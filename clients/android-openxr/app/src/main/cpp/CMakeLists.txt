@@ -6,6 +6,9 @@ project(OpenXROSXClient LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ "72" CACHE STRING
+    "Preferred headset display refresh rate requested by the Android client")
+
 # ─── OpenXR SDK (headers + loader) ──────────────────────────────────────────
 include(FetchContent)
 
@@ -64,4 +67,5 @@ target_link_libraries(openxr_osx_client PRIVATE
 target_compile_definitions(openxr_osx_client PRIVATE
     XR_USE_PLATFORM_ANDROID
     XR_USE_GRAPHICS_API_OPENGL_ES
+    OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ=${OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ}
 )

@@ -4,6 +4,9 @@ plugins {
     id("com.android.application")
 }
 
+val preferredDisplayRefreshRateHz =
+    providers.gradleProperty("openxrClientDisplayRefreshRateHz").orElse("72")
+
 android {
     namespace = "com.openxrosx.client"
     compileSdk = 35
@@ -27,7 +30,8 @@ android {
             cmake {
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
-                    "-DANDROID_PLATFORM=android-29"
+                    "-DANDROID_PLATFORM=android-29",
+                    "-DOPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ=${preferredDisplayRefreshRateHz.get()}"
                 )
             }
         }
