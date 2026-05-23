@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document covers the runtime test suite and the optional OpenXR-CTS lane.
+This document covers the runtime test suite, companion support tests, and the optional OpenXR-CTS lane.
 
 ## Runtime Tests
 
@@ -18,6 +18,20 @@ The default test layers are:
 
 - `openxr_osx_tests`
 - `openxr_osx_runtime_tests`
+
+## Companion Tests
+
+The macOS companion launcher has a small Swift test runner for bundle inspection, launcher
+persistence merging, installed runtime manifest generation, and Terminal command quoting:
+
+```bash
+swiftc -parse-as-library \
+  "clients/companion/OpenXR OSX Companion/CompanionSupport.swift" \
+  "clients/companion/OpenXR OSX Companion/OpenXRServerConfig.swift" \
+  "clients/companion/OpenXR OSX Companion/CompanionLauncher.swift" \
+  tests/CompanionLauncherTests.swift \
+  -o /tmp/openxr_companion_launcher_tests && /tmp/openxr_companion_launcher_tests
+```
 
 ## CTS Lane
 
@@ -46,6 +60,7 @@ As of March 17, 2026, the pinned non-interactive baseline is:
 Before considering a change ready:
 
 - run the macOS build and tests
+- run the companion Swift test runner when changing the companion launcher or runtime installer
 - run the Android build if Android code changed
 - run the CTS lane when runtime API, extension behavior, swapchain handling, action handling, or conformance-sensitive behavior changed
 

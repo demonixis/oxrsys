@@ -8,8 +8,9 @@ This document is the entry point for build workflows. Installation steps live in
 
 - Install the required tools first: [install.md](install.md)
 - The checked-in Xcode projects intentionally do not contain a personal Apple development team.
-  Select your own team in Xcode, or pass `DEVELOPMENT_TEAM=<team-id>` to `xcodebuild` when building
-  targets that require Apple signing.
+  The macOS companion Debug build disables Xcode signing so the standard build command is
+  non-interactive. Use `scripts/package_companion.sh` with `CODE_SIGN_IDENTITY` when preparing a
+  direct-distribution app.
 - For Xcode UI work on multiple Swift clients, open `clients/OpenXR Clients.xcworkspace`
   instead of opening the individual `.xcodeproj` files in separate windows. The simulator and
   visionOS targets share the local `OpenXRStreaming` Swift package, and one workspace avoids Xcode
@@ -58,7 +59,8 @@ The helper creates `~/.config/openxr/1/active_runtime.json` and installs a per-u
 
 ### Native macOS Companion App
 
-The SwiftUI companion app provides a native control surface for the server TOML and the per-user runtime registration workflow:
+The SwiftUI companion app provides a launcher for compatible apps, a runtime installer, the server
+TOML editor, and the per-user runtime registration workflow:
 
 ```bash
 xcodebuild -project "clients/companion/OpenXR OSX Companion.xcodeproj" \
@@ -67,9 +69,19 @@ xcodebuild -project "clients/companion/OpenXR OSX Companion.xcodeproj" \
   build
 ```
 
-The macOS target is configured for App Store/TestFlight packaging with a developer tools category
-and sandbox entitlements. See [macos-companion.md](platforms/macos-companion.md) for the app-specific
-workflow, sandbox limits, and the current hot reload scope.
+The default Debug build does not embed the runtime. It falls back to `build/runtime/openxr_osx.json`
+when no installed runtime is available.
+
+To build a direct-distribution companion bundle with the runtime copied into
+`Contents/Resources/OpenXRRuntime`:
+
+```bash
+scripts/package_companion.sh
+```
+
+Set `CODE_SIGN_IDENTITY="Developer ID Application: ..."` to sign the packaged app with Hardened
+Runtime options. See [macos-companion.md](platforms/macos-companion.md) for the launcher,
+installation, and signing workflow.
 
 ### Unified Viewer App
 
@@ -127,6 +139,9 @@ If you want to force the runtime only inside a Unity project, use the editor hel
 ## Troubleshooting
 
 - If a GUI app does not pick up the runtime, use `scripts/openxr_runtime_default.sh` instead of relying on shell startup files.
+- If a companion-launched app does not pick up the runtime, check the Apps tab logs and the Runtime
+  tab launch target. The launcher prefers the installed manifest, then a selected manifest, then
+  `build/runtime/openxr_osx.json`.
 - If Android tooling is not found, verify `clients/android-openxr/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
 - If the runtime is not discovered, check that `XR_RUNTIME_JSON` or `~/.config/openxr/1/active_runtime.json` points to `build/runtime/openxr_osx.json`.
 - If Xcode cannot execute the `metal` tool, install the Metal Toolchain component as described in [install.md](install.md).

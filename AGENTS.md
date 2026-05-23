@@ -4,8 +4,8 @@ OpenXR runtime for macOS that brings PC-style OpenXR support to Apple Silicon Ma
 The project currently combines a macOS runtime, a unified macOS/iOS viewer with `Simulator` and
 `StereoView` modes, a first-pass visionOS viewer, and a Quest/Pico-oriented streaming stack with an
 Android client scaffold.
-The repository also includes a native SwiftUI macOS companion app for runtime configuration and
-runtime registration workflows.
+The repository also includes a native SwiftUI macOS companion app for compatible app launching,
+runtime installation, runtime configuration, and runtime registration workflows.
 
 **Current state:** Metal/core runtime, Vulkan interop, controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
@@ -14,8 +14,9 @@ matches per-frame render poses for headset compositor reprojection, and enables 
 `XR_FB_foveation` path when the headset supports it. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
-while the immersive space is open. The macOS SwiftUI apps now produce sandboxed App Store/TestFlight
-archives.
+while the immersive space is open. The macOS SwiftUI companion now targets direct notarized
+distribution so it can scan known apps, install the bundled runtime, launch compatible apps with
+`XR_RUNTIME_JSON`, and capture app logs.
 As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully green locally:
 63 passed, 36 skipped, 0 failed.
 
@@ -70,6 +71,7 @@ openxr_osx/
 ├── tests/
 │   ├── TestConfig.cpp
 │   ├── TestInputManager.cpp
+│   ├── CompanionLauncherTests.swift
 │   ├── TestProtocolLayout.cpp
 │   └── TestRuntimeApi.cpp
 └── docs/
@@ -81,6 +83,12 @@ openxr_osx/
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
+swiftc -parse-as-library \
+  "clients/companion/OpenXR OSX Companion/CompanionSupport.swift" \
+  "clients/companion/OpenXR OSX Companion/OpenXRServerConfig.swift" \
+  "clients/companion/OpenXR OSX Companion/CompanionLauncher.swift" \
+  tests/CompanionLauncherTests.swift \
+  -o /tmp/openxr_companion_launcher_tests && /tmp/openxr_companion_launcher_tests
 xcodebuild -project "clients/companion/OpenXR OSX Companion.xcodeproj" \
   -scheme "OpenXR OSX Companion" \
   -configuration Debug \

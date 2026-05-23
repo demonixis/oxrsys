@@ -1,5 +1,16 @@
 # Scripts
 
+## Companion Packaging
+
+`scripts/package_companion.sh` builds the runtime, builds the macOS companion without Xcode signing,
+copies the runtime files into `OpenXR OSX Companion.app/Contents/Resources/OpenXRRuntime`, and
+optionally signs the app when `CODE_SIGN_IDENTITY` is set.
+
+```bash
+scripts/package_companion.sh
+CODE_SIGN_IDENTITY="Developer ID Application: Example Team" scripts/package_companion.sh
+```
+
 ## Unity
 
 `scripts/unity/Editor/OpenXRRuntimeAutoSelector.cs` is a Unity Editor helper that forces the OpenXR runtime JSON for the current Unity editor process.

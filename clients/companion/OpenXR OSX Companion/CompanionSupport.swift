@@ -15,10 +15,18 @@ enum EncoderPreset: String, CaseIterable, Identifiable {
 struct CompanionPaths {
     static let appSupportDirectory = NSString(string: "~/Library/Application Support/OpenXR-OSX").expandingTildeInPath
     static let configFilePath = (appSupportDirectory as NSString).appendingPathComponent("openxr_osx.toml")
+    static let launcherAppsPath = (appSupportDirectory as NSString).appendingPathComponent("launcher_apps.json")
+    static let installedRuntimeDirectory = (appSupportDirectory as NSString).appendingPathComponent("Runtime/current")
+    static let installedRuntimeManifestPath = (installedRuntimeDirectory as NSString).appendingPathComponent("openxr_osx.json")
+    static let terminalScriptsDirectory = (appSupportDirectory as NSString).appendingPathComponent("TerminalLaunchers")
     static let activeRuntimeDirectory = NSString(string: "~/.config/openxr/1").expandingTildeInPath
     static let activeRuntimePath = (activeRuntimeDirectory as NSString).appendingPathComponent("active_runtime.json")
     static let launchAgentsDirectory = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
     static let launchAgentPath = (launchAgentsDirectory as NSString).appendingPathComponent("com.openxr_osx.runtime_env.plist")
+
+    static var bundledRuntimeDirectoryURL: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("OpenXRRuntime", isDirectory: true)
+    }
 }
 
 struct RuntimeRegistrationStatus {
@@ -93,6 +101,22 @@ func chooseJsonFile(startingAt path: String?) -> String? {
         panel.nameFieldStringValue = (path as NSString).lastPathComponent
     }
     return panel.runModal() == .OK ? panel.url?.path : nil
+}
+
+func chooseAppBundle(startingAt path: String?) -> URL? {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = [.applicationBundle]
+    panel.prompt = "Add App"
+    if let path, !path.isEmpty {
+        panel.directoryURL = URL(fileURLWithPath: (path as NSString).deletingLastPathComponent)
+        panel.nameFieldStringValue = (path as NSString).lastPathComponent
+    } else {
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+    }
+    return panel.runModal() == .OK ? panel.url : nil
 }
 
 func normalizedPath(_ path: String) -> String {

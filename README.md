@@ -12,7 +12,7 @@ Created by Yannick Comte.
 **Current Status**: This project is in early development and is not yet production-ready.
 
 ### Technical Limitations
-* macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. Currently, applications must be launched via the command line.
+* macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. The companion app can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging.
 * Meta Quest Integration: The **interface is currently minimal**; the app displays a blue screen during standby and a green screen during loading.
 
 ### Stability & Contributions
@@ -42,7 +42,7 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
 - The Quest/Android client feeds real hand joints into the runtime, matches per-frame render poses for smoother headset reprojection, and exposes a first-pass `XR_FB_foveation` path when supported by the headset.
 - The visionOS viewer uses a minimal floating search window, then enters immersive VR automatically once the stream connects and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.
-- The macOS SwiftUI apps are configured for App Store/TestFlight packaging with sandboxed archives.
+- The macOS SwiftUI companion is now a direct-distribution launcher and runtime installer for compatible apps such as Godot and Unity.
 - As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed, 36 skipped, 0 failed.
 
 ## Documentation
