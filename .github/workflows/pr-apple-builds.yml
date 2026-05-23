@@ -1,0 +1,36 @@
+name: pr-apple-builds
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-build:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: companion
+            script: scripts/ci/build-companion.sh
+          - name: simulator
+            script: scripts/ci/build-simulator.sh
+          - name: visionos
+            script: scripts/ci/build-visionos.sh
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.name }}
+        run: ${{ matrix.script }}
