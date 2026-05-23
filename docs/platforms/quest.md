@@ -32,12 +32,25 @@ Quest hand tracking requires the Android manifest to declare:
 
 If these entries are missing, the runtime can still operate, but headset-side hand joints will not be available.
 
+The Quest client's preferred display refresh request is build-configured. The default repository value
+is `72`, and you can override it per build with a Gradle property:
+
+```bash
+./gradlew assembleDebug -PopenxrClientDisplayRefreshRateHz=72
+```
+
+The property is passed through Gradle into CMake as
+`OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ`. Set it to a headset-supported rate such as `72`,
+`80`, `90`, or `120`. If the runtime does not advertise the requested rate, the client logs the
+mismatch and keeps the current headset refresh.
+
 ## Runtime Interaction
 
 The Quest client:
 
 - discovers the runtime on the local network
 - connects and advertises codec and refresh-rate preferences
+- requests the build-configured display refresh rate when `XR_FB_display_refresh_rate` is available
 - receives encoded video frames and matches render-pose metadata to each decoded frame before projection submission
 - sends head, controller, and optional hand-tracking data back to the runtime
 - reports latency measurements

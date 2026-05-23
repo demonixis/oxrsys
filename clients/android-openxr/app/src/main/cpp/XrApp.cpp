@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <jni.h>
 #include <netinet/in.h>
 #include <numeric>
 #include <sys/socket.h>
@@ -63,6 +62,14 @@ void main() {
 
 namespace oxr
 {
+
+namespace
+{
+
+constexpr float kPreferredDisplayRefreshRateHz =
+    static_cast<float>(OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ);
+
+} // namespace
 
 static int64_t SteadyClockNowNs()
 {
@@ -234,6 +241,8 @@ bool XrApp::Initialize(struct android_app* app)
 
 bool XrApp::CreateInstance(struct android_app* app)
 {
+    LOGI("Preferred display refresh rate target: %.1fHz", kPreferredDisplayRefreshRateHz);
+
     // Initialize the OpenXR loader on Android
     PFN_xrInitializeLoaderKHR initializeLoader = nullptr;
     xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
@@ -265,6 +274,7 @@ bool XrApp::CreateInstance(struct android_app* app)
     foveationAvailable_ = hasExtension(XR_FB_FOVEATION_EXTENSION_NAME);
     foveationConfigurationAvailable_ = hasExtension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
     swapchainUpdateAvailable_ = hasExtension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
+    displayRefreshRateAvailable_ = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
 
     std::vector<const char*> extensions = {
         XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
@@ -284,6 +294,10 @@ bool XrApp::CreateInstance(struct android_app* app)
     if (swapchainUpdateAvailable_)
     {
         extensions.push_back(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
+    }
+    if (displayRefreshRateAvailable_)
+    {
+        extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     }
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
@@ -341,6 +355,24 @@ bool XrApp::CreateInstance(struct android_app* app)
              foveationAvailable_ ? 1 : 0,
              foveationConfigurationAvailable_ ? 1 : 0,
              swapchainUpdateAvailable_ ? 1 : 0);
+    }
+
+    if (displayRefreshRateAvailable_)
+    {
+        xrGetInstanceProcAddr(instance_, "xrEnumerateDisplayRefreshRatesFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(
+                                  &xrEnumerateDisplayRefreshRatesFB_));
+        xrGetInstanceProcAddr(instance_, "xrGetDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(
+                                  &xrGetDisplayRefreshRateFB_));
+        xrGetInstanceProcAddr(instance_, "xrRequestDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(
+                                  &xrRequestDisplayRefreshRateFB_));
+        LOGI("Display refresh rate support: ext=%d enum=%d get=%d request=%d",
+             displayRefreshRateAvailable_ ? 1 : 0,
+             xrEnumerateDisplayRefreshRatesFB_ != nullptr ? 1 : 0,
+             xrGetDisplayRefreshRateFB_ != nullptr ? 1 : 0,
+             xrRequestDisplayRefreshRateFB_ != nullptr ? 1 : 0);
     }
 
     // Query view configurations
@@ -511,6 +543,95 @@ bool XrApp::CreateSession()
     if (!InitializeHandTracking())
     {
         LOGW("Hand tracking unavailable on headset, continuing without it");
+    }
+
+    if (!InitializeDisplayRefreshRate())
+    {
+        LOGW("Display refresh rate control unavailable, continuing at runtime default");
+    }
+
+    return true;
+}
+
+bool XrApp::InitializeDisplayRefreshRate()
+{
+    if (!displayRefreshRateAvailable_ || session_ == XR_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    if (!xrEnumerateDisplayRefreshRatesFB_ || !xrRequestDisplayRefreshRateFB_)
+    {
+        return false;
+    }
+
+    uint32_t rateCount = 0;
+    XrResult enumResult =
+        xrEnumerateDisplayRefreshRatesFB_(session_, 0, &rateCount, nullptr);
+    if (XR_FAILED(enumResult) || rateCount == 0)
+    {
+        LOGW("Failed to enumerate display refresh rates: %d (count=%u)",
+             enumResult, rateCount);
+        return false;
+    }
+
+    std::vector<float> refreshRates(rateCount, 0.0f);
+    enumResult = xrEnumerateDisplayRefreshRatesFB_(
+        session_, rateCount, &rateCount, refreshRates.data());
+    if (XR_FAILED(enumResult))
+    {
+        LOGW("Failed to fetch display refresh rates: %d", enumResult);
+        return false;
+    }
+
+    std::string supported;
+    for (uint32_t i = 0; i < rateCount; ++i)
+    {
+        if (!supported.empty())
+        {
+            supported += ", ";
+        }
+        supported += std::to_string(refreshRates[i]);
+    }
+    LOGI("Supported display refresh rates: [%s]", supported.c_str());
+
+    auto hasPreferredRate = std::any_of(refreshRates.begin(), refreshRates.end(),
+                                        [](float rate) {
+                                            return std::fabs(rate - kPreferredDisplayRefreshRateHz) < 0.5f;
+                                        });
+    if (!hasPreferredRate)
+    {
+        LOGW("Preferred %.1fHz not advertised by runtime, keeping current refresh rate",
+             kPreferredDisplayRefreshRateHz);
+        if (xrGetDisplayRefreshRateFB_ != nullptr)
+        {
+            float currentRate = 0.0f;
+            if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
+            {
+                LOGI("Current display refresh rate: %.1fHz", currentRate);
+            }
+        }
+        return true;
+    }
+
+    XrResult requestResult =
+        xrRequestDisplayRefreshRateFB_(session_, kPreferredDisplayRefreshRateHz);
+    if (XR_FAILED(requestResult))
+    {
+        LOGW("Failed to request %.1fHz display refresh rate: %d",
+             kPreferredDisplayRefreshRateHz, requestResult);
+        return false;
+    }
+
+    LOGI("Requested display refresh rate: %.1fHz", kPreferredDisplayRefreshRateHz);
+
+    if (xrGetDisplayRefreshRateFB_ != nullptr)
+    {
+        float currentRate = 0.0f;
+        if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
+        {
+            LOGI("Current display refresh rate after request: %.1fHz", currentRate);
+        }
     }
 
     return true;

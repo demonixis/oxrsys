@@ -40,7 +40,7 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 
 - Metal rendering, core runtime flow, Vulkan interop, and loader-backed runtime tests are in place.
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
-- The Quest/Android client feeds real hand joints into the runtime, matches per-frame render poses for smoother headset reprojection, and exposes a first-pass `XR_FB_foveation` path when supported by the headset.
+- The Quest/Android client feeds real hand joints into the runtime, matches per-frame render poses for smoother headset reprojection, exposes a first-pass `XR_FB_foveation` path when supported by the headset, and can request a build-configured display refresh rate.
 - The visionOS viewer uses a minimal floating search window, then enters immersive VR automatically once the stream connects and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.
 - The macOS SwiftUI companion is now a direct-distribution launcher and runtime installer for compatible apps such as Godot and Unity.
 - As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed, 36 skipped, 0 failed.
