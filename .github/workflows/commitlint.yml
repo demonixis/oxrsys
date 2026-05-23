@@ -18,8 +18,13 @@ on:
         required: false
         default: HEAD
 
+# pull-requests: write is needed for the sticky comment step. For PRs whose
+# head is in a different repo (external forks), GITHUB_TOKEN is read-only
+# regardless of this declaration, and the comment step is guarded to skip
+# in that case so the lint still runs.
 permissions:
   contents: read
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -34,6 +39,7 @@ jobs:
           fetch-depth: 0
 
       - name: Lint commit messages
+        id: lint
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -46,3 +52,29 @@ jobs:
           else
             python3 scripts/ci/commitlint.py range "${PR_BASE_SHA}" "${PR_HEAD_SHA}"
           fi
+
+      - name: Post failure comment on PR
+        if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: commitlint
+          message: |
+            **Commitlint failed.** One or more commits in this PR do not follow [Conventional Commits](https://www.conventionalcommits.org/).
+
+            See [the failed run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+
+            Expected format:
+
+            ```
+            type(scope): summary
+            type: summary
+            ```
+
+            Allowed types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
+
+      - name: Resolve sticky comment on success
+        if: success() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: commitlint
+          delete: true
