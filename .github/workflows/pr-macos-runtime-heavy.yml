@@ -7,24 +7,38 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-    paths:
-      - CMakeLists.txt
-      - cmake/**
-      - runtime/**
-      - tests/**
-      - clients/common/src/Protocol.h
-      - clients/common/OpenXRStreaming/Sources/OpenXRStreaming/Protocol.swift
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  detect-runtime-sensitive-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_sensitive: ${{ steps.filter.outputs.runtime_sensitive }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            runtime_sensitive:
+              - 'CMakeLists.txt'
+              - 'cmake/**'
+              - 'runtime/**'
+              - 'tests/**'
+              - 'clients/common/src/Protocol.h'
+              - 'clients/common/OpenXRStreaming/Sources/OpenXRStreaming/Protocol.swift'
+
   runtime-heavy:
+    needs: detect-runtime-sensitive-changes
+    if: github.event_name == 'workflow_dispatch' || needs.detect-runtime-sensitive-changes.outputs.runtime_sensitive == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,3 +49,11 @@ jobs:
 
       - name: Heavy macOS runtime verification
         run: scripts/ci/verify-macos-runtime-heavy.sh
+
+  runtime-heavy-not-required:
+    needs: detect-runtime-sensitive-changes
+    if: github.event_name != 'workflow_dispatch' && needs.detect-runtime-sensitive-changes.outputs.runtime_sensitive != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runtime-heavy lane not required
+        run: echo "Runtime-sensitive paths were not changed; skipping heavy macOS runtime verification."
