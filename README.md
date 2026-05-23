@@ -8,6 +8,8 @@ OpenXR OSX Runtime brings OpenXR runtime support to Apple Silicon Macs. The repo
 
 Created by Yannick Comte.
 
+If you want to try a tagged build instead of developing from source, start with [Releases](docs/releases.md). Use the source build workflow only when you need current branch changes or local debugging.
+
 ## Disclaimer
 **Current Status**: This project is in early development and is not yet production-ready.
 
@@ -24,17 +26,16 @@ Expect **frequent crashes and bugs**. This is a normal part of the development p
 ### AI Disclosure
 This project utilizes AI-generated code and documentation. We appreciate your professional cooperation regarding this approach.
 
-## Dependencies
+## Source Build Prerequisites
 
 - macOS 13 or later on Apple Silicon
 - C++20
-- CMake with FetchContent
-- Ninja
-- SDL3
-- OpenXR SDK headers and loader
-- Metal
-- Vulkan headers for interop paths
-- Android SDK, Android NDK, and Java 17 for the Android client
+- Full Xcode app plus Command Line Tools
+- Metal Toolchain component for Xcode
+- Vulkan headers, and a Vulkan SDK or loader installation that satisfies `find_package(Vulkan)` on macOS
+- Java 17, CMake, Ninja, and Android SDK command-line tools for the Quest client
+
+The repository now ships a local [`mise.toml`](mise.toml) for portable tool pinning. OpenXR SDK headers and the loader are fetched automatically through CMake `FetchContent`; they are not a separate manual install step for source builds.
 
 ## Status
 
@@ -48,6 +49,7 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 ## Documentation
 
 - [Install](docs/install.md)
+- [Releases](docs/releases.md)
 - [Build](docs/build.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
@@ -65,6 +67,8 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 Contributions from humans and LLM-assisted workflows are welcome. Keep changes small, tested, and documented: if behavior, architecture, build steps, or platform support changes, update the relevant files in `docs/` and `AGENTS.md` in the same patch.
 
 Before considering a change ready, run the macOS build and tests. If you touch the Android client, also run the Android build. If you touch runtime API or conformance-sensitive behavior, run the CTS lane when practical.
+
+For automation, prefer checked-in entry points under `scripts/ci/` when that directory exists on the branch you are working on. Do not document workflow-only commands that cannot be run locally.
 
 ## License
 

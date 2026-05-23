@@ -1,0 +1,6 @@
+[tools]
+# `adb` comes from the pinned Android SDK after `platform-tools` is installed with `sdkmanager`.
+android-sdk = "20.0"
+java = "temurin-17.0.19+10"
+cmake = "3.24"
+ninja = "1.12"

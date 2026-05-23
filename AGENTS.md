@@ -28,6 +28,7 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 
 - **Always build and verify before declaring success** — run the macOS build + tests and/or Android build as appropriate before saying everything works
 - **Always update `README.md`, `AGENTS.md`, and the relevant files in `docs/` when making significant project changes**
+- If a branch contains `scripts/ci/`, treat those checked-in scripts as the source of truth for CI entry points. Do not document or recommend workflow-only commands that cannot be run locally.
 - All dependencies are fetched via CMake FetchContent
 - All source code and documentation must be in English
 - Project-owned source code is licensed under MPL-2.0; preserve SPDX headers and keep third-party code under its upstream license.
@@ -44,6 +45,8 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 `README.md` must stay short. Put detailed build, platform, protocol, simulator, and test guidance in `docs/`.
 
 Avoid duplicating the same guidance in multiple files. If commands, platform status, or CTS results change, update the single page that owns that topic and keep cross-links accurate.
+
+Keep binary-first release guidance in `docs/releases.md`, host prerequisite details in `docs/install.md`, and source build commands in `docs/build.md`.
 
 ## Important Technical Constraints
 

@@ -4,14 +4,16 @@
 
 This document covers the Android headset client used with Meta Quest-class devices. It focuses on build, install, permissions, and the current runtime interaction model.
 
+If a tagged release already ships a Quest APK that matches the runtime/server version you want to try, sideload that binary first. Use the source build path below when you need branch-only changes or a local debug build.
+
 ## Requirements
 
 - Android SDK and NDK
 - Java 17
-- `adb`
+- `adb` from Android `platform-tools`
 - Quest device in developer mode
 
-See [install.md](../install.md) for the recommended package list and `sdkmanager` commands.
+See [install.md](../install.md) for the pinned `mise` tooling, required Android packages, and `sdkmanager` commands.
 
 ## Build And Install
 
@@ -21,7 +23,7 @@ cd clients/android-openxr
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`clients/android-openxr/local.properties` must point to the local Android SDK.
+`clients/android-openxr/local.properties` must point to the local Android SDK. If you follow the repo-local `mise` setup from [install.md](../install.md), that is the pinned `android-sdk@20.0` install root.
 
 ## Permissions And Features
 
