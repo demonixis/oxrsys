@@ -89,7 +89,8 @@ def lint_range(from_ref: str, to_ref: str) -> int:
 
 
 def lint_edit(message_file: str) -> int:
-    header = pathlib.Path(message_file).read_text(encoding="utf-8").splitlines()[0]
+    lines = pathlib.Path(message_file).read_text(encoding="utf-8").splitlines()
+    header = lines[0] if lines else ""
     return lint_message(message_file, header)
 
 

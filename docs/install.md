@@ -21,9 +21,10 @@ If `mise` is not installed yet:
 brew install mise
 ```
 
-Install them from the repository root:
+Trust the repo-local tool definition, then install from the repository root:
 
 ```bash
+mise trust
 mise install
 ```
 
@@ -48,6 +49,12 @@ xcodebuild -downloadComponent MetalToolchain
 These are still required even if you use `mise` for Java, CMake, Ninja, and the Android command-line tools.
 
 If simulator builds report that `CoreSimulator` is older than the selected SDK, update Xcode and the simulator runtime components so their versions match.
+
+If you want to build the visionOS client locally and the platform is not already installed, add it with:
+
+```bash
+xcodebuild -downloadPlatform visionOS
+```
 
 ## Vulkan Loader And Headers
 

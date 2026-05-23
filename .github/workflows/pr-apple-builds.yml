@@ -31,6 +31,10 @@ jobs:
     name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
 
       - name: Build ${{ matrix.name }}
         run: ${{ matrix.script }}

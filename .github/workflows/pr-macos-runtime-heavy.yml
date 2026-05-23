@@ -28,6 +28,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
 
       - name: Heavy macOS runtime verification
         run: scripts/ci/verify-macos-runtime-heavy.sh

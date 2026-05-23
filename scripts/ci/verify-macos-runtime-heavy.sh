@@ -11,6 +11,10 @@ require_command ninja
 
 BUILD_DIR="${BUILD_ROOT}/runtime-heavy"
 
+if [[ "${OSTYPE}" == darwin* ]] && [[ "${OPENXR_OSX_SKIP_HOST_BOOTSTRAP:-0}" != "1" ]]; then
+    bootstrap_macos_host
+fi
+
 log "Configuring heavy macOS runtime verification build"
 cd "${REPO_ROOT}"
 run cmake -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE=Debug

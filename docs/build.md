@@ -23,7 +23,7 @@ This document is the entry point for source build workflows. If a tagged binary 
   - [Vision OS](platforms/visionos.md)
   - [macOS Companion](platforms/macos-companion.md)
 
-If your branch contains `scripts/ci/`, treat those checked-in scripts as the automation entry points and keep CI docs aligned with them. This branch currently documents the raw local build commands below.
+If your branch contains `scripts/ci/`, treat those checked-in scripts as the automation entry points and keep CI docs aligned with them. Use [testing-and-conformance.md](testing-and-conformance.md) for the local pull request verification wrappers and the heavy runtime lane.
 
 ## Build The macOS Runtime
 

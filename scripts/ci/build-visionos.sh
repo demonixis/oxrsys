@@ -6,6 +6,7 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 require_command xcodebuild
+ensure_visionos_platform
 
 log "Building visionOS player"
 cd "${REPO_ROOT}"
@@ -17,7 +18,7 @@ run /usr/bin/env \
     -project "clients/visionos/Vision Player.xcodeproj" \
     -scheme "Vision Player" \
     -configuration Debug \
-    -destination "generic/platform=visionOS Simulator" \
+    -destination "generic/platform=visionOS" \
     -derivedDataPath "$(derived_data_path visionos)" \
     CODE_SIGNING_ALLOWED=NO \
     build
