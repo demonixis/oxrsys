@@ -39,7 +39,7 @@ static void LoadDeviceFunctions(VkDevice device)
     PFN_vkGetDeviceProcAddr fpGetDeviceProcAddr = gVulkanDispatch.getDeviceProcAddr;
     if (!fpGetDeviceProcAddr)
     {
-        spdlog::error("OpenXR OSX: vkGetDeviceProcAddr not available");
+        spdlog::error("OXRSys: vkGetDeviceProcAddr not available");
         return;
     }
 
@@ -55,7 +55,7 @@ static void LoadDeviceFunctions(VkDevice device)
     gDeviceFuncs.bindImageMemory = (PFN_vkBindImageMemory)get("vkBindImageMemory");
     gDeviceFuncs.exportMetalObjects = (PFN_vkExportMetalObjectsEXT)get("vkExportMetalObjectsEXT");
 
-    spdlog::info("OpenXR OSX: Loaded Vulkan device functions (exportMetalObjects={})",
+    spdlog::info("OXRSys: Loaded Vulkan device functions (exportMetalObjects={})",
                   gDeviceFuncs.exportMetalObjects ? "yes" : "no");
 }
 
@@ -79,7 +79,7 @@ static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
     }
     else
     {
-        spdlog::error("OpenXR OSX: vkGetPhysicalDeviceMemoryProperties not available");
+        spdlog::error("OXRSys: vkGetPhysicalDeviceMemoryProperties not available");
         return 0;
     }
     for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
@@ -158,7 +158,7 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
     }
 
     Runtime::Get().RegisterHandle(handle_, this);
-    spdlog::info("OpenXR OSX: Metal swapchain created {}x{} format={} arraySize={} images={}",
+    spdlog::info("OXRSys: Metal swapchain created {}x{} format={} arraySize={} images={}",
                   width_, height_, format_, arraySize_, imageCount_);
 }
 
@@ -220,7 +220,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
         VkResult result = gDeviceFuncs.createImage(device, &imageCI, nullptr, &image);
         if (result != VK_SUCCESS)
         {
-            spdlog::error("OpenXR OSX: vkCreateImage failed with {}", static_cast<int>(result));
+            spdlog::error("OXRSys: vkCreateImage failed with {}", static_cast<int>(result));
             continue;
         }
         vkImages_[i] = reinterpret_cast<uint64_t>(image);
@@ -239,7 +239,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
         result = gDeviceFuncs.allocateMemory(device, &allocInfo, nullptr, &memory);
         if (result != VK_SUCCESS)
         {
-            spdlog::error("OpenXR OSX: vkAllocateMemory failed with {}", static_cast<int>(result));
+            spdlog::error("OXRSys: vkAllocateMemory failed with {}", static_cast<int>(result));
             continue;
         }
         vkMemories_[i] = reinterpret_cast<uint64_t>(memory);
@@ -269,10 +269,10 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
     }
 
     Runtime::Get().RegisterHandle(handle_, this);
-    spdlog::info("OpenXR OSX: Vulkan swapchain created {}x{} format={} arraySize={} images={}",
+    spdlog::info("OXRSys: Vulkan swapchain created {}x{} format={} arraySize={} images={}",
                   width_, height_, format_, arraySize_, imageCount_);
 #else
-    spdlog::error("OpenXR OSX: Vulkan support not compiled in");
+    spdlog::error("OXRSys: Vulkan support not compiled in");
     (void)createInfo;
 #endif
 }
@@ -495,7 +495,7 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
     // Create a 2D texture view into a specific array slice
     if (arrayIndex >= tex.arrayLength)
     {
-        spdlog::warn("OpenXR OSX: arrayIndex {} >= arrayLength {}", arrayIndex, (uint32_t)tex.arrayLength);
+        spdlog::warn("OXRSys: arrayIndex {} >= arrayLength {}", arrayIndex, (uint32_t)tex.arrayLength);
         return nullptr;
     }
 
@@ -517,6 +517,5 @@ void Swapchain::ReleaseTextureSlice(void* textureSlice)
 bool Swapchain::HasReleasedImage() const
 {
     std::scoped_lock lock(stateMutex_);
-    return hasReleasedImage_ && acquiredImageOrder_.empty() &&
-           imageStates_[lastReleasedIndex_] == ImageState::Available;
+    return hasReleasedImage_ && imageStates_[lastReleasedIndex_] == ImageState::Available;
 }

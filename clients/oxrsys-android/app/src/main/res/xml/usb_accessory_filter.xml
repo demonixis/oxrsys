@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<resources>
+    <!-- Broad diagnostic filter: request app-level USB permission for any accessory-visible host. -->
+    <usb-accessory />
+</resources>

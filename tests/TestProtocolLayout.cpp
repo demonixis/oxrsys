@@ -13,6 +13,10 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(ServerAnnounce) == 92);
     STATIC_REQUIRE(sizeof(ClientConnect) == 80);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
+    STATIC_REQUIRE(sizeof(TcpRecordHeader) == 12);
+    STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
+    STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);
+    STATIC_REQUIRE(TCP_RECORD_MAGIC == 0x4f585255);
 
     STATIC_REQUIRE(sizeof(LatencyReport) == 20);
     STATIC_REQUIRE(sizeof(RequestKeyframe) == 12);

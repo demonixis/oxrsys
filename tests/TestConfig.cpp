@@ -32,6 +32,7 @@ quest_logcat = yes
     CHECK(values.resolutionScale == 0.8f);
     CHECK(values.keyframeIntervalSec == 4);
     CHECK(values.encoderPreset == "quality");
+    CHECK(values.streamingTransport == "auto");
     CHECK(values.fileLogging == false);
     CHECK(values.questLogcat == true);
 }
@@ -60,6 +61,18 @@ encoder_preset = "turbo"
     CHECK(values.resolutionScale == 0.5f);
     CHECK(values.keyframeIntervalSec == 3);
     CHECK(values.encoderPreset == "speed");
+}
+
+TEST_CASE("Config parser accepts streaming transport", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+transport = "usb_adb"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingTransport == "usb_adb");
 }
 
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")

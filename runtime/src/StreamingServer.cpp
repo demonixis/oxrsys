@@ -2,6 +2,7 @@
 
 #include "StreamingServer.h"
 #include "Config.h"
+#include "RuntimeStatus.h"
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
@@ -13,11 +14,14 @@
 #include <arpa/inet.h>
 #include <chrono>
 #include <cstring>
+#include <cerrno>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <numeric>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 namespace
@@ -34,6 +38,147 @@ int64_t SteadyClockNowNs()
 double ToMilliseconds(Clock::duration duration)
 {
     return std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(duration).count();
+}
+
+bool SendAll(int socket, const void* data, size_t size)
+{
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    size_t sentTotal = 0;
+    while (sentTotal < size)
+    {
+        ssize_t sent = send(socket, bytes + sentTotal, size - sentTotal, 0);
+        if (sent < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        if (sent == 0)
+        {
+            return false;
+        }
+        sentTotal += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+bool ReadAll(int socket, void* data, size_t size)
+{
+    auto* bytes = static_cast<uint8_t*>(data);
+    size_t receivedTotal = 0;
+    while (receivedTotal < size)
+    {
+        ssize_t received = recv(socket, bytes + receivedTotal, size - receivedTotal, 0);
+        if (received < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        if (received == 0)
+        {
+            return false;
+        }
+        receivedTotal += static_cast<size_t>(received);
+    }
+    return true;
+}
+
+bool ReadTcpRecord(int socket, oxr::protocol::TcpRecordHeader& header,
+                   std::vector<uint8_t>& payload)
+{
+    if (!ReadAll(socket, &header, sizeof(header)))
+    {
+        return false;
+    }
+    if (header.magic != oxr::protocol::TCP_RECORD_MAGIC ||
+        header.version != oxr::protocol::TCP_RECORD_VERSION ||
+        header.payloadSize > oxr::protocol::TCP_MAX_RECORD_PAYLOAD)
+    {
+        return false;
+    }
+
+    payload.clear();
+    payload.resize(header.payloadSize);
+    if (header.payloadSize == 0)
+    {
+        return true;
+    }
+    return ReadAll(socket, payload.data(), payload.size());
+}
+
+void ConfigureTcpSocket(int socket)
+{
+    int yes = 1;
+    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+#ifdef SO_NOSIGPIPE
+    setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+#endif
+}
+
+void CloseTcpSocket(int& socket)
+{
+    if (socket >= 0)
+    {
+        shutdown(socket, SHUT_RDWR);
+        close(socket);
+        socket = -1;
+    }
+}
+
+int CreateLoopbackListener(uint16_t port)
+{
+    int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocket < 0)
+    {
+        return -1;
+    }
+
+    int yes = 1;
+    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(listenSocket, (sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        close(listenSocket);
+        return -1;
+    }
+
+    if (listen(listenSocket, 1) < 0)
+    {
+        close(listenSocket);
+        return -1;
+    }
+
+    return listenSocket;
+}
+
+int AcceptWithTimeout(int listenSocket)
+{
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(listenSocket, &readSet);
+    timeval timeout = {1, 0};
+
+    int ready = select(listenSocket + 1, &readSet, nullptr, nullptr, &timeout);
+    if (ready <= 0 || !FD_ISSET(listenSocket, &readSet))
+    {
+        return -1;
+    }
+
+    int clientSocket = accept(listenSocket, nullptr, nullptr);
+    if (clientSocket >= 0)
+    {
+        ConfigureTcpSocket(clientSocket);
+    }
+    return clientSocket;
 }
 
 struct MetricSummary
@@ -126,6 +271,8 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     targetRefreshRateHz_.store(refreshRateHz);
 
     const ConfigValues config = Config::Get().GetValues();
+    wifiEnabled_ = config.streamingTransport != "usb_adb";
+    usbAdbEnabled_ = config.streamingTransport != "wifi";
     float scale = config.resolutionScale;
     scaledWidth_ = static_cast<uint32_t>(renderWidth * scale);
     scaledHeight_ = static_cast<uint32_t>(renderHeight * scale);
@@ -207,13 +354,38 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
 
     running_.store(true);
     state_.store(State::Broadcasting);
+    RuntimeStatus::SetIdle();
 
-    broadcastThread_ = std::thread(&StreamingServer::BroadcastThread, this);
+    if (usbAdbEnabled_ && !StartUsbTcpListeners())
+    {
+        if (!wifiEnabled_)
+        {
+            spdlog::error("StreamingServer: Failed to start required USB ADB TCP listeners");
+            running_.store(false);
+            close(broadcastSocket_);
+            close(controlSocket_);
+            close(videoSocket_);
+            broadcastSocket_ = -1;
+            controlSocket_ = -1;
+            videoSocket_ = -1;
+            trackingReceiver_->Stop();
+            trackingReceiver_.reset();
+            return false;
+        }
+        spdlog::warn("StreamingServer: USB ADB TCP listeners unavailable; continuing with WiFi");
+        usbAdbEnabled_ = false;
+    }
+
+    if (wifiEnabled_)
+    {
+        broadcastThread_ = std::thread(&StreamingServer::BroadcastThread, this);
+    }
     controlThread_ = std::thread(&StreamingServer::ControlThread, this);
     encodeThread_ = std::thread(&StreamingServer::EncodeThread, this);
 
     std::string ip = GetLocalIpAddress();
-    spdlog::info("StreamingServer: Broadcasting on {} ({}x{} @ {}Hz)",
+    spdlog::info("StreamingServer: Started transport={} wifi={} usb_adb={} on {} ({}x{} @ {}Hz)",
+                  config.streamingTransport, wifiEnabled_, usbAdbEnabled_,
                   ip, renderWidth_, renderHeight_, refreshRateHz_);
     return true;
 }
@@ -223,12 +395,23 @@ void StreamingServer::Stop()
     running_.store(false);
     state_.store(State::Stopped);
     frameReadyCv_.notify_all();
+    RuntimeStatus::SetIdle();
+    SendUsbDisconnectBestEffort();
+    StopUsbTcpSockets();
 
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->acceptingPackets = false;
         packetDispatchState_->clientIp.clear();
         packetDispatchState_->videoSocket = -1;
+        packetDispatchState_->videoUsesTcp = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(clientMutex_);
+        clientIp_.clear();
+        clientName_.clear();
+        clientPort_ = 0;
+        clientUsesUsbAdb_ = false;
     }
 
     if (broadcastSocket_ >= 0)
@@ -259,6 +442,18 @@ void StreamingServer::Stop()
     {
         encodeThread_.join();
     }
+    if (tcpControlThread_.joinable())
+    {
+        tcpControlThread_.join();
+    }
+    if (tcpVideoThread_.joinable())
+    {
+        tcpVideoThread_.join();
+    }
+    if (tcpTrackingThread_.joinable())
+    {
+        tcpTrackingThread_.join();
+    }
     {
         std::lock_guard<std::mutex> lock(frameMutex_);
         ReleasePendingFrame(pendingFrame_);
@@ -280,18 +475,7 @@ void StreamingServer::Stop()
 
 void StreamingServer::BroadcastThread()
 {
-    oxr::protocol::ServerAnnounce announce = {};
-    announce.type = oxr::protocol::MessageType::ServerAnnounce;
-    announce.versionMajor = 1;
-    announce.versionMinor = 0;
-    announce.videoPort = oxr::protocol::VIDEO_PORT;
-    announce.trackingPort = oxr::protocol::TRACKING_PORT;
-    announce.renderWidth = renderWidth_ * 2;
-    announce.renderHeight = renderHeight_;
-    announce.refreshRateHz = refreshRateHz_;
-    announce.encodedWidth = scaledWidth_ * 2;
-    announce.encodedHeight = scaledHeight_;
-    strncpy(announce.serverName, "OpenXR OSX Runtime", sizeof(announce.serverName) - 1);
+    oxr::protocol::ServerAnnounce announce = BuildServerAnnounce();
 
     sockaddr_in broadcastAddr = {};
     broadcastAddr.sin_family = AF_INET;
@@ -310,6 +494,23 @@ void StreamingServer::BroadcastThread()
     }
 
     spdlog::info("StreamingServer: Broadcast thread ended");
+}
+
+oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce() const
+{
+    oxr::protocol::ServerAnnounce announce = {};
+    announce.type = oxr::protocol::MessageType::ServerAnnounce;
+    announce.versionMajor = 1;
+    announce.versionMinor = 0;
+    announce.videoPort = oxr::protocol::VIDEO_PORT;
+    announce.trackingPort = oxr::protocol::TRACKING_PORT;
+    announce.renderWidth = renderWidth_ * 2;
+    announce.renderHeight = renderHeight_;
+    announce.refreshRateHz = refreshRateHz_;
+    announce.encodedWidth = scaledWidth_ * 2;
+    announce.encodedHeight = scaledHeight_;
+    strncpy(announce.serverName, "OXRSys Runtime", sizeof(announce.serverName) - 1);
+    return announce;
 }
 
 void StreamingServer::ControlThread()
@@ -334,30 +535,248 @@ void StreamingServer::ControlThread()
         if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
             received >= (ssize_t)sizeof(oxr::protocol::ClientConnect))
         {
-            HandleClientConnect(*reinterpret_cast<oxr::protocol::ClientConnect*>(buffer), clientAddr);
+            if (wifiEnabled_)
+            {
+                HandleClientConnect(*reinterpret_cast<oxr::protocol::ClientConnect*>(buffer), clientAddr);
+            }
         }
         else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ServerDisconnect))
         {
             HandleClientDisconnect();
         }
-        else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::LatencyReport) &&
-                 received >= (ssize_t)sizeof(oxr::protocol::LatencyReport))
+        else
         {
-            HandleLatencyReport(*reinterpret_cast<oxr::protocol::LatencyReport*>(buffer));
-        }
-        else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::RequestKeyframe) &&
-                 received >= (ssize_t)sizeof(oxr::protocol::RequestKeyframe))
-        {
-            HandleKeyframeRequest(*reinterpret_cast<oxr::protocol::RequestKeyframe*>(buffer));
-        }
-        else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::NackRequest) &&
-                 received >= (ssize_t)sizeof(oxr::protocol::NackRequest))
-        {
-            HandleNackRequest(*reinterpret_cast<oxr::protocol::NackRequest*>(buffer));
+            HandleControlPayload(buffer, static_cast<size_t>(received));
         }
     }
 
     spdlog::info("StreamingServer: Control thread ended");
+}
+
+bool StreamingServer::StartUsbTcpListeners()
+{
+    tcpControlListenSocket_ = CreateLoopbackListener(oxr::protocol::CONTROL_PORT);
+    tcpVideoListenSocket_ = CreateLoopbackListener(oxr::protocol::VIDEO_PORT);
+    tcpTrackingListenSocket_ = CreateLoopbackListener(oxr::protocol::TRACKING_PORT);
+    if (tcpControlListenSocket_ < 0 || tcpVideoListenSocket_ < 0 || tcpTrackingListenSocket_ < 0)
+    {
+        StopUsbTcpSockets();
+        return false;
+    }
+
+    tcpControlThread_ = std::thread(&StreamingServer::TcpControlThread, this);
+    tcpVideoThread_ = std::thread(&StreamingServer::TcpVideoThread, this);
+    tcpTrackingThread_ = std::thread(&StreamingServer::TcpTrackingThread, this);
+    spdlog::info("StreamingServer: USB ADB TCP listeners active on localhost ports {}/{}/{}",
+                  oxr::protocol::CONTROL_PORT,
+                  oxr::protocol::VIDEO_PORT,
+                  oxr::protocol::TRACKING_PORT);
+    return true;
+}
+
+void StreamingServer::SendUsbDisconnectBestEffort()
+{
+    int controlSocket = -1;
+    {
+        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+        controlSocket = tcpControlClientSocket_;
+    }
+    if (controlSocket >= 0)
+    {
+        SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
+    }
+}
+
+void StreamingServer::StopUsbTcpSockets()
+{
+    std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+    int* sockets[] = {
+        &tcpControlListenSocket_,
+        &tcpVideoListenSocket_,
+        &tcpTrackingListenSocket_,
+        &tcpControlClientSocket_,
+        &tcpVideoClientSocket_,
+        &tcpTrackingClientSocket_,
+    };
+    for (int* socketPtr : sockets)
+    {
+        CloseTcpSocket(*socketPtr);
+    }
+}
+
+void StreamingServer::TcpControlThread()
+{
+    while (running_.load() && usbAdbEnabled_)
+    {
+        int clientSocket = AcceptWithTimeout(tcpControlListenSocket_);
+        if (clientSocket < 0)
+        {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+            if (tcpControlClientSocket_ >= 0)
+            {
+                CloseTcpSocket(tcpControlClientSocket_);
+            }
+            tcpControlClientSocket_ = clientSocket;
+        }
+
+        oxr::protocol::ServerAnnounce announce = BuildServerAnnounce();
+        if (!SendTcpRecord(clientSocket, oxr::protocol::TcpRecordType::ServerAnnounce,
+                           &announce, sizeof(announce)))
+        {
+            {
+                std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+                if (tcpControlClientSocket_ == clientSocket)
+                {
+                    tcpControlClientSocket_ = -1;
+                }
+            }
+            CloseTcpSocket(clientSocket);
+            continue;
+        }
+
+        spdlog::info("StreamingServer: USB ADB control client connected");
+        while (running_.load())
+        {
+            oxr::protocol::TcpRecordHeader header = {};
+            std::vector<uint8_t> payload;
+            if (!ReadTcpRecord(clientSocket, header, payload))
+            {
+                break;
+            }
+
+            if (header.type == oxr::protocol::TcpRecordType::ClientConnect &&
+                payload.size() >= sizeof(oxr::protocol::ClientConnect))
+            {
+                HandleUsbClientConnect(*reinterpret_cast<const oxr::protocol::ClientConnect*>(
+                    payload.data()));
+            }
+            else if (header.type == oxr::protocol::TcpRecordType::Control)
+            {
+                HandleControlPayload(payload.data(), payload.size());
+            }
+            else if (header.type == oxr::protocol::TcpRecordType::Disconnect)
+            {
+                HandleClientDisconnect();
+                break;
+            }
+        }
+
+        bool shouldClose = true;
+        {
+            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+            if (tcpControlClientSocket_ == clientSocket)
+            {
+                tcpControlClientSocket_ = -1;
+            }
+            else
+            {
+                shouldClose = false;
+            }
+        }
+        if (shouldClose)
+        {
+            CloseTcpSocket(clientSocket);
+        }
+        if (clientUsesUsbAdb_)
+        {
+            HandleClientDisconnect();
+        }
+        spdlog::info("StreamingServer: USB ADB control client disconnected");
+    }
+    spdlog::info("StreamingServer: USB ADB control thread ended");
+}
+
+void StreamingServer::TcpVideoThread()
+{
+    while (running_.load() && usbAdbEnabled_)
+    {
+        int clientSocket = AcceptWithTimeout(tcpVideoListenSocket_);
+        if (clientSocket < 0)
+        {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+            if (tcpVideoClientSocket_ >= 0)
+            {
+                CloseTcpSocket(tcpVideoClientSocket_);
+            }
+            tcpVideoClientSocket_ = clientSocket;
+        }
+        {
+            std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
+            if (clientUsesUsbAdb_)
+            {
+                packetDispatchState_->videoSocket = clientSocket;
+                packetDispatchState_->videoUsesTcp = true;
+            }
+        }
+
+        spdlog::info("StreamingServer: USB ADB video client connected");
+    }
+    spdlog::info("StreamingServer: USB ADB video thread ended");
+}
+
+void StreamingServer::TcpTrackingThread()
+{
+    while (running_.load() && usbAdbEnabled_)
+    {
+        int clientSocket = AcceptWithTimeout(tcpTrackingListenSocket_);
+        if (clientSocket < 0)
+        {
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+            if (tcpTrackingClientSocket_ >= 0)
+            {
+                CloseTcpSocket(tcpTrackingClientSocket_);
+            }
+            tcpTrackingClientSocket_ = clientSocket;
+        }
+
+        spdlog::info("StreamingServer: USB ADB tracking client connected");
+        while (running_.load())
+        {
+            oxr::protocol::TcpRecordHeader header = {};
+            std::vector<uint8_t> payload;
+            if (!ReadTcpRecord(clientSocket, header, payload))
+            {
+                break;
+            }
+            if (header.type == oxr::protocol::TcpRecordType::Tracking &&
+                payload.size() >= sizeof(oxr::protocol::TrackingPacket) &&
+                trackingReceiver_ != nullptr)
+            {
+                trackingReceiver_->InjectPacket(payload.data(), payload.size());
+            }
+        }
+
+        bool shouldClose = true;
+        {
+            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+            if (tcpTrackingClientSocket_ == clientSocket)
+            {
+                tcpTrackingClientSocket_ = -1;
+            }
+            else
+            {
+                shouldClose = false;
+            }
+        }
+        if (shouldClose)
+        {
+            CloseTcpSocket(clientSocket);
+        }
+        spdlog::info("StreamingServer: USB ADB tracking client disconnected");
+    }
+    spdlog::info("StreamingServer: USB ADB tracking thread ended");
 }
 
 void StreamingServer::EncodeThread()
@@ -422,15 +841,29 @@ void StreamingServer::EncodeThread()
         {
             std::string clientIp;
             int videoSocket = -1;
+            bool videoUsesTcp = false;
             {
                 std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
                 if (packetDispatchState_->acceptingPackets)
                 {
                     clientIp = packetDispatchState_->clientIp;
                     videoSocket = packetDispatchState_->videoSocket;
+                    videoUsesTcp = packetDispatchState_->videoUsesTcp;
                 }
             }
-            if (!clientIp.empty() && videoSocket >= 0)
+            if (videoUsesTcp && videoSocket >= 0)
+            {
+                oxr::protocol::TcpRenderPose pose = {};
+                pose.frameIndex = frame.frameIndex;
+                pose.presentationTimeNs = frame.timestampNs;
+                memcpy(pose.position, frame.headPosition, sizeof(float) * 3);
+                memcpy(pose.orientation, frame.headOrientation, sizeof(float) * 4);
+
+                std::lock_guard<std::mutex> sendLock(packetDispatchState_->sendMutex);
+                SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::RenderPose,
+                              &pose, sizeof(pose));
+            }
+            else if (!clientIp.empty() && videoSocket >= 0)
             {
                 // Payload: 7 floats (position[3] + orientation[4])
                 float posePayload[7];
@@ -493,6 +926,43 @@ void StreamingServer::EncodeThread()
                     MetricSummary callbackSummary = telemetry->callbackLatencyMs.Consume();
                     MetricSummary totalSummary = telemetry->totalPipelineMs.Consume();
 
+                    const uint32_t replacedFrames = replacedFrameCount_.exchange(0);
+                    const uint32_t encoderDrops = encoder->GetDroppedFrameCount();
+                    const uint32_t keyframeRequests = requestKeyframeCount_.exchange(0);
+                    const uint32_t pendingDepthMax = pendingFrameDepthMax_.exchange(0);
+
+                    RuntimeStatus::StreamingStats stats = {};
+                    stats.refreshRateHz = targetRefreshRateHz_.load();
+                    stats.currentBitrateMbps = currentBitrateMbps_.load();
+                    stats.maxBitrateMbps = configMaxBitrateMbps_.load();
+                    stats.renderWidth = renderWidth_ * 2;
+                    stats.renderHeight = renderHeight_;
+                    stats.encodedWidth = scaledWidth_ * 2;
+                    stats.encodedHeight = scaledHeight_;
+                    stats.serverPipelineLatencyMs = serverPipelineLatencyMs_.load();
+                    stats.clientPipelineLatencyMs = clientPipelineLatencyMs_.load();
+                    stats.clientReceiveToSubmitMs = clientReceiveToSubmitMs_.load();
+                    stats.clientDecodeMs = clientDecodeLatencyMs_.load();
+                    stats.clientCompositorMs = clientCompositorLatencyMs_.load();
+                    stats.predictionHorizonMs = trackingReceiver_ ?
+                        trackingReceiver_->GetPredictionHorizonMs() : 0.0f;
+                    stats.encodeQueueAverageMs = queueSummary.average;
+                    stats.encodeQueueP95Ms = queueSummary.p95;
+                    stats.encodeGpuAverageMs = gpuSummary.average;
+                    stats.encodeGpuP95Ms = gpuSummary.p95;
+                    stats.encodeSubmitAverageMs = submitSummary.average;
+                    stats.encodeSubmitP95Ms = submitSummary.p95;
+                    stats.encodeCallbackAverageMs = callbackSummary.average;
+                    stats.encodeCallbackP95Ms = callbackSummary.p95;
+                    stats.encodeTotalAverageMs = totalSummary.average;
+                    stats.encodeTotalP95Ms = totalSummary.p95;
+                    stats.encodedFramesTotal = encoder->GetEncodedFrameCount();
+                    stats.encoderDroppedFramesTotal = encoderDrops;
+                    stats.replacedFramesDelta = replacedFrames;
+                    stats.keyframeRequestsDelta = keyframeRequests;
+                    stats.pendingDepthMax = pendingDepthMax;
+                    RuntimeStatus::SetStreamingStats(stats);
+
                     spdlog::info(
                         "StreamingServer: encode queue(avg/p95={:.2f}/{:.2f}ms) gpu({:.2f}/{:.2f}) "
                         "submit({:.3f}/{:.3f}) callback({:.2f}/{:.2f}) total({:.2f}/{:.2f}) "
@@ -502,10 +972,10 @@ void StreamingServer::EncodeThread()
                         submitSummary.average, submitSummary.p95,
                         callbackSummary.average, callbackSummary.p95,
                         totalSummary.average, totalSummary.p95,
-                        replacedFrameCount_.exchange(0),
-                        encoder->GetDroppedFrameCount(),
-                        requestKeyframeCount_.exchange(0),
-                        pendingFrameDepthMax_.exchange(0));
+                        replacedFrames,
+                        encoderDrops,
+                        keyframeRequests,
+                        pendingDepthMax);
 
                     telemetry->lastLogTime = now;
                 }
@@ -535,18 +1005,21 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 {
     char ipStr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+    std::string clientName(clientConnect.deviceName,
+        strnlen(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
 
     {
         std::lock_guard<std::mutex> lock(clientMutex_);
         clientIp_ = ipStr;
         clientPort_ = ntohs(clientAddr.sin_port);
-        clientName_ = std::string(clientConnect.deviceName,
-            strnlen(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
+        clientName_ = clientName;
+        clientUsesUsbAdb_ = false;
     }
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->clientIp = ipStr;
         packetDispatchState_->videoSocket = videoSocket_;
+        packetDispatchState_->videoUsesTcp = false;
     }
 
     uint32_t negotiatedRefresh = clientConnect.refreshRateHz > 0
@@ -572,7 +1045,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
                 ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
                 : config.bitrateMbps;
-            configMaxBitrateMbps_ = bitrateMbps;
+            configMaxBitrateMbps_.store(bitrateMbps);
             currentBitrateMbps_.store(bitrateMbps);
             lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
             lastKeyframeRequestCountForAbr_ = 0;
@@ -583,8 +1056,9 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
                 encoderReady = true;
-                spdlog::info("StreamingServer: Client connected: {} ({}:{}) refresh={}Hz",
-                              clientName_, clientIp_, clientPort_, negotiatedRefresh);
+                spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz",
+                              clientName, clientIp_, clientPort_, negotiatedRefresh);
+                RuntimeStatus::SetStreaming("wifi", clientName);
             }
             else
             {
@@ -601,8 +1075,9 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
     if (!encoderReady)
     {
+        RuntimeStatus::SetIdle();
         state_.store(State::Broadcasting);
-        if (running_.load())
+        if (wifiEnabled_ && running_.load())
         {
             broadcastThread_ = std::thread(&StreamingServer::BroadcastThread, this);
         }
@@ -610,18 +1085,126 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 }
 
-void StreamingServer::HandleClientDisconnect()
+void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
+    std::string clientName(clientConnect.deviceName,
+        strnlen(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
     {
         std::lock_guard<std::mutex> lock(clientMutex_);
+        clientIp_ = "127.0.0.1";
+        clientPort_ = oxr::protocol::CONTROL_PORT;
+        clientName_ = clientName;
+        clientUsesUsbAdb_ = true;
+    }
+    {
+        std::lock_guard<std::mutex> tcpLock(tcpSocketMutex_);
+        std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
+        packetDispatchState_->clientIp.clear();
+        packetDispatchState_->videoSocket = tcpVideoClientSocket_;
+        packetDispatchState_->videoUsesTcp = true;
+    }
+
+    uint32_t negotiatedRefresh = clientConnect.refreshRateHz > 0
+        ? clientConnect.refreshRateHz
+        : refreshRateHz_;
+    targetRefreshRateHz_.store(negotiatedRefresh);
+    UpdatePredictionHorizon();
+
+    state_.store(State::Connected);
+
+    if (broadcastThread_.joinable())
+    {
+        broadcastThread_.join();
+    }
+
+    bool encoderReady = false;
+    {
+        std::lock_guard<std::mutex> lock(encoderMutex_);
+        encoder_ = std::make_shared<VideoEncoder>();
+        if (metalDevice_ != nullptr)
+        {
+            const ConfigValues config = Config::Get().GetValues();
+            uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
+                ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
+                : config.bitrateMbps;
+            configMaxBitrateMbps_.store(bitrateMbps);
+            currentBitrateMbps_.store(bitrateMbps);
+            lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
+            lastKeyframeRequestCountForAbr_ = 0;
+            uint32_t stereoWidth = scaledWidth_ * 2;
+            if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
+                                     bitrateMbps, metalDevice_))
+            {
+                encoder_->ForceKeyframe();
+                frameIndex_ = 0;
+                encoderReady = true;
+                spdlog::info("StreamingServer: Client connected via usb_adb: {} refresh={}Hz",
+                              clientName, negotiatedRefresh);
+                RuntimeStatus::SetStreaming("usb_adb", clientName);
+            }
+            else
+            {
+                spdlog::error("StreamingServer: Failed to initialize VideoEncoder for USB ADB");
+                encoder_.reset();
+            }
+        }
+        else
+        {
+            spdlog::warn("StreamingServer: No Metal device set, cannot encode video");
+            encoder_.reset();
+        }
+    }
+
+    if (!encoderReady)
+    {
+        RuntimeStatus::SetIdle();
+        clientUsesUsbAdb_ = false;
+        state_.store(State::Broadcasting);
+        if (wifiEnabled_ && running_.load())
+        {
+            broadcastThread_ = std::thread(&StreamingServer::BroadcastThread, this);
+        }
+    }
+}
+
+void StreamingServer::HandleClientDisconnect()
+{
+    std::lock_guard<std::mutex> disconnectLock(disconnectMutex_);
+    if (!running_.load())
+    {
+        return;
+    }
+
+    State previousState = state_.exchange(State::Broadcasting);
+    bool hadClient = false;
+    bool wasUsbClient = false;
+    {
+        std::lock_guard<std::mutex> lock(clientMutex_);
+        hadClient = clientUsesUsbAdb_ || !clientIp_.empty() ||
+                    !clientName_.empty() || clientPort_ != 0;
+        wasUsbClient = clientUsesUsbAdb_;
         clientIp_.clear();
         clientName_.clear();
         clientPort_ = 0;
+        clientUsesUsbAdb_ = false;
     }
+    if (previousState != State::Connected && !hadClient)
+    {
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->clientIp.clear();
         packetDispatchState_->videoSocket = videoSocket_;
+        packetDispatchState_->videoUsesTcp = false;
+    }
+    if (wasUsbClient)
+    {
+        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+        CloseTcpSocket(tcpControlClientSocket_);
+        CloseTcpSocket(tcpVideoClientSocket_);
+        CloseTcpSocket(tcpTrackingClientSocket_);
     }
 
     {
@@ -636,18 +1219,18 @@ void StreamingServer::HandleClientDisconnect()
 
     targetRefreshRateHz_.store(refreshRateHz_);
     UpdatePredictionHorizon();
-    state_.store(State::Broadcasting);
 
-    if (broadcastThread_.joinable())
+    if (previousState == State::Connected && broadcastThread_.joinable())
     {
         broadcastThread_.join();
     }
 
-    if (running_.load())
+    if (previousState == State::Connected && wifiEnabled_ && running_.load())
     {
         broadcastThread_ = std::thread(&StreamingServer::BroadcastThread, this);
     }
 
+    RuntimeStatus::SetIdle();
     spdlog::info("StreamingServer: Client disconnected, resuming broadcast");
 }
 
@@ -679,7 +1262,7 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
         bool shouldDecrease = (smoothed > kLatencyHighMs) || (newKeyframeRequests > 0);
         bool canIncrease = (smoothed < kLatencyTargetMs) && (newKeyframeRequests == 0) &&
                            (nowNs - lastBitrateIncreaseTimeNs_ >= kIncreaseIntervalNs) &&
-                           (currentBitrate < configMaxBitrateMbps_);
+                           (currentBitrate < configMaxBitrateMbps_.load());
 
         uint32_t newBitrate = currentBitrate;
         if (shouldDecrease && currentBitrate > kMinBitrateMbps)
@@ -688,7 +1271,8 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
         }
         else if (canIncrease)
         {
-            newBitrate = std::min(currentBitrate + currentBitrate / 20, configMaxBitrateMbps_); // +5%
+            newBitrate = std::min(currentBitrate + currentBitrate / 20,
+                                  configMaxBitrateMbps_.load()); // +5%
             lastBitrateIncreaseTimeNs_ = nowNs;
         }
 
@@ -730,6 +1314,34 @@ void StreamingServer::HandleKeyframeRequest(const oxr::protocol::RequestKeyframe
 
     spdlog::info("StreamingServer: Keyframe requested (reasons=0x{:x}, detail={})",
                   request.reasonFlags, request.detail);
+}
+
+void StreamingServer::HandleControlPayload(const uint8_t* data, size_t size)
+{
+    if (data == nullptr || size < 1)
+    {
+        return;
+    }
+
+    uint8_t type = data[0];
+    if (type == static_cast<uint8_t>(oxr::protocol::ControlType::LatencyReport) &&
+        size >= sizeof(oxr::protocol::LatencyReport))
+    {
+        HandleLatencyReport(*reinterpret_cast<const oxr::protocol::LatencyReport*>(data));
+    }
+    else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::RequestKeyframe) &&
+             size >= sizeof(oxr::protocol::RequestKeyframe))
+    {
+        HandleKeyframeRequest(*reinterpret_cast<const oxr::protocol::RequestKeyframe*>(data));
+    }
+    else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::NackRequest) &&
+             size >= sizeof(oxr::protocol::NackRequest))
+    {
+        if (!clientUsesUsbAdb_)
+        {
+            HandleNackRequest(*reinterpret_cast<const oxr::protocol::NackRequest*>(data));
+        }
+    }
 }
 
 void StreamingServer::UpdatePredictionHorizon()
@@ -814,6 +1426,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 {
     std::string clientIp;
     int videoSocket = -1;
+    bool videoUsesTcp = false;
     {
         if (!dispatchState)
         {
@@ -826,10 +1439,39 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         }
         clientIp = dispatchState->clientIp;
         videoSocket = dispatchState->videoSocket;
+        videoUsesTcp = dispatchState->videoUsesTcp;
     }
 
-    if (clientIp.empty() || videoSocket < 0)
+    if (videoSocket < 0 || (!videoUsesTcp && clientIp.empty()))
     {
+        return;
+    }
+
+    if (videoUsesTcp)
+    {
+        if (size > oxr::protocol::TCP_MAX_RECORD_PAYLOAD - sizeof(oxr::protocol::TcpVideoNalHeader))
+        {
+            spdlog::warn("StreamingServer: USB TCP NAL too large ({} bytes), dropping", size);
+            return;
+        }
+
+        std::vector<uint8_t> payload(sizeof(oxr::protocol::TcpVideoNalHeader) + size);
+        oxr::protocol::TcpVideoNalHeader nalHeader = {};
+        nalHeader.presentationTimeNs = timestampNs;
+        nalHeader.frameIndex = frameIndex;
+        nalHeader.payloadSize = static_cast<uint32_t>(size);
+        nalHeader.flags = oxr::protocol::VIDEO_FLAG_STEREO;
+        if (isKeyframe)
+        {
+            nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
+        }
+        nalHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+        memcpy(payload.data(), &nalHeader, sizeof(nalHeader));
+        memcpy(payload.data() + sizeof(nalHeader), data, size);
+
+        std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
+        SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::VideoNal,
+                      payload.data(), payload.size());
         return;
     }
 
@@ -928,6 +1570,28 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
                    (sockaddr*)&destAddr, sizeof(destAddr));
         }
     }
+}
+
+bool StreamingServer::SendTcpRecord(int socket, oxr::protocol::TcpRecordType type,
+                                    const void* payload, size_t payloadSize)
+{
+    if (socket < 0 || payloadSize > oxr::protocol::TCP_MAX_RECORD_PAYLOAD)
+    {
+        return false;
+    }
+
+    oxr::protocol::TcpRecordHeader header = {};
+    header.type = type;
+    header.payloadSize = static_cast<uint32_t>(payloadSize);
+    if (!SendAll(socket, &header, sizeof(header)))
+    {
+        return false;
+    }
+    if (payloadSize == 0)
+    {
+        return true;
+    }
+    return SendAll(socket, payload, payloadSize);
 }
 
 void StreamingServer::HandleNackRequest(const oxr::protocol::NackRequest& request)

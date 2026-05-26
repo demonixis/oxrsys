@@ -111,3 +111,4 @@ docs/api
 __pycache__
 .cache
 clients/common/OpenXRStreaming/.build
+clients/common/OpenXRSimulator/.build

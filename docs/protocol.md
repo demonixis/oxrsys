@@ -12,7 +12,7 @@ This document describes the internal streaming protocol shared by the macOS runt
 
 ## Transport Model
 
-The current transport uses UDP with dedicated ports:
+The WiFi transport uses UDP with dedicated ports:
 
 - Discovery: `9943`
 - Video: `9944`
@@ -20,6 +20,24 @@ The current transport uses UDP with dedicated ports:
 - Control: `9946`
 
 Discovery announces the server and its stream settings. Video carries encoded frame fragments. Tracking carries headset and controller state back to the runtime. Control carries latency reports, keyframe requests, and haptics.
+
+The Quest USB path uses ADB reverse TCP on localhost ports:
+
+- Video TCP: `9944`
+- Tracking TCP: `9945`
+- Control TCP: `9946`
+
+The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback.
+
+TCP payloads are framed with `TcpRecordHeader`, which contains the record magic, protocol version, record type, and payload size. Current TCP record types are:
+
+- `ServerAnnounce`
+- `ClientConnect`
+- `VideoNal`
+- `RenderPose`
+- `Tracking`
+- `Control`
+- `Disconnect`
 
 ## Discovery
 
@@ -36,7 +54,7 @@ The handshake exposes:
 
 ## Video Stream
 
-Video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
+UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
 
 - frame index
 - packet index and total packet count
@@ -51,6 +69,8 @@ Current codec identifiers:
 - `H264`
 - `AV1`
 
+USB TCP video sends complete encoded NAL units as `VideoNal` records. It does not use UDP fragmentation, FEC, or NACK recovery.
+
 The runtime currently targets low-latency headset streaming. The queue is latest-frame-only rather than fully reliable.
 
 The current stream also includes two recovery and timing helpers:
@@ -60,7 +80,7 @@ The current stream also includes two recovery and timing helpers:
 
 ## Tracking Stream
 
-`TrackingPacket` carries:
+`TrackingPacket` carries the same payload over UDP tracking packets or TCP `Tracking` records:
 
 - headset pose
 - headset linear and angular velocity when the client can provide it
@@ -75,7 +95,7 @@ Velocity values are optional. Zero vectors mean the runtime should fall back to 
 
 ## Control Channel
 
-The control channel currently defines:
+The control channel currently defines the following payloads over UDP or TCP `Control` records:
 
 - `LatencyReport`
 - `RequestKeyframe`
@@ -84,17 +104,17 @@ The control channel currently defines:
 
 Latency reports allow the runtime to keep prediction bounded. Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from the runtime to the client.
 
-`NackRequest` lets a client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability.
+`NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
 
 ## Session Lifecycle
 
 The expected lifecycle is:
 
-1. The runtime announces itself.
+1. The runtime announces itself over UDP, or a USB TCP client connects to control port `9946` and receives `ServerAnnounce`.
 2. A client connects and advertises capabilities.
 3. The runtime starts video and tracking exchange.
 4. The client sends latency feedback and keyframe requests while streaming is active.
-5. Either side can disconnect and return to idle.
+5. Either side can disconnect and return to idle. USB TCP shutdown uses a best-effort `Disconnect` record on the control channel before sockets are closed; clients also treat closed video/control sockets as a connection loss and resume discovery/retry.
 
 ## Compatibility
 

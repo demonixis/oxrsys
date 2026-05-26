@@ -139,7 +139,7 @@ struct RuntimeSessionContext
         : enabledExtensions(extensions)
     {
         XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-        std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_runtime_tests",
+        std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_tests",
                      XR_MAX_APPLICATION_NAME_SIZE);
         createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
@@ -509,7 +509,7 @@ TEST_CASE("Runtime gates xrLocateSpaces behind OpenXR 1.1", "[runtime][loader]")
     const char* enabledExtensions[] = {XR_KHR_METAL_ENABLE_EXTENSION_NAME};
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_api_version_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_version_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 57);
     createInfo.enabledExtensionCount = 1;
@@ -624,7 +624,7 @@ TEST_CASE("Runtime hides LOCAL_FLOOR for OpenXR 1.0 instances", "[runtime][space
     const char* enabledExtensions[] = {XR_KHR_METAL_ENABLE_EXTENSION_NAME};
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_local_floor_1_0_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_local_floor_1_0_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 57);
     createInfo.enabledExtensionCount = 1;
@@ -760,7 +760,7 @@ TEST_CASE("Debug utils messenger callbacks work from instance create and explici
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
     createInfo.next = &chainedCreateInfo;
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_debug_utils_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_debug_utils_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
@@ -906,7 +906,7 @@ TEST_CASE("BeginSession rejects unsupported view configuration types", "[runtime
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_destroy_session_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_destroy_session_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 
@@ -963,7 +963,7 @@ TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loa
 TEST_CASE("DestroyInstance tolerates active session resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_destroy_instance_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_destroy_instance_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 
@@ -2024,6 +2024,62 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
             quad.subImage.imageArrayIndex = 1;
         },
         XR_ERROR_VALIDATION_FAILURE);
+}
+
+TEST_CASE("EndFrame accepts a released projection image while another swapchain image is acquired", "[runtime][frame][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+
+    const int64_t format = SelectColorSwapchainFormat(context.session);
+    XrSwapchain swapchain = CreateColorSwapchain(context.session, format);
+
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = 0;
+
+    uint32_t releasedImageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &releasedImageIndex));
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+    uint32_t pipelinedImageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &pipelinedImageIndex));
+
+    XrCompositionLayerProjectionView projectionViews[2] = {};
+    for (auto& view : projectionViews)
+    {
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose.orientation.w = 1.0f;
+        view.fov.angleLeft = -0.5f;
+        view.fov.angleRight = 0.5f;
+        view.fov.angleUp = 0.5f;
+        view.fov.angleDown = -0.5f;
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect.extent = {16, 16};
+    }
+
+    XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projectionLayer.space = context.localSpace;
+    projectionLayer.viewCount = 2;
+    projectionLayer.views = projectionViews;
+
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+    };
+
+    XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    frameEndInfo.layerCount = 1;
+    frameEndInfo.layers = layers;
+
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
+
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+    XR_CHECK(xrDestroySwapchain(swapchain));
 }
 
 TEST_CASE("Space and view validation matches CTS expectations", "[runtime][space]")

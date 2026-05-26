@@ -85,8 +85,10 @@ private:
     struct PacketDispatchState
     {
         std::mutex mutex;
+        std::mutex sendMutex;
         std::string clientIp;
         int videoSocket = -1;
+        bool videoUsesTcp = false;
         bool acceptingPackets = false;
 
         // Ring buffer of recently sent frames for NACK retransmission
@@ -112,15 +114,24 @@ private:
     void BroadcastThread();
     void ControlThread();
     void EncodeThread();
+    void TcpControlThread();
+    void TcpVideoThread();
+    void TcpTrackingThread();
     std::string GetLocalIpAddress() const;
+    oxr::protocol::ServerAnnounce BuildServerAnnounce() const;
     void ReleasePendingFrame(PendingFrame& frame);
     void HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                              const sockaddr_in& clientAddr);
+    void HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect);
     void HandleClientDisconnect();
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
     void HandleNackRequest(const oxr::protocol::NackRequest& request);
+    void HandleControlPayload(const uint8_t* data, size_t size);
     void UpdatePredictionHorizon();
+    bool StartUsbTcpListeners();
+    void SendUsbDisconnectBestEffort();
+    void StopUsbTcpSockets();
 
     std::atomic<State> state_{State::Stopped};
 
@@ -138,7 +149,7 @@ private:
     std::atomic<float> clientCompositorLatencyMs_{0.0f};
 
     // Adaptive bitrate state
-    uint32_t configMaxBitrateMbps_ = 50;
+    std::atomic<uint32_t> configMaxBitrateMbps_{50};
     std::atomic<uint32_t> currentBitrateMbps_{50};
     int64_t lastBitrateIncreaseTimeNs_ = 0;
     uint32_t lastKeyframeRequestCountForAbr_ = 0;
@@ -147,6 +158,17 @@ private:
     int broadcastSocket_ = -1;
     int controlSocket_ = -1;
     int videoSocket_ = -1;
+    int tcpControlListenSocket_ = -1;
+    int tcpVideoListenSocket_ = -1;
+    int tcpTrackingListenSocket_ = -1;
+    int tcpControlClientSocket_ = -1;
+    int tcpVideoClientSocket_ = -1;
+    int tcpTrackingClientSocket_ = -1;
+    std::mutex tcpSocketMutex_;
+    std::mutex disconnectMutex_;
+    bool wifiEnabled_ = true;
+    bool usbAdbEnabled_ = true;
+    bool clientUsesUsbAdb_ = false;
 
     // Client info
     std::string clientIp_;
@@ -158,6 +180,9 @@ private:
     std::thread broadcastThread_;
     std::thread controlThread_;
     std::thread encodeThread_;
+    std::thread tcpControlThread_;
+    std::thread tcpVideoThread_;
+    std::thread tcpTrackingThread_;
     std::atomic<bool> running_{false};
     std::condition_variable frameReadyCv_;
     std::mutex frameMutex_;
@@ -171,6 +196,8 @@ private:
     static void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                             uint32_t frameIndex, const uint8_t* data, size_t size,
                             bool isKeyframe, int64_t timestampNs);
+    static bool SendTcpRecord(int socket, oxr::protocol::TcpRecordType type,
+                              const void* payload, size_t payloadSize);
 
     // Sub-components
     std::shared_ptr<VideoEncoder> encoder_;

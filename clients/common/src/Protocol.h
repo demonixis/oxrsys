@@ -18,6 +18,59 @@ constexpr uint16_t TRACKING_PORT = 9945;
 constexpr uint16_t CONTROL_PORT = 9946;
 constexpr uint32_t HAND_JOINT_COUNT = 26;
 
+enum class StreamingTransport : uint8_t
+{
+    Auto = 0,
+    Wifi = 1,
+    UsbAdb = 2,
+};
+
+// ─── TCP Framing (USB ADB reverse transport) ─────────────────────────────────
+
+constexpr uint32_t TCP_RECORD_MAGIC = 0x4f585255; // "OXRU", little-endian on supported targets
+constexpr uint16_t TCP_RECORD_VERSION = 1;
+constexpr uint32_t TCP_MAX_RECORD_PAYLOAD = 16 * 1024 * 1024;
+
+enum class TcpRecordType : uint16_t
+{
+    ServerAnnounce = 0x0001,
+    ClientConnect = 0x0002,
+    VideoNal = 0x0003,
+    RenderPose = 0x0004,
+    Tracking = 0x0005,
+    Control = 0x0006,
+    Disconnect = 0x0007,
+};
+
+struct TcpRecordHeader
+{
+    uint32_t magic = TCP_RECORD_MAGIC;
+    uint16_t version = TCP_RECORD_VERSION;
+    TcpRecordType type = TcpRecordType::Control;
+    uint32_t payloadSize = 0;
+};
+
+struct TcpVideoNalHeader
+{
+    int64_t presentationTimeNs = 0;
+    uint32_t frameIndex = 0;
+    uint32_t payloadSize = 0;
+    uint8_t flags = 0;
+    uint8_t codec = 0;
+    uint16_t reserved = 0;
+    uint32_t reserved2 = 0;
+};
+
+struct TcpRenderPose
+{
+    int64_t presentationTimeNs = 0;
+    uint32_t frameIndex = 0;
+    uint32_t reserved = 0;
+    float position[3] = {};
+    float orientation[4] = {0, 0, 0, 1};
+    uint32_t reserved2 = 0;
+};
+
 // ─── Discovery (UDP broadcast on DISCOVERY_PORT) ────────────────────────────
 
 enum class MessageType : uint8_t

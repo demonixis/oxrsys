@@ -16,15 +16,16 @@ struct ConfigValues
     float resolutionScale = 0.75f;  // Encode resolution multiplier (0.25-1.0)
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
+    std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
 
-    bool fileLogging = true;        // Write logs to openxr_osx.log
-    bool questLogcat = false;       // Capture Quest logcat to openxr_osx_quest.log
+    bool fileLogging = true;        // Write logs to oxrsys-runtime.log
+    bool questLogcat = false;       // Capture Quest logcat to oxrsys-headset.log
 };
 
 ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults = {});
 
 /**
- * Runtime configuration loaded from ~/Library/Application Support/OpenXR-OSX/openxr_osx.toml
+ * Runtime configuration loaded from ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
  * with a one-release fallback to the legacy dylib-local config file.
  *
  * Singleton initialized once on first access. Configures spdlog sinks
@@ -42,11 +43,12 @@ public:
     void RefreshIfNeeded();
 
     // Resolved paths
-    std::string appSupportDir;      // ~/Library/Application Support/OpenXR-OSX
-    std::string dylibDir;           // Directory containing libopenxr_osx.dylib
+    std::string appSupportDir;      // ~/Library/Application Support/OXRSys
+    std::string dylibDir;           // Directory containing liboxrsys-runtime.dylib
     std::string configFilePath;     // Resolved config file path
-    std::string logFilePath;        // Full path to openxr_osx.log
-    std::string questLogFilePath;   // Full path to openxr_osx_quest.log
+    std::string logFilePath;        // Full path to oxrsys-runtime.log
+    std::string questLogFilePath;   // Full path to oxrsys-headset.log
+    std::string runtimeStatusPath;  // Full path to runtime_status.json
 
     void Shutdown();
 

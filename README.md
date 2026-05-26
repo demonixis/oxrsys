@@ -1,28 +1,37 @@
-# OpenXR OSX Runtime
+# OXRSys Runtime
 
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
 ## Project
 
-OpenXR OSX Runtime brings OpenXR runtime support to Apple Silicon Macs. The repository includes a macOS runtime, a unified macOS/iOS viewer with `Simulator` and `StereoView` modes, a first-pass visionOS viewer, and a streaming stack with an Android client for Quest-class headsets.
+OXRSys Runtime is an unofficial OpenXR runtime for Apple Silicon Macs. The repository includes a macOS runtime, a unified macOS/iOS viewer with `Simulator` and `StereoView` modes, a first-pass visionOS viewer, and a streaming stack with an Android client for Quest-class headsets.
 
-Created by Yannick Comte.
+OXRSys is independent software. It is not affiliated with, endorsed by, sponsored by, or approved by The Khronos Group, Meta, Apple, LunarG, or the owners of the platforms, SDKs, runtimes, and trademarks referenced by this project.
+
+### Meta Quest Client
+
+The Meta Quest client can be used over WiFi or USB. The USB path is the best way to experiment with the runtime because it gives the lowest latency. Install `adb` first; in this setup, `brew install adb-enhanced` provides it on your `PATH`.
+
+### Home App
+
+OXRSys Home is a macOS application for launching configured apps with the runtime, installing and registering the runtime, configuring USB for Quest, tuning streaming settings, and listing available apps.
 
 ## Disclaimer
+
 **Current Status**: This project is in early development and is not yet production-ready.
 
 ### Technical Limitations
-* macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. Currently, applications must be launched via the command line.
-* Meta Quest Integration: The **interface is currently minimal**; the app displays a blue screen during standby and a green screen during loading.
+
+- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging.
+- Meta Quest Integration: The interface is currently minimal; the app displays a blue screen during standby and a green screen during loading.
 
 ### Stability & Contributions
-Expect **frequent crashes and bugs**. This is a normal part of the development phase. We welcome contributions through:
-•	Bug reports
-•	Feature requests
-•	Pull requests
+
+Expect frequent crashes and bugs. Contributions are welcome through bug reports, feature requests, and pull requests.
 
 ### AI Disclosure
-This project utilizes AI-generated code and documentation. We appreciate your professional cooperation regarding this approach.
+
+This project uses AI-generated code and documentation. We appreciate professional cooperation regarding this approach.
 
 ## Dependencies
 
@@ -30,7 +39,6 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 - C++20
 - CMake with FetchContent
 - Ninja
-- SDL3
 - OpenXR SDK headers and loader
 - Metal
 - Vulkan headers for interop paths
@@ -40,9 +48,9 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 
 - Metal rendering, core runtime flow, Vulkan interop, and loader-backed runtime tests are in place.
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
-- The Quest/Android client feeds real hand joints into the runtime, matches per-frame render poses for smoother headset reprojection, and exposes a first-pass `XR_FB_foveation` path when supported by the headset.
+- The Quest/Android client feeds real hand joints into the runtime, supports WiFi UDP and reconnecting USB ADB reverse TCP streaming, matches per-frame render poses for smoother headset reprojection, exposes a first-pass `XR_FB_foveation` path when supported by the headset, and can request a build-configured display refresh rate.
 - The visionOS viewer uses a minimal floating search window, then enters immersive VR automatically once the stream connects and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.
-- The macOS SwiftUI apps are configured for App Store/TestFlight packaging with sandboxed archives.
+- OXRSys Home is now a direct-distribution launcher and runtime installer for compatible apps such as Godot and Unity, with a main-window runtime activity summary, transport readiness controls, and an optional Developer tab for opening the integrated simulator and viewing live runtime streaming stats.
 - As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed, 36 skipped, 0 failed.
 
 ## Documentation
@@ -53,7 +61,7 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 - [Protocol](docs/protocol.md)
 - [Simulator](docs/simulator.md)
 - [Quest](docs/platforms/quest.md)
-- [macOS Companion](docs/platforms/macos-companion.md)
+- [macOS Home](docs/platforms/macos-home.md)
 - [iOS Viewer](docs/platforms/ios-viewer.md)
 - [Vision OS](docs/platforms/visionos.md)
 - [Testing And Conformance](docs/testing-and-conformance.md)
