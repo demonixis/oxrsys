@@ -2,11 +2,18 @@
 
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
+/!\ Warning: This project will be renamed soon.
+
 ## Project
 
 OpenXR OSX Runtime brings OpenXR runtime support to Apple Silicon Macs. The repository includes a macOS runtime, a unified macOS/iOS viewer with `Simulator` and `StereoView` modes, a first-pass visionOS viewer, and a streaming stack with an Android client for Quest-class headsets.
 
-Created by Yannick Comte.
+### Meta Quest Client
+The Meta Quest client can be used in Wifi or USB. The USB path is the best way to experiment with the OpenXR runtime, giving the best latency. To be able to use the USB path, you need to install adb first.
+The adb command should be available in your PATH. You can install it using Homebrew with `brew install adb-enhanced`.
+
+### Compagnon app aka Home 
+The companion app, also known as Home, is a macOS application that allows you to launch configured apps with the OpenXR runtime. It'll allow you to configure USB for Quest, tweak streaming settings and list all available apps.
 
 ## Disclaimer
 **Current Status**: This project is in early development and is not yet production-ready.
@@ -30,7 +37,6 @@ This project utilizes AI-generated code and documentation. We appreciate your pr
 - C++20
 - CMake with FetchContent
 - Ninja
-- SDL3
 - OpenXR SDK headers and loader
 - Metal
 - Vulkan headers for interop paths
