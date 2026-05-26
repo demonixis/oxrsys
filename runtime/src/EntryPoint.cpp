@@ -549,11 +549,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     const ConfigValues config = Config::Get().GetValues();
     if (!config.runtimeEnabled)
     {
-        spdlog::info("OpenXR OSX: Rejecting xrCreateInstance because runtime_enabled=false");
+        spdlog::info("OXRSys: Rejecting xrCreateInstance because runtime_enabled=false");
         return XR_ERROR_RUNTIME_UNAVAILABLE;
     }
 
-    spdlog::info("OpenXR OSX: Creating instance for '{}'", createInfo->applicationInfo.applicationName);
+    spdlog::info("OXRSys: Creating instance for '{}'", createInfo->applicationInfo.applicationName);
 
     std::vector<std::string> enabledExtensions;
     enabledExtensions.reserve(createInfo->enabledExtensionCount);
@@ -563,7 +563,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
         const char* extensionName = createInfo->enabledExtensionNames[i];
         if (!IsSupportedExtensionName(extensionName))
         {
-            spdlog::warn("OpenXR OSX: Unsupported extension requested: {}", extensionName);
+            spdlog::warn("OXRSys: Unsupported extension requested: {}", extensionName);
             return XR_ERROR_EXTENSION_NOT_PRESENT;
         }
         enabledExtensions.emplace_back(NormalizeExtensionName(extensionName));
@@ -857,7 +857,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
                                               reinterpret_cast<void*>(vulkanBinding->device),
                                               reinterpret_cast<void*>(vulkanBinding->physicalDevice));
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
-        spdlog::info("OpenXR OSX: Session created with Vulkan binding");
+        spdlog::info("OXRSys: Session created with Vulkan binding");
         return XR_SUCCESS;
     }
 #endif
@@ -867,11 +867,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
         gGraphicsApi = GraphicsApi::Metal;
         gSession = std::make_unique<Session>(inst, gMetalDevice);
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
-        spdlog::info("OpenXR OSX: Session created with Metal binding");
+        spdlog::info("OXRSys: Session created with Metal binding");
         return XR_SUCCESS;
     }
 
-    spdlog::error("OpenXR OSX: No supported graphics binding provided");
+    spdlog::error("OXRSys: No supported graphics binding provided");
     return XR_ERROR_GRAPHICS_DEVICE_INVALID;
 }
 
@@ -1723,11 +1723,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSuggestInteractionProfileBindings(
         binding.bindingPathString = pathStr;
         binding.componentPath = ComponentFromBindingPath(pathStr);
         bindings.push_back(std::move(binding));
-        spdlog::debug("OpenXR OSX: Binding {} -> {}", actionHandle, pathStr);
+        spdlog::debug("OXRSys: Binding {} -> {}", actionHandle, pathStr);
     }
 
     gSuggestedBindings[static_cast<uint64_t>(profilePath)] = std::move(bindings);
-    spdlog::info("OpenXR OSX: Stored {} bindings for profile {}",
+    spdlog::info("OXRSys: Stored {} bindings for profile {}",
                   suggestedBindings->countSuggestedBindings,
                   profilePathString);
     return XR_SUCCESS;
@@ -1766,7 +1766,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrAttachSessionActionSets(
     }
     gActionSetsAttached = true;
 
-    spdlog::info("OpenXR OSX: Attached {} action sets", attachInfo->countActionSets);
+    spdlog::info("OXRSys: Attached {} action sets", attachInfo->countActionSets);
     return XR_SUCCESS;
 }
 
@@ -2809,7 +2809,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateHandTrackerEXT(
     *handTracker = reinterpret_cast<XrHandTrackerEXT>(ht->GetHandle());
     gHandTrackers.push_back(std::move(ht));
 
-    spdlog::info("OpenXR OSX: Created hand tracker for {}",
+    spdlog::info("OXRSys: Created hand tracker for {}",
                   createInfo->hand == XR_HAND_LEFT_EXT ? "left" : "right");
     return XR_SUCCESS;
 }
@@ -3118,7 +3118,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsDeviceKHR(
         {
             // No app proc addr available — try to get one from the VkInstance's dispatch table
             // The first pointer in a VkInstance is the loader dispatch table
-            spdlog::error("OpenXR OSX: No Vulkan dispatch available for physical device enumeration");
+            spdlog::error("OXRSys: No Vulkan dispatch available for physical device enumeration");
             return XR_ERROR_RUNTIME_FAILURE;
         }
         gVulkanDispatch.LoadInstanceFunctions(vkInstance);
@@ -3126,7 +3126,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsDeviceKHR(
 
     if (!gVulkanDispatch.enumeratePhysicalDevices)
     {
-        spdlog::error("OpenXR OSX: Failed to resolve vkEnumeratePhysicalDevices");
+        spdlog::error("OXRSys: Failed to resolve vkEnumeratePhysicalDevices");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
@@ -3134,7 +3134,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsDeviceKHR(
     gVulkanDispatch.enumeratePhysicalDevices(vkInstance, &deviceCount, nullptr);
     if (deviceCount == 0)
     {
-        spdlog::error("OpenXR OSX: No Vulkan physical devices found");
+        spdlog::error("OXRSys: No Vulkan physical devices found");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
@@ -3146,7 +3146,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsDeviceKHR(
     {
         VkPhysicalDeviceProperties props;
         gVulkanDispatch.getPhysicalDeviceProperties(*vkPhysicalDevice, &props);
-        spdlog::info("OpenXR OSX: Selected Vulkan device: {}", props.deviceName);
+        spdlog::info("OXRSys: Selected Vulkan device: {}", props.deviceName);
     }
     return XR_SUCCESS;
 }
@@ -3179,7 +3179,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsRequirementsKHR(
     graphicsRequirements->minApiVersionSupported = XR_MAKE_VERSION(1, 0, 0);
     graphicsRequirements->maxApiVersionSupported = XR_MAKE_VERSION(1, 3, 0);
 
-    spdlog::info("OpenXR OSX: Vulkan graphics requirements provided");
+    spdlog::info("OXRSys: Vulkan graphics requirements provided");
     return XR_SUCCESS;
 }
 
@@ -3213,7 +3213,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanInstanceKHR(
 
     if (!gVulkanDispatch.createInstance)
     {
-        spdlog::error("OpenXR OSX: Failed to resolve vkCreateInstance from app");
+        spdlog::error("OXRSys: Failed to resolve vkCreateInstance from app");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
@@ -3265,14 +3265,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanInstanceKHR(
                                                     vulkanInstance);
     if (*vulkanResult != VK_SUCCESS)
     {
-        spdlog::error("OpenXR OSX: vkCreateInstance failed with {}", static_cast<int>(*vulkanResult));
+        spdlog::error("OXRSys: vkCreateInstance failed with {}", static_cast<int>(*vulkanResult));
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
     // Load instance-level functions through the app's dispatch
     gVulkanDispatch.LoadInstanceFunctions(*vulkanInstance);
 
-    spdlog::info("OpenXR OSX: Created Vulkan instance on behalf of app");
+    spdlog::info("OXRSys: Created Vulkan instance on behalf of app");
     return XR_SUCCESS;
 }
 
@@ -3341,7 +3341,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
 
     if (!gVulkanDispatch.createDevice)
     {
-        spdlog::error("OpenXR OSX: vkCreateDevice not resolved");
+        spdlog::error("OXRSys: vkCreateDevice not resolved");
         return XR_ERROR_RUNTIME_FAILURE;
     }
     *vulkanResult = gVulkanDispatch.createDevice(createInfo->vulkanPhysicalDevice,
@@ -3350,11 +3350,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
                                                    vulkanDevice);
     if (*vulkanResult != VK_SUCCESS)
     {
-        spdlog::error("OpenXR OSX: vkCreateDevice failed with {}", static_cast<int>(*vulkanResult));
+        spdlog::error("OXRSys: vkCreateDevice failed with {}", static_cast<int>(*vulkanResult));
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
-    spdlog::info("OpenXR OSX: Created Vulkan device on behalf of app");
+    spdlog::info("OXRSys: Created Vulkan device on behalf of app");
     return XR_SUCCESS;
 }
 
@@ -3404,7 +3404,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 
     if (!gMetalDevice)
     {
-        spdlog::error("OpenXR OSX: Failed to create Metal device");
+        spdlog::error("OXRSys: Failed to create Metal device");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 
@@ -3412,7 +3412,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
     graphicsRequirements->metalDevice = gMetalDevice;
     inst->MarkMetalGraphicsRequirementsQueried();
 
-    spdlog::info("OpenXR OSX: Metal graphics requirements provided");
+    spdlog::info("OXRSys: Metal graphics requirements provided");
     return XR_SUCCESS;
 }
 
@@ -3570,7 +3570,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     DISPATCH(xrGetVulkanGraphicsRequirements2KHR, OxrGetVulkanGraphicsRequirements2KHR)
 #endif
 
-    spdlog::warn("OpenXR OSX: Unsupported function requested: {}", name);
+    spdlog::warn("OXRSys: Unsupported function requested: {}", name);
     return XR_ERROR_FUNCTION_UNSUPPORTED;
 }
 
@@ -3612,7 +3612,7 @@ extern "C"
         runtimeRequest->runtimeApiVersion = XR_CURRENT_API_VERSION;
         runtimeRequest->getInstanceProcAddr = OxrGetInstanceProcAddr;
 
-        spdlog::info("OpenXR OSX: Runtime negotiation successful");
+        spdlog::info("OXRSys: Runtime negotiation successful");
         return XR_SUCCESS;
     }
 }

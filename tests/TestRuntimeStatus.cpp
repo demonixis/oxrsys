@@ -75,7 +75,7 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     RuntimeStatus::SetStreamingStats(stats);
 
     const auto statusPath =
-        home / "Library/Application Support/OpenXR-OSX/runtime_status.json";
+        home / "Library/Application Support/OXRSys/runtime_status.json";
     const std::string streamingStatus = ReadFile(statusPath);
 
     CHECK(Contains(streamingStatus, "\"state\": \"streaming\""));

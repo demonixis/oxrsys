@@ -67,16 +67,16 @@ void Config::DetectDylibDir()
     const char* home = getenv("HOME");
     if (home != nullptr && home[0] != '\0')
     {
-        appSupportDir = std::string(home) + "/Library/Application Support/OpenXR-OSX";
+        appSupportDir = std::string(home) + "/Library/Application Support/OXRSys";
     }
     else
     {
         appSupportDir = dylibDir;
     }
 
-    configFilePath = appSupportDir + "/openxr_osx.toml";
-    logFilePath = appSupportDir + "/openxr_osx.log";
-    questLogFilePath = appSupportDir + "/openxr_osx_quest.log";
+    configFilePath = appSupportDir + "/oxrsys-runtime.toml";
+    logFilePath = appSupportDir + "/oxrsys-runtime.log";
+    questLogFilePath = appSupportDir + "/oxrsys-headset.log";
     runtimeStatusPath = appSupportDir + "/runtime_status.json";
 }
 
@@ -207,8 +207,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
 
 bool Config::ResolveConfigFilePath(std::string& resolvedPath, bool& fileExists) const
 {
-    const std::string preferredConfigPath = appSupportDir + "/openxr_osx.toml";
-    const std::string legacyConfigPath = dylibDir + "/openxr_osx.toml";
+    const std::string preferredConfigPath = appSupportDir + "/oxrsys-runtime.toml";
+    const std::string legacyConfigPath = dylibDir + "/oxrsys-runtime.toml";
     if (std::filesystem::exists(preferredConfigPath))
     {
         resolvedPath = preferredConfigPath;
@@ -292,7 +292,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OpenXR OSX: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} res_scale={:.2f} keyframe={}s preset={} transport={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} res_scale={:.2f} keyframe={}s preset={} transport={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
@@ -352,7 +352,7 @@ void Config::SetupLogging()
         catch (const spdlog::spdlog_ex& ex)
         {
             // Can't log yet, just skip file logging
-            fprintf(stderr, "OpenXR OSX: Failed to create log file %s: %s\n",
+            fprintf(stderr, "OXRSys: Failed to create log file %s: %s\n",
                     logFilePath.c_str(), ex.what());
         }
     }
@@ -364,7 +364,7 @@ void Config::SetupLogging()
     spdlog::set_default_logger(logger);
     spdlog::flush_every(std::chrono::seconds(1));
 
-    spdlog::info("OpenXR OSX Runtime starting (config from {})", configFilePath);
+    spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
     spdlog::info("  bitrate={}Mbps fov={}° res_scale={:.2f} keyframe={}s preset={} transport={}",
@@ -385,9 +385,9 @@ void Config::StartLogcatCapture()
     system("adb logcat -c 2>/dev/null");
 
     std::string cmd = "adb logcat -s "
-                      "'OpenXR-OSX-Client:*' "
-                      "'OpenXR-OSX-Network:*' "
-                      "'OpenXR-OSX-Decoder:*' "
+                      "'OXRSys-Android:*' "
+                      "'OXRSys-Network:*' "
+                      "'OXRSys-Decoder:*' "
                       "2>/dev/null";
 
     logcatProcess_ = popen(cmd.c_str(), "r");

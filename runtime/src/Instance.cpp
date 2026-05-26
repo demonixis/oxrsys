@@ -11,14 +11,14 @@ Instance::Instance(XrVersion apiVersion, const std::vector<std::string>& enabled
 {
     Runtime::Get().RegisterHandle(handle_, this);
     Runtime::Get().SetInstance(this);
-    spdlog::info("OpenXR OSX: Instance created");
+    spdlog::info("OXRSys: Instance created");
 }
 
 Instance::~Instance()
 {
     Runtime::Get().SetInstance(nullptr);
     Runtime::Get().RemoveHandle(handle_);
-    spdlog::info("OpenXR OSX: Instance destroyed");
+    spdlog::info("OXRSys: Instance destroyed");
 }
 
 XrResult Instance::GetSystem(const XrSystemGetInfo* getInfo, XrSystemId* systemId)
@@ -52,7 +52,7 @@ XrResult Instance::GetSystemProperties(XrSystemId systemId, XrSystemProperties* 
     properties->type = XR_TYPE_SYSTEM_PROPERTIES;
     properties->systemId = 1;
     properties->vendorId = 0;
-    std::strncpy(properties->systemName, "OpenXR OSX Runtime", XR_MAX_SYSTEM_NAME_SIZE);
+    std::strncpy(properties->systemName, "OXRSys Runtime", XR_MAX_SYSTEM_NAME_SIZE);
     properties->graphicsProperties.maxSwapchainImageWidth = 4096;
     properties->graphicsProperties.maxSwapchainImageHeight = 4096;
     properties->graphicsProperties.maxLayerCount = 16;
@@ -84,7 +84,7 @@ XrResult Instance::GetInstanceProperties(XrInstanceProperties* properties)
 
     properties->type = XR_TYPE_INSTANCE_PROPERTIES;
     properties->runtimeVersion = XR_MAKE_VERSION(0, 1, 0);
-    std::strncpy(properties->runtimeName, "OpenXR OSX Runtime", XR_MAX_RUNTIME_NAME_SIZE);
+    std::strncpy(properties->runtimeName, "OXRSys Runtime", XR_MAX_RUNTIME_NAME_SIZE);
 
     return XR_SUCCESS;
 }

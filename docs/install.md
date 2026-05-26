@@ -48,7 +48,7 @@ sdkmanager --install \
   "cmake;3.22.1"
 ```
 
-Then set `clients/android-openxr/local.properties`:
+Then set `clients/oxrsys-android/local.properties`:
 
 ```text
 sdk.dir=/Users/<you>/Library/Android/sdk
@@ -62,7 +62,7 @@ The current Gradle configuration in the repository uses `compileSdk = 35`, `targ
 sdkmanager --install "platforms;android-35"
 ```
 
-Keep this document aligned with `clients/android-openxr/app/build.gradle.kts`.
+Keep this document aligned with `clients/oxrsys-android/app/build.gradle.kts`.
 
 ## Vulkan SDK And MoltenVK
 

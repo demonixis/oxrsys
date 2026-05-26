@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 cmake_minimum_required(VERSION 3.24)
-project(OpenXROSX LANGUAGES C CXX OBJCXX)
+project(OXRSys LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -14,10 +14,10 @@ execute_process(
     COMMAND ${CMAKE_COMMAND} -E create_symlink
         ${CMAKE_BINARY_DIR}/compile_commands.json
         ${CMAKE_SOURCE_DIR}/compile_commands.json
-    RESULT_VARIABLE openxr_osx_compile_commands_symlink_result
+    RESULT_VARIABLE oxrsys_runtime_compile_commands_symlink_result
 )
 
-if(NOT openxr_osx_compile_commands_symlink_result EQUAL 0)
+if(NOT oxrsys_runtime_compile_commands_symlink_result EQUAL 0)
     message(STATUS "Failed to create compile_commands.json symlink during configure. The build sync step will retry.")
 endif()
 
@@ -66,7 +66,7 @@ FetchContent_MakeAvailable(OpenXR)
 # --- Our runtime ---
 add_subdirectory(runtime)
 
-add_custom_target(openxr_osx_sync_compile_commands ALL
+add_custom_target(oxrsys_runtime_sync_compile_commands ALL
     COMMAND ${CMAKE_COMMAND}
         -DINPUT_FILE=${CMAKE_BINARY_DIR}/compile_commands.json
         -DOUTPUT_FILE=${CMAKE_SOURCE_DIR}/compile_commands.json
@@ -75,7 +75,7 @@ add_custom_target(openxr_osx_sync_compile_commands ALL
 )
 
 # --- Tests ---
-add_executable(openxr_osx_tests
+add_executable(oxrsys_runtime_tests
     tests/TestConfig.cpp
     tests/TestInputManager.cpp
     tests/TestProtocolLayout.cpp
@@ -83,89 +83,89 @@ add_executable(openxr_osx_tests
     runtime/src/TrackingReceiver.cpp
     runtime/src/Config.cpp
 )
-target_include_directories(openxr_osx_tests PRIVATE
+target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
     clients/common/src
     ${openxr_SOURCE_DIR}/include
 )
-target_link_libraries(openxr_osx_tests PRIVATE
+target_link_libraries(oxrsys_runtime_tests PRIVATE
     Catch2::Catch2WithMain
     glm::glm
     spdlog::spdlog
 )
-target_compile_definitions(openxr_osx_tests PRIVATE
+target_compile_definitions(oxrsys_runtime_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
 )
-add_test(NAME openxr_osx_tests COMMAND openxr_osx_tests)
+add_test(NAME oxrsys_runtime_tests COMMAND oxrsys_runtime_tests)
 
-add_executable(openxr_osx_status_tests
+add_executable(oxrsys_runtime_status_tests
     tests/TestRuntimeStatus.cpp
     runtime/src/RuntimeStatus.cpp
     runtime/src/Config.cpp
 )
-target_include_directories(openxr_osx_status_tests PRIVATE
+target_include_directories(oxrsys_runtime_status_tests PRIVATE
     runtime/src
 )
-target_link_libraries(openxr_osx_status_tests PRIVATE
+target_link_libraries(oxrsys_runtime_status_tests PRIVATE
     Catch2::Catch2WithMain
     spdlog::spdlog
 )
-add_test(NAME openxr_osx_status_tests COMMAND openxr_osx_status_tests)
+add_test(NAME oxrsys_runtime_status_tests COMMAND oxrsys_runtime_status_tests)
 
-add_executable(openxr_osx_runtime_tests
+add_executable(oxrsys_runtime_api_tests
     tests/TestRuntimeApi.cpp
 )
-target_include_directories(openxr_osx_runtime_tests PRIVATE
+target_include_directories(oxrsys_runtime_api_tests PRIVATE
     runtime/src
     ${openxr_SOURCE_DIR}/include
 )
-target_link_libraries(openxr_osx_runtime_tests PRIVATE
+target_link_libraries(oxrsys_runtime_api_tests PRIVATE
     Catch2::Catch2WithMain
     OpenXR::openxr_loader
 )
-target_compile_definitions(openxr_osx_runtime_tests PRIVATE
+target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
 )
-add_dependencies(openxr_osx_runtime_tests openxr_osx)
-add_test(NAME openxr_osx_runtime_tests COMMAND openxr_osx_runtime_tests)
-set_tests_properties(openxr_osx_runtime_tests PROPERTIES
-    ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:openxr_osx>/openxr_osx.json"
+add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
+add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)
+set_tests_properties(oxrsys_runtime_api_tests PROPERTIES
+    ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
 )
 
-add_dependencies(openxr_osx_sync_compile_commands
-    openxr_osx
-    openxr_osx_tests
-    openxr_osx_status_tests
-    openxr_osx_runtime_tests
+add_dependencies(oxrsys_runtime_sync_compile_commands
+    oxrsys_runtime
+    oxrsys_runtime_tests
+    oxrsys_runtime_status_tests
+    oxrsys_runtime_api_tests
 )
 
-option(OPENXR_OSX_ENABLE_CTS "Fetch and wire an opt-in OpenXR CTS lane" OFF)
+option(OXRSYS_ENABLE_CTS "Fetch and wire an opt-in OpenXR CTS lane" OFF)
 
-add_custom_target(openxr_osx_set_default_runtime
-    COMMAND /bin/zsh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/openxr_runtime_default.sh set $<TARGET_FILE_DIR:openxr_osx>/openxr_osx.json
-    DEPENDS openxr_osx
+add_custom_target(oxrsys_runtime_set_default_runtime
+    COMMAND /bin/zsh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/oxrsys_runtime_default.sh set $<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json
+    DEPENDS oxrsys_runtime
     USES_TERMINAL
     COMMENT "Registering the generated OpenXR manifest as the default runtime for this user"
 )
 
-if(OPENXR_OSX_ENABLE_CTS)
+if(OXRSYS_ENABLE_CTS)
     include(ExternalProject)
 
-    set(OPENXR_OSX_CTS_TAG "openxr-cts-1.1.57.0" CACHE STRING "Pinned OpenXR CTS tag")
-    set(OPENXR_OSX_CTS_GRAPHICS_PLUGIN "metal" CACHE STRING "Graphics plugin to use for the CTS baseline")
-    set(OPENXR_OSX_CTS_FILTER "exclude:[interactive]" CACHE STRING "Catch2 filter used for the CTS baseline")
-    set(OPENXR_OSX_CTS_PREFIX_DIR "${CMAKE_BINARY_DIR}/thirdparty/OpenXR-CTS")
-    set(OPENXR_OSX_CTS_SOURCE_DIR "${OPENXR_OSX_CTS_PREFIX_DIR}/source")
-    set(OPENXR_OSX_CTS_BINARY_DIR "${OPENXR_OSX_CTS_PREFIX_DIR}/build")
-    set(OPENXR_OSX_CTS_REPORT_DIR "${CMAKE_BINARY_DIR}/reports/openxr-cts")
+    set(OXRSYS_CTS_TAG "openxr-cts-1.1.57.0" CACHE STRING "Pinned OpenXR CTS tag")
+    set(OXRSYS_CTS_GRAPHICS_PLUGIN "metal" CACHE STRING "Graphics plugin to use for the CTS baseline")
+    set(OXRSYS_CTS_FILTER "exclude:[interactive]" CACHE STRING "Catch2 filter used for the CTS baseline")
+    set(OXRSYS_CTS_PREFIX_DIR "${CMAKE_BINARY_DIR}/thirdparty/OpenXR-CTS")
+    set(OXRSYS_CTS_SOURCE_DIR "${OXRSYS_CTS_PREFIX_DIR}/source")
+    set(OXRSYS_CTS_BINARY_DIR "${OXRSYS_CTS_PREFIX_DIR}/build")
+    set(OXRSYS_CTS_REPORT_DIR "${CMAKE_BINARY_DIR}/reports/openxr-cts")
 
     ExternalProject_Add(openxr_cts
         GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-CTS.git
-        GIT_TAG ${OPENXR_OSX_CTS_TAG}
+        GIT_TAG ${OXRSYS_CTS_TAG}
         GIT_SHALLOW ON
-        PREFIX "${OPENXR_OSX_CTS_PREFIX_DIR}"
-        SOURCE_DIR "${OPENXR_OSX_CTS_SOURCE_DIR}"
-        BINARY_DIR "${OPENXR_OSX_CTS_BINARY_DIR}"
+        PREFIX "${OXRSYS_CTS_PREFIX_DIR}"
+        SOURCE_DIR "${OXRSYS_CTS_SOURCE_DIR}"
+        BINARY_DIR "${OXRSYS_CTS_BINARY_DIR}"
         CMAKE_ARGS
             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
         UPDATE_DISCONNECTED ON
@@ -174,16 +174,16 @@ if(OPENXR_OSX_ENABLE_CTS)
     )
 
     add_custom_target(openxr_cts_run
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${OPENXR_OSX_CTS_REPORT_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${OXRSYS_CTS_REPORT_DIR}"
         COMMAND ${CMAKE_COMMAND}
-            -DCTS_BINARY_DIR=${OPENXR_OSX_CTS_BINARY_DIR}
-            -DREPORT_DIR=${OPENXR_OSX_CTS_REPORT_DIR}
-            -DRUNTIME_JSON=$<TARGET_FILE_DIR:openxr_osx>/openxr_osx.json
-            -DCTS_GRAPHICS_PLUGIN=${OPENXR_OSX_CTS_GRAPHICS_PLUGIN}
-            -DCTS_FILTER=${OPENXR_OSX_CTS_FILTER}
+            -DCTS_BINARY_DIR=${OXRSYS_CTS_BINARY_DIR}
+            -DREPORT_DIR=${OXRSYS_CTS_REPORT_DIR}
+            -DRUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json
+            -DCTS_GRAPHICS_PLUGIN=${OXRSYS_CTS_GRAPHICS_PLUGIN}
+            -DCTS_FILTER=${OXRSYS_CTS_FILTER}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunOpenXRCTS.cmake
-        DEPENDS openxr_cts openxr_osx
+        DEPENDS openxr_cts oxrsys_runtime
         USES_TERMINAL
-        COMMENT "Running the pinned OpenXR CTS baseline against the OpenXR OSX runtime"
+        COMMENT "Running the pinned OpenXR CTS baseline against the OXRSys runtime"
     )
 endif()

@@ -2,15 +2,15 @@
 
 ## Overview
 
-OpenXR OSX Runtime is a macOS OpenXR runtime backed by Metal, with a simulator/debug path and a streaming path for external headsets. The runtime is exposed through `libopenxr_osx.dylib`, discovered by the OpenXR loader through the generated `openxr_osx.json` manifest.
+OXRSys Runtime is a macOS OpenXR runtime backed by Metal, with a simulator/debug path and a streaming path for external headsets. The runtime is exposed through `liboxrsys-runtime.dylib`, discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
 
 ## Repository Layout
 
 - `runtime/`: runtime library, graphics integration, input, configuration, streaming server, tracking receiver, and video encoder.
 - `clients/common/`: shared protocol definitions used by the runtime and headset clients.
-- `clients/android-openxr/`: Quest-oriented Android client for decode, display, and tracking return.
-- `clients/companion/`: native SwiftUI macOS companion app for config and runtime registration.
-- `clients/visionos/`: native visionOS viewer that reuses the shared Swift streaming package.
+- `clients/oxrsys-android/`: Quest-oriented Android client for decode, display, and tracking return.
+- `clients/oxrsys-home/`: native SwiftUI macOS Home app for config and runtime registration.
+- `clients/oxrsys-visionos/`: native visionOS viewer that reuses the shared Swift streaming package.
 - `tests/`: unit-style and loader-backed runtime tests.
 - `cmake/`: CMake helpers, including the OpenXR-CTS lane.
 - `docs/`: focused project documentation.
@@ -69,11 +69,11 @@ Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`
 
 Runtime configuration is loaded from:
 
-- `~/Library/Application Support/OpenXR-OSX/openxr_osx.toml`
-- fallback: `build/runtime/openxr_osx.toml`
+- `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`
+- fallback: `build/runtime/oxrsys-runtime.toml`
 
-For terminal-launched applications, use `XR_RUNTIME_JSON`. For GUI applications, `scripts/openxr_runtime_default.sh` can register `build/runtime/openxr_osx.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
+For terminal-launched applications, use `XR_RUNTIME_JSON`. For GUI applications, `scripts/oxrsys_runtime_default.sh` can register `build/runtime/oxrsys-runtime.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
 
-The native companion app in `clients/companion/` manages the same files directly, controls whether the runtime is enabled, and can register or unregister the runtime JSON through the user OpenXR config path.
+The native Home app in `clients/oxrsys-home/` manages the same files directly, controls whether the runtime is enabled, and can register or unregister the runtime JSON through the user OpenXR config path.
 
 The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as FOV and keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart.

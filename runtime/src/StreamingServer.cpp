@@ -509,7 +509,7 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce() const
     announce.refreshRateHz = refreshRateHz_;
     announce.encodedWidth = scaledWidth_ * 2;
     announce.encodedHeight = scaledHeight_;
-    strncpy(announce.serverName, "OpenXR OSX Runtime", sizeof(announce.serverName) - 1);
+    strncpy(announce.serverName, "OXRSys Runtime", sizeof(announce.serverName) - 1);
     return announce;
 }
 

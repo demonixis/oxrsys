@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document covers the runtime test suite, companion support tests, and the optional OpenXR-CTS lane.
+This document covers the runtime test suite, Home support tests, and the optional OpenXR-CTS lane.
 
 ## Runtime Tests
 
@@ -16,23 +16,23 @@ ctest --test-dir build --output-on-failure
 
 The default test layers are:
 
-- `openxr_osx_tests`
-- `openxr_osx_runtime_tests`
+- `oxrsys_runtime_tests`
+- `oxrsys_runtime_api_tests`
 
-## Companion Tests
+## Home Tests
 
-The macOS companion has a small Swift test runner for bundle inspection, launcher persistence
+The macOS Home has a small Swift test runner for bundle inspection, launcher persistence
 merging, installed runtime manifest generation, preference persistence, and Terminal command
 quoting:
 
 ```bash
 swiftc -parse-as-library \
-  "clients/companion/OpenXR OSX Companion/CompanionSupport.swift" \
-  "clients/companion/OpenXR OSX Companion/OpenXRServerConfig.swift" \
-  "clients/companion/OpenXR OSX Companion/CompanionLauncher.swift" \
-  "clients/companion/OpenXR OSX Companion/CompanionPreferences.swift" \
-  tests/CompanionLauncherTests.swift \
-  -o /tmp/openxr_companion_launcher_tests && /tmp/openxr_companion_launcher_tests
+  "clients/oxrsys-home/OXRSys Home/HomeSupport.swift" \
+  "clients/oxrsys-home/OXRSys Home/OXRSysServerConfig.swift" \
+  "clients/oxrsys-home/OXRSys Home/HomeLauncher.swift" \
+  "clients/oxrsys-home/OXRSys Home/HomePreferences.swift" \
+  tests/HomeLauncherTests.swift \
+  -o /tmp/oxrsys_home_launcher_tests && /tmp/oxrsys_home_launcher_tests
 ```
 
 ## CTS Lane
@@ -40,7 +40,7 @@ swiftc -parse-as-library \
 Enable and run the optional OpenXR-CTS lane with:
 
 ```bash
-cmake -B build_cts -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOPENXR_OSX_ENABLE_CTS=ON
+cmake -B build_cts -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_ENABLE_CTS=ON
 cmake --build build_cts --target openxr_cts_run
 ```
 
@@ -62,7 +62,7 @@ As of March 17, 2026, the pinned non-interactive baseline is:
 Before considering a change ready:
 
 - run the macOS build and tests
-- run the companion Swift test runner when changing the companion launcher, preferences, or runtime installer
+- run the Home Swift test runner when changing the Home launcher, preferences, or runtime installer
 - run the Android build if Android code changed
 - run the CTS lane when runtime API, extension behavior, swapchain handling, action handling, or conformance-sensitive behavior changed
 

@@ -104,7 +104,7 @@ Session::Session(Instance* instance, void* metalDevice)
     TransitionState(XR_SESSION_STATE_IDLE);
     TransitionState(XR_SESSION_STATE_READY);
 
-    spdlog::info("OpenXR OSX: Metal session created");
+    spdlog::info("OXRSys: Metal session created");
 }
 
 Session::Session(Instance* instance, void* metalDevice,
@@ -124,7 +124,7 @@ Session::Session(Instance* instance, void* metalDevice,
     TransitionState(XR_SESSION_STATE_IDLE);
     TransitionState(XR_SESSION_STATE_READY);
 
-    spdlog::info("OpenXR OSX: Vulkan session created");
+    spdlog::info("OXRSys: Vulkan session created");
 }
 
 Session::~Session()
@@ -133,7 +133,7 @@ Session::~Session()
     instance_->RemoveEventsForSession(reinterpret_cast<XrSession>(handle_));
     instance_->SetSession(nullptr);
     Runtime::Get().RemoveHandle(handle_);
-    spdlog::info("OpenXR OSX: Session destroyed");
+    spdlog::info("OXRSys: Session destroyed");
 }
 
 XrTime Session::GetCurrentTime() const
@@ -160,7 +160,7 @@ void Session::TransitionState(XrSessionState newState)
             .count());
 
     instance_->PushEvent(event);
-    spdlog::info("OpenXR OSX: Session state -> {}", static_cast<int>(newState));
+    spdlog::info("OXRSys: Session state -> {}", static_cast<int>(newState));
 }
 
 XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
@@ -194,7 +194,7 @@ XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
     // Start streaming server (broadcasts on LAN, waits for headset connection)
     StartStreamingIfNeeded();
 
-    spdlog::info("OpenXR OSX: Session begun");
+    spdlog::info("OXRSys: Session begun");
     return XR_SUCCESS;
 }
 
@@ -214,7 +214,7 @@ XrResult Session::EndSession()
         streamingServer_.reset();
         streamingStarted_ = false;
         inputManager_->SetTrackingReceiver(nullptr);
-        spdlog::info("OpenXR OSX: Streaming server stopped for session end");
+        spdlog::info("OXRSys: Streaming server stopped for session end");
     }
 
     {
@@ -227,7 +227,7 @@ XrResult Session::EndSession()
     TransitionState(XR_SESSION_STATE_EXITING);
     exitRequested_ = false;
 
-    spdlog::info("OpenXR OSX: Session ended");
+    spdlog::info("OXRSys: Session ended");
     return XR_SUCCESS;
 }
 
@@ -521,7 +521,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         if (Clock::now() - lastLogTime >= std::chrono::seconds(1))
         {
             SessionMetricSummary summary = SummarizeSessionSamples(enqueueSamples);
-            spdlog::info("OpenXR OSX: Session::EndFrame streaming enqueue avg/p95 = {:.3f}/{:.3f}ms (n={})",
+            spdlog::info("OXRSys: Session::EndFrame streaming enqueue avg/p95 = {:.3f}/{:.3f}ms (n={})",
                           summary.average, summary.p95, summary.count);
             enqueueSamples.clear();
             lastLogTime = Clock::now();
@@ -878,11 +878,11 @@ void Session::StartStreamingIfNeeded()
     if (streamingServer_->Start(width, height, refreshHz))
     {
         streamingStarted_ = true;
-        spdlog::info("OpenXR OSX: Streaming server started, waiting for headset connection...");
+        spdlog::info("OXRSys: Streaming server started, waiting for headset connection...");
     }
     else
     {
-        spdlog::warn("OpenXR OSX: Failed to start streaming server (non-fatal, simulator mode only)");
+        spdlog::warn("OXRSys: Failed to start streaming server (non-fatal, simulator mode only)");
         streamingServer_.reset();
     }
 }
@@ -898,7 +898,7 @@ void Session::CheckStreamingConnection()
     if (streamingServer_->IsClientConnected() && !inputManager_->IsStreaming())
     {
         inputManager_->SetTrackingReceiver(streamingServer_->GetTrackingReceiver());
-        spdlog::info("OpenXR OSX: Client connected ({}), receiving tracking",
+        spdlog::info("OXRSys: Client connected ({}), receiving tracking",
                       streamingServer_->GetClientName());
     }
 
@@ -906,6 +906,6 @@ void Session::CheckStreamingConnection()
     if (!streamingServer_->IsClientConnected() && inputManager_->IsStreaming())
     {
         inputManager_->SetTrackingReceiver(nullptr);
-        spdlog::info("OpenXR OSX: Client disconnected");
+        spdlog::info("OXRSys: Client disconnected");
     }
 }

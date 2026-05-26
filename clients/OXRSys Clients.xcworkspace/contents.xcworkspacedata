@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "group:oxrsys-home/OXRSys Home.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:oxrsys-simulator/OXRSys Simulator.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:oxrsys-visionos/OXRSys visionOS.xcodeproj">
+   </FileRef>
+</Workspace>

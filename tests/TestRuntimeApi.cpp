@@ -139,7 +139,7 @@ struct RuntimeSessionContext
         : enabledExtensions(extensions)
     {
         XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-        std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_runtime_tests",
+        std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_tests",
                      XR_MAX_APPLICATION_NAME_SIZE);
         createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
@@ -509,7 +509,7 @@ TEST_CASE("Runtime gates xrLocateSpaces behind OpenXR 1.1", "[runtime][loader]")
     const char* enabledExtensions[] = {XR_KHR_METAL_ENABLE_EXTENSION_NAME};
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_api_version_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_version_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 57);
     createInfo.enabledExtensionCount = 1;
@@ -624,7 +624,7 @@ TEST_CASE("Runtime hides LOCAL_FLOOR for OpenXR 1.0 instances", "[runtime][space
     const char* enabledExtensions[] = {XR_KHR_METAL_ENABLE_EXTENSION_NAME};
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_local_floor_1_0_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_local_floor_1_0_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 57);
     createInfo.enabledExtensionCount = 1;
@@ -760,7 +760,7 @@ TEST_CASE("Debug utils messenger callbacks work from instance create and explici
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
     createInfo.next = &chainedCreateInfo;
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_debug_utils_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_debug_utils_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
@@ -906,7 +906,7 @@ TEST_CASE("BeginSession rejects unsupported view configuration types", "[runtime
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_destroy_session_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_destroy_session_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 
@@ -963,7 +963,7 @@ TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loa
 TEST_CASE("DestroyInstance tolerates active session resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
-    std::strncpy(createInfo.applicationInfo.applicationName, "openxr_osx_destroy_instance_test",
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_destroy_instance_test",
                  XR_MAX_APPLICATION_NAME_SIZE);
     createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
 

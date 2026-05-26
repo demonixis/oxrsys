@@ -1,7 +1,0 @@
-{
-    "file_format_version": "1.0.0",
-    "runtime": {
-        "name": "OpenXR OSX Runtime",
-        "library_path": "@CMAKE_CURRENT_BINARY_DIR@/libopenxr_osx.dylib"
-    }
-}

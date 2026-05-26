@@ -16,12 +16,12 @@ See [install.md](../install.md) for the recommended package list and `sdkmanager
 ## Build And Install
 
 ```bash
-cd clients/android-openxr
+cd clients/oxrsys-android
 ./gradlew assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`clients/android-openxr/local.properties` must point to the local Android SDK.
+`clients/oxrsys-android/local.properties` must point to the local Android SDK.
 
 ## Permissions And Features
 
@@ -40,11 +40,11 @@ The Quest client's preferred display refresh request is build-configured. The de
 is `72`, and you can override it per build with a Gradle property:
 
 ```bash
-./gradlew assembleDebug -PopenxrClientDisplayRefreshRateHz=72
+./gradlew assembleDebug -PoxrsysAndroidDisplayRefreshRateHz=72
 ```
 
 The property is passed through Gradle into CMake as
-`OPENXR_OSX_PREFERRED_DISPLAY_REFRESH_RATE_HZ`. Set it to a headset-supported rate such as `72`,
+`OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ`. Set it to a headset-supported rate such as `72`,
 `80`, `90`, or `120`. If the runtime does not advertise the requested rate, the client logs the
 mismatch and keeps the current headset refresh.
 
@@ -65,7 +65,7 @@ When supported by the headset, the client also enables a first-pass `XR_FB_fovea
 
 ## USB ADB Transport
 
-The USB path is optimized for sideloaded Quest development. The macOS Companion can detect an authorized Quest through `adb devices -l`, clear stale reverse mappings, and apply:
+The USB path is optimized for sideloaded Quest development. The macOS Home can detect an authorized Quest through `adb devices -l`, clear stale reverse mappings, and apply:
 
 ```bash
 adb -s <serial> reverse tcp:9944 tcp:9944
