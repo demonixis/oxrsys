@@ -56,23 +56,6 @@ If you want to build the visionOS client locally and the platform is not already
 xcodebuild -downloadPlatform visionOS
 ```
 
-## Vulkan Loader And Headers
-
-The macOS runtime CMake project uses `find_package(Vulkan REQUIRED)`, so Vulkan headers are an explicit host prerequisite even when your day-to-day work is Metal-first.
-
-Choose one of these setups:
-
-- install the full LunarG macOS Vulkan SDK if you need MoltenVK, Vulkan tools, or to run Vulkan applications through the runtime
-- install a lighter header-only path only if it still satisfies your local `find_package(Vulkan)` configuration
-
-Header-only example:
-
-```bash
-brew install vulkan-headers
-```
-
-For Vulkan interop work or Vulkan application testing, prefer the full LunarG SDK because it provides the loader, MoltenVK, and the surrounding tools in one consistent macOS install.
-
 ## Android SDK And NDK
 
 With the repository `mise.toml`, install Android packages into the pinned SDK with `sdkmanager`.
