@@ -67,6 +67,8 @@ public:
     bool SupportsLocalFloor() const;
     void MarkMetalGraphicsRequirementsQueried();
     bool HasQueriedMetalGraphicsRequirements() const;
+    void MarkVulkanGraphicsRequirementsQueried();
+    bool HasQueriedVulkanGraphicsRequirements() const;
     bool IsViewConfigurationTypeSupported(XrViewConfigurationType viewConfigurationType) const;
 
     void SetDebugUtilsObjectName(XrObjectType objectType, uint64_t objectHandle, const char* objectName);
@@ -108,4 +110,5 @@ private:
     mutable std::mutex debugUtilsMutex_;
     std::unordered_map<DebugUtilsObjectKey, std::string, DebugUtilsObjectKeyHash> debugUtilsObjectNames_;
     bool metalGraphicsRequirementsQueried_ = false;
+    bool vulkanGraphicsRequirementsQueried_ = false;
 };

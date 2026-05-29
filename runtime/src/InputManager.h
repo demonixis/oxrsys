@@ -9,7 +9,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "../../clients/common/src/Protocol.h"
+#include <oxrsys/protocol/Protocol.h>
 
 class TrackingReceiver;
 

@@ -26,11 +26,11 @@ The iOS path is still a lightweight remote-viewing workflow for experimentation 
 - low-friction experimentation
 - clear separation from headset-class features
 - realistic scope for a future prototype
-- shared implementation in `clients/common/OXRSysSimulator/` to avoid duplicate client stacks
+- shared implementation in `clients/Apple/common/OXRSysSimulator/` to avoid duplicate client stacks
 
 ## Current Workflow
 
-- Build the unified target in `clients/oxrsys-simulator/`
+- Build the unified target in `clients/Apple/oxrsys-simulator/`
 - Connect to the runtime from the app landing page
 - Open the settings sheet and switch to `StereoView`
 - Use the stats overlay and IPD controls as needed
@@ -39,7 +39,7 @@ The iOS path is still a lightweight remote-viewing workflow for experimentation 
 ## Build
 
 ```bash
-xcodebuild -project "clients/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
   -scheme "OXRSys Simulator" \
   -configuration Debug \
   -destination 'generic/platform=iOS' \

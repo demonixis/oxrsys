@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document lists the host tools and SDKs required to build and test the project on macOS, plus the Android tooling needed for the Quest client.
+This document lists the host tools and SDKs required to build and test the project on macOS and Linux, plus the Android tooling needed for the Android VR client.
 
 ## Host Tools
 
@@ -24,6 +24,15 @@ xcodebuild -downloadComponent MetalToolchain
 ```
 
 If simulator builds report that `CoreSimulator` is older than the selected SDK, update Xcode and the simulator runtime components so their versions match.
+
+Linux runtime and Qt frontend builds need equivalent distro packages for:
+
+- CMake, Ninja, and a C++20 compiler
+- Vulkan headers
+- FFmpeg development libraries: `libavcodec`, `libavutil`, `libswscale`
+- pkg-config
+- Qt 6 Core, Widgets, and Network
+- adb / Android Platform Tools for USB transport setup
 
 ## Android SDK And NDK
 
@@ -48,7 +57,7 @@ sdkmanager --install \
   "cmake;3.22.1"
 ```
 
-Then set `clients/oxrsys-android/local.properties`:
+Then set `clients/Android/android-vr/local.properties`:
 
 ```text
 sdk.dir=/Users/<you>/Library/Android/sdk
@@ -62,7 +71,7 @@ The current Gradle configuration in the repository uses `compileSdk = 35`, `targ
 sdkmanager --install "platforms;android-35"
 ```
 
-Keep this document aligned with `clients/oxrsys-android/app/build.gradle.kts`.
+Keep this document aligned with `clients/Android/android-vr/app/build.gradle.kts`.
 
 ## Vulkan SDK And MoltenVK
 

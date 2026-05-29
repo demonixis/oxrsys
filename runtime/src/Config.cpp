@@ -9,8 +9,68 @@
 #include <chrono>
 #include <fstream>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <thread>
+
+namespace
+{
+
+std::string HomeDirectory()
+{
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && home[0] != '\0')
+    {
+        return home;
+    }
+    return {};
+}
+
+std::string ConfigRoot()
+{
+    const std::string home = HomeDirectory();
+#if defined(__APPLE__)
+    if (!home.empty())
+    {
+        return home + "/Library/Application Support/OXRSys";
+    }
+#else
+    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
+    if (xdgConfigHome != nullptr && xdgConfigHome[0] != '\0')
+    {
+        return std::string(xdgConfigHome) + "/oxrsys";
+    }
+    if (!home.empty())
+    {
+        return home + "/.config/oxrsys";
+    }
+#endif
+    return {};
+}
+
+std::string StateRoot()
+{
+    const std::string home = HomeDirectory();
+#if defined(__APPLE__)
+    if (!home.empty())
+    {
+        return home + "/Library/Application Support/OXRSys";
+    }
+#else
+    const char* xdgStateHome = std::getenv("XDG_STATE_HOME");
+    if (xdgStateHome != nullptr && xdgStateHome[0] != '\0')
+    {
+        return std::string(xdgStateHome) + "/oxrsys";
+    }
+    if (!home.empty())
+    {
+        return home + "/.local/state/oxrsys";
+    }
+#endif
+    return {};
+}
+
+} // namespace
 
 Config& Config::Get()
 {
@@ -64,20 +124,21 @@ void Config::DetectDylibDir()
         dylibDir = ".";
     }
 
-    const char* home = getenv("HOME");
-    if (home != nullptr && home[0] != '\0')
-    {
-        appSupportDir = std::string(home) + "/Library/Application Support/OXRSys";
-    }
-    else
+    appSupportDir = ConfigRoot();
+    std::string stateDir = StateRoot();
+    if (appSupportDir.empty())
     {
         appSupportDir = dylibDir;
     }
+    if (stateDir.empty())
+    {
+        stateDir = appSupportDir;
+    }
 
     configFilePath = appSupportDir + "/oxrsys-runtime.toml";
-    logFilePath = appSupportDir + "/oxrsys-runtime.log";
-    questLogFilePath = appSupportDir + "/oxrsys-headset.log";
-    runtimeStatusPath = appSupportDir + "/runtime_status.json";
+    logFilePath = stateDir + "/oxrsys-runtime.log";
+    questLogFilePath = stateDir + "/oxrsys-headset.log";
+    runtimeStatusPath = stateDir + "/runtime_status.json";
 }
 
 // ─── Config file parsing ─────────────────────────────────────────────────────

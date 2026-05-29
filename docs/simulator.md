@@ -7,8 +7,13 @@ The simulator is the local debug path inside the unified viewer app. It lets you
 ## App Layout
 
 The reusable SwiftUI simulator implementation lives in
-`clients/common/OXRSysSimulator/` and exposes `OXRSysSimulatorView`. The standalone app in
-`clients/oxrsys-simulator/` is a thin wrapper around that shared view.
+`clients/Apple/common/OXRSysSimulator/` and exposes `OXRSysSimulatorView`. The standalone Apple app in
+`clients/Apple/oxrsys-simulator/` is a thin wrapper around that shared view.
+
+The Qt simulator shared code lives in `clients/Qt/oxrsys-simulator-shared` and is reused by:
+
+- `clients/Qt/oxrsys-simulator`: standalone simulator shell
+- `clients/Qt/oxrsys-home`: embedded Developer tab simulator
 
 The viewer exposes two viewing modes:
 

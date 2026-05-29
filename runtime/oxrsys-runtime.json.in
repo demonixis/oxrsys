@@ -2,6 +2,6 @@
     "file_format_version": "1.0.0",
     "runtime": {
         "name": "OXRSys Runtime",
-        "library_path": "@CMAKE_CURRENT_BINARY_DIR@/liboxrsys-runtime.dylib"
+        "library_path": "@CMAKE_CURRENT_BINARY_DIR@/@OXRSYS_RUNTIME_LIBRARY_FILENAME@"
     }
 }

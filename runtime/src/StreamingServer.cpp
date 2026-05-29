@@ -6,7 +6,7 @@
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
-#include "../../clients/common/src/FecCodec.h"
+#include <oxrsys/protocol/FecCodec.h>
 
 #include <spdlog/spdlog.h>
 
@@ -1039,7 +1039,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
         encoder_ = std::make_shared<VideoEncoder>();
-        if (metalDevice_ != nullptr)
+        if (graphicsDevice_ != nullptr)
         {
             const ConfigValues config = Config::Get().GetValues();
             uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
@@ -1051,7 +1051,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             lastKeyframeRequestCountForAbr_ = 0;
             uint32_t stereoWidth = scaledWidth_ * 2;
             if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
-                                     bitrateMbps, metalDevice_))
+                                     bitrateMbps, graphicsDevice_))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
@@ -1068,7 +1068,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         }
         else
         {
-            spdlog::warn("StreamingServer: No Metal device set, cannot encode video");
+            spdlog::warn("StreamingServer: No graphics device set, cannot encode video");
             encoder_.reset();
         }
     }
@@ -1121,7 +1121,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
         encoder_ = std::make_shared<VideoEncoder>();
-        if (metalDevice_ != nullptr)
+        if (graphicsDevice_ != nullptr)
         {
             const ConfigValues config = Config::Get().GetValues();
             uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
@@ -1133,7 +1133,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
             lastKeyframeRequestCountForAbr_ = 0;
             uint32_t stereoWidth = scaledWidth_ * 2;
             if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
-                                     bitrateMbps, metalDevice_))
+                                     bitrateMbps, graphicsDevice_))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
@@ -1150,7 +1150,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         }
         else
         {
-            spdlog::warn("StreamingServer: No Metal device set, cannot encode video");
+            spdlog::warn("StreamingServer: No graphics device set, cannot encode video");
             encoder_.reset();
         }
     }

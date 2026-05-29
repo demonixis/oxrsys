@@ -867,7 +867,7 @@ void Session::StartStreamingIfNeeded()
     }
 
     streamingServer_ = std::make_unique<StreamingServer>();
-    streamingServer_->SetMetalDevice(metalDevice_);
+    streamingServer_->SetGraphicsDevice(graphicsApi_ == GraphicsApi::Vulkan ? vkDevice_ : metalDevice_);
 
     // Use default resolution until first swapchain is created
     // Will be updated when we know the actual render resolution

@@ -2,7 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "Protocol.h"
+#include <oxrsys/protocol/Protocol.h>
 
 #include <cstddef>
 

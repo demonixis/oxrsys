@@ -8,7 +8,7 @@
 #include <mutex>
 #include <thread>
 
-#include "../../clients/common/src/Protocol.h"
+#include <oxrsys/protocol/Protocol.h>
 
 /**
  * Receives 6DOF tracking data from the headset client via UDP.

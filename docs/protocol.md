@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the internal streaming protocol shared by the macOS runtime and headset clients. The authoritative wire layout lives in `clients/common/src/Protocol.h`.
+This document describes the internal streaming protocol shared by the macOS runtime and headset clients. The authoritative wire layout lives in `common/protocol/include/oxrsys/protocol/Protocol.h`.
 
 ## Goals
 
@@ -118,4 +118,4 @@ The expected lifecycle is:
 
 ## Compatibility
 
-The protocol is still internal and may evolve with the runtime and client implementations. When updating the wire format, keep `clients/common/src/Protocol.h`, the runtime, the Android client, and this document aligned in the same change.
+The protocol is still internal and may evolve with the runtime and client implementations. When updating the wire format, keep `common/protocol/include/oxrsys/protocol/Protocol.h`, the runtime, the Android client, and this document aligned in the same change.

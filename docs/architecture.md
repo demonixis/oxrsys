@@ -2,15 +2,15 @@
 
 ## Overview
 
-OXRSys Runtime is a macOS OpenXR runtime backed by Metal, with a simulator/debug path and a streaming path for external headsets. The runtime is exposed through `liboxrsys-runtime.dylib`, discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
+OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux is being added through Vulkan + FFmpeg scaffolding, and Windows is documented as a future scaffold in this pass. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
 
 ## Repository Layout
 
 - `runtime/`: runtime library, graphics integration, input, configuration, streaming server, tracking receiver, and video encoder.
-- `clients/common/`: shared protocol definitions used by the runtime and headset clients.
-- `clients/oxrsys-android/`: Quest-oriented Android client for decode, display, and tracking return.
-- `clients/oxrsys-home/`: native SwiftUI macOS Home app for config and runtime registration.
-- `clients/oxrsys-visionos/`: native visionOS viewer that reuses the shared Swift streaming package.
+- `common/protocol/include/oxrsys/protocol/`: canonical C++ protocol and FEC wire layout.
+- `clients/Android/android-vr/`: Quest/Pico-oriented Android VR client for decode, display, and tracking return.
+- `clients/Apple/`: Xcode workspace, native SwiftUI Home app, unified Apple simulator/viewer, visionOS viewer, and shared Swift packages.
+- `clients/Qt/`: Qt Home app, Qt simulator app, and reusable Qt simulator widget.
 - `tests/`: unit-style and loader-backed runtime tests.
 - `cmake/`: CMake helpers, including the OpenXR-CTS lane.
 - `docs/`: focused project documentation.
@@ -40,13 +40,13 @@ At a high level:
 
 ### Metal
 
-Metal is the native rendering path. Applications provide an `MTLDevice` through `XR_KHR_metal_enable`, and swapchain textures are backed by native Metal resources.
+Metal is the native Apple rendering path. Applications provide an `MTLDevice` through `XR_KHR_metal_enable`, and swapchain textures are backed by native Metal resources.
 
 ### Vulkan
 
-Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. The runtime does not link directly against Vulkan. Instead, it resolves Vulkan functions through the application-provided loader path to avoid dual-MoltenVK crashes on macOS.
+Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. The runtime does not link directly against Vulkan. Instead, it resolves Vulkan functions through the application-provided loader path to avoid dual-loader and dual-MoltenVK issues.
 
-When Vulkan images need to be surfaced to the debug renderer, the runtime uses `VK_EXT_metal_objects` to bridge Vulkan-backed images to Metal textures.
+On Apple, Vulkan images can use `VK_EXT_metal_objects` to bridge Vulkan-backed images to Metal textures. On Linux, the first-pass Vulkan swapchain allocates Vulkan images directly and the FFmpeg encoder path is wired, with real Vulkan image readback still pending.
 
 ## Input And Actions
 
@@ -69,11 +69,14 @@ Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`
 
 Runtime configuration is loaded from:
 
-- `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`
+- macOS: `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`
 - fallback: `build/runtime/oxrsys-runtime.toml`
 
-For terminal-launched applications, use `XR_RUNTIME_JSON`. For GUI applications, `scripts/oxrsys_runtime_default.sh` can register `build/runtime/oxrsys-runtime.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
+Runtime status and logs are written to the platform state directory. On Linux this is `${XDG_STATE_HOME:-~/.local/state}/oxrsys`.
 
-The native Home app in `clients/oxrsys-home/` manages the same files directly, controls whether the runtime is enabled, and can register or unregister the runtime JSON through the user OpenXR config path.
+For terminal-launched applications, use `XR_RUNTIME_JSON`. On macOS, `scripts/oxrsys_runtime_default.sh` can register `build/runtime/oxrsys-runtime.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
+
+The native Home app in `clients/Apple/oxrsys-home/` manages the macOS workflow. The Qt Home app in `clients/Qt/oxrsys-home/` owns Linux runtime install/registration and can manually launch apps with `XR_RUNTIME_JSON` on other desktop platforms.
 
 The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as FOV and keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart.

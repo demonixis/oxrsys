@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: MPL-2.0
 
 cmake_minimum_required(VERSION 3.24)
-project(OXRSys LANGUAGES C CXX OBJCXX)
+project(OXRSys LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OBJCXX_STANDARD 20)
-set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 enable_testing()
 
 execute_process(
@@ -23,9 +26,6 @@ endif()
 
 # --- FetchContent dependencies ---
 include(FetchContent)
-
-# Build a universal (arm64 + x86_64) dylib so x64 apps can load the runtime
-set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
 
 # spdlog
 FetchContent_Declare(
@@ -85,7 +85,7 @@ add_executable(oxrsys_runtime_tests
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
-    clients/common/src
+    common/protocol/include
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_runtime_tests PRIVATE
@@ -93,9 +93,11 @@ target_link_libraries(oxrsys_runtime_tests PRIVATE
     glm::glm
     spdlog::spdlog
 )
-target_compile_definitions(oxrsys_runtime_tests PRIVATE
-    XR_USE_GRAPHICS_API_METAL
-)
+if(APPLE)
+    target_compile_definitions(oxrsys_runtime_tests PRIVATE
+        XR_USE_GRAPHICS_API_METAL
+    )
+endif()
 add_test(NAME oxrsys_runtime_tests COMMAND oxrsys_runtime_tests)
 
 add_executable(oxrsys_runtime_status_tests
@@ -112,41 +114,76 @@ target_link_libraries(oxrsys_runtime_status_tests PRIVATE
 )
 add_test(NAME oxrsys_runtime_status_tests COMMAND oxrsys_runtime_status_tests)
 
-add_executable(oxrsys_runtime_api_tests
-    tests/TestRuntimeApi.cpp
-)
-target_include_directories(oxrsys_runtime_api_tests PRIVATE
-    runtime/src
-    ${openxr_SOURCE_DIR}/include
-)
-target_link_libraries(oxrsys_runtime_api_tests PRIVATE
-    Catch2::Catch2WithMain
-    OpenXR::openxr_loader
-)
-target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
-    XR_USE_GRAPHICS_API_METAL
-)
-add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
-add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)
-set_tests_properties(oxrsys_runtime_api_tests PROPERTIES
-    ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
-)
-
-add_dependencies(oxrsys_runtime_sync_compile_commands
+set(OXRSYS_RUNTIME_TEST_TARGETS
     oxrsys_runtime
     oxrsys_runtime_tests
     oxrsys_runtime_status_tests
-    oxrsys_runtime_api_tests
+)
+
+if(APPLE)
+    add_executable(oxrsys_runtime_api_tests
+        tests/TestRuntimeApi.cpp
+    )
+    target_include_directories(oxrsys_runtime_api_tests PRIVATE
+        runtime/src
+        ${openxr_SOURCE_DIR}/include
+    )
+    target_link_libraries(oxrsys_runtime_api_tests PRIVATE
+        Catch2::Catch2WithMain
+        OpenXR::openxr_loader
+    )
+    target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
+        XR_USE_GRAPHICS_API_METAL
+    )
+    add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
+    add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)
+    set_tests_properties(oxrsys_runtime_api_tests PROPERTIES
+        ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+    )
+    list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
+endif()
+
+add_dependencies(oxrsys_runtime_sync_compile_commands
+    ${OXRSYS_RUNTIME_TEST_TARGETS}
 )
 
 option(OXRSYS_ENABLE_CTS "Fetch and wire an opt-in OpenXR CTS lane" OFF)
 
-add_custom_target(oxrsys_runtime_set_default_runtime
-    COMMAND /bin/zsh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/oxrsys_runtime_default.sh set $<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json
-    DEPENDS oxrsys_runtime
-    USES_TERMINAL
-    COMMENT "Registering the generated OpenXR manifest as the default runtime for this user"
-)
+set(OXRSYS_BUILD_QT_FRONTENDS "AUTO" CACHE STRING "Build Qt frontends: AUTO, ON, or OFF")
+set_property(CACHE OXRSYS_BUILD_QT_FRONTENDS PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${OXRSYS_BUILD_QT_FRONTENDS}" OXRSYS_BUILD_QT_FRONTENDS_NORMALIZED)
+if(NOT OXRSYS_BUILD_QT_FRONTENDS_NORMALIZED MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "OXRSYS_BUILD_QT_FRONTENDS must be AUTO, ON, or OFF")
+endif()
+
+set(OXRSYS_QT_FRONTENDS_ENABLED OFF)
+if(OXRSYS_BUILD_QT_FRONTENDS_NORMALIZED STREQUAL "ON")
+    set(OXRSYS_QT_FRONTENDS_ENABLED ON)
+elseif(OXRSYS_BUILD_QT_FRONTENDS_NORMALIZED STREQUAL "AUTO" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(${CMAKE_CURRENT_SOURCE_DIR}/clients/Qt/cmake/DetectQt6.cmake)
+    find_package(Qt6 QUIET COMPONENTS Core Widgets Network)
+    if(Qt6_FOUND)
+        set(OXRSYS_QT_FRONTENDS_ENABLED ON)
+    else()
+        message(STATUS "Qt6 was not found; skipping Qt frontends in AUTO mode")
+    endif()
+endif()
+
+if(OXRSYS_QT_FRONTENDS_ENABLED)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/clients/Qt/cmake/DetectQt6.cmake)
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
+    set(OXRSYS_PROTOCOL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/common/protocol/include")
+    add_subdirectory(clients/Qt)
+endif()
+
+if(APPLE)
+    add_custom_target(oxrsys_runtime_set_default_runtime
+        COMMAND /bin/zsh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/oxrsys_runtime_default.sh set $<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json
+        DEPENDS oxrsys_runtime
+        USES_TERMINAL
+        COMMENT "Registering the generated OpenXR manifest as the default runtime for this user"
+    )
+endif()
 
 if(OXRSYS_ENABLE_CTS)
     include(ExternalProject)

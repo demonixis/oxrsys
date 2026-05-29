@@ -2,7 +2,7 @@
 
 ## Scope
 
-This page covers the native visionOS viewer in `clients/oxrsys-visionos/`.
+This page covers the native visionOS viewer in `clients/Apple/oxrsys-visionos/`.
 
 ## Current Role
 
@@ -19,13 +19,13 @@ The visionOS target is a first-pass native viewer that fits the Apple platform m
 
 ## Build
 
-When using the Xcode UI, open `clients/OXRSys Clients.xcworkspace` rather than opening `OXRSys visionOS.xcodeproj`
+When using the Xcode UI, open `clients/Apple/OXRSys Clients.xcworkspace` rather than opening `OXRSys visionOS.xcodeproj`
 while another client project is already open. `OXRSys visionOS` and `OXRSys Simulator` both depend on
 the local `OXRSysStreaming` package, and Xcode can report `Missing package product 'OXRSysStreaming'`
 if it has already loaded the package from another project window.
 
 ```bash
-xcodebuild -project "clients/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
   -scheme "OXRSys visionOS" \
   -configuration Debug \
   -destination 'generic/platform=visionOS Simulator' \
@@ -35,7 +35,7 @@ xcodebuild -project "clients/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
 For TestFlight upload, create a device archive:
 
 ```bash
-xcodebuild -project "clients/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
   -scheme "OXRSys visionOS" \
   -configuration Release \
   -destination 'generic/platform=visionOS' \

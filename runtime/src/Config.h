@@ -25,8 +25,9 @@ struct ConfigValues
 ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults = {});
 
 /**
- * Runtime configuration loaded from ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
- * with a one-release fallback to the legacy dylib-local config file.
+ * Runtime configuration loaded from the platform config directory
+ * (macOS: ~/Library/Application Support/OXRSys, Linux: XDG_CONFIG_HOME/oxrsys)
+ * with a fallback to the library-local config file.
  *
  * Singleton initialized once on first access. Configures spdlog sinks
  * (console + optional rotating file) and optionally captures Quest logcat.
@@ -43,8 +44,8 @@ public:
     void RefreshIfNeeded();
 
     // Resolved paths
-    std::string appSupportDir;      // ~/Library/Application Support/OXRSys
-    std::string dylibDir;           // Directory containing liboxrsys-runtime.dylib
+    std::string appSupportDir;      // Platform config directory
+    std::string dylibDir;           // Directory containing the runtime library
     std::string configFilePath;     // Resolved config file path
     std::string logFilePath;        // Full path to oxrsys-runtime.log
     std::string questLogFilePath;   // Full path to oxrsys-headset.log

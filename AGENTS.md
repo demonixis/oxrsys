@@ -1,15 +1,16 @@
 # OXRSys Runtime
 
-OpenXR runtime for macOS that brings PC-style OpenXR support to Apple Silicon Macs without Windows.
-The project currently combines a macOS runtime, a unified macOS/iOS viewer with `Simulator` and
-`StereoView` modes, a first-pass visionOS viewer, and a Quest/Pico-oriented streaming stack with an
-Android client scaffold.
-The repository also includes a native SwiftUI macOS Home app for compatible app launching,
-runtime installation, runtime configuration, and runtime registration workflows.
+OpenXR runtime that started on macOS and is now being moved toward a measured cross-platform
+runtime shape. The project currently combines the shared runtime, a unified macOS/iOS viewer with
+`Simulator` and `StereoView` modes, a first-pass visionOS viewer, a Quest/Pico-oriented Android VR
+client, and Linux-first Qt frontends.
+The repository also includes a native SwiftUI macOS Home app and a Qt Home app for compatible app
+launching, runtime installation, runtime configuration, and runtime registration workflows.
 
-**Current state:** Metal/core runtime, Vulkan interop, controller and hand input paths, loader-backed
+**Current state:** Metal/core runtime, Vulkan interop, Linux Vulkan/FFmpeg scaffolding,
+controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
-are in place. The Quest/Android client now feeds real `XR_EXT_hand_tracking` joints into the runtime,
+are in place. Windows is scaffolded in layout/docs only for this pass. The Android VR client now feeds real `XR_EXT_hand_tracking` joints into the runtime,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
 and can request a build-configured display refresh rate. The visionOS
@@ -31,7 +32,7 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 
 - **Always build and verify before declaring success** — run the macOS build + tests and/or Android build as appropriate before saying everything works
 - **Always update `README.md`, `AGENTS.md`, and the relevant files in `docs/` when making significant project changes**
-- All dependencies are fetched via CMake FetchContent
+- Core C++ dependencies are fetched via CMake FetchContent; Qt, FFmpeg, Vulkan SDKs, and platform SDKs are system/toolchain dependencies.
 - All source code and documentation must be in English
 - Project-owned source code is licensed under MPL-2.0; preserve SPDX headers and keep third-party code under its upstream license.
 
@@ -62,7 +63,9 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - The action system is profile-aware and must not regress to hard-forcing `KHR simple_controller`.
 - `xrLocateSpacesKHR` is accepted as an alias of the OpenXR 1.1 `xrLocateSpaces` entry point.
 - Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
-- Runtime configuration is loaded from `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`.
+- Runtime configuration is loaded from the platform config directory:
+  macOS `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
+  Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`.
 
 ## Project Layout
 
@@ -72,14 +75,21 @@ oxrsys_runtime/
 ├── cmake/RunOpenXRCTS.cmake
 ├── runtime/
 ├── clients/
-│   ├── common/
-│   │   ├── src/Protocol.h
-│   │   ├── OXRSysStreaming/
-│   │   └── OXRSysSimulator/
-│   ├── oxrsys-android/
-│   ├── oxrsys-simulator/
-│   ├── oxrsys-home/
-│   └── oxrsys-visionos/
+│   ├── Android/
+│   │   └── android-vr/
+│   ├── Apple/
+│   │   ├── OXRSys Clients.xcworkspace/
+│   │   ├── common/
+│   │   │   ├── OXRSysStreaming/
+│   │   │   └── OXRSysSimulator/
+│   │   ├── oxrsys-home/
+│   │   ├── oxrsys-simulator/
+│   │   └── oxrsys-visionos/
+│   └── Qt/
+│       ├── apps/
+│       └── libs/
+├── common/
+│   └── protocol/include/oxrsys/protocol/
 ├── tests/
 │   ├── TestConfig.cpp
 │   ├── TestInputManager.cpp
@@ -95,31 +105,37 @@ oxrsys_runtime/
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
-swift test --package-path clients/common/OXRSysStreaming
-swift build --package-path clients/common/OXRSysSimulator
+swift test --package-path clients/Apple/common/OXRSysStreaming
+swift build --package-path clients/Apple/common/OXRSysSimulator
 swiftc -parse-as-library \
-  "clients/oxrsys-home/OXRSys Home/HomeSupport.swift" \
-  "clients/oxrsys-home/OXRSys Home/OXRSysServerConfig.swift" \
-  "clients/oxrsys-home/OXRSys Home/HomeLauncher.swift" \
-  "clients/oxrsys-home/OXRSys Home/HomePreferences.swift" \
+  "clients/Apple/oxrsys-home/OXRSys Home/HomeSupport.swift" \
+  "clients/Apple/oxrsys-home/OXRSys Home/OXRSysServerConfig.swift" \
+  "clients/Apple/oxrsys-home/OXRSys Home/HomeLauncher.swift" \
+  "clients/Apple/oxrsys-home/OXRSys Home/HomePreferences.swift" \
   tests/HomeLauncherTests.swift \
   -o /tmp/oxrsys_home_launcher_tests && /tmp/oxrsys_home_launcher_tests
-xcodebuild -project "clients/oxrsys-home/OXRSys Home.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
   -scheme "OXRSys Home" \
   -configuration Debug \
   build
 
-xcodebuild -project "clients/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
   -scheme "OXRSys Simulator" \
   -configuration Debug \
   -destination 'platform=macOS' \
   build
 
-xcodebuild -project "clients/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
   -scheme "OXRSys visionOS" \
   -configuration Debug \
   -destination 'generic/platform=visionOS Simulator' \
   build
+
+cd clients/Android/android-vr && ./gradlew assembleDebug
+
+cmake -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_BUILD_QT_FRONTENDS=ON
+cmake --build build-qt
+ctest --test-dir build-qt --output-on-failure
 ```
 
 Optional CTS lane:

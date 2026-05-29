@@ -16,12 +16,12 @@ See [install.md](../install.md) for the recommended package list and `sdkmanager
 ## Build And Install
 
 ```bash
-cd clients/oxrsys-android
+cd clients/Android/android-vr
 ./gradlew assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`clients/oxrsys-android/local.properties` must point to the local Android SDK.
+`clients/Android/android-vr/local.properties` must point to the local Android SDK.
 
 ## Permissions And Features
 

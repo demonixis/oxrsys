@@ -15,7 +15,7 @@
 #include <vector>
 
 // Shared protocol definitions
-#include "../../clients/common/src/Protocol.h"
+#include <oxrsys/protocol/Protocol.h>
 
 class VideoEncoder;
 class TrackingReceiver;
@@ -53,11 +53,12 @@ public:
     void Stop();
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
-    // leftTexture/rightTexture are retained MTLTexture* views from Swapchain.
+    // The handles are platform graphics resources retained/owned by Swapchain.
     void SendFrame(void* leftTexture, void* rightTexture);
 
-    // Set the Metal device for VideoEncoder initialization
-    void SetMetalDevice(void* metalDevice) { metalDevice_ = metalDevice; }
+    // Set the platform graphics device for VideoEncoder initialization.
+    void SetGraphicsDevice(void* graphicsDevice) { graphicsDevice_ = graphicsDevice; }
+    void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(metalDevice); }
 
     // Check if a client is connected
     bool IsClientConnected() const { return state_.load() == State::Connected; }
@@ -202,7 +203,7 @@ private:
     // Sub-components
     std::shared_ptr<VideoEncoder> encoder_;
     std::unique_ptr<TrackingReceiver> trackingReceiver_;
-    void* metalDevice_ = nullptr;
+    void* graphicsDevice_ = nullptr;
 
     // Frame sending state
     uint32_t frameIndex_ = 0;

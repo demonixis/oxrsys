@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # OXRSys Runtime Configuration
-# Preferred location: ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
-# Fallback location: next to liboxrsys-runtime.dylib
+# Preferred location:
+#   macOS: ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
+#   Linux: ${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml
+# Fallback location: next to liboxrsys-runtime.dylib / liboxrsys-runtime.so
 
 [general]
 # Enable or disable this runtime without unregistering the manifest.
@@ -36,9 +38,11 @@ encoder_preset = "balanced"
 transport = "auto"
 
 [logging]
-# Write server logs to ~/Library/Application Support/OXRSys/oxrsys-runtime.log.
+# Write server logs to the platform state directory.
+#   macOS: ~/Library/Application Support/OXRSys/oxrsys-runtime.log
+#   Linux: ${XDG_STATE_HOME:-~/.local/state}/oxrsys/oxrsys-runtime.log
 file_logging = true
 
-# Capture Quest/headset logcat to ~/Library/Application Support/OXRSys/oxrsys-headset.log.
+# Capture Quest/headset logcat to the platform state directory.
 # Requires adb in PATH and a connected device.
 quest_logcat = false

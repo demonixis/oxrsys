@@ -1,0 +1,1207 @@
+// SPDX-License-Identifier: MPL-2.0
+
+#include "MainWindow.h"
+
+#include "PlatformSupport.h"
+#include "SimulatorWidget.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFileDialog>
+#include <QFileIconProvider>
+#include <QFileInfo>
+#include <QFormLayout>
+#include <QFrame>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLayout>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QSizePolicy>
+#include <QSlider>
+#include <QStyle>
+#include <QTabWidget>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QVector>
+
+#include <algorithm>
+
+namespace
+{
+
+class ElidedLabel final : public QLabel
+{
+public:
+    explicit ElidedLabel(QWidget* parent = nullptr)
+        : QLabel(parent)
+    {
+        setWordWrap(false);
+        setTextInteractionFlags(Qt::TextSelectableByMouse);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        setMinimumWidth(0);
+        setStyleSheet("color: palette(mid);");
+    }
+
+    void setFullText(const QString& text)
+    {
+        fullText_ = text;
+        setToolTip(text);
+        updateGeometry();
+        update();
+    }
+
+    QSize sizeHint() const override
+    {
+        return QSize(120, QLabel::sizeHint().height());
+    }
+
+    QSize minimumSizeHint() const override
+    {
+        return QSize(40, QLabel::minimumSizeHint().height());
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setPen(palette().color(QPalette::WindowText));
+        painter.drawText(rect(),
+                         alignment() | Qt::AlignVCenter,
+                         fontMetrics().elidedText(fullText_, Qt::ElideMiddle, width()));
+    }
+
+private:
+    QString fullText_;
+};
+
+class FlowLayout final : public QLayout
+{
+public:
+    explicit FlowLayout(QWidget* parent = nullptr, int margin = 0, int spacing = 12)
+        : QLayout(parent)
+        , spacing_(spacing)
+    {
+        setContentsMargins(margin, margin, margin, margin);
+    }
+
+    ~FlowLayout() override
+    {
+        QLayoutItem* item = nullptr;
+        while ((item = takeAt(0)) != nullptr)
+        {
+            delete item;
+        }
+    }
+
+    void addItem(QLayoutItem* item) override
+    {
+        items_.append(item);
+    }
+
+    int count() const override
+    {
+        return items_.size();
+    }
+
+    QLayoutItem* itemAt(int index) const override
+    {
+        return items_.value(index);
+    }
+
+    QLayoutItem* takeAt(int index) override
+    {
+        if (index < 0 || index >= items_.size())
+        {
+            return nullptr;
+        }
+        return items_.takeAt(index);
+    }
+
+    Qt::Orientations expandingDirections() const override
+    {
+        return {};
+    }
+
+    bool hasHeightForWidth() const override
+    {
+        return true;
+    }
+
+    int heightForWidth(int width) const override
+    {
+        return doLayout(QRect(0, 0, width, 0), true);
+    }
+
+    QSize minimumSize() const override
+    {
+        QSize size;
+        for (const QLayoutItem* item : items_)
+        {
+            size = size.expandedTo(item->minimumSize());
+        }
+        const QMargins margins = contentsMargins();
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom());
+        return size;
+    }
+
+    QSize sizeHint() const override
+    {
+        return minimumSize();
+    }
+
+    void setGeometry(const QRect& rect) override
+    {
+        QLayout::setGeometry(rect);
+        doLayout(rect, false);
+    }
+
+private:
+    int doLayout(const QRect& rect, bool testOnly) const
+    {
+        const QMargins margins = contentsMargins();
+        const QRect effectiveRect = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom());
+        int x = effectiveRect.x();
+        int y = effectiveRect.y();
+        int lineHeight = 0;
+
+        for (QLayoutItem* item : items_)
+        {
+            const QSize itemSize = item->sizeHint();
+            const int nextX = x + itemSize.width() + spacing_;
+            if (nextX - spacing_ > effectiveRect.right() && lineHeight > 0)
+            {
+                x = effectiveRect.x();
+                y += lineHeight + spacing_;
+                lineHeight = 0;
+            }
+
+            if (!testOnly)
+            {
+                item->setGeometry(QRect(QPoint(x, y), itemSize));
+            }
+            x += itemSize.width() + spacing_;
+            lineHeight = std::max(lineHeight, itemSize.height());
+        }
+
+        return y + lineHeight - rect.y() + margins.bottom();
+    }
+
+    QList<QLayoutItem*> items_;
+    int spacing_ = 12;
+};
+
+QLabel* secondaryLabel(const QString& text = {})
+{
+    auto* label = new QLabel(text);
+    label->setWordWrap(true);
+    label->setStyleSheet("color: palette(mid);");
+    return label;
+}
+
+QLabel* elidedSecondaryLabel(QWidget* parent = nullptr)
+{
+    return new ElidedLabel(parent);
+}
+
+void setElidedText(QLabel* label, const QString& text)
+{
+    if (auto* elided = dynamic_cast<ElidedLabel*>(label))
+    {
+        elided->setFullText(text);
+        return;
+    }
+    label->setText(text);
+    label->setToolTip(text);
+}
+
+QPushButton* iconButton(QWidget* parent,
+                        QStyle::StandardPixmap icon,
+                        const QString& text,
+                        const QString& tooltip = {})
+{
+    auto* button = new QPushButton(text, parent);
+    button->setIcon(parent->style()->standardIcon(icon));
+    if (!tooltip.isEmpty())
+    {
+        button->setToolTip(tooltip);
+    }
+    return button;
+}
+
+QToolButton* appActionButton(QWidget* parent,
+                             QStyle::StandardPixmap icon,
+                             const QString& tooltip)
+{
+    auto* button = new QToolButton(parent);
+    button->setIcon(parent->style()->standardIcon(icon));
+    button->setToolTip(tooltip);
+    button->setAccessibleName(tooltip);
+    button->setAutoRaise(false);
+    button->setIconSize(QSize(16, 16));
+    button->setFixedSize(28, 26);
+    button->setStyleSheet(
+        "QToolButton {"
+        "  border: 1px solid palette(midlight);"
+        "  border-radius: 5px;"
+        "  background: palette(button);"
+        "}"
+        "QToolButton:hover { background: palette(light); }"
+        "QToolButton:disabled { color: palette(mid); background: palette(window); }");
+    return button;
+}
+
+void clearLayout(QLayout* layout)
+{
+    while (QLayoutItem* item = layout->takeAt(0))
+    {
+        if (QWidget* widget = item->widget())
+        {
+            widget->deleteLater();
+        }
+        if (QLayout* childLayout = item->layout())
+        {
+            clearLayout(childLayout);
+        }
+        delete item;
+    }
+}
+
+QString registrationButtonTitle(const HomeModel& model)
+{
+    const QString selected = normalizedPath(model.runtimeManifestPath());
+    const QString current = normalizedPath(model.runtimeRegistrationStatus().activeRuntimeTarget);
+    if (!selected.isEmpty() && selected == current)
+    {
+        return "Update Registration";
+    }
+    if (model.runtimeRegistrationStatus().activeRuntimeExists)
+    {
+        return "Update Registration";
+    }
+    return "Enable Registration";
+}
+
+QString runtimeInstallButtonTitle(const RuntimeInstallStatus& status)
+{
+    if (!status.bundledRuntimeExists)
+    {
+        return "No Bundled Runtime";
+    }
+    if (!status.installedRuntimeExists)
+    {
+        return "Install and Register Runtime";
+    }
+    if (status.installedRuntimeNeedsUpdate)
+    {
+        return "Update and Register Runtime";
+    }
+    return "Reinstall and Register Runtime";
+}
+
+} // namespace
+
+class RuntimeStatsChart final : public QFrame
+{
+public:
+    enum class Kind
+    {
+        Pipeline,
+        Encode,
+    };
+
+    explicit RuntimeStatsChart(Kind kind, QWidget* parent = nullptr)
+        : QFrame(parent)
+        , kind_(kind)
+    {
+        setMinimumHeight(170);
+        setFrameShape(QFrame::StyledPanel);
+        setAutoFillBackground(true);
+    }
+
+    void setSamples(QList<RuntimeStreamingStats> samples)
+    {
+        samples_ = std::move(samples);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent* event) override
+    {
+        QFrame::paintEvent(event);
+
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QRectF plotRect = rect().adjusted(16, 28, -16, -26);
+
+        painter.setPen(palette().mid().color());
+        painter.drawText(QRectF(14, 6, width() - 28, 18),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         kind_ == Kind::Pipeline ? "Pipeline Latency" : "Encode Latency");
+
+        for (int tick = 0; tick <= 2; ++tick)
+        {
+            const double y = plotRect.top() + plotRect.height() * tick / 2.0;
+            painter.setPen(QColor(128, 128, 128, 45));
+            painter.drawLine(QPointF(plotRect.left(), y), QPointF(plotRect.right(), y));
+        }
+
+        if (samples_.isEmpty())
+        {
+            painter.setPen(palette().mid().color());
+            painter.drawText(plotRect, Qt::AlignCenter, "No samples");
+            return;
+        }
+
+        const auto seriesValues = [this](const RuntimeStreamingStats& stats) {
+            if (kind_ == Kind::Pipeline)
+            {
+                return QVector<double>{
+                    stats.serverPipelineMs,
+                    stats.clientPipelineMs,
+                    stats.predictionHorizonMs,
+                };
+            }
+            return QVector<double>{
+                stats.encodeTotalP95Ms,
+                stats.encodeQueueP95Ms,
+            };
+        };
+
+        double maxValue = 1.0;
+        for (const RuntimeStreamingStats& sample : samples_)
+        {
+            for (double value : seriesValues(sample))
+            {
+                maxValue = std::max(maxValue, value);
+            }
+        }
+        maxValue *= 1.1;
+
+        const QVector<QColor> colors = kind_ == Kind::Pipeline
+            ? QVector<QColor>{QColor(214, 126, 36), QColor(31, 141, 163), QColor(92, 87, 180)}
+            : QVector<QColor>{QColor(190, 57, 57), QColor(60, 110, 190)};
+
+        for (int seriesIndex = 0; seriesIndex < colors.size(); ++seriesIndex)
+        {
+            QPainterPath path;
+            for (int i = 0; i < samples_.size(); ++i)
+            {
+                const QVector<double> values = seriesValues(samples_.at(i));
+                const double value = values.value(seriesIndex);
+                const double x = samples_.size() == 1
+                    ? plotRect.center().x()
+                    : plotRect.left() + plotRect.width() * i / (samples_.size() - 1);
+                const double y = plotRect.bottom() - plotRect.height() * std::min(value / maxValue, 1.0);
+                if (i == 0)
+                {
+                    path.moveTo(x, y);
+                }
+                else
+                {
+                    path.lineTo(x, y);
+                }
+            }
+            painter.setPen(QPen(colors.at(seriesIndex), 2.0));
+            painter.drawPath(path);
+        }
+
+        painter.setPen(palette().mid().color());
+        painter.drawText(QRectF(14, height() - 22, width() - 28, 16),
+                         Qt::AlignRight | Qt::AlignVCenter,
+                         QString("%1 ms").arg(maxValue, 0, 'f', 1));
+    }
+
+private:
+    Kind kind_;
+    QList<RuntimeStreamingStats> samples_;
+};
+
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent)
+    , model_(new HomeModel(this))
+{
+    setWindowTitle("OXRSys Home");
+    resize(1120, 780);
+
+    buildUi();
+
+    connect(model_, &HomeModel::changed, this, &MainWindow::refreshUi);
+    connect(model_, &HomeModel::errorOccurred, this, [this](const QString& message) {
+        QMessageBox::warning(this, "OXRSys Home", message);
+    });
+
+    refreshUi();
+}
+
+void MainWindow::buildUi()
+{
+    auto* central = new QWidget(this);
+    auto* layout = new QVBoxLayout(central);
+    layout->setContentsMargins(20, 18, 20, 20);
+    layout->setSpacing(12);
+
+    layout->addWidget(buildHeader());
+
+    tabs_ = new QTabWidget(central);
+    tabs_->addTab(buildAppsTab(), "Apps");
+    tabs_->addTab(buildSettingsTab(), "Settings");
+    tabs_->addTab(buildStreamingTab(), "Streaming");
+    developerTab_ = buildDeveloperTab();
+    tabs_->addTab(developerTab_, "Developer");
+    layout->addWidget(tabs_, 1);
+
+    setCentralWidget(central);
+}
+
+QWidget* MainWindow::buildHeader()
+{
+    auto* box = new QGroupBox(this);
+    auto* layout = new QHBoxLayout(box);
+    layout->setSpacing(18);
+
+    auto* titleLayout = new QVBoxLayout();
+    auto* title = new QLabel("OXRSys Home", box);
+    title->setStyleSheet("font-size: 22px; font-weight: 600;");
+    auto* subtitle = secondaryLabel("Launch compatible apps, install the runtime, and tune headset streaming.");
+    titleLayout->addWidget(title);
+    titleLayout->addWidget(subtitle);
+    layout->addLayout(titleLayout, 2);
+
+    const auto addStatusItem = [box, layout](const QString& titleText, QLabel** valueLabel) {
+        auto* itemLayout = new QVBoxLayout();
+        auto* label = secondaryLabel(titleText);
+        *valueLabel = new QLabel(box);
+        (*valueLabel)->setStyleSheet("font-weight: 600;");
+        (*valueLabel)->setMinimumWidth(130);
+        itemLayout->addWidget(label);
+        itemLayout->addWidget(*valueLabel);
+        layout->addLayout(itemLayout);
+    };
+
+    addStatusItem("State", &stateValueLabel_);
+    addStatusItem("Device", &deviceValueLabel_);
+    addStatusItem("Profile App", &profileValueLabel_);
+
+    auto* transportLayout = new QVBoxLayout();
+    auto* transportLabel = secondaryLabel("Transport");
+    transportCombo_ = new QComboBox(box);
+    transportCombo_->addItem("WiFi", "wifi");
+    transportCombo_->addItem("USB", "usb_adb");
+    connect(transportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
+        model_->setMainTransportSelection(transportCombo_->currentData().toString());
+    });
+    transportLayout->addWidget(transportLabel);
+    transportLayout->addWidget(transportCombo_);
+    layout->addLayout(transportLayout);
+
+    readinessPillLabel_ = new QLabel(box);
+    readinessMessageLabel_ = secondaryLabel();
+    readinessMessageLabel_->setMinimumWidth(240);
+    configureTransportButton_ =
+        iconButton(box, QStyle::SP_ComputerIcon, "Configure", "Configure USB ADB reverse");
+    connect(configureTransportButton_, &QPushButton::clicked,
+            model_, &HomeModel::configureQuestUsbReverse);
+
+    auto* readinessLayout = new QVBoxLayout();
+    auto* readinessTop = new QHBoxLayout();
+    readinessTop->addWidget(readinessPillLabel_);
+    readinessTop->addWidget(configureTransportButton_);
+    readinessTop->addStretch();
+    readinessLayout->addLayout(readinessTop);
+    readinessLayout->addWidget(readinessMessageLabel_);
+    layout->addLayout(readinessLayout, 2);
+
+    statusMessageLabel_ = secondaryLabel();
+    statusMessageLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(statusMessageLabel_, 1);
+
+    return box;
+}
+
+QWidget* MainWindow::buildAppsTab()
+{
+    auto* tab = new QWidget(this);
+    auto* layout = new QVBoxLayout(tab);
+    layout->setSpacing(12);
+
+    auto* toolbar = new QHBoxLayout();
+    auto* headingLayout = new QVBoxLayout();
+    auto* heading = new QLabel("Apps", tab);
+    heading->setStyleSheet("font-size: 16px; font-weight: 600;");
+    appsCountLabel_ = secondaryLabel();
+    headingLayout->addWidget(heading);
+    headingLayout->addWidget(appsCountLabel_);
+    toolbar->addLayout(headingLayout);
+    toolbar->addStretch();
+
+    auto* rescanButton = iconButton(tab, QStyle::SP_BrowserReload, "Rescan");
+    auto* addButton = iconButton(tab, QStyle::SP_DialogOpenButton, "Add App");
+    connect(rescanButton, &QPushButton::clicked, model_, &HomeModel::reloadLauncherApps);
+    connect(addButton, &QPushButton::clicked, this, &MainWindow::chooseLauncherApp);
+    toolbar->addWidget(rescanButton);
+    toolbar->addWidget(addButton);
+    layout->addLayout(toolbar);
+
+    auto* dropHint = secondaryLabel("Add Linux executables or .desktop files, macOS .app bundles, or Windows executables.");
+    dropHint->setFrameShape(QFrame::StyledPanel);
+    dropHint->setMargin(10);
+    layout->addWidget(dropHint);
+
+    appsScrollArea_ = new QScrollArea(tab);
+    appsScrollArea_->setWidgetResizable(true);
+    appsScrollArea_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    appsScrollArea_->setMinimumHeight(260);
+    appsListWidget_ = new QWidget(appsScrollArea_);
+    appsListLayout_ = new FlowLayout(appsListWidget_, 12, 12);
+    appsScrollArea_->setWidget(appsListWidget_);
+    layout->addWidget(appsScrollArea_, 4);
+
+    auto* logsBox = new QGroupBox("Logs", tab);
+    logsBox->setCheckable(true);
+    logsBox->setChecked(false);
+    auto* logsLayout = new QVBoxLayout(logsBox);
+    auto* logsContent = new QWidget(logsBox);
+    auto* logsContentLayout = new QVBoxLayout(logsContent);
+    logsContentLayout->setContentsMargins(0, 4, 0, 0);
+    auto* logsToolbar = new QHBoxLayout();
+    logAppCombo_ = new QComboBox(logsBox);
+    clearLogButton_ = iconButton(logsBox, QStyle::SP_TrashIcon, "Clear");
+    connect(logAppCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
+        model_->setSelectedLogAppId(logAppCombo_->currentData().toString());
+    });
+    connect(clearLogButton_, &QPushButton::clicked, this, [this]() {
+        const QString id = model_->selectedLogAppId();
+        for (const LauncherApp& app : model_->launcherApps())
+        {
+            if (app.id() == id)
+            {
+                model_->clearLog(app);
+                break;
+            }
+        }
+    });
+    logsToolbar->addWidget(logAppCombo_);
+    logsToolbar->addWidget(clearLogButton_);
+    logsToolbar->addStretch();
+    logsContentLayout->addLayout(logsToolbar);
+    logTextEdit_ = new QPlainTextEdit(logsBox);
+    logTextEdit_->setReadOnly(true);
+    logTextEdit_->setMaximumBlockCount(2000);
+    logTextEdit_->setMinimumHeight(150);
+    logsContentLayout->addWidget(logTextEdit_);
+    logsLayout->addWidget(logsContent);
+    logsContent->setVisible(false);
+    connect(logsBox, &QGroupBox::toggled, logsContent, &QWidget::setVisible);
+    layout->addWidget(logsBox);
+
+    return tab;
+}
+
+QWidget* MainWindow::buildSettingsTab()
+{
+    auto* tab = new QWidget(this);
+    auto* outerLayout = new QVBoxLayout(tab);
+
+    auto* scroll = new QScrollArea(tab);
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget(scroll);
+    auto* layout = new QVBoxLayout(content);
+    layout->setSpacing(14);
+
+    auto* developerBox = new QGroupBox("Developer", content);
+    auto* developerLayout = new QVBoxLayout(developerBox);
+    developerModeCheckBox_ = new QCheckBox("Developer Mode", developerBox);
+    connect(developerModeCheckBox_, &QCheckBox::toggled,
+            model_, &HomeModel::setDeveloperModeEnabled);
+    developerLayout->addWidget(developerModeCheckBox_);
+    layout->addWidget(developerBox);
+
+    auto* installBox = new QGroupBox("Runtime Installation", content);
+    auto* installLayout = new QVBoxLayout(installBox);
+    auto* installTop = new QHBoxLayout();
+    auto* installForm = new QFormLayout();
+    bundledRuntimePillLabel_ = new QLabel(installBox);
+    installedRuntimePillLabel_ = new QLabel(installBox);
+    updateRuntimePillLabel_ = new QLabel(installBox);
+    installForm->addRow("Bundled runtime", bundledRuntimePillLabel_);
+    installForm->addRow("Installed runtime", installedRuntimePillLabel_);
+    installForm->addRow("Update state", updateRuntimePillLabel_);
+    installTop->addLayout(installForm, 2);
+    auto* installButtons = new QVBoxLayout();
+    installRuntimeButton_ = iconButton(installBox, QStyle::SP_ArrowDown, "Install and Register Runtime");
+    useInstalledManifestButton_ = iconButton(installBox, QStyle::SP_DialogApplyButton, "Use Installed Manifest");
+    auto* revealInstalledButton = iconButton(installBox, QStyle::SP_DirOpenIcon, "Reveal Installed Runtime");
+    connect(installRuntimeButton_, &QPushButton::clicked,
+            model_, &HomeModel::installBundledRuntimeAndRegister);
+    connect(useInstalledManifestButton_, &QPushButton::clicked,
+            model_, &HomeModel::useInstalledRuntimeManifest);
+    connect(revealInstalledButton, &QPushButton::clicked, this, [this]() {
+        revealInFileManager(model_->runtimeInstallStatus().installedManifestPath);
+    });
+    installButtons->addWidget(installRuntimeButton_);
+    installButtons->addWidget(useInstalledManifestButton_);
+    installButtons->addWidget(revealInstalledButton);
+    installButtons->addStretch();
+    installTop->addLayout(installButtons);
+    installLayout->addLayout(installTop);
+    installedRuntimePathLabel_ = elidedSecondaryLabel(installBox);
+    bundledRuntimePathLabel_ = elidedSecondaryLabel(installBox);
+    installLayout->addWidget(installedRuntimePathLabel_);
+    installLayout->addWidget(bundledRuntimePathLabel_);
+    layout->addWidget(installBox);
+
+    auto* registrationBox = new QGroupBox("Runtime Registration", content);
+    auto* registrationLayout = new QVBoxLayout(registrationBox);
+    auto* manifestRow = new QHBoxLayout();
+    runtimeManifestLineEdit_ = new QLineEdit(registrationBox);
+    auto* browseButton = iconButton(registrationBox, QStyle::SP_DialogOpenButton, "Browse");
+    auto* revealButton = iconButton(registrationBox, QStyle::SP_DirOpenIcon, "Reveal");
+    connect(runtimeManifestLineEdit_, &QLineEdit::editingFinished, this, [this]() {
+        model_->setRuntimeManifestPath(runtimeManifestLineEdit_->text());
+    });
+    connect(browseButton, &QPushButton::clicked, this, &MainWindow::chooseRuntimeManifest);
+    connect(revealButton, &QPushButton::clicked, this, [this]() {
+        revealInFileManager(model_->runtimeManifestPath());
+    });
+    manifestRow->addWidget(runtimeManifestLineEdit_, 1);
+    manifestRow->addWidget(browseButton);
+    manifestRow->addWidget(revealButton);
+    registrationLayout->addLayout(manifestRow);
+
+    auto* registrationForm = new QFormLayout();
+    registrationFileLabel_ = elidedSecondaryLabel(registrationBox);
+    currentRuntimeTargetLabel_ = elidedSecondaryLabel(registrationBox);
+    selectedRuntimeActiveLabel_ = new QLabel(registrationBox);
+    launchTargetLabel_ = elidedSecondaryLabel(registrationBox);
+    registrationForm->addRow("Registration file", registrationFileLabel_);
+    registrationForm->addRow("Current target", currentRuntimeTargetLabel_);
+    registrationForm->addRow("Selected target active", selectedRuntimeActiveLabel_);
+    registrationForm->addRow("Launch target", launchTargetLabel_);
+    registrationLayout->addLayout(registrationForm);
+
+    auto* registrationButtons = new QHBoxLayout();
+    auto* refreshButton = iconButton(registrationBox, QStyle::SP_BrowserReload, "Refresh");
+    registerRuntimeButton_ = iconButton(registrationBox, QStyle::SP_DialogApplyButton, "Enable Registration");
+    unregisterRuntimeButton_ = iconButton(registrationBox, QStyle::SP_DialogCancelButton, "Disable Registration");
+    connect(refreshButton, &QPushButton::clicked, this, [this]() {
+        model_->refreshRuntimeStatus();
+        model_->refreshRuntimeInstallStatus();
+    });
+    connect(registerRuntimeButton_, &QPushButton::clicked, model_, &HomeModel::registerRuntime);
+    connect(unregisterRuntimeButton_, &QPushButton::clicked, model_, &HomeModel::unregisterRuntime);
+    registrationButtons->addWidget(refreshButton);
+    registrationButtons->addStretch();
+    registrationButtons->addWidget(registerRuntimeButton_);
+    registrationButtons->addWidget(unregisterRuntimeButton_);
+    registrationLayout->addLayout(registrationButtons);
+    layout->addWidget(registrationBox);
+
+    layout->addStretch();
+    scroll->setWidget(content);
+    outerLayout->addWidget(scroll);
+    return tab;
+}
+
+QWidget* MainWindow::buildStreamingTab()
+{
+    auto* tab = new QWidget(this);
+    auto* outerLayout = new QVBoxLayout(tab);
+
+    auto* scroll = new QScrollArea(tab);
+    scroll->setWidgetResizable(true);
+    auto* content = new QWidget(scroll);
+    auto* layout = new QVBoxLayout(content);
+    layout->setSpacing(14);
+
+    auto* configBox = new QGroupBox("Streaming Configuration", content);
+    auto* configLayout = new QVBoxLayout(configBox);
+    runtimeEnabledCheckBox_ = new QCheckBox("Runtime enabled", configBox);
+    fileLoggingCheckBox_ = new QCheckBox("Write server log file", configBox);
+    questLogcatCheckBox_ = new QCheckBox("Capture Quest logcat", configBox);
+    configLayout->addWidget(runtimeEnabledCheckBox_);
+    configLayout->addWidget(fileLoggingCheckBox_);
+    configLayout->addWidget(questLogcatCheckBox_);
+
+    const auto addSlider = [configBox, configLayout](const QString& title,
+                                                     QSlider** slider,
+                                                     QLabel** valueLabel,
+                                                     int min,
+                                                     int max) {
+        auto* row = new QHBoxLayout();
+        auto* label = new QLabel(title, configBox);
+        label->setMinimumWidth(150);
+        *slider = new QSlider(Qt::Horizontal, configBox);
+        (*slider)->setRange(min, max);
+        *valueLabel = new QLabel(configBox);
+        (*valueLabel)->setMinimumWidth(72);
+        (*valueLabel)->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        row->addWidget(label);
+        row->addWidget(*slider, 1);
+        row->addWidget(*valueLabel);
+        configLayout->addLayout(row);
+    };
+
+    addSlider("Bitrate", &bitrateSlider_, &bitrateValueLabel_, 1, 200);
+    addSlider("Vertical FOV", &fovSlider_, &fovValueLabel_, 60, 150);
+    addSlider("Resolution Scale", &resolutionSlider_, &resolutionValueLabel_, 25, 100);
+    addSlider("Keyframe Interval", &keyframeSlider_, &keyframeValueLabel_, 1, 10);
+
+    auto* form = new QFormLayout();
+    encoderPresetCombo_ = new QComboBox(configBox);
+    encoderPresetCombo_->addItem("Quality", "quality");
+    encoderPresetCombo_->addItem("Balanced", "balanced");
+    encoderPresetCombo_->addItem("Speed", "speed");
+    configTransportCombo_ = new QComboBox(configBox);
+    configTransportCombo_->addItem("Auto", "auto");
+    configTransportCombo_->addItem("WiFi", "wifi");
+    configTransportCombo_->addItem("USB ADB", "usb_adb");
+    form->addRow("Encoder preset", encoderPresetCombo_);
+    form->addRow("Transport", configTransportCombo_);
+    configLayout->addLayout(form);
+
+    const auto connectConfigChanged = [this]() {
+        updateConfigFromControls();
+    };
+    connect(runtimeEnabledCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(fileLoggingCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(questLogcatCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(bitrateSlider_, &QSlider::valueChanged, this, connectConfigChanged);
+    connect(fovSlider_, &QSlider::valueChanged, this, connectConfigChanged);
+    connect(resolutionSlider_, &QSlider::valueChanged, this, connectConfigChanged);
+    connect(keyframeSlider_, &QSlider::valueChanged, this, connectConfigChanged);
+    connect(encoderPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(configTransportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+
+    auto* configButtons = new QHBoxLayout();
+    auto* saveButton = iconButton(configBox, QStyle::SP_DialogSaveButton, "Save Configuration");
+    auto* reloadButton = iconButton(configBox, QStyle::SP_BrowserReload, "Reload From Disk");
+    auto* revealConfigButton = iconButton(configBox, QStyle::SP_DirOpenIcon, "Reveal Config");
+    connect(saveButton, &QPushButton::clicked, model_, &HomeModel::saveStructuredConfig);
+    connect(reloadButton, &QPushButton::clicked, model_, &HomeModel::resetConfigFromDisk);
+    connect(revealConfigButton, &QPushButton::clicked, this, [this]() {
+        if (!QFileInfo(model_->paths().configFilePath).exists())
+        {
+            model_->saveStructuredConfig();
+        }
+        revealInFileManager(model_->paths().configFilePath);
+    });
+    configButtons->addWidget(saveButton);
+    configButtons->addWidget(reloadButton);
+    configButtons->addStretch();
+    configButtons->addWidget(revealConfigButton);
+    configLayout->addLayout(configButtons);
+    layout->addWidget(configBox);
+
+    auto* usbBox = new QGroupBox("Quest USB ADB", content);
+    auto* usbLayout = new QVBoxLayout(usbBox);
+    auto* usbForm = new QFormLayout();
+    usbDeviceCombo_ = new QComboBox(usbBox);
+    usbForm->addRow("Quest device", usbDeviceCombo_);
+    usbLayout->addLayout(usbForm);
+    usbStatusLabel_ = secondaryLabel();
+    usbLayout->addWidget(usbStatusLabel_);
+    auto* usbButtons = new QHBoxLayout();
+    auto* refreshDevicesButton = iconButton(usbBox, QStyle::SP_BrowserReload, "Refresh Devices");
+    configureUsbButton_ = iconButton(usbBox, QStyle::SP_ComputerIcon, "Configure USB Reverse");
+    connect(usbDeviceCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() {
+        model_->setSelectedQuestUsbSerial(usbDeviceCombo_->currentData().toString());
+    });
+    connect(refreshDevicesButton, &QPushButton::clicked, model_, &HomeModel::refreshQuestUsbDevices);
+    connect(configureUsbButton_, &QPushButton::clicked, model_, &HomeModel::configureQuestUsbReverse);
+    usbButtons->addWidget(refreshDevicesButton);
+    usbButtons->addWidget(configureUsbButton_);
+    usbButtons->addStretch();
+    usbLayout->addLayout(usbButtons);
+    layout->addWidget(usbBox);
+
+    layout->addStretch();
+    scroll->setWidget(content);
+    outerLayout->addWidget(scroll);
+    return tab;
+}
+
+QWidget* MainWindow::buildDeveloperTab()
+{
+    auto* tab = new QWidget(this);
+    auto* scroll = new QScrollArea(tab);
+    scroll->setWidgetResizable(true);
+    auto* outerLayout = new QVBoxLayout(tab);
+    auto* content = new QWidget(scroll);
+    auto* layout = new QVBoxLayout(content);
+    layout->setSpacing(14);
+
+    auto* simulatorBox = new QGroupBox("Simulator", content);
+    auto* simulatorLayout = new QVBoxLayout(simulatorBox);
+    simulatorWidget_ = new SimulatorWidget(simulatorBox);
+    simulatorLayout->addWidget(simulatorWidget_);
+    layout->addWidget(simulatorBox);
+
+    auto* statsBox = new QGroupBox("Runtime Stats", content);
+    auto* statsLayout = new QVBoxLayout(statsBox);
+    auto* metricsGrid = new QGridLayout();
+    metricsGrid->addWidget(buildMetric("Refresh", &refreshRateMetricLabel_, "Display target"), 0, 0);
+    metricsGrid->addWidget(buildMetric("Bitrate", &bitrateMetricLabel_, "Current / max"), 0, 1);
+    metricsGrid->addWidget(buildMetric("Render", &renderMetricLabel_, "Stereo source"), 0, 2);
+    metricsGrid->addWidget(buildMetric("Encoded", &encodedMetricLabel_, "H.265 stream"), 0, 3);
+    metricsGrid->addWidget(buildMetric("Server", &serverMetricLabel_, "Pipeline"), 1, 0);
+    metricsGrid->addWidget(buildMetric("Client", &clientMetricLabel_, "Pipeline"), 1, 1);
+    metricsGrid->addWidget(buildMetric("Horizon", &horizonMetricLabel_, "Prediction"), 1, 2);
+    metricsGrid->addWidget(buildMetric("Drops", &dropsMetricLabel_, "Encoder total"), 1, 3);
+    statsLayout->addLayout(metricsGrid);
+    auto* chartsLayout = new QHBoxLayout();
+    pipelineChart_ = new RuntimeStatsChart(RuntimeStatsChart::Kind::Pipeline, statsBox);
+    encodeChart_ = new RuntimeStatsChart(RuntimeStatsChart::Kind::Encode, statsBox);
+    chartsLayout->addWidget(pipelineChart_);
+    chartsLayout->addWidget(encodeChart_);
+    statsLayout->addLayout(chartsLayout);
+    runtimeStatsEmptyLabel_ = secondaryLabel();
+    statsLayout->addWidget(runtimeStatsEmptyLabel_);
+    layout->addWidget(statsBox);
+    layout->addStretch();
+
+    scroll->setWidget(content);
+    outerLayout->addWidget(scroll);
+    return tab;
+}
+
+QWidget* MainWindow::buildAppCard(const LauncherApp& app)
+{
+    auto* card = new QFrame(appsListWidget_);
+    card->setFrameShape(QFrame::StyledPanel);
+    card->setFixedWidth(320);
+    card->setMinimumHeight(154);
+    auto* layout = new QVBoxLayout(card);
+
+    auto* top = new QHBoxLayout();
+    QFileIconProvider iconProvider;
+    auto* iconLabel = new QLabel(card);
+    iconLabel->setPixmap(iconProvider.icon(QFileInfo(app.path)).pixmap(42, 42));
+    top->addWidget(iconLabel);
+
+    auto* textLayout = new QVBoxLayout();
+    auto* nameLabel = new QLabel(app.name, card);
+    nameLabel->setStyleSheet("font-weight: 600;");
+    nameLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    textLayout->addWidget(nameLabel);
+    auto* metaLabel = secondaryLabel(QString("%1 · %2").arg(app.kindDisplayName(), app.sourceDisplayName()));
+    textLayout->addWidget(metaLabel);
+    auto* pathLabel = elidedSecondaryLabel(card);
+    setElidedText(pathLabel, app.path);
+    textLayout->addWidget(pathLabel);
+    top->addLayout(textLayout, 1);
+    layout->addLayout(top);
+
+    auto* buttons = new QHBoxLayout();
+    buttons->setSpacing(6);
+    buttons->setContentsMargins(0, 4, 0, 0);
+    auto* launchButton = appActionButton(card, QStyle::SP_MediaPlay, "Launch");
+    auto* stopButton = appActionButton(card, QStyle::SP_MediaStop, "Stop");
+    auto* logsButton = appActionButton(card, QStyle::SP_FileDialogDetailedView, "Show logs");
+    auto* revealButton = appActionButton(card, QStyle::SP_DirOpenIcon, "Reveal in file manager");
+    auto* removeButton = appActionButton(card, QStyle::SP_TrashIcon, "Remove");
+    connect(launchButton, &QToolButton::clicked, model_, [this, app]() { model_->launchApp(app); });
+    connect(stopButton, &QToolButton::clicked, model_, [this, app]() { model_->stopApp(app); });
+    connect(logsButton, &QToolButton::clicked, model_, [this, app]() { model_->showLogs(app); });
+    connect(revealButton, &QToolButton::clicked, this, [app]() { revealInFileManager(app.path); });
+    connect(removeButton, &QToolButton::clicked, model_, [this, app]() { model_->removeLauncherApp(app); });
+    launchButton->setEnabled(!model_->isAppRunning(app));
+    stopButton->setEnabled(model_->isAppRunning(app));
+    buttons->addWidget(launchButton);
+    buttons->addWidget(stopButton);
+    buttons->addWidget(logsButton);
+    buttons->addWidget(revealButton);
+    buttons->addStretch();
+    buttons->addWidget(removeButton);
+    layout->addLayout(buttons);
+
+    if (model_->isAppRunning(app))
+    {
+        card->setStyleSheet("QFrame { border: 1px solid #3b8f45; border-radius: 6px; }");
+    }
+    return card;
+}
+
+QWidget* MainWindow::buildMetric(const QString& title, QLabel** valueLabel, const QString& subtitle)
+{
+    auto* frame = new QFrame(this);
+    frame->setFrameShape(QFrame::StyledPanel);
+    auto* layout = new QVBoxLayout(frame);
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->addWidget(secondaryLabel(title));
+    *valueLabel = new QLabel(frame);
+    (*valueLabel)->setStyleSheet("font-weight: 600;");
+    layout->addWidget(*valueLabel);
+    layout->addWidget(secondaryLabel(subtitle));
+    return frame;
+}
+
+void MainWindow::refreshUi()
+{
+    refreshHeader();
+    refreshApps();
+    refreshLogs();
+    refreshSettings();
+    refreshStreaming();
+    refreshDeveloper();
+    updateDeveloperTab();
+}
+
+void MainWindow::refreshHeader()
+{
+    const RuntimeActivity& activity = model_->runtimeActivity();
+    stateValueLabel_->setText(activity.stateDisplayName());
+    deviceValueLabel_->setText(activity.deviceDisplayName());
+    profileValueLabel_->setText(model_->currentProfileAppDisplayName());
+    statusMessageLabel_->setText(model_->statusMessage());
+
+    const int transportIndex = transportCombo_->findData(model_->mainTransportSelection());
+    transportCombo_->blockSignals(true);
+    transportCombo_->setCurrentIndex(std::max(transportIndex, 0));
+    transportCombo_->blockSignals(false);
+
+    const TransportReadiness readiness = model_->mainTransportReadiness();
+    setPill(readinessPillLabel_,
+            readiness.isReady ? "Ready" : "Action needed",
+            readiness.isReady ? QColor(42, 145, 72) : QColor(190, 57, 57));
+    readinessMessageLabel_->setText(readiness.message);
+    configureTransportButton_->setVisible(readiness.canConfigureUsb);
+}
+
+void MainWindow::refreshApps()
+{
+    appsCountLabel_->setText(QString("%1 compatible app%2")
+                                 .arg(model_->launcherApps().size())
+                                 .arg(model_->launcherApps().size() == 1 ? "" : "s"));
+
+    clearLayout(appsListLayout_);
+    for (const LauncherApp& app : model_->launcherApps())
+    {
+        appsListLayout_->addWidget(buildAppCard(app));
+    }
+    if (model_->launcherApps().isEmpty())
+    {
+        auto* empty = secondaryLabel("No compatible apps found. Add an executable to start launching with XR_RUNTIME_JSON.");
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setMinimumWidth(320);
+        appsListLayout_->addWidget(empty);
+    }
+    appsListWidget_->updateGeometry();
+}
+
+void MainWindow::refreshLogs()
+{
+    const QString selectedId = model_->selectedLogAppId();
+    logAppCombo_->blockSignals(true);
+    logAppCombo_->clear();
+    for (const LauncherApp& app : model_->launcherApps())
+    {
+        logAppCombo_->addItem(app.name, app.id());
+        if (app.id() == selectedId)
+        {
+            logAppCombo_->setCurrentIndex(logAppCombo_->count() - 1);
+        }
+    }
+    logAppCombo_->blockSignals(false);
+
+    const QString effectiveId = selectedId.isEmpty()
+        ? logAppCombo_->currentData().toString()
+        : selectedId;
+    logTextEdit_->setPlainText(model_->appLogs().value(effectiveId));
+    clearLogButton_->setEnabled(!model_->appLogs().value(effectiveId).isEmpty());
+}
+
+void MainWindow::refreshSettings()
+{
+    developerModeCheckBox_->blockSignals(true);
+    developerModeCheckBox_->setChecked(model_->developerModeEnabled());
+    developerModeCheckBox_->blockSignals(false);
+
+    const RuntimeInstallStatus& install = model_->runtimeInstallStatus();
+    setPill(bundledRuntimePillLabel_, install.bundledRuntimeExists ? "Available" : "Not embedded",
+            install.bundledRuntimeExists ? QColor(42, 145, 72) : QColor(120, 120, 120));
+    setPill(installedRuntimePillLabel_, install.installedRuntimeExists ? "Installed" : "Not installed",
+            install.installedRuntimeExists ? QColor(42, 145, 72) : QColor(120, 120, 120));
+    setPill(updateRuntimePillLabel_, install.installedRuntimeNeedsUpdate ? "Update available" : "Current",
+            install.installedRuntimeNeedsUpdate ? QColor(186, 119, 28) : QColor(120, 120, 120));
+    setElidedText(installedRuntimePathLabel_, install.installedManifestPath);
+    setElidedText(bundledRuntimePathLabel_, install.bundledRuntimePath);
+    installRuntimeButton_->setText(runtimeInstallButtonTitle(install));
+    installRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() && install.bundledRuntimeExists);
+    useInstalledManifestButton_->setEnabled(install.installedManifestExists);
+
+    runtimeManifestLineEdit_->blockSignals(true);
+    runtimeManifestLineEdit_->setText(model_->runtimeManifestPath());
+    runtimeManifestLineEdit_->blockSignals(false);
+
+    setElidedText(registrationFileLabel_, model_->paths().activeRuntimePath);
+    setElidedText(currentRuntimeTargetLabel_,
+                  model_->runtimeRegistrationStatus().activeRuntimeTarget.isEmpty()
+                      ? "Not registered"
+                      : model_->runtimeRegistrationStatus().activeRuntimeTarget);
+    const bool selectedActive =
+        normalizedPath(model_->runtimeRegistrationStatus().activeRuntimeTarget) ==
+        normalizedPath(model_->runtimeManifestPath());
+    selectedRuntimeActiveLabel_->setText(selectedActive ? "Yes" : "No");
+    setElidedText(launchTargetLabel_, model_->activeLaunchRuntimeManifestPath());
+    registerRuntimeButton_->setText(registrationButtonTitle(*model_));
+    registerRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration());
+    unregisterRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() &&
+                                         model_->runtimeRegistrationStatus().activeRuntimeExists);
+}
+
+void MainWindow::refreshStreaming()
+{
+    const ServerConfig& config = model_->serverConfig();
+    const QList<QWidget*> controls = {
+        runtimeEnabledCheckBox_, fileLoggingCheckBox_, questLogcatCheckBox_,
+        bitrateSlider_, fovSlider_, resolutionSlider_, keyframeSlider_,
+        encoderPresetCombo_, configTransportCombo_, usbDeviceCombo_,
+    };
+    for (QWidget* control : controls)
+    {
+        control->blockSignals(true);
+    }
+
+    runtimeEnabledCheckBox_->setChecked(config.runtimeEnabled);
+    fileLoggingCheckBox_->setChecked(config.fileLogging);
+    questLogcatCheckBox_->setChecked(config.questLogcat);
+    bitrateSlider_->setValue(config.bitrateMbps);
+    fovSlider_->setValue(config.fovDegrees);
+    resolutionSlider_->setValue(qRound(config.resolutionScale * 100.0));
+    keyframeSlider_->setValue(config.keyframeIntervalSec);
+    encoderPresetCombo_->setCurrentIndex(std::max(encoderPresetCombo_->findData(config.encoderPreset), 0));
+    configTransportCombo_->setCurrentIndex(std::max(configTransportCombo_->findData(config.transport), 0));
+
+    usbDeviceCombo_->clear();
+    usbDeviceCombo_->addItem("Select a device", QString());
+    for (const AdbDevice& device : model_->questUsbDevices())
+    {
+        usbDeviceCombo_->addItem(device.displayName(), device.serial);
+        if (device.serial == model_->selectedQuestUsbSerial())
+        {
+            usbDeviceCombo_->setCurrentIndex(usbDeviceCombo_->count() - 1);
+        }
+    }
+
+    for (QWidget* control : controls)
+    {
+        control->blockSignals(false);
+    }
+
+    bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
+    fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
+    resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
+    keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
+    usbStatusLabel_->setText(model_->questUsbStatus());
+    configureUsbButton_->setEnabled(!model_->selectedQuestUsbSerial().isEmpty());
+}
+
+void MainWindow::refreshDeveloper()
+{
+    const RuntimeActivity& activity = model_->runtimeActivity();
+    const bool hasStats = activity.hasStreamingStats;
+    const RuntimeStreamingStats stats = activity.streamingStats;
+
+    refreshRateMetricLabel_->setText(stats.refreshRateHz > 0
+                                         ? QString("%1 Hz").arg(stats.refreshRateHz)
+                                         : "Unknown");
+    bitrateMetricLabel_->setText(QString("%1 / %2 Mbps")
+                                     .arg(stats.currentBitrateMbps)
+                                     .arg(stats.maxBitrateMbps));
+    renderMetricLabel_->setText(dimensionsText(stats.renderWidth, stats.renderHeight));
+    encodedMetricLabel_->setText(dimensionsText(stats.encodedWidth, stats.encodedHeight));
+    serverMetricLabel_->setText(millisecondsText(stats.serverPipelineMs));
+    clientMetricLabel_->setText(millisecondsText(stats.clientPipelineMs));
+    horizonMetricLabel_->setText(millisecondsText(stats.predictionHorizonMs));
+    dropsMetricLabel_->setText(QString::number(stats.encoderDroppedFramesTotal));
+    runtimeStatsEmptyLabel_->setText(hasStats ? QString() :
+        (activity.isStreaming() ? "Waiting for the first telemetry sample." : "Runtime is idle."));
+    pipelineChart_->setSamples(model_->runtimeStatsHistory());
+    encodeChart_->setSamples(model_->runtimeStatsHistory());
+}
+
+void MainWindow::updateDeveloperTab()
+{
+    const int index = tabs_->indexOf(developerTab_);
+    if (model_->developerModeEnabled() && index < 0)
+    {
+        tabs_->addTab(developerTab_, "Developer");
+    }
+    else if (!model_->developerModeEnabled() && index >= 0)
+    {
+        tabs_->removeTab(index);
+    }
+}
+
+void MainWindow::setPill(QLabel* label, const QString& text, const QColor& color)
+{
+    label->setText(text);
+    label->setStyleSheet(QString(
+        "QLabel { padding: 3px 8px; border-radius: 8px; color: %1; background: rgba(%2,%3,%4,36); font-weight: 600; }")
+        .arg(color.name())
+        .arg(color.red())
+        .arg(color.green())
+        .arg(color.blue()));
+}
+
+void MainWindow::chooseLauncherApp()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        "Add App",
+        QDir::homePath(),
+#if defined(Q_OS_WIN)
+        "Applications (*.exe *.bat *.cmd);;All files (*)"
+#elif defined(Q_OS_MACOS)
+        "Applications and Executables (*.app *);;All files (*)"
+#else
+        "Applications and Executables (*.desktop *);;All files (*)"
+#endif
+    );
+    if (!path.isEmpty())
+    {
+        model_->addLauncherApp(path);
+    }
+}
+
+void MainWindow::chooseRuntimeManifest()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        "Choose Runtime JSON",
+        QFileInfo(model_->runtimeManifestPath()).absolutePath(),
+        "OpenXR runtime manifests (*.json);;All files (*)");
+    if (!path.isEmpty())
+    {
+        model_->setRuntimeManifestPath(path);
+    }
+}
+
+void MainWindow::updateConfigFromControls()
+{
+    ServerConfig& config = model_->mutableServerConfig();
+    config.runtimeEnabled = runtimeEnabledCheckBox_->isChecked();
+    config.fileLogging = fileLoggingCheckBox_->isChecked();
+    config.questLogcat = questLogcatCheckBox_->isChecked();
+    config.bitrateMbps = bitrateSlider_->value();
+    config.fovDegrees = fovSlider_->value();
+    config.resolutionScale = resolutionSlider_->value() / 100.0;
+    config.keyframeIntervalSec = keyframeSlider_->value();
+    config.encoderPreset = encoderPresetCombo_->currentData().toString();
+    config.transport = configTransportCombo_->currentData().toString();
+
+    bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
+    fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
+    resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
+    keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
+}

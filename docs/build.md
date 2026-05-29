@@ -11,7 +11,7 @@ This document is the entry point for build workflows. Installation steps live in
   The macOS Home Debug build disables Xcode signing so the standard build command is
   non-interactive. Use `scripts/package_home.sh` with `CODE_SIGN_IDENTITY` when preparing a
   direct-distribution app.
-- For Xcode UI work on multiple Swift clients, open `clients/OXRSys Clients.xcworkspace`
+- For Xcode UI work on multiple Swift clients, open `clients/Apple/OXRSys Clients.xcworkspace`
   instead of opening the individual `.xcodeproj` files in separate windows. The simulator and
   visionOS targets share local Swift packages, and one workspace avoids Xcode loading them from
   multiple project containers.
@@ -21,8 +21,11 @@ This document is the entry point for build workflows. Installation steps live in
   - [Simulator](simulator.md)
   - [Vision OS](platforms/visionos.md)
   - [macOS Home](platforms/macos-home.md)
+  - [Qt Home](platforms/qt-home.md)
 
-## Build The macOS Runtime
+## Build The Runtime
+
+The default configure is host-native. Presets are shortcuts, not the source of truth for the target OS or architecture.
 
 ```bash
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -30,14 +33,42 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Key outputs:
+Equivalent preset form:
+
+```bash
+cmake --preset default
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+macOS explicit architecture presets:
+
+```bash
+cmake --preset macos-arm64
+cmake --preset macos-x64
+cmake --preset macos-universal
+```
+
+Linux native preset:
+
+```bash
+cmake --preset linux-native
+cmake --build build/linux-native
+ctest --test-dir build/linux-native --output-on-failure
+```
+
+Key outputs in the selected build directory. With the default build these are under `build/runtime`; with a preset they are under `build/<preset>/runtime`.
 
 - `build/runtime/liboxrsys-runtime.dylib`
+- `build/runtime/liboxrsys-runtime.so` on Linux
 - `build/runtime/oxrsys-runtime.json`
 - `build/runtime/oxrsys-runtime.toml`
 - `compile_commands.json` symlinked at the project root for editor integration
 
 All third-party C++ dependencies are fetched through CMake `FetchContent`.
+Linux additionally requires system/toolchain packages for Vulkan headers, FFmpeg development libraries, and pkg-config.
+
+Windows is a scaffold only in this pass; do not treat Windows runtime builds as an acceptance gate yet.
 
 ## Run The Runtime
 
@@ -64,7 +95,7 @@ TOML editor, the per-user runtime registration workflow, and an optional Develop
 the integrated simulator:
 
 ```bash
-xcodebuild -project "clients/oxrsys-home/OXRSys Home.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
   -scheme "OXRSys Home" \
   -configuration Debug \
   build
@@ -89,14 +120,14 @@ installation, and signing workflow.
 The shared simulator package can be checked directly:
 
 ```bash
-swift build --package-path clients/common/OXRSysSimulator
+swift build --package-path clients/Apple/common/OXRSysSimulator
 ```
 
-The unified viewer target under `clients/oxrsys-simulator/` wraps that package for both the standalone
+The unified viewer target under `clients/Apple/oxrsys-simulator/` wraps that package for both the standalone
 macOS simulator workflow and the iOS stereo viewer workflow:
 
 ```bash
-xcodebuild -project "clients/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
   -scheme "OXRSys Simulator" \
   -configuration Debug \
   -destination 'platform=macOS' \
@@ -106,7 +137,7 @@ xcodebuild -project "clients/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
 Optional iOS build:
 
 ```bash
-xcodebuild -project "clients/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
   -scheme "OXRSys Simulator" \
   -configuration Debug \
   -destination 'generic/platform=iOS' \
@@ -117,10 +148,10 @@ See [simulator.md](simulator.md) for the simulator mode details and [ios-viewer.
 
 ### Vision OS Viewer
 
-The native visionOS viewer under `clients/oxrsys-visionos/` reuses the shared streaming package for discovery, decode, and transport:
+The native visionOS viewer under `clients/Apple/oxrsys-visionos/` reuses the shared streaming package for discovery, decode, and transport:
 
 ```bash
-xcodebuild -project "clients/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-visionos/OXRSys visionOS.xcodeproj" \
   -scheme "OXRSys visionOS" \
   -configuration Debug \
   -destination 'generic/platform=visionOS Simulator' \
@@ -131,6 +162,18 @@ See [visionos.md](platforms/visionos.md) for the current workflow and limits.
 
 For TestFlight, archive with `-destination 'generic/platform=visionOS'`. The visionOS target does
 not use macOS-only `LSApplicationCategoryType` or App Sandbox settings.
+
+### Qt Frontends
+
+The Qt apps live under `clients/Qt/`. They build automatically on Linux when Qt6 is found. On macOS or Windows, enable them explicitly:
+
+```bash
+cmake -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_BUILD_QT_FRONTENDS=ON
+cmake --build build-qt
+ctest --test-dir build-qt --output-on-failure
+```
+
+The standalone targets are `oxrsys-home` and `oxrsys-simulator`. See [qt-home.md](platforms/qt-home.md) for Linux registration/install behavior.
 
 ### Unity Editor Helper
 
@@ -143,6 +186,7 @@ If you want to force the runtime only inside a Unity project, use the editor hel
 - iOS `StereoView` workflow: [ios-viewer.md](platforms/ios-viewer.md)
 - visionOS viewer: [visionos.md](platforms/visionos.md)
 - macOS Home app: [macos-home.md](platforms/macos-home.md)
+- Qt Home app: [qt-home.md](platforms/qt-home.md)
 
 ## Troubleshooting
 
@@ -150,7 +194,7 @@ If you want to force the runtime only inside a Unity project, use the editor hel
 - If a Home-launched app does not pick up the runtime, check the Apps tab logs and the Runtime
   tab launch target. The launcher prefers the installed manifest, then a selected manifest, then
   `build/runtime/oxrsys-runtime.json`.
-- If Android tooling is not found, verify `clients/oxrsys-android/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
+- If Android tooling is not found, verify `clients/Android/android-vr/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
 - If the runtime is not discovered, check that `XR_RUNTIME_JSON` or `~/.config/openxr/1/active_runtime.json` points to `build/runtime/oxrsys-runtime.json`.
 - If Xcode cannot execute the `metal` tool, install the Metal Toolchain component as described in [install.md](install.md).
 - If simulator builds fail with a `CoreSimulator` version mismatch, update Xcode and the simulator runtime components together.

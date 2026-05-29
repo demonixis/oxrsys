@@ -2,7 +2,7 @@
 
 ## Scope
 
-The native macOS Home app lives in `clients/oxrsys-home/` and provides three default tabs:
+The native macOS Home app lives in `clients/Apple/oxrsys-home/` and provides three default tabs:
 
 - `Apps`: scans for compatible apps, manages manually added apps, launches them with
   `XR_RUNTIME_JSON`, and captures stdout/stderr logs.
@@ -24,7 +24,7 @@ scripts, `~/.config/openxr/1/active_runtime.json`, `~/Library/LaunchAgents`, and
 ## Build
 
 ```bash
-xcodebuild -project "clients/oxrsys-home/OXRSys Home.xcodeproj" \
+xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
   -scheme "OXRSys Home" \
   -configuration Debug \
   build

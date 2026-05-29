@@ -6,7 +6,9 @@
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
+#if defined(__APPLE__)
 #include <vulkan/vulkan_metal.h>
+#endif
 #endif
 
 #include <openxr/openxr_platform.h>
@@ -88,7 +90,11 @@ static std::vector<std::unique_ptr<DebugUtilsMessengerState>> gDebugUtilsMesseng
 static std::vector<std::unique_ptr<HandTracker>> gHandTrackers;
 
 // Graphics API for the current session
+#ifdef XR_USE_GRAPHICS_API_METAL
 static GraphicsApi gGraphicsApi = GraphicsApi::Metal;
+#else
+static GraphicsApi gGraphicsApi = GraphicsApi::Vulkan;
+#endif
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 // Global Vulkan dispatch — definition (declared extern in VulkanDispatch.h)
@@ -158,9 +164,11 @@ struct ExtensionInfo
     uint32_t version;
 };
 
+#ifdef XR_USE_GRAPHICS_API_METAL
 static constexpr const char* UNITY_METAL_ENABLE_EXTENSION_ALIAS = "XR_KHRX2_metal_enable";
 static constexpr const char* UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS =
     "xrGetMetalGraphicsRequirementsKHRX2";
+#endif
 static constexpr const char* XR_LOCATE_SPACES_KHR_FUNCTION_ALIAS = "xrLocateSpacesKHR";
 
 static const char* NormalizeExtensionName(const char* extensionName)
@@ -170,10 +178,12 @@ static const char* NormalizeExtensionName(const char* extensionName)
         return nullptr;
     }
 
+#ifdef XR_USE_GRAPHICS_API_METAL
     if (std::strcmp(extensionName, UNITY_METAL_ENABLE_EXTENSION_ALIAS) == 0)
     {
         return XR_KHR_METAL_ENABLE_EXTENSION_NAME;
     }
+#endif
 
     return extensionName;
 }
@@ -181,8 +191,10 @@ static const char* NormalizeExtensionName(const char* extensionName)
 static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
 {
     std::vector<ExtensionInfo> extensions = {
+#ifdef XR_USE_GRAPHICS_API_METAL
         {XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_metal_enable_SPEC_VERSION},
         {UNITY_METAL_ENABLE_EXTENSION_ALIAS, XR_KHR_metal_enable_SPEC_VERSION},
+#endif
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
@@ -252,11 +264,13 @@ static const char* ExtensionForFunctionName(const char* functionName)
     {
         return XR_EXT_DEBUG_UTILS_EXTENSION_NAME;
     }
+#ifdef XR_USE_GRAPHICS_API_METAL
     if (std::strcmp(functionName, "xrGetMetalGraphicsRequirementsKHR") == 0 ||
         std::strcmp(functionName, UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS) == 0)
     {
         return XR_KHR_METAL_ENABLE_EXTENSION_NAME;
     }
+#endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (std::strcmp(functionName, "xrGetVulkanInstanceExtensionsKHR") == 0 ||
         std::strcmp(functionName, "xrGetVulkanDeviceExtensionsKHR") == 0 ||
@@ -791,13 +805,16 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
     }
 
     // Extract graphics binding from the next chain
+#ifdef XR_USE_GRAPHICS_API_METAL
     const XrGraphicsBindingMetalKHR* metalBinding = nullptr;
+#endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     const XrGraphicsBindingVulkanKHR* vulkanBinding = nullptr;
 #endif
     const XrBaseInStructure* next = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
     while (next)
     {
+#ifdef XR_USE_GRAPHICS_API_METAL
         if (next->type == XR_TYPE_GRAPHICS_BINDING_METAL_KHR)
         {
             if (!inst->IsExtensionEnabled(XR_KHR_METAL_ENABLE_EXTENSION_NAME))
@@ -814,8 +831,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
                 return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
             }
         }
+#endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
-        else if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR)
+        if (next->type == XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR)
         {
             if (!inst->IsExtensionEnabled(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME) &&
                 !inst->IsExtensionEnabled(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME))
@@ -823,6 +841,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
                 return XR_ERROR_VALIDATION_FAILURE;
             }
             vulkanBinding = reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(next);
+            if (!inst->HasQueriedVulkanGraphicsRequirements())
+            {
+                return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+            }
         }
 #endif
         next = next->next;
@@ -833,6 +855,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
         return XR_ERROR_LIMIT_REACHED;
     }
 
+#ifdef XR_USE_GRAPHICS_API_METAL
     // Ensure we have a Metal device for the debug Renderer
     if (!gMetalDevice)
     {
@@ -848,6 +871,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
             }
         }
     }
+#endif
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (vulkanBinding)
@@ -862,6 +886,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
     }
 #endif
 
+#ifdef XR_USE_GRAPHICS_API_METAL
     if (metalBinding)
     {
         gGraphicsApi = GraphicsApi::Metal;
@@ -870,6 +895,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
         spdlog::info("OXRSys: Session created with Metal binding");
         return XR_SUCCESS;
     }
+#endif
 
     spdlog::error("OXRSys: No supported graphics binding provided");
     return XR_ERROR_GRAPHICS_DEVICE_INVALID;
@@ -3023,9 +3049,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSessionInsertDebugUtilsLabelEXT(
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 
-// Helper: ensure Metal device is created (for the debug Renderer)
+// Helper: ensure Metal device is created when the Vulkan path needs Metal interop
+// on macOS. Linux uses pure Vulkan and does not create a Metal device.
 static void EnsureMetalDevice()
 {
+#ifdef XR_USE_GRAPHICS_API_METAL
     if (!gMetalDevice)
     {
         typedef void* (*MTLCreateSystemDefaultDeviceFn)(void);
@@ -3040,6 +3068,7 @@ static void EnsureMetalDevice()
             }
         }
     }
+#endif
 }
 
 // --- v1 functions (XR_KHR_vulkan_enable) ---
@@ -3168,7 +3197,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsRequirementsKHR(
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
-    if (!inst->IsExtensionEnabled(XR_KHR_METAL_ENABLE_EXTENSION_NAME))
+    if (!inst->IsExtensionEnabled(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME) &&
+        !inst->IsExtensionEnabled(XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME))
     {
         return XR_ERROR_FUNCTION_UNSUPPORTED;
     }
@@ -3178,6 +3208,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsRequirementsKHR(
     graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR;
     graphicsRequirements->minApiVersionSupported = XR_MAKE_VERSION(1, 0, 0);
     graphicsRequirements->maxApiVersionSupported = XR_MAKE_VERSION(1, 3, 0);
+    inst->MarkVulkanGraphicsRequirementsQueried();
 
     spdlog::info("OXRSys: Vulkan graphics requirements provided");
     return XR_SUCCESS;
@@ -3300,13 +3331,15 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    // Call vkCreateDevice using the app's provided creation info
-    // Inject VK_KHR_portability_subset for MoltenVK on macOS
+    // Call vkCreateDevice using the app's provided creation info.
     const VkDeviceCreateInfo* appDeviceInfo = createInfo->vulkanCreateInfo;
     VkDeviceCreateInfo modifiedDeviceInfo = *appDeviceInfo;
 
     std::vector<const char*> deviceExts(appDeviceInfo->ppEnabledExtensionNames,
                                          appDeviceInfo->ppEnabledExtensionNames + appDeviceInfo->enabledExtensionCount);
+
+#if defined(__APPLE__)
+    // Inject VK_KHR_portability_subset for MoltenVK on macOS.
     bool hasPortabilitySubset = false;
     for (const auto* ext : deviceExts)
     {
@@ -3335,6 +3368,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
     {
         deviceExts.push_back(VK_EXT_METAL_OBJECTS_EXTENSION_NAME);
     }
+#endif
 
     modifiedDeviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
     modifiedDeviceInfo.ppEnabledExtensionNames = deviceExts.data();
@@ -3364,6 +3398,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
 // Metal extension
 // ============================================================================
 
+#ifdef XR_USE_GRAPHICS_API_METAL
 static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
     XrInstance instance, XrSystemId systemId,
     XrGraphicsRequirementsMetalKHR* graphicsRequirements)
@@ -3415,6 +3450,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
     spdlog::info("OXRSys: Metal graphics requirements provided");
     return XR_SUCCESS;
 }
+#endif
 
 // ============================================================================
 // xrGetInstanceProcAddr — the main dispatch function
@@ -3549,12 +3585,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     DISPATCH(xrSessionInsertDebugUtilsLabelEXT, OxrSessionInsertDebugUtilsLabelEXT)
 
     // Metal extension
+#ifdef XR_USE_GRAPHICS_API_METAL
     DISPATCH(xrGetMetalGraphicsRequirementsKHR, OxrGetMetalGraphicsRequirementsKHR)
     if (std::strcmp(name, UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS) == 0)
     {
         *function = reinterpret_cast<PFN_xrVoidFunction>(OxrGetMetalGraphicsRequirementsKHR);
         return XR_SUCCESS;
     }
+#endif
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     // Vulkan v1 extension
