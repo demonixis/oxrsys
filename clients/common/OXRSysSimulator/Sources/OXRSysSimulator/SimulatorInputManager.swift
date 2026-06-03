@@ -211,6 +211,8 @@ final class SimulatorInputManager {
         packet.headOrientation = (headQuat.imag.x, headQuat.imag.y, headQuat.imag.z, headQuat.real)
 
         // Controllers — orient same as head for simplicity
+        packet.trackingFlags |= TrackingFlagsValues.leftControllerActive
+        packet.trackingFlags |= TrackingFlagsValues.rightControllerActive
         packet.leftControllerPos = (leftControllerPos.x, leftControllerPos.y, leftControllerPos.z)
         packet.leftControllerRot = (headQuat.imag.x, headQuat.imag.y, headQuat.imag.z, headQuat.real)
         packet.rightControllerPos = (rightControllerPos.x, rightControllerPos.y, rightControllerPos.z)

@@ -49,7 +49,8 @@ The handshake exposes:
 - advertised ports
 - render and encoded resolution
 - refresh rate
-- server and device names
+- server and device names; Android clients send the OpenXR `systemName` in
+  `ClientConnect.deviceName`
 - preferred codec and bitrate limits
 
 ## Video Stream
@@ -90,6 +91,9 @@ The current stream also includes two recovery and timing helpers:
 - optional 26-joint hand tracking payloads for each hand
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
+Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
+`TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
+controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.
 
 Velocity values are optional. Zero vectors mean the runtime should fall back to its bounded finite-difference prediction path.
 

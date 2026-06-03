@@ -8,6 +8,7 @@
 #include <array>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "../../clients/common/src/Protocol.h"
 
@@ -60,12 +61,15 @@ public:
     XrVector2f GetThumbstickValue(Hand hand) const;
     bool GetButtonClick(Hand hand, const std::string& componentPath) const;
     bool IsInputDeviceActive(Hand hand) const;
+    bool IsControllerTrackingActive(Hand hand) const;
     bool IsHandTrackingActive(Hand hand) const;
     std::string GetCurrentInteractionProfile(Hand hand) const;
+    std::vector<std::string> GetActiveInteractionProfiles(Hand hand) const;
     bool GetBooleanComponent(Hand hand, const std::string& componentPath) const;
     float GetFloatComponent(Hand hand, const std::string& componentPath) const;
     XrVector2f GetVector2fComponent(Hand hand, const std::string& componentPath) const;
     XrPosef GetPoseComponent(Hand hand, const std::string& componentPath) const;
+    void SetStreamingClientName(const std::string& clientName);
 
     // Conformance automation overrides
     void SetAutomationInteractionProfile(Hand hand, const std::string& interactionProfile, bool isActive);
@@ -118,6 +122,9 @@ private:
     XrVector2f leftThumbstick_ = {0.0f, 0.0f};
     XrVector2f rightThumbstick_ = {0.0f, 0.0f};
     uint32_t buttonState_ = 0;
+    std::array<bool, 2> streamingControllerActive_ = {false, false};
+    std::string streamingClientName_;
+    std::string streamingControllerProfile_;
 
     // Controller positions (world space offsets)
     glm::vec3 leftControllerPos_ = {-0.2f, 1.3f, -0.4f};

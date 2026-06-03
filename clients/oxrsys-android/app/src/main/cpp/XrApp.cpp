@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <numeric>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <EGL/egl.h>
@@ -78,6 +79,53 @@ namespace
 
 constexpr float kPreferredDisplayRefreshRateHz =
     static_cast<float>(OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ);
+
+std::string JoinExtensionNames(const std::vector<const char*>& extensionNames)
+{
+    std::string joined;
+    for (const char* extensionName : extensionNames)
+    {
+        if (!joined.empty())
+        {
+            joined += ", ";
+        }
+        joined += extensionName;
+    }
+    return joined;
+}
+
+std::string PathToString(XrInstance instance, XrPath path)
+{
+    if (path == XR_NULL_PATH)
+    {
+        return "<none>";
+    }
+
+    char buffer[XR_MAX_PATH_LENGTH] = {};
+    uint32_t count = 0;
+    if (XR_FAILED(xrPathToString(instance, path, sizeof(buffer), &count, buffer)))
+    {
+        return "<unknown>";
+    }
+    return buffer;
+}
+
+bool HasValidJointPosition(const XrHandJointLocationEXT& joint)
+{
+    return (joint.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+           std::isfinite(joint.pose.position.x) &&
+           std::isfinite(joint.pose.position.y) &&
+           std::isfinite(joint.pose.position.z) &&
+           std::isfinite(joint.radius);
+}
+
+bool HasValidCriticalHandJoints(const XrHandJointLocationEXT* joints)
+{
+    return HasValidJointPosition(joints[XR_HAND_JOINT_PALM_EXT]) &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_WRIST_EXT]) &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_THUMB_TIP_EXT]) &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_INDEX_TIP_EXT]);
+}
 
 } // namespace
 
@@ -367,6 +415,10 @@ bool XrApp::CreateInstance(struct android_app* app)
     foveationConfigurationAvailable_ = hasExtension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
     swapchainUpdateAvailable_ = hasExtension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
     displayRefreshRateAvailable_ = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    const bool metaTouchControllerPlusAvailable =
+        hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
+    const bool picoControllerInteractionAvailable =
+        hasExtension(XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME);
 
     std::vector<const char*> extensions = {
         XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
@@ -391,6 +443,15 @@ bool XrApp::CreateInstance(struct android_app* app)
     {
         extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     }
+    if (metaTouchControllerPlusAvailable)
+    {
+        extensions.push_back(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
+    }
+    if (picoControllerInteractionAvailable)
+    {
+        extensions.push_back(XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME);
+    }
+    LOGI("Enabled OpenXR extensions: %s", JoinExtensionNames(extensions).c_str());
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
     createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
@@ -412,6 +473,27 @@ bool XrApp::CreateInstance(struct android_app* app)
 
     LOGI("OpenXR instance created, systemId = %llu", (unsigned long long)systemId_);
 
+    XrSystemHandTrackingPropertiesEXT handTrackingProperties = {
+        XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+    XrSystemProperties systemProperties = {XR_TYPE_SYSTEM_PROPERTIES};
+    if (handTrackingExtensionAvailable_)
+    {
+        systemProperties.next = &handTrackingProperties;
+    }
+    if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &systemProperties)))
+    {
+        strncpy(headsetSystemName_, systemProperties.systemName, sizeof(headsetSystemName_) - 1);
+        headsetSystemName_[sizeof(headsetSystemName_) - 1] = '\0';
+        if (handTrackingExtensionAvailable_)
+        {
+            handTrackingSupported_ = handTrackingProperties.supportsHandTracking == XR_TRUE;
+        }
+        LOGI("OpenXR system: name='%s' vendor=%u handTracking=%d/%d",
+             headsetSystemName_, systemProperties.vendorId,
+             handTrackingExtensionAvailable_ ? 1 : 0,
+             handTrackingSupported_ ? 1 : 0);
+    }
+
     if (handTrackingExtensionAvailable_)
     {
         xrGetInstanceProcAddr(instance_, "xrCreateHandTrackerEXT",
@@ -420,15 +502,6 @@ bool XrApp::CreateInstance(struct android_app* app)
                               reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyHandTrackerEXT_));
         xrGetInstanceProcAddr(instance_, "xrLocateHandJointsEXT",
                               reinterpret_cast<PFN_xrVoidFunction*>(&xrLocateHandJointsEXT_));
-
-        XrSystemHandTrackingPropertiesEXT handTrackingProperties = {
-            XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
-        XrSystemProperties systemProperties = {XR_TYPE_SYSTEM_PROPERTIES};
-        systemProperties.next = &handTrackingProperties;
-        if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &systemProperties)))
-        {
-            handTrackingSupported_ = handTrackingProperties.supportsHandTracking == XR_TRUE;
-        }
 
         LOGI("Hand tracking support: extension=%d runtime=%d",
              handTrackingExtensionAvailable_ ? 1 : 0,
@@ -823,10 +896,6 @@ bool XrApp::SetupActions()
     strncpy(actionInfo.localizedActionName, "Menu", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &menuAction_), "xrCreateAction(menu)");
 
-    // Suggest interaction profile bindings (Oculus Touch)
-    XrPath touchProfilePath;
-    xrStringToPath(instance_, "/interaction_profiles/oculus/touch_controller", &touchProfilePath);
-
     XrPath bindingPaths[13];
     xrStringToPath(instance_, "/user/hand/left/input/grip/pose", &bindingPaths[0]);
     xrStringToPath(instance_, "/user/hand/right/input/grip/pose", &bindingPaths[1]);
@@ -858,12 +927,50 @@ bool XrApp::SetupActions()
         {menuAction_, bindingPaths[12]},
     };
 
-    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    suggestedBindings.interactionProfile = touchProfilePath;
-    suggestedBindings.suggestedBindings = bindings;
-    suggestedBindings.countSuggestedBindings = sizeof(bindings) / sizeof(bindings[0]);
-    XR_CHECK(xrSuggestInteractionProfileBindings(instance_, &suggestedBindings),
-             "xrSuggestInteractionProfileBindings");
+    const char* controllerProfiles[] = {
+        "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/meta/touch_controller_quest_1_rift_s",
+        "/interaction_profiles/meta/touch_controller_quest_2",
+        "/interaction_profiles/meta/touch_plus_controller",
+        "/interaction_profiles/meta/touch_controller_plus",
+        "/interaction_profiles/bytedance/pico_neo3_controller",
+        "/interaction_profiles/bytedance/pico4_controller",
+    };
+
+    uint32_t acceptedProfiles = 0;
+    for (const char* controllerProfile : controllerProfiles)
+    {
+        XrPath profilePath = XR_NULL_PATH;
+        XrResult pathResult = xrStringToPath(instance_, controllerProfile, &profilePath);
+        if (XR_FAILED(pathResult))
+        {
+            LOGW("Controller profile path unavailable: %s result=%d",
+                 controllerProfile, pathResult);
+            continue;
+        }
+
+        XrInteractionProfileSuggestedBinding suggestedBindings = {
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile = profilePath;
+        suggestedBindings.suggestedBindings = bindings;
+        suggestedBindings.countSuggestedBindings = sizeof(bindings) / sizeof(bindings[0]);
+        XrResult suggestResult = xrSuggestInteractionProfileBindings(instance_, &suggestedBindings);
+        if (XR_SUCCEEDED(suggestResult))
+        {
+            ++acceptedProfiles;
+            LOGI("Controller bindings accepted for %s", controllerProfile);
+        }
+        else
+        {
+            LOGW("Controller bindings unsupported for %s result=%d",
+                 controllerProfile, suggestResult);
+        }
+    }
+    if (acceptedProfiles == 0)
+    {
+        LOGE("No controller interaction profile accepted");
+        return false;
+    }
 
     // Create grip pose spaces for each hand
     for (int hand = 0; hand < 2; hand++)
@@ -877,7 +984,7 @@ bool XrApp::SetupActions()
                  "xrCreateActionSpace(grip)");
     }
 
-    LOGI("Controller actions set up (Oculus Touch profile)");
+    LOGI("Controller actions set up (%u profile suggestions accepted)", acceptedProfiles);
     return true;
 }
 
@@ -1512,7 +1619,8 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
     connect.maxBitrateMbps = 100;
     connect.refreshRateHz = clientRefreshRateHz_;
-    strncpy(connect.deviceName, "Quest", sizeof(connect.deviceName) - 1);
+    strncpy(connect.deviceName, headsetSystemName_, sizeof(connect.deviceName) - 1);
+    connect.deviceName[sizeof(connect.deviceName) - 1] = '\0';
 
     if (usbAdb)
     {
@@ -1524,9 +1632,9 @@ void XrApp::SendClientConnect(const char* serverIp)
         send(controlSocket_, &connect, sizeof(connect), MSG_DONTWAIT);
     }
 
-    LOGI("Sent ClientConnect via %s to %s:%d (refresh=%uHz)",
+    LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz)",
          usbAdb ? "USB ADB" : "WiFi", serverIp, protocol::CONTROL_PORT,
-         clientRefreshRateHz_);
+         connect.deviceName, clientRefreshRateHz_);
 }
 
 void XrApp::SendLatencyReport()
@@ -1764,7 +1872,18 @@ void XrApp::RunFrame()
             static uint32_t syncLogCount = 0;
             if (++syncLogCount % 270 == 1)
             {
-                LOGI("xrSyncActions result=%d", syncResult);
+                XrInteractionProfileState leftProfile = {XR_TYPE_INTERACTION_PROFILE_STATE};
+                XrInteractionProfileState rightProfile = {XR_TYPE_INTERACTION_PROFILE_STATE};
+                XrResult leftProfileResult =
+                    xrGetCurrentInteractionProfile(session_, handPaths_[0], &leftProfile);
+                XrResult rightProfileResult =
+                    xrGetCurrentInteractionProfile(session_, handPaths_[1], &rightProfile);
+                LOGI("xrSyncActions result=%d profiles L=%s(%d) R=%s(%d)",
+                     syncResult,
+                     PathToString(instance_, leftProfile.interactionProfile).c_str(),
+                     leftProfileResult,
+                     PathToString(instance_, rightProfile.interactionProfile).c_str(),
+                     rightProfileResult);
             }
         }
 
@@ -2281,10 +2400,16 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     // Hand tracking joints
     if (xrLocateHandJointsEXT_ != nullptr)
     {
+        static bool lastHandActive[2] = {false, false};
         for (int hand = 0; hand < 2; ++hand)
         {
             if (handTrackers_[hand] == XR_NULL_HANDLE)
             {
+                if (lastHandActive[hand])
+                {
+                    LOGI("Hand tracking %s inactive (tracker missing)", hand == 0 ? "left" : "right");
+                    lastHandActive[hand] = false;
+                }
                 continue;
             }
 
@@ -2299,7 +2424,18 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
 
             XrResult locateResult =
                 xrLocateHandJointsEXT_(handTrackers_[hand], &locateInfo, &locations);
-            if (XR_FAILED(locateResult) || locations.isActive != XR_TRUE)
+            const bool handActive = XR_SUCCEEDED(locateResult) &&
+                                    locations.isActive == XR_TRUE &&
+                                    HasValidCriticalHandJoints(jointLocations);
+            if (handActive != lastHandActive[hand])
+            {
+                LOGI("Hand tracking %s %s locateResult=%d isActive=%d",
+                     hand == 0 ? "left" : "right",
+                     handActive ? "active" : "inactive",
+                     locateResult, locations.isActive == XR_TRUE ? 1 : 0);
+                lastHandActive[hand] = handActive;
+            }
+            if (!handActive)
             {
                 continue;
             }
@@ -2322,11 +2458,31 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     // Controller poses
     if (gripSpaces_[0] != XR_NULL_HANDLE && gripSpaces_[1] != XR_NULL_HANDLE)
     {
+        static bool lastControllerActive[2] = {false, false};
         for (int hand = 0; hand < 2; hand++)
         {
             XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
             XrResult locResult = xrLocateSpace(gripSpaces_[hand], appSpace_,
                                                 predictedDisplayTime, &loc);
+
+            const bool controllerActive =
+                XR_SUCCEEDED(locResult) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+            if (controllerActive)
+            {
+                packet.trackingFlags |= (hand == 0)
+                    ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE
+                    : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+            }
+            if (controllerActive != lastControllerActive[hand])
+            {
+                LOGI("Controller %s %s locateResult=%d flags=0x%lx",
+                     hand == 0 ? "left" : "right",
+                     controllerActive ? "active" : "inactive",
+                     locResult, (unsigned long)loc.locationFlags);
+                lastControllerActive[hand] = controllerActive;
+            }
 
             // Debug: log controller locate results periodically
             static uint32_t ctrlLogCounter = 0;
@@ -2336,9 +2492,7 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
                      locResult, (unsigned long)loc.locationFlags);
             }
 
-            if (XR_SUCCEEDED(locResult) &&
-                (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
-                (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+            if (controllerActive)
             {
                 float* pos = (hand == 0) ? packet.leftControllerPos : packet.rightControllerPos;
                 float* rot = (hand == 0) ? packet.leftControllerRot : packet.rightControllerRot;

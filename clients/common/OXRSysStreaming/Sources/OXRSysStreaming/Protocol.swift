@@ -273,6 +273,8 @@ public struct HandJointData: Sendable {
 public struct TrackingFlagsValues {
     public static let leftHandActive: UInt32 = 0x0001
     public static let rightHandActive: UInt32 = 0x0002
+    public static let leftControllerActive: UInt32 = 0x0004
+    public static let rightControllerActive: UInt32 = 0x0008
 }
 
 public struct ButtonFlags {

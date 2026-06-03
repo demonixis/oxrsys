@@ -1223,8 +1223,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
-    if (auto* velocities = reinterpret_cast<XrSpaceVelocities*>(
-            FindNextStructure(spaceLocations->next, XR_TYPE_SPACE_VELOCITIES)))
+    auto* velocities = reinterpret_cast<XrSpaceVelocities*>(
+        FindNextStructure(spaceLocations->next, XR_TYPE_SPACE_VELOCITIES));
+    if (velocities != nullptr)
     {
         uint32_t velocityCapacity = velocities->velocityCount;
         velocities->velocityCount = requiredLocationCount;
@@ -1243,8 +1244,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
 
         for (uint32_t i = 0; i < requiredLocationCount; ++i)
         {
-            velocities->velocities[i].velocityFlags =
-                XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+            velocities->velocities[i].velocityFlags = 0;
             velocities->velocities[i].linearVelocity = {0.0f, 0.0f, 0.0f};
             velocities->velocities[i].angularVelocity = {0.0f, 0.0f, 0.0f};
         }
@@ -1267,6 +1267,13 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
 
         spaceLocations->locations[i].locationFlags = location.locationFlags;
         spaceLocations->locations[i].pose = location.pose;
+        if (velocities != nullptr &&
+            (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0)
+        {
+            velocities->velocities[i].velocityFlags =
+                XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+        }
     }
 
     return XR_SUCCESS;
@@ -2164,37 +2171,39 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
 
     for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
     {
-        std::string profilePathString = inputManager.GetCurrentInteractionProfile(hand);
-        if (profilePathString.empty())
-        {
-            continue;
-        }
-        XrPath profilePath = XR_NULL_PATH;
-        Runtime::Get().StringToPath(profilePathString.c_str(), &profilePath);
-
-        auto profileIt = gSuggestedBindings.find(static_cast<uint64_t>(profilePath));
-        if (profileIt == gSuggestedBindings.end())
-        {
-            continue;
-        }
-
         XrPath expectedTopLevelPath = TopLevelPathFromHand(hand);
-        for (const auto& binding : profileIt->second)
+        for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
         {
-            if (binding.topLevelPath != expectedTopLevelPath)
+            if (profilePathString.empty())
+            {
+                continue;
+            }
+            XrPath profilePath = XR_NULL_PATH;
+            Runtime::Get().StringToPath(profilePathString.c_str(), &profilePath);
+
+            auto profileIt = gSuggestedBindings.find(static_cast<uint64_t>(profilePath));
+            if (profileIt == gSuggestedBindings.end())
             {
                 continue;
             }
 
-            auto* action = Runtime::Get().FromHandle<ActionState>(binding.actionHandle);
-            if (!action || !IsActionSetActive(syncInfo, action))
+            for (const auto& binding : profileIt->second)
             {
-                continue;
-            }
+                if (binding.topLevelPath != expectedTopLevelPath)
+                {
+                    continue;
+                }
 
-            XrPath subactionPath = action->GetSubactionPaths().empty() ? XR_NULL_PATH : binding.topLevelPath;
-            AccumulateBindingState(inputManager, binding, action, subactionPath,
-                                    aggregatedStates[binding.actionHandle][static_cast<uint64_t>(subactionPath)]);
+                auto* action = Runtime::Get().FromHandle<ActionState>(binding.actionHandle);
+                if (!action || !IsActionSetActive(syncInfo, action))
+                {
+                    continue;
+                }
+
+                XrPath subactionPath = action->GetSubactionPaths().empty() ? XR_NULL_PATH : binding.topLevelPath;
+                AccumulateBindingState(inputManager, binding, action, subactionPath,
+                                        aggregatedStates[binding.actionHandle][static_cast<uint64_t>(subactionPath)]);
+            }
         }
     }
 
@@ -2461,6 +2470,26 @@ static std::string LocalizedInteractionProfileName(Session* session, XrPath sour
     if (profilePath == "/interaction_profiles/oculus/touch_controller")
     {
         return "Oculus Touch Controller";
+    }
+    if (profilePath == "/interaction_profiles/meta/touch_controller_quest_1_rift_s")
+    {
+        return "Meta Quest 1/Rift S Touch Controller";
+    }
+    if (profilePath == "/interaction_profiles/meta/touch_controller_quest_2")
+    {
+        return "Meta Quest 2 Touch Controller";
+    }
+    if (profilePath == "/interaction_profiles/meta/touch_plus_controller")
+    {
+        return "Meta Touch Plus Controller";
+    }
+    if (profilePath == "/interaction_profiles/bytedance/pico_neo3_controller")
+    {
+        return "PICO Neo3 Controller";
+    }
+    if (profilePath == "/interaction_profiles/bytedance/pico4_controller")
+    {
+        return "PICO 4 Controller";
     }
     if (profilePath == "/interaction_profiles/ext/hand_interaction_ext")
     {

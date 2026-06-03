@@ -335,25 +335,43 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
                                      glm::radians(35.0f)));
     }
 
-    StoreVec3(outPacket.leftControllerPos,
-              PredictPosition(LoadVec3(previous.packet.leftControllerPos),
-                              LoadVec3(current.packet.leftControllerPos),
-                              dtSeconds, positionHorizonSeconds, 6.0f));
-    StoreQuat(outPacket.leftControllerRot,
-              PredictOrientation(LoadQuat(previous.packet.leftControllerRot),
-                                 LoadQuat(current.packet.leftControllerRot),
-                                 dtSeconds, controllerRotationHorizonSeconds,
-                                 glm::radians(45.0f)));
+    const bool previousLeftControllerActive =
+        (previous.packet.trackingFlags &
+         oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
+    const bool currentLeftControllerActive =
+        (current.packet.trackingFlags &
+         oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
+    if (previousLeftControllerActive && currentLeftControllerActive)
+    {
+        StoreVec3(outPacket.leftControllerPos,
+                  PredictPosition(LoadVec3(previous.packet.leftControllerPos),
+                                  LoadVec3(current.packet.leftControllerPos),
+                                  dtSeconds, positionHorizonSeconds, 6.0f));
+        StoreQuat(outPacket.leftControllerRot,
+                  PredictOrientation(LoadQuat(previous.packet.leftControllerRot),
+                                     LoadQuat(current.packet.leftControllerRot),
+                                     dtSeconds, controllerRotationHorizonSeconds,
+                                     glm::radians(45.0f)));
+    }
 
-    StoreVec3(outPacket.rightControllerPos,
-              PredictPosition(LoadVec3(previous.packet.rightControllerPos),
-                              LoadVec3(current.packet.rightControllerPos),
-                              dtSeconds, positionHorizonSeconds, 6.0f));
-    StoreQuat(outPacket.rightControllerRot,
-              PredictOrientation(LoadQuat(previous.packet.rightControllerRot),
-                                 LoadQuat(current.packet.rightControllerRot),
-                                 dtSeconds, controllerRotationHorizonSeconds,
-                                 glm::radians(45.0f)));
+    const bool previousRightControllerActive =
+        (previous.packet.trackingFlags &
+         oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0;
+    const bool currentRightControllerActive =
+        (current.packet.trackingFlags &
+         oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0;
+    if (previousRightControllerActive && currentRightControllerActive)
+    {
+        StoreVec3(outPacket.rightControllerPos,
+                  PredictPosition(LoadVec3(previous.packet.rightControllerPos),
+                                  LoadVec3(current.packet.rightControllerPos),
+                                  dtSeconds, positionHorizonSeconds, 6.0f));
+        StoreQuat(outPacket.rightControllerRot,
+                  PredictOrientation(LoadQuat(previous.packet.rightControllerRot),
+                                     LoadQuat(current.packet.rightControllerRot),
+                                     dtSeconds, controllerRotationHorizonSeconds,
+                                     glm::radians(45.0f)));
+    }
 
     return true;
 }

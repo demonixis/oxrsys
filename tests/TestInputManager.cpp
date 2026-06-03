@@ -5,8 +5,10 @@
 
 #include "InputManager.h"
 #include "TrackingReceiver.h"
+#include <algorithm>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
+#include <vector>
 
 using Catch::Matchers::WithinAbs;
 
@@ -179,6 +181,128 @@ TEST_CASE("InputManager — streaming head pose", "[input]")
     CHECK(std::abs(pose.orientation.y) > 0.01f);
 }
 
+TEST_CASE("InputManager — streaming controller activity gates pose updates", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Meta Quest 2");
+
+    oxr::protocol::TrackingPacket active = {};
+    active.timestampNs = 1'000'000'000;
+    active.headOrientation[3] = 1.0f;
+    active.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    active.leftControllerPos[0] = -0.35f;
+    active.leftControllerPos[1] = 1.20f;
+    active.leftControllerPos[2] = -0.55f;
+    active.leftControllerRot[3] = 1.0f;
+    active.rightControllerPos[0] = 0.35f;
+    active.rightControllerPos[1] = 1.25f;
+    active.rightControllerPos[2] = -0.50f;
+    active.rightControllerRot[3] = 1.0f;
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&active), sizeof(active));
+    im.Update(0.0f);
+
+    CHECK(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK(im.IsInputDeviceActive(InputManager::Hand::Left));
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/meta/touch_controller_quest_2");
+    XrPosef left = im.GetControllerPose(InputManager::Hand::Left);
+    CHECK_THAT(left.position.x, WithinAbs(-0.35f, 0.001f));
+    CHECK_THAT(left.position.y, WithinAbs(1.20f, 0.001f));
+    CHECK_THAT(left.position.z, WithinAbs(-0.55f, 0.001f));
+
+    oxr::protocol::TrackingPacket inactive = {};
+    inactive.timestampNs = 1'011'111'111;
+    inactive.headOrientation[3] = 1.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&inactive), sizeof(inactive));
+    im.Update(0.0f);
+
+    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK_FALSE(im.IsInputDeviceActive(InputManager::Hand::Left));
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left).empty());
+    left = im.GetControllerPose(InputManager::Hand::Left);
+    CHECK_THAT(left.position.x, WithinAbs(-0.35f, 0.001f));
+    CHECK_THAT(left.position.y, WithinAbs(1.20f, 0.001f));
+    CHECK_THAT(left.position.z, WithinAbs(-0.55f, 0.001f));
+}
+
+TEST_CASE("InputManager — hand tracking keeps the hand active without controller flags", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("PICO 4");
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
+    for (uint32_t i = 0; i < oxr::protocol::HAND_JOINT_COUNT; ++i)
+    {
+        packet.leftHandJoints[i][0] = 0.01f * static_cast<float>(i);
+        packet.leftHandJoints[i][1] = 1.0f;
+        packet.leftHandJoints[i][2] = -0.2f;
+        packet.leftHandJoints[i][3] = 0.01f;
+    }
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
+    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK(im.IsInputDeviceActive(InputManager::Hand::Left));
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/ext/hand_interaction_ext");
+}
+
+TEST_CASE("InputManager — streaming client names map to controller profiles and aliases", "[input]")
+{
+    struct Case
+    {
+        const char* clientName;
+        const char* expectedProfile;
+    };
+
+    const Case cases[] = {
+        {"Oculus Quest", "/interaction_profiles/oculus/touch_controller"},
+        {"Meta Quest 2", "/interaction_profiles/meta/touch_controller_quest_2"},
+        {"Meta Quest 3", "/interaction_profiles/meta/touch_plus_controller"},
+        {"PICO Neo3", "/interaction_profiles/bytedance/pico_neo3_controller"},
+        {"PICO 4", "/interaction_profiles/bytedance/pico4_controller"},
+    };
+
+    for (const Case& testCase : cases)
+    {
+        INFO(testCase.clientName);
+        InputManager im;
+        TrackingReceiver receiver;
+        im.SetTrackingReceiver(&receiver);
+        im.SetStreamingClientName(testCase.clientName);
+
+        oxr::protocol::TrackingPacket packet = {};
+        packet.timestampNs = 1'000'000'000;
+        packet.headOrientation[3] = 1.0f;
+        packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+        packet.leftControllerRot[3] = 1.0f;
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+
+        CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) == testCase.expectedProfile);
+        std::vector<std::string> profiles = im.GetActiveInteractionProfiles(InputManager::Hand::Left);
+        CHECK(std::find(profiles.begin(), profiles.end(), testCase.expectedProfile) != profiles.end());
+        CHECK(std::find(profiles.begin(), profiles.end(),
+                        "/interaction_profiles/khr/simple_controller") != profiles.end());
+        if (std::string(testCase.expectedProfile).find("/interaction_profiles/meta/") == 0)
+        {
+            CHECK(std::find(profiles.begin(), profiles.end(),
+                            "/interaction_profiles/oculus/touch_controller") != profiles.end());
+        }
+    }
+}
+
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")
 {
     TrackingReceiver receiver;
@@ -213,6 +337,36 @@ TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[in
     {
         CHECK(std::abs(predicted.headOrientation[1]) > std::abs(second.headOrientation[1]));
     }
+}
+
+TEST_CASE("TrackingReceiver — controller prediction requires active history", "[input]")
+{
+    TrackingReceiver receiver;
+
+    oxr::protocol::TrackingPacket inactive = {};
+    inactive.timestampNs = 1'000'000'000;
+    inactive.headOrientation[3] = 1.0f;
+
+    oxr::protocol::TrackingPacket active = {};
+    active.timestampNs = 1'011'111'111;
+    active.headOrientation[3] = 1.0f;
+    active.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    active.leftControllerPos[0] = -0.30f;
+    active.leftControllerPos[1] = 1.10f;
+    active.leftControllerPos[2] = -0.50f;
+    active.leftControllerRot[3] = 1.0f;
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&inactive), sizeof(inactive));
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&active), sizeof(active));
+    receiver.SetPredictionHorizonMs(20.0f);
+
+    oxr::protocol::TrackingPacket predicted = {};
+    REQUIRE(receiver.GetPredictedPose(predicted));
+
+    CHECK((predicted.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0);
+    CHECK_THAT(predicted.leftControllerPos[0], WithinAbs(active.leftControllerPos[0], 0.001f));
+    CHECK_THAT(predicted.leftControllerPos[1], WithinAbs(active.leftControllerPos[1], 0.001f));
+    CHECK_THAT(predicted.leftControllerPos[2], WithinAbs(active.leftControllerPos[2], 0.001f));
 }
 
 TEST_CASE("TrackingReceiver — angular velocity uses the full prediction horizon", "[input]")

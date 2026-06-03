@@ -88,19 +88,25 @@ static std::string ComponentFromBindingPath(const std::string& bindingPath)
     return bindingPath.substr(inputPos + 7);
 }
 
-// Compute world pose of a space
-static XrPosef GetWorldPose(Space* space, const InputManager& inputManager)
+struct LocatedWorldPose
 {
-    XrPosef worldPose{};
-    worldPose.orientation = {0, 0, 0, 1};
-    worldPose.position = {0, 0, 0};
+    XrPosef pose{};
+    bool active = true;
+};
+
+// Compute world pose of a space.
+static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputManager)
+{
+    LocatedWorldPose result{};
+    result.pose.orientation = {0, 0, 0, 1};
+    result.pose.position = {0, 0, 0};
 
     if (space->GetType() == Space::Type::Reference)
     {
         switch (space->GetReferenceSpaceType())
         {
             case XR_REFERENCE_SPACE_TYPE_VIEW:
-                worldPose = inputManager.GetHeadPose();
+                result.pose = inputManager.GetHeadPose();
                 break;
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
@@ -116,44 +122,48 @@ static XrPosef GetWorldPose(Space* space, const InputManager& inputManager)
         auto* action = Runtime::Get().FromHandle<ActionState>(
             reinterpret_cast<uint64_t>(space->GetAction()));
         std::string poseBindingPath;
+        bool poseActive = false;
 
         if (action != nullptr)
         {
             const auto& data = action->GetSubactionData(space->GetSubactionPath());
+            poseActive = data.poseActive;
             poseBindingPath = Runtime::Get().GetPathString(data.poseSourcePath);
 
-            if (poseBindingPath.empty())
+            if (poseBindingPath.empty() || !poseActive)
             {
                 const auto& fallbackData = action->GetSubactionData(XR_NULL_PATH);
+                poseActive = fallbackData.poseActive;
                 poseBindingPath = Runtime::Get().GetPathString(fallbackData.poseSourcePath);
             }
         }
 
-        if (!poseBindingPath.empty())
+        result.active = poseActive;
+        if (poseActive && !poseBindingPath.empty())
         {
             InputManager::Hand hand = HandFromBindingPath(poseBindingPath);
-            worldPose = inputManager.GetPoseComponent(hand, ComponentFromBindingPath(poseBindingPath));
+            result.pose = inputManager.GetPoseComponent(hand, ComponentFromBindingPath(poseBindingPath));
         }
         else
         {
             InputManager::Hand hand = HandFromPath(space->GetSubactionPath());
-            worldPose = inputManager.GetControllerPose(hand);
+            result.pose = inputManager.GetControllerPose(hand);
         }
     }
 
     // Apply the space's offset pose
     const XrPosef& offset = space->GetPoseInSpace();
-    glm::quat worldRot = ToGlm(worldPose.orientation);
-    glm::vec3 worldPos = ToGlm(worldPose.position);
+    glm::quat worldRot = ToGlm(result.pose.orientation);
+    glm::vec3 worldPos = ToGlm(result.pose.position);
     glm::quat offsetRot = ToGlm(offset.orientation);
     glm::vec3 offsetPos = ToGlm(offset.position);
 
     glm::quat finalRot = worldRot * offsetRot;
     glm::vec3 finalPos = worldPos + worldRot * offsetPos;
 
-    worldPose.orientation = ToXr(finalRot);
-    worldPose.position = ToXr(finalPos);
-    return worldPose;
+    result.pose.orientation = ToXr(finalRot);
+    result.pose.position = ToXr(finalPos);
+    return result;
 }
 
 XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)
@@ -174,21 +184,23 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
     const InputManager& inputManager = session_->GetInputManager();
 
     // Get world poses for both spaces
-    XrPosef thisPose = GetWorldPose(this, inputManager);
-    XrPosef basePose = GetWorldPose(baseSpace, inputManager);
+    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
+    LocatedWorldPose basePose = GetWorldPose(baseSpace, inputManager);
 
     // Compute relative pose: this relative to base
-    glm::quat baseRotInv = glm::inverse(ToGlm(basePose.orientation));
-    glm::vec3 basePos = ToGlm(basePose.position);
-    glm::vec3 thisPos = ToGlm(thisPose.position);
-    glm::quat thisRot = ToGlm(thisPose.orientation);
+    glm::quat baseRotInv = glm::inverse(ToGlm(basePose.pose.orientation));
+    glm::vec3 basePos = ToGlm(basePose.pose.position);
+    glm::vec3 thisPos = ToGlm(thisPose.pose.position);
+    glm::quat thisRot = ToGlm(thisPose.pose.orientation);
 
     glm::quat relRot = baseRotInv * thisRot;
     glm::vec3 relPos = baseRotInv * (thisPos - basePos);
 
     location->type = XR_TYPE_SPACE_LOCATION;
-    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
-                              XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+    location->locationFlags = (thisPose.active && basePose.active)
+        ? XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
+              XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT
+        : 0;
     location->pose.orientation = ToXr(relRot);
     location->pose.position = ToXr(relPos);
 

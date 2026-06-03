@@ -153,6 +153,7 @@ private:
 
     XrViewConfigurationView viewConfigs_[2] = {};
     XrView views_[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};
+    char headsetSystemName_[XR_MAX_SYSTEM_NAME_SIZE] = "Android XR Headset";
 
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning_ = false;

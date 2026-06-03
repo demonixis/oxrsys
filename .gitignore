@@ -112,3 +112,5 @@ __pycache__
 .cache
 clients/common/OpenXRStreaming/.build
 clients/common/OpenXRSimulator/.build
+clients/Android/android-vr/.gradle
+clients/Android/android-vr/app/.cxx

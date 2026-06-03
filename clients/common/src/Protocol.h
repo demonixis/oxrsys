@@ -209,6 +209,8 @@ enum TrackingFlags : uint32_t
 {
     TRACKING_FLAG_LEFT_HAND_ACTIVE = 0x0001,
     TRACKING_FLAG_RIGHT_HAND_ACTIVE = 0x0002,
+    TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE = 0x0004,
+    TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE = 0x0008,
 };
 
 // ─── Control Channel (bidirectional, UDP on CONTROL_PORT) ───────────────────

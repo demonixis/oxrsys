@@ -27,5 +27,7 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headAngularVelocity), 164)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftHandJoints), 176)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightHandJoints), 592)
+        XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
+        XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
     }
 }

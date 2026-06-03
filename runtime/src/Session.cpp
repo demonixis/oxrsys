@@ -897,9 +897,11 @@ void Session::CheckStreamingConnection()
     // When a client connects, wire up the tracking receiver
     if (streamingServer_->IsClientConnected() && !inputManager_->IsStreaming())
     {
+        std::string clientName = streamingServer_->GetClientName();
         inputManager_->SetTrackingReceiver(streamingServer_->GetTrackingReceiver());
+        inputManager_->SetStreamingClientName(clientName);
         spdlog::info("OXRSys: Client connected ({}), receiving tracking",
-                      streamingServer_->GetClientName());
+                      clientName);
     }
 
     // When client disconnects, clear the tracking receiver

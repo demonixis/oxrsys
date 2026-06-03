@@ -134,6 +134,7 @@ final class AppModel {
             }
 
             if let leftController = snapshot.leftController {
+                packet.trackingFlags |= TrackingFlagsValues.leftControllerActive
                 packet.leftControllerPos = (
                     leftController.position.x,
                     leftController.position.y,
@@ -155,6 +156,7 @@ final class AppModel {
             }
 
             if let rightController = snapshot.rightController {
+                packet.trackingFlags |= TrackingFlagsValues.rightControllerActive
                 packet.rightControllerPos = (
                     rightController.position.x,
                     rightController.position.y,

@@ -1631,6 +1631,194 @@ TEST_CASE("Quest Touch profile reports float and vector inputs", "[runtime][acti
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
+TEST_CASE("Quest Pico and simple profiles report float inputs through automation", "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "multi_controller",
+                 XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Multi Controller",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction valueAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    actionCreateInfo.countSubactionPaths = 1;
+    actionCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(actionCreateInfo.actionName, "controller_value", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Controller Value",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &valueAction));
+
+    struct ProfileCase
+    {
+        const char* profilePath;
+        const char* bindingPath;
+        const char* statePath;
+        float value;
+    };
+
+    const ProfileCase profiles[] = {
+        {"/interaction_profiles/oculus/touch_controller",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.20f},
+        {"/interaction_profiles/meta/touch_controller_quest_2",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.35f},
+        {"/interaction_profiles/meta/touch_plus_controller",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.50f},
+        {"/interaction_profiles/bytedance/pico_neo3_controller",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.65f},
+        {"/interaction_profiles/bytedance/pico4_controller",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.80f},
+        {"/interaction_profiles/khr/simple_controller",
+         "/user/hand/left/input/select/value",
+         "/input/select/value",
+         0.95f},
+    };
+
+    for (const ProfileCase& profile : profiles)
+    {
+        XrActionSuggestedBinding binding = {
+            valueAction, context.Path(profile.bindingPath)};
+        XrInteractionProfileSuggestedBinding suggestedBindings = {
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile = context.Path(profile.profilePath);
+        suggestedBindings.suggestedBindings = &binding;
+        suggestedBindings.countSuggestedBindings = 1;
+        XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    }
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+
+    for (const ProfileCase& profile : profiles)
+    {
+        INFO(profile.profilePath);
+        XrPath interactionProfile = context.Path(profile.profilePath);
+        XR_CHECK(context.setInputDeviceActiveEXT(context.session, interactionProfile,
+                                                 leftHandPath, XR_TRUE));
+        XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                     context.Path(profile.statePath),
+                                                     profile.value));
+        XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+        XrInteractionProfileState interactionProfileState = {XR_TYPE_INTERACTION_PROFILE_STATE};
+        XR_CHECK(xrGetCurrentInteractionProfile(context.session, leftHandPath,
+                                                &interactionProfileState));
+        CHECK(interactionProfileState.interactionProfile == interactionProfile);
+
+        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+        getInfo.action = valueAction;
+        getInfo.subactionPath = leftHandPath;
+        XrActionStateFloat state = {XR_TYPE_ACTION_STATE_FLOAT};
+        XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &state));
+        CHECK(state.isActive == XR_TRUE);
+        CHECK_THAT(state.currentState, WithinAbs(profile.value, 0.001f));
+    }
+
+    XR_CHECK(xrDestroyAction(valueAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("Inactive action spaces clear location flags", "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath touchControllerPath = context.Path("/interaction_profiles/oculus/touch_controller");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "inactive_pose", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Inactive Pose",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction poseAction = XR_NULL_HANDLE;
+    XrActionCreateInfo poseCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    poseCreateInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    poseCreateInfo.countSubactionPaths = 1;
+    poseCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(poseCreateInfo.actionName, "inactive_grip", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(poseCreateInfo.localizedActionName, "Inactive Grip",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &poseCreateInfo, &poseAction));
+
+    XrActionSuggestedBinding binding = {
+        poseAction, context.Path("/user/hand/left/input/grip/pose")};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchControllerPath;
+    suggestedBindings.suggestedBindings = &binding;
+    suggestedBindings.countSuggestedBindings = 1;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchControllerPath,
+                                             leftHandPath, XR_FALSE));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrActionStateGetInfo poseGetInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    poseGetInfo.action = poseAction;
+    poseGetInfo.subactionPath = leftHandPath;
+    XrActionStatePose poseState = {XR_TYPE_ACTION_STATE_POSE};
+    XR_CHECK(xrGetActionStatePose(context.session, &poseGetInfo, &poseState));
+    CHECK(poseState.isActive == XR_FALSE);
+
+    XrSpace actionSpace = XR_NULL_HANDLE;
+    XrActionSpaceCreateInfo actionSpaceCreateInfo = {XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    actionSpaceCreateInfo.action = poseAction;
+    actionSpaceCreateInfo.subactionPath = leftHandPath;
+    actionSpaceCreateInfo.poseInActionSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    XR_CHECK(xrCreateActionSpace(context.session, &actionSpaceCreateInfo, &actionSpace));
+
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+    XR_CHECK(xrLocateSpace(actionSpace, context.localSpace, 1, &location));
+    CHECK(location.locationFlags == 0);
+
+    XR_CHECK(xrDestroySpace(actionSpace));
+    XR_CHECK(xrDestroyAction(poseAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
 TEST_CASE("Hand interaction pose and value inputs work through automation", "[runtime][hand]")
 {
     RuntimeSessionContext context({

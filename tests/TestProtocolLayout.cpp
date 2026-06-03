@@ -28,4 +28,6 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
     STATIC_REQUIRE(offsetof(TrackingPacket, leftHandJoints) == 176);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightHandJoints) == 592);
+    STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
+    STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
 }

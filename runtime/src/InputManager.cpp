@@ -6,7 +6,9 @@
 #include "TrackingReceiver.h"
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <initializer_list>
 #include <spdlog/spdlog.h>
 
 // XR_EXT_hand_tracking types are in openxr.h
@@ -17,6 +19,74 @@ namespace
 size_t HandIndex(InputManager::Hand hand)
 {
     return (hand == InputManager::Hand::Left) ? 0u : 1u;
+}
+
+std::string Lowercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool ContainsAny(const std::string& value, std::initializer_list<const char*> needles)
+{
+    for (const char* needle : needles)
+    {
+        if (value.find(needle) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string DetectStreamingControllerProfile(const std::string& clientName)
+{
+    const std::string lowerName = Lowercase(clientName);
+
+    if (ContainsAny(lowerName, {"pico 3", "pico3", "neo 3", "neo3"}))
+    {
+        return "/interaction_profiles/bytedance/pico_neo3_controller";
+    }
+    if (ContainsAny(lowerName, {"pico 4", "pico4"}))
+    {
+        return "/interaction_profiles/bytedance/pico4_controller";
+    }
+    if (lowerName.find("pico") != std::string::npos)
+    {
+        return "/interaction_profiles/bytedance/pico4_controller";
+    }
+
+    if (ContainsAny(lowerName, {"quest 3", "quest3", "touch plus"}))
+    {
+        return "/interaction_profiles/meta/touch_plus_controller";
+    }
+    if (ContainsAny(lowerName, {"quest 2", "quest2"}))
+    {
+        return "/interaction_profiles/meta/touch_controller_quest_2";
+    }
+    if (ContainsAny(lowerName, {"quest 1", "quest1", "rift s"}))
+    {
+        return "/interaction_profiles/meta/touch_controller_quest_1_rift_s";
+    }
+    if (ContainsAny(lowerName, {"quest", "oculus", "meta"}))
+    {
+        return "/interaction_profiles/oculus/touch_controller";
+    }
+
+    return "/interaction_profiles/oculus/touch_controller";
+}
+
+void AddProfileIfMissing(std::vector<std::string>& profiles, const std::string& profile)
+{
+    if (profile.empty())
+    {
+        return;
+    }
+    if (std::find(profiles.begin(), profiles.end(), profile) == profiles.end())
+    {
+        profiles.push_back(profile);
+    }
 }
 
 glm::vec3 JointVec3(const InputManager::StreamingHandState& handState, size_t index)
@@ -78,6 +148,24 @@ InputManager::InputManager() = default;
 void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
 {
     trackingReceiver_ = receiver;
+    if (receiver == nullptr)
+    {
+        streamingControllerActive_.fill(false);
+        for (auto& handState : streamingHands_)
+        {
+            handState.active = false;
+        }
+        streamingClientName_.clear();
+        streamingControllerProfile_.clear();
+    }
+}
+
+void InputManager::SetStreamingClientName(const std::string& clientName)
+{
+    streamingClientName_ = clientName;
+    streamingControllerProfile_ = DetectStreamingControllerProfile(clientName);
+    spdlog::info("InputManager: streaming client='{}' controller_profile='{}'",
+                 streamingClientName_, streamingControllerProfile_);
 }
 
 glm::quat InputManager::GetHeadRotation() const
@@ -113,22 +201,33 @@ void InputManager::UpdateFromStreaming()
                            packet.headOrientation[1],   // y
                            packet.headOrientation[2]);  // z
 
-    // Apply controller poses
-    leftControllerPos_ = glm::vec3(packet.leftControllerPos[0],
-                                     packet.leftControllerPos[1],
-                                     packet.leftControllerPos[2]);
-    rightControllerPos_ = glm::vec3(packet.rightControllerPos[0],
-                                      packet.rightControllerPos[1],
-                                      packet.rightControllerPos[2]);
+    const bool leftControllerActive =
+        (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
+    const bool rightControllerActive =
+        (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0;
+    streamingControllerActive_[HandIndex(Hand::Left)] = leftControllerActive;
+    streamingControllerActive_[HandIndex(Hand::Right)] = rightControllerActive;
 
-    leftControllerRot_ = glm::quat(packet.leftControllerRot[3],
-                                     packet.leftControllerRot[0],
-                                     packet.leftControllerRot[1],
-                                     packet.leftControllerRot[2]);
-    rightControllerRot_ = glm::quat(packet.rightControllerRot[3],
-                                      packet.rightControllerRot[0],
-                                      packet.rightControllerRot[1],
-                                      packet.rightControllerRot[2]);
+    if (leftControllerActive)
+    {
+        leftControllerPos_ = glm::vec3(packet.leftControllerPos[0],
+                                       packet.leftControllerPos[1],
+                                       packet.leftControllerPos[2]);
+        leftControllerRot_ = glm::quat(packet.leftControllerRot[3],
+                                       packet.leftControllerRot[0],
+                                       packet.leftControllerRot[1],
+                                       packet.leftControllerRot[2]);
+    }
+    if (rightControllerActive)
+    {
+        rightControllerPos_ = glm::vec3(packet.rightControllerPos[0],
+                                        packet.rightControllerPos[1],
+                                        packet.rightControllerPos[2]);
+        rightControllerRot_ = glm::quat(packet.rightControllerRot[3],
+                                        packet.rightControllerRot[0],
+                                        packet.rightControllerRot[1],
+                                        packet.rightControllerRot[2]);
+    }
 
     // Apply button/trigger states
     buttonState_ = packet.buttonState;
@@ -172,11 +271,11 @@ void InputManager::UpdateFromStreaming()
     {
         spdlog::info("InputManager: streaming pos=({:.3f}, {:.3f}, {:.3f}) "
                       "L=({:.3f},{:.3f},{:.3f}) R=({:.3f},{:.3f},{:.3f}) "
-                      "trig={:.2f}/{:.2f} btn=0x{:x}",
+                      "trig={:.2f}/{:.2f} btn=0x{:x} flags=0x{:x}",
                       headPosition_.x, headPosition_.y, headPosition_.z,
                       leftControllerPos_.x, leftControllerPos_.y, leftControllerPos_.z,
                       rightControllerPos_.x, rightControllerPos_.y, rightControllerPos_.z,
-                      leftTrigger_, rightTrigger_, buttonState_);
+                      leftTrigger_, rightTrigger_, buttonState_, packet.trackingFlags);
     }
 
     // Log Quest IPD/FOV on first packet for debugging
@@ -379,7 +478,17 @@ bool InputManager::IsInputDeviceActive(Hand hand) const
         return automation.isActive;
     }
 
-    return IsHandTrackingActive(hand) || (trackingReceiver_ != nullptr && trackingReceiver_->IsReceiving());
+    return IsHandTrackingActive(hand) || IsControllerTrackingActive(hand);
+}
+
+bool InputManager::IsControllerTrackingActive(Hand hand) const
+{
+    if (IsStreaming())
+    {
+        return streamingControllerActive_[HandIndex(hand)];
+    }
+
+    return false;
 }
 
 bool InputManager::IsHandTrackingActive(Hand hand) const
@@ -412,12 +521,44 @@ std::string InputManager::GetCurrentInteractionProfile(Hand hand) const
         return "/interaction_profiles/ext/hand_interaction_ext";
     }
 
-    if (trackingReceiver_ != nullptr && trackingReceiver_->IsReceiving())
+    if (IsControllerTrackingActive(hand))
     {
-        return "/interaction_profiles/oculus/touch_controller";
+        return streamingControllerProfile_.empty()
+            ? "/interaction_profiles/oculus/touch_controller"
+            : streamingControllerProfile_;
+    }
+
+    if (IsStreaming())
+    {
+        return "";
     }
 
     return "/interaction_profiles/khr/simple_controller";
+}
+
+std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) const
+{
+    std::vector<std::string> profiles;
+    const std::string currentProfile = GetCurrentInteractionProfile(hand);
+    AddProfileIfMissing(profiles, currentProfile);
+
+    const auto& automation = GetAutomationState(hand);
+    if (automation.hasExplicitActivity || currentProfile == "/interaction_profiles/ext/hand_interaction_ext")
+    {
+        return profiles;
+    }
+
+    if (IsControllerTrackingActive(hand))
+    {
+        if (currentProfile.find("/interaction_profiles/meta/") == 0 ||
+            currentProfile == "/interaction_profiles/oculus/touch_controller")
+        {
+            AddProfileIfMissing(profiles, "/interaction_profiles/oculus/touch_controller");
+        }
+        AddProfileIfMissing(profiles, "/interaction_profiles/khr/simple_controller");
+    }
+
+    return profiles;
 }
 
 bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) const
