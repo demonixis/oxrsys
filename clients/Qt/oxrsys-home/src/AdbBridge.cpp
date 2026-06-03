@@ -30,26 +30,35 @@ void appendUnique(QStringList& paths, const QString& path)
     }
 }
 
-bool runAdb(const QStringList& arguments, QString* output, QString* errorMessage)
+QString cleanedPath(QString path)
 {
-    const QString adb = AdbBridge::resolveExecutablePath();
-    if (adb.isEmpty())
+    path = path.trimmed();
+    if (path.size() >= 2)
     {
-        if (errorMessage != nullptr)
+        const QChar first = path.front();
+        const QChar last = path.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
         {
-            *errorMessage = "adb was not found in Android SDK paths or PATH.";
+            path = path.mid(1, path.size() - 2).trimmed();
         }
-        return false;
     }
+    return path;
+}
 
+bool runProcess(const QString& program,
+                const QStringList& arguments,
+                int timeoutMs,
+                QString* output,
+                QString* errorMessage)
+{
     QProcess process;
-    process.start(adb, arguments);
-    if (!process.waitForFinished(10000))
+    process.start(program, arguments);
+    if (!process.waitForFinished(timeoutMs))
     {
         process.kill();
         if (errorMessage != nullptr)
         {
-            *errorMessage = "adb timed out.";
+            *errorMessage = QString("%1 timed out.").arg(QFileInfo(program).fileName());
         }
         return false;
     }
@@ -61,7 +70,9 @@ bool runAdb(const QStringList& arguments, QString* output, QString* errorMessage
         if (errorMessage != nullptr)
         {
             *errorMessage = stderrText.isEmpty()
-                ? QString("adb exited with code %1.").arg(process.exitCode())
+                ? QString("%1 exited with code %2.")
+                      .arg(QFileInfo(program).fileName())
+                      .arg(process.exitCode())
                 : stderrText;
         }
         return false;
@@ -72,6 +83,26 @@ bool runAdb(const QStringList& arguments, QString* output, QString* errorMessage
         *output = stdoutText;
     }
     return true;
+}
+
+bool runAdb(const QStringList& arguments,
+            QString* output,
+            QString* errorMessage,
+            const QString& customPath)
+{
+    const QString adb = AdbBridge::resolveExecutablePath(customPath);
+    if (adb.isEmpty())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = customPath.trimmed().isEmpty()
+                ? "adb was not found in Android SDK paths or PATH."
+                : "custom adb path is invalid or unavailable.";
+        }
+        return false;
+    }
+
+    return runProcess(adb, arguments, 10000, output, errorMessage);
 }
 
 } // namespace
@@ -100,11 +131,13 @@ QList<int> AdbBridge::reversePorts()
     return {9944, 9945, 9946};
 }
 
-QStringList AdbBridge::candidatePaths()
+QStringList AdbBridge::candidatePaths(const QString& customPath)
 {
     QStringList paths;
     const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     const QString executable = adbExecutableName();
+
+    appendUnique(paths, cleanedPath(customPath));
 
     const auto appendAndroidSdk = [&](const QString& root) {
         if (!root.isEmpty())
@@ -137,8 +170,14 @@ QStringList AdbBridge::candidatePaths()
     return paths;
 }
 
-QString AdbBridge::resolveExecutablePath()
+QString AdbBridge::resolveExecutablePath(const QString& customPath)
 {
+    const QString custom = cleanedPath(customPath);
+    if (!custom.isEmpty())
+    {
+        return validateExecutable(custom) ? QFileInfo(custom).absoluteFilePath() : QString();
+    }
+
     for (const QString& candidate : candidatePaths())
     {
         if (isExecutableFile(candidate))
@@ -149,8 +188,40 @@ QString AdbBridge::resolveExecutablePath()
     return {};
 }
 
-AdbStatus AdbBridge::status()
+bool AdbBridge::validateExecutable(const QString& path, QString* errorMessage)
 {
+    const QString cleanPath = cleanedPath(path);
+    if (!isExecutableFile(cleanPath))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "file is not executable";
+        }
+        return false;
+    }
+
+    QString ignoredOutput;
+    return runProcess(cleanPath, {"version"}, 5000, &ignoredOutput, errorMessage);
+}
+
+AdbStatus AdbBridge::status(const QString& customPath)
+{
+    const QString custom = cleanedPath(customPath);
+    if (!custom.isEmpty())
+    {
+        QString error;
+        if (!validateExecutable(custom, &error))
+        {
+            return {QString(),
+                    QString("Custom ADB path is invalid: %1. Select an executable adb that "
+                            "passes `adb version`, or clear the custom path to auto-detect.%2")
+                        .arg(custom,
+                             error.isEmpty() ? QString() : QString(" %1").arg(error))};
+        }
+        return {QFileInfo(custom).absoluteFilePath(),
+                QString("Custom ADB found at %1.").arg(QFileInfo(custom).absoluteFilePath())};
+    }
+
     const QString adb = resolveExecutablePath();
     if (adb.isEmpty())
     {
@@ -214,27 +285,31 @@ QSet<int> AdbBridge::parseReversePorts(const QString& output)
     return ports;
 }
 
-QList<AdbDevice> AdbBridge::devices(QString* errorMessage)
+QList<AdbDevice> AdbBridge::devices(QString* errorMessage, const QString& customPath)
 {
     QString output;
-    if (!runAdb({"devices", "-l"}, &output, errorMessage))
+    if (!runAdb({"devices", "-l"}, &output, errorMessage, customPath))
     {
         return {};
     }
     return parseDevices(output);
 }
 
-QSet<int> AdbBridge::reverseMappings(const QString& serial, QString* errorMessage)
+QSet<int> AdbBridge::reverseMappings(const QString& serial,
+                                     QString* errorMessage,
+                                     const QString& customPath)
 {
     QString output;
-    if (!runAdb({"-s", serial, "reverse", "--list"}, &output, errorMessage))
+    if (!runAdb({"-s", serial, "reverse", "--list"}, &output, errorMessage, customPath))
     {
         return {};
     }
     return parseReversePorts(output);
 }
 
-QSet<int> AdbBridge::configureReverse(const QString& serial, QString* errorMessage)
+QSet<int> AdbBridge::configureReverse(const QString& serial,
+                                      QString* errorMessage,
+                                      const QString& customPath)
 {
     for (int port : reversePorts())
     {
@@ -242,7 +317,8 @@ QSet<int> AdbBridge::configureReverse(const QString& serial, QString* errorMessa
         QString ignoredError;
         runAdb({"-s", serial, "reverse", "--remove", QString("tcp:%1").arg(port)},
                &ignoredOutput,
-               &ignoredError);
+               &ignoredError,
+               customPath);
     }
 
     for (int port : reversePorts())
@@ -251,13 +327,14 @@ QSet<int> AdbBridge::configureReverse(const QString& serial, QString* errorMessa
         if (!runAdb({"-s", serial, "reverse", QString("tcp:%1").arg(port),
                      QString("tcp:%1").arg(port)},
                     &output,
-                    errorMessage))
+                    errorMessage,
+                    customPath))
         {
             return {};
         }
     }
 
-    const QSet<int> configuredPorts = reverseMappings(serial, errorMessage);
+    const QSet<int> configuredPorts = reverseMappings(serial, errorMessage, customPath);
     for (int port : reversePorts())
     {
         if (!configuredPorts.contains(port))

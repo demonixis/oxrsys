@@ -145,6 +145,11 @@ selected ADB device for reverse mappings on `9944`, `9945`, and `9946`. If any U
 is missing, the header shows an action state and exposes a `Configure` button; once all ports are
 mapped, the button is hidden.
 
+The Quest USB ADB section can also store a custom `adb` executable path in the SwiftUI Home
+`UserDefaults`. A selected custom path is tried before SDK, Homebrew, and `PATH` candidates and must
+be executable and pass `adb version`. If the custom path becomes invalid, Home reports that path and
+does not silently fall back; use `Auto Detect` to clear it and resume automatic detection.
+
 ## Runtime Installation And Registration
 
 The packaged Home app installs the bundled runtime into:

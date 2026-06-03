@@ -16,6 +16,10 @@ struct HomeLauncherTests {
         try testQuestUsbDeviceParsing()
         try testQuestUsbReverseParsing()
         try testQuestUsbAdbCandidatePaths()
+        try testQuestUsbAdbCustomPathOrdering()
+        try testQuestUsbAdbCustomResolution()
+        try testQuestUsbAdbInvalidCustomStatus()
+        try testQuestUsbAdbClearRestoresAutoDetection()
         try testServerConfigTransportRoundTrip()
         try testRuntimeActivityParsing()
         try testMacWifiParsing()
@@ -147,6 +151,90 @@ struct HomeLauncherTests {
         try expect(candidates.contains("/Users/tester/Library/Android/sdk/platform-tools/adb"), "Expected default Android SDK adb path")
         try expect(candidates.contains("/opt/homebrew/bin/adb"), "Expected Homebrew adb path")
         try expect(candidates.contains("/custom/bin/adb"), "Expected PATH adb path")
+    }
+
+    private static func testQuestUsbAdbCustomPathOrdering() throws {
+        let candidates = QuestUsbBridge.adbCandidatePaths(
+            customPath: "/custom/adb",
+            environment: [
+                "ANDROID_HOME": "/tmp/android-home",
+                "PATH": "/custom/bin:/usr/bin",
+            ],
+            homeDirectory: "/Users/tester"
+        )
+
+        try expect(candidates.first == "/custom/adb", "Expected custom adb path first")
+        try expect(candidates.contains("/custom/bin/adb"), "Expected automatic PATH candidate after custom path")
+    }
+
+    private static func testQuestUsbAdbCustomResolution() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let customAdb = root.appendingPathComponent("adb")
+        try makeExecutableScript(
+            at: customAdb,
+            contents: """
+            #!/bin/sh
+            if [ "$1" = "version" ]; then
+              echo "Android Debug Bridge version 1.0.41"
+              exit 0
+            fi
+            exit 0
+            """
+        )
+
+        let resolved = QuestUsbBridge.resolveAdbExecutablePath(
+            customPath: customAdb.path,
+            environment: ["PATH": "/usr/bin"],
+            homeDirectory: root.path,
+            includeShellLookup: false
+        )
+        try expect(resolved == customAdb.path, "Expected valid custom adb to be preferred")
+        try expect(QuestUsbBridge.status(customPath: customAdb.path).isAvailable,
+                   "Expected valid custom adb status")
+    }
+
+    private static func testQuestUsbAdbInvalidCustomStatus() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let invalidAdb = root.appendingPathComponent("adb")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: invalidAdb)
+
+        let status = QuestUsbBridge.status(customPath: invalidAdb.path)
+        try expect(!status.isAvailable, "Expected invalid custom adb to be unavailable")
+        try expect(status.message.contains(invalidAdb.path), "Expected invalid custom adb path in status")
+
+        let resolved = QuestUsbBridge.resolveAdbExecutablePath(
+            customPath: invalidAdb.path,
+            environment: ["PATH": "/usr/bin"],
+            homeDirectory: root.path,
+            includeShellLookup: false
+        )
+        try expect(resolved == nil, "Expected invalid custom adb to block automatic fallback")
+    }
+
+    private static func testQuestUsbAdbClearRestoresAutoDetection() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let platformTools = root
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Android", isDirectory: true)
+            .appendingPathComponent("sdk", isDirectory: true)
+            .appendingPathComponent("platform-tools", isDirectory: true)
+        try FileManager.default.createDirectory(at: platformTools, withIntermediateDirectories: true)
+        let autoAdb = platformTools.appendingPathComponent("adb")
+        try makeExecutableScript(at: autoAdb, contents: "#!/bin/sh\nexit 0\n")
+
+        let resolved = QuestUsbBridge.resolveAdbExecutablePath(
+            customPath: "",
+            environment: [:],
+            homeDirectory: root.path,
+            includeShellLookup: false
+        )
+        try expect(resolved == autoAdb.path, "Expected empty custom adb path to restore automatic detection")
     }
 
     private static func testServerConfigTransportRoundTrip() throws {
@@ -311,6 +399,11 @@ struct HomeLauncherTests {
         let executableURL = macOSURL.appendingPathComponent(executableName)
         try Data("#!/bin/zsh\n".utf8).write(to: executableURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executableURL.path)
+    }
+
+    private static func makeExecutableScript(at url: URL, contents: String) throws {
+        try Data(contents.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
     }
 
     private static func temporaryDirectory() throws -> URL {

@@ -30,6 +30,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     @Published var selectedQuestUsbReversePorts: Set<Int> = []
     @Published var wifiStatus = MacWifiStatus.unknown
     @Published var adbStatus = HomeAdbStatus.unknown
+    @Published var customAdbPath: String = ""
     @Published var isAdbInstallGuidancePresented = false
     @Published var runtimeActivity = HomeRuntimeActivity.idle
     @Published private(set) var runtimeStatsHistory: [HomeRuntimeStreamingStats] = []
@@ -40,6 +41,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let runtimeManifestPathKey = "runtimeManifestPath"
+    private let customAdbPathKey = "customAdbPath"
     private let launcherScanner = LauncherAppScanner()
     private let runtimeInstaller = HomeRuntimeInstaller()
     private let maxLogCharacters = 30_000
@@ -56,6 +58,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     init() {
         runtimeManifestPath = defaults.string(forKey: runtimeManifestPathKey) ?? SourceDefaults.defaultRuntimeManifestPath()
+        customAdbPath = defaults.string(forKey: customAdbPathKey) ?? ""
         loadAll()
         if defaults.string(forKey: runtimeManifestPathKey) == nil,
            runtimeInstallStatus.installedRuntimeExists,
@@ -212,6 +215,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         runtimeStatsHistory.last
     }
 
+    private var effectiveCustomAdbPath: String? {
+        let trimmed = customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func loadAll() {
         loadConfigFromDisk()
         refreshRuntimeStatus()
@@ -282,12 +290,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             questUsbDevices = []
             selectedQuestUsbSerial = nil
             selectedQuestUsbReversePorts = []
-            questUsbStatus = "ADB is unavailable. Install adb-enhanced before using USB mode."
+            questUsbStatus = adbStatus.message
             return
         }
 
         do {
-            questUsbDevices = try QuestUsbBridge.devices()
+            questUsbDevices = try QuestUsbBridge.devices(customAdbPath: effectiveCustomAdbPath)
             let usableDevices = questUsbDevices.filter(\.isUsable)
             if let selectedQuestUsbSerial,
                !usableDevices.contains(where: { $0.serial == selectedQuestUsbSerial }) {
@@ -299,7 +307,10 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             selectedQuestUsbReversePorts = []
             if let selectedQuestUsbSerial {
                 selectedQuestUsbReversePorts =
-                    (try? QuestUsbBridge.reverseMappings(for: selectedQuestUsbSerial)) ?? []
+                    (try? QuestUsbBridge.reverseMappings(
+                        for: selectedQuestUsbSerial,
+                        customAdbPath: effectiveCustomAdbPath
+                    )) ?? []
             }
 
             if questUsbDevices.isEmpty {
@@ -324,18 +335,16 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     @discardableResult
     private func refreshAdbStatus() -> Bool {
-        guard let adbPath = QuestUsbBridge.resolveAdbExecutablePath() else {
-            adbStatus = .missing
-            return false
-        }
-        adbStatus = .available(at: adbPath)
-        return true
+        adbStatus = QuestUsbBridge.status(customPath: effectiveCustomAdbPath)
+        return adbStatus.isAvailable
     }
 
     func configureQuestUsbReverse() {
         guard refreshAdbStatus() else {
-            questUsbStatus = "ADB is unavailable. Install adb-enhanced before configuring USB."
-            presentAdbInstallGuidance()
+            questUsbStatus = adbStatus.message
+            if effectiveCustomAdbPath == nil {
+                presentAdbInstallGuidance()
+            }
             return
         }
 
@@ -346,7 +355,10 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         }
 
         do {
-            let configuredPorts = try QuestUsbBridge.configureReverse(for: serial)
+            let configuredPorts = try QuestUsbBridge.configureReverse(
+                for: serial,
+                customAdbPath: effectiveCustomAdbPath
+            )
             selectedQuestUsbReversePorts = configuredPorts
             questUsbStatus = "Verified adb reverse for \(serial) on ports \(configuredPorts.sorted().map(String.init).joined(separator: ", "))."
             statusMessage = "Configured Quest USB ADB transport."
@@ -358,8 +370,10 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     func setMainTransportSelection(_ selection: HomePrimaryTransport) {
         if selection == .usbAdb, !refreshAdbStatus() {
-            questUsbStatus = "ADB is unavailable. USB mode needs adb-enhanced."
-            presentAdbInstallGuidance()
+            questUsbStatus = adbStatus.message
+            if effectiveCustomAdbPath == nil {
+                presentAdbInstallGuidance()
+            }
             return
         }
 
@@ -380,6 +394,22 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     func openAdbInstallHelp() {
         NSWorkspace.shared.open(HomeAdbInstallGuidance.homebrewURL)
         dismissAdbInstallGuidance()
+    }
+
+    func chooseCustomAdbExecutable() {
+        if let selected = chooseExecutableFile(prompt: "Choose ADB", startingAt: customAdbPath) {
+            customAdbPath = selected
+            defaults.set(selected, forKey: customAdbPathKey)
+            statusMessage = "Selected custom ADB executable."
+            refreshTransportHealth(force: true)
+        }
+    }
+
+    func clearCustomAdbPath() {
+        customAdbPath = ""
+        defaults.removeObject(forKey: customAdbPathKey)
+        statusMessage = "ADB will be auto-detected."
+        refreshTransportHealth(force: true)
     }
 
     func resetToDisk() {

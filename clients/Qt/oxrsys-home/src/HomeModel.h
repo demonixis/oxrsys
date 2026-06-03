@@ -29,7 +29,9 @@ class HomeModel final : public QObject
     Q_OBJECT
 
 public:
-    explicit HomeModel(QObject* parent = nullptr);
+    explicit HomeModel(QObject* parent = nullptr,
+                       const QString& settingsOrganization = "OXRSys",
+                       const QString& settingsApplication = "HomeQt");
     ~HomeModel() override;
 
     const HomePaths& paths() const;
@@ -48,6 +50,8 @@ public:
     QString activeLaunchRuntimeManifestPath() const;
     QString statusMessage() const;
     QString questUsbStatus() const;
+    const AdbStatus& adbStatus() const;
+    QString customAdbPath() const;
     QString selectedQuestUsbSerial() const;
     QString selectedLogAppId() const;
     QString currentProfileAppDisplayName() const;
@@ -63,6 +67,8 @@ public slots:
     void setPreferInstalledRuntimeForLaunches(bool enabled);
     void setDeveloperModeEnabled(bool enabled);
     void setSelectedQuestUsbSerial(const QString& serial);
+    void setCustomAdbPath(const QString& path);
+    void clearCustomAdbPath();
     void setSelectedLogAppId(const QString& appId);
     void setMainTransportSelection(const QString& transport);
     void saveStructuredConfig();
@@ -126,6 +132,7 @@ private:
     QString questUsbStatus_ = "USB ADB transport is not configured.";
     QSet<int> selectedQuestUsbReversePorts_;
     AdbStatus adbStatus_;
+    QString customAdbPath_;
     bool wifiReady_ = true;
     QString wifiStatus_ = "WiFi transport readiness has not been checked.";
     QString mainTransportOverride_;

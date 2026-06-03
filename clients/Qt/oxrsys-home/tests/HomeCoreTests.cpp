@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "AdbBridge.h"
+#include "HomeModel.h"
 #include "Launcher.h"
 #include "PlatformSupport.h"
 #include "RuntimeActivity.h"
@@ -13,8 +14,10 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QTimeZone>
 #include <QTemporaryDir>
+#include <QUuid>
 
 #include <stdexcept>
 
@@ -201,6 +204,73 @@ UsbFfs tcp:9946 tcp:9946
     expect(ports == expectedPorts, "Expected reverse ports");
 }
 
+void testAdbCustomPathSelection()
+{
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+#if !defined(Q_OS_WIN)
+    const QString customAdbPath = QDir(temporaryDir.path()).filePath("adb");
+    writeFile(customAdbPath,
+              "#!/bin/sh\n"
+              "if [ \"$1\" = \"version\" ]; then\n"
+              "  echo \"Android Debug Bridge version 1.0.41\"\n"
+              "  exit 0\n"
+              "fi\n"
+              "exit 0\n");
+    makeExecutable(customAdbPath);
+
+    const QStringList candidates = AdbBridge::candidatePaths(customAdbPath);
+    expect(candidates.first() == customAdbPath,
+           "Expected custom adb path to be the first candidate");
+    expect(AdbBridge::resolveExecutablePath(customAdbPath) ==
+               QFileInfo(customAdbPath).absoluteFilePath(),
+           "Expected valid custom adb path to be selected");
+    expect(AdbBridge::status(customAdbPath).isAvailable(),
+           "Expected valid custom adb status");
+#endif
+
+    const QString invalidPath = QDir(temporaryDir.path()).filePath("invalid-adb");
+    writeFile(invalidPath, "not executable");
+    const AdbStatus invalidStatus = AdbBridge::status(invalidPath);
+    expect(!invalidStatus.isAvailable(), "Expected invalid custom adb to be unavailable");
+    expect(invalidStatus.message.contains("Custom ADB path is invalid"),
+           "Expected invalid custom adb status message");
+    expect(AdbBridge::resolveExecutablePath(invalidPath).isEmpty(),
+           "Expected invalid custom adb to block automatic fallback");
+}
+
+void testCustomAdbPreferencePersistence()
+{
+    const QString organization = "OXRSysHomeTests";
+    const QString application =
+        "HomeQt-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings settings(organization, application);
+    settings.clear();
+
+    {
+        HomeModel model(nullptr, organization, application);
+        model.setCustomAdbPath("/tmp/custom-adb");
+        expect(model.customAdbPath() == "/tmp/custom-adb",
+               "Expected custom adb path to update in model");
+    }
+    {
+        HomeModel model(nullptr, organization, application);
+        expect(model.customAdbPath() == "/tmp/custom-adb",
+               "Expected custom adb path to persist in settings");
+        model.clearCustomAdbPath();
+        expect(model.customAdbPath().isEmpty(),
+               "Expected custom adb path to clear in model");
+    }
+    {
+        HomeModel model(nullptr, organization, application);
+        expect(model.customAdbPath().isEmpty(),
+               "Expected cleared custom adb path to persist");
+    }
+
+    settings.clear();
+}
+
 void testRuntimeActivityParsing()
 {
     const RuntimeActivity activity = RuntimeActivity::parse(R"({
@@ -353,6 +423,8 @@ int main(int argc, char** argv)
         testRuntimeLaunchManifestPreference();
         testRuntimeBuildDirectoryCandidates();
         testAdbParsing();
+        testAdbCustomPathSelection();
+        testCustomAdbPreferencePersistence();
         testRuntimeActivityParsing();
         testDesktopInspection();
         testMacAppInspection();

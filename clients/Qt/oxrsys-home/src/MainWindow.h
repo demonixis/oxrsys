@@ -52,6 +52,7 @@ private:
     void revealPath(const QString& path, const QString& label);
     void chooseLauncherApp();
     void chooseRuntimeManifest();
+    void chooseCustomAdbExecutable();
     void openSimulatorWindow();
     void updateConfigFromControls();
 
@@ -108,7 +109,9 @@ private:
     QComboBox* encoderPresetCombo_ = nullptr;
     QComboBox* configTransportCombo_ = nullptr;
     QComboBox* usbDeviceCombo_ = nullptr;
+    QLabel* adbStatusLabel_ = nullptr;
     QLabel* usbStatusLabel_ = nullptr;
+    QPushButton* clearAdbPathButton_ = nullptr;
     QPushButton* configureUsbButton_ = nullptr;
 
     QLabel* refreshRateMetricLabel_ = nullptr;

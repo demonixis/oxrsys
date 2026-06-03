@@ -29,13 +29,19 @@ class AdbBridge
 {
 public:
     static QList<int> reversePorts();
-    static QStringList candidatePaths();
-    static QString resolveExecutablePath();
-    static AdbStatus status();
+    static QStringList candidatePaths(const QString& customPath = {});
+    static QString resolveExecutablePath(const QString& customPath = {});
+    static AdbStatus status(const QString& customPath = {});
+    static bool validateExecutable(const QString& path, QString* errorMessage = nullptr);
     static QList<AdbDevice> parseDevices(const QString& output);
     static QSet<int> parseReversePorts(const QString& output);
 
-    static QList<AdbDevice> devices(QString* errorMessage = nullptr);
-    static QSet<int> reverseMappings(const QString& serial, QString* errorMessage = nullptr);
-    static QSet<int> configureReverse(const QString& serial, QString* errorMessage = nullptr);
+    static QList<AdbDevice> devices(QString* errorMessage = nullptr,
+                                    const QString& customPath = {});
+    static QSet<int> reverseMappings(const QString& serial,
+                                     QString* errorMessage = nullptr,
+                                     const QString& customPath = {});
+    static QSet<int> configureReverse(const QString& serial,
+                                      QString* errorMessage = nullptr,
+                                      const QString& customPath = {});
 };

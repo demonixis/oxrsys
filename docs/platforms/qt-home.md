@@ -58,4 +58,8 @@ If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
 brew install adb-enhanced
 ```
 
-The error message lists the candidate paths that were checked.
+The error message lists the candidate paths that were checked. The Quest USB ADB panel also has
+`Select ADB` and `Auto Detect` actions. A selected custom path is stored in Qt Home `QSettings`,
+is not shared with the SwiftUI Home, and must be executable and pass `adb version`. If it becomes
+invalid, Qt Home reports that selected path and does not silently fall back until `Auto Detect` clears
+the setting.

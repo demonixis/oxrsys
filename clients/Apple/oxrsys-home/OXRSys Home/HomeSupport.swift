@@ -469,10 +469,17 @@ struct HomeAdbStatus: Equatable {
         message: "ADB is required for USB mode."
     )
 
-    static func available(at path: String) -> HomeAdbStatus {
+    static func available(at path: String, isCustom: Bool = false) -> HomeAdbStatus {
         HomeAdbStatus(
             executablePath: path,
-            message: "ADB found at \(path)."
+            message: isCustom ? "Custom ADB found at \(path)." : "ADB found at \(path)."
+        )
+    }
+
+    static func invalidCustomPath(_ path: String) -> HomeAdbStatus {
+        HomeAdbStatus(
+            executablePath: nil,
+            message: "Custom ADB path is invalid: \(path). Select an executable adb that passes `adb version`, or clear the custom path to auto-detect."
         )
     }
 }
@@ -506,21 +513,21 @@ struct QuestUsbDevice: Identifiable, Equatable {
 enum QuestUsbBridge {
     static let reversePorts = [9944, 9945, 9946]
 
-    static func devices() throws -> [QuestUsbDevice] {
-        let adb = try adbExecutablePath()
+    static func devices(customAdbPath: String? = nil) throws -> [QuestUsbDevice] {
+        let adb = try adbExecutablePath(customPath: customAdbPath)
         return try parseDevices(Shell.run(adb, ["devices", "-l"]))
     }
 
     @discardableResult
-    static func configureReverse(for serial: String) throws -> Set<Int> {
-        let adb = try adbExecutablePath()
+    static func configureReverse(for serial: String, customAdbPath: String? = nil) throws -> Set<Int> {
+        let adb = try adbExecutablePath(customPath: customAdbPath)
         for port in reversePorts {
             _ = try? Shell.run(adb, ["-s", serial, "reverse", "--remove", "tcp:\(port)"])
         }
         for port in reversePorts {
             _ = try Shell.run(adb, ["-s", serial, "reverse", "tcp:\(port)", "tcp:\(port)"])
         }
-        let configuredPorts = try reverseMappings(for: serial)
+        let configuredPorts = try reverseMappings(for: serial, customAdbPath: customAdbPath)
         let missingPorts = reversePorts.filter { !configuredPorts.contains($0) }
         if !missingPorts.isEmpty {
             throw QuestUsbBridgeError.missingReversePorts(missingPorts)
@@ -528,30 +535,55 @@ enum QuestUsbBridge {
         return configuredPorts
     }
 
-    static func reverseMappings(for serial: String) throws -> Set<Int> {
-        let adb = try adbExecutablePath()
+    static func reverseMappings(for serial: String, customAdbPath: String? = nil) throws -> Set<Int> {
+        let adb = try adbExecutablePath(customPath: customAdbPath)
         return parseReversePorts(try Shell.run(adb, ["-s", serial, "reverse", "--list"]))
     }
 
-    static func adbExecutablePath() throws -> String {
-        if let path = resolveAdbExecutablePath() {
+    static func adbExecutablePath(customPath: String? = nil) throws -> String {
+        if let custom = cleanedCustomAdbPath(customPath),
+           !validateAdbExecutable(at: custom) {
+            throw QuestUsbBridgeError.invalidCustomAdb(custom)
+        }
+        if let path = resolveAdbExecutablePath(customPath: customPath) {
             return path
         }
         throw QuestUsbBridgeError.adbNotFound
     }
 
+    static func status(customPath: String? = nil) -> HomeAdbStatus {
+        if let custom = cleanedCustomAdbPath(customPath) {
+            if validateAdbExecutable(at: custom) {
+                return .available(at: custom, isCustom: true)
+            }
+            return .invalidCustomPath(custom)
+        }
+
+        if let path = resolveAdbExecutablePath() {
+            return .available(at: path)
+        }
+        return .missing
+    }
+
     static func resolveAdbExecutablePath(
+        customPath: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        homeDirectory: String = NSHomeDirectory()
+        homeDirectory: String = NSHomeDirectory(),
+        includeShellLookup: Bool = true
     ) -> String? {
         let fileManager = FileManager.default
+        if let custom = cleanedCustomAdbPath(customPath) {
+            return validateAdbExecutable(at: custom) ? custom : nil
+        }
+
         for candidate in adbCandidatePaths(environment: environment, homeDirectory: homeDirectory) {
             if fileManager.isExecutableFile(atPath: candidate) {
                 return candidate
             }
         }
 
-        if let shellPath = try? Shell.run("/bin/zsh", ["-lc", "command -v adb"]),
+        if includeShellLookup,
+           let shellPath = try? Shell.run("/bin/zsh", ["-lc", "command -v adb"]),
            !shellPath.isEmpty,
            fileManager.isExecutableFile(atPath: shellPath) {
             return shellPath
@@ -561,6 +593,7 @@ enum QuestUsbBridge {
     }
 
     static func adbCandidatePaths(
+        customPath: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: String = NSHomeDirectory()
     ) -> [String] {
@@ -570,6 +603,7 @@ enum QuestUsbBridge {
             paths.append(path)
         }
 
+        append(cleanedCustomAdbPath(customPath))
         append(environment["ANDROID_HOME"].map { "\($0)/platform-tools/adb" })
         append(environment["ANDROID_SDK_ROOT"].map { "\($0)/platform-tools/adb" })
         append("\(homeDirectory)/Library/Android/sdk/platform-tools/adb")
@@ -583,6 +617,18 @@ enum QuestUsbBridge {
         }
 
         return paths
+    }
+
+    static func validateAdbExecutable(at path: String) -> Bool {
+        FileManager.default.isExecutableFile(atPath: path) &&
+            ((try? Shell.run(path, ["version"])) != nil)
+    }
+
+    private static func cleanedCustomAdbPath(_ path: String?) -> String? {
+        guard let path else { return nil }
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return (trimmed as NSString).expandingTildeInPath
     }
 
     static func parseDevices(_ output: String) -> [QuestUsbDevice] {
@@ -617,12 +663,15 @@ enum QuestUsbBridge {
 
 enum QuestUsbBridgeError: LocalizedError {
     case adbNotFound
+    case invalidCustomAdb(String)
     case missingReversePorts([Int])
 
     var errorDescription: String? {
         switch self {
         case .adbNotFound:
             return "adb was not found from the OXRSys Home. Install Android Platform Tools or make sure adb exists at /opt/homebrew/bin/adb, /usr/local/bin/adb, or ~/Library/Android/sdk/platform-tools/adb."
+        case let .invalidCustomAdb(path):
+            return "Custom adb path is invalid: \(path). Select an executable adb that passes `adb version`, or clear the custom path to auto-detect."
         case let .missingReversePorts(ports):
             let portList = ports.map(String.init).joined(separator: ", ")
             return "adb reverse did not report the expected mapping for port(s): \(portList)."
@@ -698,6 +747,19 @@ func chooseJsonFile(startingAt path: String?) -> String? {
     panel.allowsMultipleSelection = false
     panel.allowedContentTypes = [.json]
     panel.prompt = "Choose Runtime JSON"
+    if let path, !path.isEmpty {
+        panel.directoryURL = URL(fileURLWithPath: (path as NSString).deletingLastPathComponent)
+        panel.nameFieldStringValue = (path as NSString).lastPathComponent
+    }
+    return panel.runModal() == .OK ? panel.url?.path : nil
+}
+
+func chooseExecutableFile(prompt: String, startingAt path: String?) -> String? {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.prompt = prompt
     if let path, !path.isEmpty {
         panel.directoryURL = URL(fileURLWithPath: (path as NSString).deletingLastPathComponent)
         panel.nameFieldStringValue = (path as NSString).lastPathComponent

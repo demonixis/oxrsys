@@ -169,16 +169,19 @@ WifiReadiness wifiReadinessStatus()
 
 } // namespace
 
-HomeModel::HomeModel(QObject* parent)
+HomeModel::HomeModel(QObject* parent,
+                     const QString& settingsOrganization,
+                     const QString& settingsApplication)
     : QObject(parent)
     , paths_(homePaths())
     , runtimeManager_(paths_)
-    , settings_("OXRSys", "HomeQt")
+    , settings_(settingsOrganization, settingsApplication)
 {
     runtimeManifestPath_ =
         settings_.value("runtimeManifestPath", defaultRuntimeManifestPath()).toString();
     preferInstalledRuntimeForLaunches_ =
         settings_.value("preferInstalledRuntimeForLaunches", false).toBool();
+    customAdbPath_ = cleanedPath(settings_.value("customAdbPath").toString());
     loadAll();
 
     pollTimer_.setInterval(1000);
@@ -280,6 +283,16 @@ QString HomeModel::statusMessage() const
 QString HomeModel::questUsbStatus() const
 {
     return questUsbStatus_;
+}
+
+const AdbStatus& HomeModel::adbStatus() const
+{
+    return adbStatus_;
+}
+
+QString HomeModel::customAdbPath() const
+{
+    return customAdbPath_;
 }
 
 QString HomeModel::selectedQuestUsbSerial() const
@@ -434,13 +447,37 @@ void HomeModel::setSelectedQuestUsbSerial(const QString& serial)
     {
         QString error;
         selectedQuestUsbReversePorts_ =
-            AdbBridge::reverseMappings(selectedQuestUsbSerial_, &error);
+            AdbBridge::reverseMappings(selectedQuestUsbSerial_, &error, customAdbPath_);
         if (!error.isEmpty())
         {
             questUsbStatus_ = "Failed to read adb reverse mappings: " + error;
         }
     }
     emit changed();
+}
+
+void HomeModel::setCustomAdbPath(const QString& path)
+{
+    customAdbPath_ = cleanedPath(path);
+    if (customAdbPath_.isEmpty())
+    {
+        settings_.remove("customAdbPath");
+    }
+    else
+    {
+        settings_.setValue("customAdbPath", customAdbPath_);
+    }
+    selectedQuestUsbSerial_.clear();
+    selectedQuestUsbReversePorts_.clear();
+    refreshTransportHealth(true);
+    setStatusMessage(customAdbPath_.isEmpty()
+                         ? "ADB will be auto-detected."
+                         : "Selected custom ADB executable.");
+}
+
+void HomeModel::clearCustomAdbPath()
+{
+    setCustomAdbPath(QString());
 }
 
 void HomeModel::setSelectedLogAppId(const QString& appId)
@@ -453,7 +490,7 @@ void HomeModel::setMainTransportSelection(const QString& transport)
 {
     if (transport == "usb_adb")
     {
-        adbStatus_ = AdbBridge::status();
+        adbStatus_ = AdbBridge::status(customAdbPath_);
         if (!adbStatus_.isAvailable())
         {
             questUsbStatus_ = adbStatus_.message;
@@ -799,7 +836,7 @@ void HomeModel::showLogs(const LauncherApp& app)
 
 void HomeModel::refreshQuestUsbDevices()
 {
-    adbStatus_ = AdbBridge::status();
+    adbStatus_ = AdbBridge::status(customAdbPath_);
     if (!adbStatus_.isAvailable())
     {
         questUsbDevices_.clear();
@@ -811,7 +848,7 @@ void HomeModel::refreshQuestUsbDevices()
     }
 
     QString error;
-    questUsbDevices_ = AdbBridge::devices(&error);
+    questUsbDevices_ = AdbBridge::devices(&error, customAdbPath_);
     if (!error.isEmpty())
     {
         questUsbDevices_.clear();
@@ -840,7 +877,7 @@ void HomeModel::refreshQuestUsbDevices()
     if (!selectedQuestUsbSerial_.isEmpty())
     {
         selectedQuestUsbReversePorts_ =
-            AdbBridge::reverseMappings(selectedQuestUsbSerial_, &error);
+            AdbBridge::reverseMappings(selectedQuestUsbSerial_, &error, customAdbPath_);
     }
 
     if (questUsbDevices_.isEmpty())
@@ -867,7 +904,7 @@ void HomeModel::refreshQuestUsbDevices()
 
 void HomeModel::configureQuestUsbReverse()
 {
-    adbStatus_ = AdbBridge::status();
+    adbStatus_ = AdbBridge::status(customAdbPath_);
     if (!adbStatus_.isAvailable())
     {
         questUsbStatus_ = adbStatus_.message;
@@ -883,7 +920,8 @@ void HomeModel::configureQuestUsbReverse()
     }
 
     QString error;
-    selectedQuestUsbReversePorts_ = AdbBridge::configureReverse(selectedQuestUsbSerial_, &error);
+    selectedQuestUsbReversePorts_ =
+        AdbBridge::configureReverse(selectedQuestUsbSerial_, &error, customAdbPath_);
     if (!error.isEmpty())
     {
         questUsbStatus_ = "Failed to configure adb reverse: " + error;

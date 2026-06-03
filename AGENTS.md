@@ -22,7 +22,8 @@ distribution so it can scan known apps, install the bundled runtime, launch comp
 `XR_RUNTIME_JSON`, and capture app logs.
 The Home app shows a main-window runtime activity summary from
 `~/Library/Application Support/OXRSys/runtime_status.json`, including idle/streaming state,
-transport, connected device family, active OpenXR application, and WiFi/USB transport readiness.
+transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
+per-app custom ADB path selection for USB setup.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
 same-process window backed by the shared `OXRSysSimulator` Swift package, and show live runtime
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared

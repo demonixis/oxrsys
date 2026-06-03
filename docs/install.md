@@ -13,7 +13,10 @@ xcode-select --install
 brew install cmake ninja gradle adb-enhanced openjdk@17
 ```
 
-Install `adb-enhanced` via Homebrew to get `adb` on the command line in this setup.
+Install `adb-enhanced` via Homebrew to get `adb` on the command line in this setup. If `adb` is
+installed elsewhere, both Home apps can store a custom ADB executable path from the Quest USB ADB
+panel. The SwiftUI Home and Qt Home preferences are intentionally separate; clear the custom path to
+return to automatic SDK/Homebrew/PATH detection.
 
 Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper checks Homebrew,
 MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as

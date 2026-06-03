@@ -902,6 +902,18 @@ QWidget* MainWindow::buildStreamingTab()
     usbDeviceCombo_ = new QComboBox(usbBox);
     usbForm->addRow("Quest device", usbDeviceCombo_);
     usbLayout->addLayout(usbForm);
+    adbStatusLabel_ = secondaryLabel();
+    adbStatusLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    usbLayout->addWidget(adbStatusLabel_);
+    auto* adbButtons = new QHBoxLayout();
+    auto* selectAdbButton = iconButton(usbBox, QStyle::SP_DialogOpenButton, "Select ADB");
+    clearAdbPathButton_ = iconButton(usbBox, QStyle::SP_BrowserReload, "Auto Detect");
+    connect(selectAdbButton, &QPushButton::clicked, this, &MainWindow::chooseCustomAdbExecutable);
+    connect(clearAdbPathButton_, &QPushButton::clicked, model_, &HomeModel::clearCustomAdbPath);
+    adbButtons->addWidget(selectAdbButton);
+    adbButtons->addWidget(clearAdbPathButton_);
+    adbButtons->addStretch();
+    usbLayout->addLayout(adbButtons);
     usbStatusLabel_ = secondaryLabel();
     usbLayout->addWidget(usbStatusLabel_);
     auto* usbButtons = new QHBoxLayout();
@@ -1226,6 +1238,8 @@ void MainWindow::refreshStreaming()
     fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
+    adbStatusLabel_->setText(model_->adbStatus().message);
+    clearAdbPathButton_->setEnabled(!model_->customAdbPath().isEmpty());
     usbStatusLabel_->setText(model_->questUsbStatus());
     configureUsbButton_->setEnabled(!model_->selectedQuestUsbSerial().isEmpty());
 }
@@ -1324,6 +1338,27 @@ void MainWindow::chooseRuntimeManifest()
     if (!path.isEmpty())
     {
         model_->setRuntimeManifestPath(path);
+    }
+}
+
+void MainWindow::chooseCustomAdbExecutable()
+{
+    const QString startPath = model_->customAdbPath().isEmpty()
+        ? QDir::homePath()
+        : QFileInfo(model_->customAdbPath()).absolutePath();
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        "Choose ADB",
+        startPath,
+#if defined(Q_OS_WIN)
+        "ADB executable (adb.exe);;All files (*)"
+#else
+        "ADB executable (adb);;All files (*)"
+#endif
+    );
+    if (!path.isEmpty())
+    {
+        model_->setCustomAdbPath(path);
     }
 }
 

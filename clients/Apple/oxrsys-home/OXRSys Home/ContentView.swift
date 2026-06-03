@@ -539,11 +539,32 @@ struct ContentView: View {
                         }
                     }
 
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(model.adbStatus.message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        if !model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text("Custom ADB: \(model.customAdbPath)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+
                     Text(model.questUsbStatus)
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     HStack {
+                        Button("Select ADB") {
+                            model.chooseCustomAdbExecutable()
+                        }
+                        Button("Auto Detect") {
+                            model.clearCustomAdbPath()
+                        }
+                        .disabled(model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Divider()
                         Button("Refresh Devices") {
                             model.refreshQuestUsbDevices()
                         }
