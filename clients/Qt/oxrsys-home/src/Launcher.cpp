@@ -473,3 +473,41 @@ QString launcherKindForMetadata(const QString& name,
     }
     return "custom";
 }
+
+QString terminalSafeName(const QString& value)
+{
+    QString output;
+    for (const QChar ch : value)
+    {
+        if (ch.isLetterOrNumber() || ch == '-' || ch == '_')
+        {
+            output.append(ch);
+        }
+        else
+        {
+            output.append('_');
+        }
+    }
+    while (output.startsWith('_'))
+    {
+        output.remove(0, 1);
+    }
+    while (output.endsWith('_'))
+    {
+        output.chop(1);
+    }
+    return output.isEmpty() ? "XR-App" : output;
+}
+
+QString terminalLaunchScript(const LauncherApp& app, const QString& runtimeManifestPath)
+{
+    const QString workingDirectory = QFileInfo(app.executablePath).absolutePath();
+    return QString(
+        "#!/bin/sh\n"
+        "cd %1 || exit 1\n"
+        "export XR_RUNTIME_JSON=%2\n"
+        "exec %3\n")
+        .arg(shellQuoted(workingDirectory),
+             shellQuoted(runtimeManifestPath),
+             shellQuoted(app.executablePath));
+}

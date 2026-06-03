@@ -85,12 +85,13 @@ void testServerConfigRoundTrip()
 
 void testRuntimeManifestGeneration()
 {
-    const QString json = RuntimeManager::runtimeManifestJson("/tmp/OXRSys Runtime/liboxrsys-runtime.so");
+    const QString libraryPath = QDir("/tmp/OXRSys Runtime").filePath(runtimeLibraryFileName());
+    const QString json = RuntimeManager::runtimeManifestJson(libraryPath);
     const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
     const QJsonObject runtime = document.object().value("runtime").toObject();
     expect(document.object().value("file_format_version").toString() == "1.0.0",
            "Expected manifest format version");
-    expect(runtime.value("library_path").toString().endsWith("liboxrsys-runtime.so"),
+    expect(runtime.value("library_path").toString().endsWith(runtimeLibraryFileName()),
            "Expected runtime library path");
 }
 
@@ -143,9 +144,11 @@ void testRuntimeLaunchManifestPreference()
     QTemporaryDir temporaryDir;
     expect(temporaryDir.isValid(), "Expected temporary directory");
 
-    const QString selectedLibraryPath = QDir(temporaryDir.path()).filePath("selected/liboxrsys-runtime.so");
+    const QString selectedLibraryPath =
+        QDir(temporaryDir.path()).filePath("selected/" + runtimeLibraryFileName());
     const QString selectedManifestPath = QDir(temporaryDir.path()).filePath("selected/oxrsys-runtime.json");
-    const QString installedLibraryPath = QDir(temporaryDir.path()).filePath("installed/liboxrsys-runtime.so");
+    const QString installedLibraryPath =
+        QDir(temporaryDir.path()).filePath("installed/" + runtimeLibraryFileName());
     const QString installedManifestPath = QDir(temporaryDir.path()).filePath("installed/oxrsys-runtime.json");
 
     writeFile(selectedLibraryPath, "selected");
@@ -320,6 +323,23 @@ void testShellSplitting()
     expect(tokens.first() == "quoted app", "Expected quoted token");
 }
 
+void testTerminalLaunchScript()
+{
+    LauncherApp app;
+    app.name = "Godot XR!";
+    app.path = "/tmp/Godot XR";
+    app.executablePath = "/tmp/Godot XR/bin/godot";
+
+    expect(terminalSafeName(app.name) == "Godot_XR", "Expected terminal-safe app name");
+
+    const QString script = terminalLaunchScript(app, "/tmp/runtime/oxrsys-runtime.json");
+    expect(script.startsWith("#!/bin/sh\n"), "Expected POSIX terminal script");
+    expect(script.contains("cd "), "Expected terminal script working directory");
+    expect(script.contains("export XR_RUNTIME_JSON="), "Expected runtime manifest export");
+    expect(script.contains("oxrsys-runtime.json"), "Expected manifest path in terminal script");
+    expect(script.contains("godot"), "Expected executable in terminal script");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -338,6 +358,7 @@ int main(int argc, char** argv)
         testMacAppInspection();
         testLauncherStore();
         testShellSplitting();
+        testTerminalLaunchScript();
     }
     catch (const std::exception& error)
     {

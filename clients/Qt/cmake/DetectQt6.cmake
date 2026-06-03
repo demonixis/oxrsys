@@ -20,6 +20,20 @@ if(DEFINED ENV{QTDIR})
     list(APPEND _oxrsys_qt6_prefix_hints "$ENV{QTDIR}")
 endif()
 
+if(DEFINED ENV{HOME})
+    if(APPLE)
+        file(GLOB _oxrsys_qt6_home_prefixes "$ENV{HOME}/Qt/[0-9]*/*")
+    elseif(UNIX)
+        file(GLOB _oxrsys_qt6_home_prefixes "$ENV{HOME}/Qt/[0-9]*/*")
+    endif()
+
+    foreach(_oxrsys_qt6_home_prefix IN LISTS _oxrsys_qt6_home_prefixes)
+        if(IS_DIRECTORY "${_oxrsys_qt6_home_prefix}/lib/cmake/Qt6")
+            list(APPEND _oxrsys_qt6_prefix_hints "${_oxrsys_qt6_home_prefix}")
+        endif()
+    endforeach()
+endif()
+
 if(APPLE)
     list(APPEND _oxrsys_qt6_prefix_hints
         /opt/homebrew/opt/qt
@@ -36,4 +50,6 @@ endforeach()
 
 unset(_oxrsys_qt6_config_dir)
 unset(_oxrsys_qt6_prefix)
+unset(_oxrsys_qt6_home_prefix)
+unset(_oxrsys_qt6_home_prefixes)
 unset(_oxrsys_qt6_prefix_hints)

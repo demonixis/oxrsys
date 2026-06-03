@@ -2,7 +2,9 @@
 
 #include "SimulatorWidget.h"
 
+#include <QAbstractButton>
 #include <QAbstractSocket>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QEvent>
 #include <QFocusEvent>
@@ -32,6 +34,7 @@ extern "C"
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iterator>
@@ -162,6 +165,22 @@ public:
         update();
     }
 
+    void setStatusOverlay(const QString& videoStatus,
+                          quint64 videoPackets,
+                          quint64 videoFrames,
+                          quint64 videoDrops,
+                          quint64 fecRecoveries,
+                          quint64 decodeErrors)
+    {
+        videoStatus_ = videoStatus;
+        videoPackets_ = videoPackets;
+        videoFrames_ = videoFrames;
+        videoDrops_ = videoDrops;
+        fecRecoveries_ = fecRecoveries;
+        decodeErrors_ = decodeErrors;
+        update();
+    }
+
 protected:
     void paintEvent(QPaintEvent*) override
     {
@@ -215,6 +234,15 @@ protected:
 
             painter.setPen(QPen(QColor(126, 231, 135, streaming_ ? 230 : 150), 2.0));
             painter.drawLine(QPointF(0, horizonY), QPointF(bounds.width(), horizonY));
+
+            painter.setPen(QColor(242, 244, 248, 220));
+            QFont statusFont = painter.font();
+            statusFont.setPointSize(statusFont.pointSize() + 1);
+            statusFont.setBold(true);
+            painter.setFont(statusFont);
+            painter.drawText(bounds.adjusted(24, 24, -24, -24),
+                             Qt::AlignCenter,
+                             videoStatus_.isEmpty() ? "Waiting for video" : videoStatus_);
         }
 
         const float centerX = static_cast<float>(bounds.center().x());
@@ -251,6 +279,22 @@ protected:
         painter.setPen(QColor(242, 244, 248));
         painter.drawText(captureBadge, Qt::AlignCenter,
                          mouseCaptured_ ? "Mouse captured" : "Mouse free");
+
+        const QRectF videoBadge(bounds.right() - 292.0, bounds.bottom() - 58.0, 278.0, 42.0);
+        painter.setBrush(QColor(8, 11, 16, 205));
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(videoBadge, 8.0, 8.0);
+        painter.setPen(QColor(242, 244, 248));
+        painter.drawText(videoBadge.adjusted(12, 6, -12, -22),
+                         videoStatus_.isEmpty() ? "Waiting for video" : videoStatus_);
+        painter.setPen(QColor(154, 160, 166));
+        painter.drawText(videoBadge.adjusted(12, 22, -12, -6),
+                         QString("%1 packets  %2 frames  %3 drops  %4 fec  %5 errors")
+                             .arg(videoPackets_)
+                             .arg(videoFrames_)
+                             .arg(videoDrops_)
+                             .arg(fecRecoveries_)
+                             .arg(decodeErrors_));
     }
 
 private:
@@ -259,6 +303,12 @@ private:
     float roll_ = 0.0f;
     float position_[3] = {0.0f, 1.6f, 0.0f};
     QImage videoFrame_;
+    QString videoStatus_ = "Waiting for video";
+    quint64 videoPackets_ = 0;
+    quint64 videoFrames_ = 0;
+    quint64 videoDrops_ = 0;
+    quint64 fecRecoveries_ = 0;
+    quint64 decodeErrors_ = 0;
     bool mouseCaptured_ = false;
     bool streaming_ = false;
 };
@@ -406,7 +456,7 @@ void SimulatorWidget::readPendingVideoDatagrams()
             std::min<qsizetype>(static_cast<qsizetype>(header.payloadSize), availablePayloadSize);
 
         ++videoPacketsReceived_;
-        handleVideoPacket(header, payload, payloadSize);
+        handleVideoPacket(header, payload, payloadSize, monotonicNowNs());
     }
 }
 
@@ -440,6 +490,7 @@ void SimulatorWidget::connectToDiscoveredRuntime()
         oxr::protocol::CONTROL_PORT);
 
     trackingPacketsSent_ = 0;
+    updatePreviewStatus();
     setState(State::Streaming, "Connected; sending synthetic head tracking");
     updateTelemetrySummary();
 }
@@ -451,10 +502,18 @@ void SimulatorWidget::sendTrackingSample()
                                        0.001f,
                                        0.050f);
     advanceSimulation(deltaTime);
+    processAssembledVideoFrames(videoAssembler_.expirePendingFrame(
+        monotonicNowNs(),
+        500'000'000));
 
     if (previewWidget_ != nullptr)
     {
-        previewWidget_->setPose(yaw_, pitch_, roll_, headPosition_, mouseCaptured_, state_ == State::Streaming);
+        previewWidget_->setPose(trackingPose_.yaw,
+                                trackingPose_.pitch,
+                                trackingPose_.roll,
+                                trackingPose_.headPosition,
+                                mouseCaptured_,
+                                state_ == State::Streaming);
     }
 
     if (state_ != State::Streaming)
@@ -544,6 +603,7 @@ void SimulatorWidget::setState(State state, const QString& status)
     statusLabel_->setText(status);
     updateControls();
     updateTelemetrySummary();
+    updatePreviewStatus();
     emit stateTextChanged(stateText());
 }
 
@@ -601,10 +661,10 @@ bool SimulatorWidget::eventFilter(QObject* watched, QEvent* event)
         {
             auto* wheelEvent = static_cast<QWheelEvent*>(event);
             const float wheelSteps = static_cast<float>(wheelEvent->angleDelta().y()) / 120.0f;
-            const float forwardX = -std::sin(yaw_);
-            const float forwardZ = -std::cos(yaw_);
-            headPosition_[0] += forwardX * wheelSteps * 0.25f;
-            headPosition_[2] += forwardZ * wheelSteps * 0.25f;
+            const float forwardX = -std::sin(trackingPose_.yaw);
+            const float forwardZ = -std::cos(trackingPose_.yaw);
+            trackingPose_.headPosition[0] += forwardX * wheelSteps * 0.25f;
+            trackingPose_.headPosition[2] += forwardZ * wheelSteps * 0.25f;
             event->accept();
             return true;
         }
@@ -635,7 +695,7 @@ void SimulatorWidget::keyPressEvent(QKeyEvent* event)
     }
     if (!event->isAutoRepeat())
     {
-        setKeyPressed(event->key(), true);
+        setKeyPressed(oxrsys::qt_simulator::simulatorKeyIdentifier(*event), true);
     }
     event->accept();
 }
@@ -644,7 +704,7 @@ void SimulatorWidget::keyReleaseEvent(QKeyEvent* event)
 {
     if (!event->isAutoRepeat())
     {
-        setKeyPressed(event->key(), false);
+        setKeyPressed(oxrsys::qt_simulator::simulatorKeyIdentifier(*event), false);
     }
     event->accept();
 }
@@ -686,141 +746,80 @@ void SimulatorWidget::updateServerSummary()
                               .arg(discoveredServer_.refreshRateHz));
 }
 
+void SimulatorWidget::updatePreviewStatus()
+{
+    if (previewWidget_ == nullptr)
+    {
+        return;
+    }
+
+    QString status;
+#if !OXRSYS_QT_SIMULATOR_HAS_FFMPEG
+    status = "Video preview unavailable: FFmpeg support was not enabled";
+#else
+    if (state_ == State::Streaming && videoFramesDecoded_ == 0)
+    {
+        status = "Waiting for video";
+    }
+    else if (videoFramesDecoded_ > 0)
+    {
+        status = "Video";
+    }
+    else
+    {
+        status = "Waiting for video";
+    }
+#endif
+    previewWidget_->setStatusOverlay(status,
+                                     videoPacketsReceived_,
+                                     videoFramesDecoded_,
+                                     videoFramesDropped_,
+                                     videoFecRecoveries_,
+                                     decodeErrors_);
+}
+
 void SimulatorWidget::advanceSimulation(float deltaTime)
 {
     const QPointF mouseDelta = pendingMouseDelta_;
     pendingMouseDelta_ = {};
-
-    constexpr float MouseSensitivity = 0.003f;
-    constexpr float ArrowSensitivity = 2.0f;
-    constexpr float MoveSpeed = 2.0f;
-
-    yaw_ -= static_cast<float>(mouseDelta.x()) * MouseSensitivity;
-    pitch_ -= static_cast<float>(mouseDelta.y()) * MouseSensitivity;
-
-    if (pressedKeys_.contains(Qt::Key_Left))
-    {
-        yaw_ += ArrowSensitivity * deltaTime;
-    }
-    if (pressedKeys_.contains(Qt::Key_Right))
-    {
-        yaw_ -= ArrowSensitivity * deltaTime;
-    }
-    if (pressedKeys_.contains(Qt::Key_Up))
-    {
-        pitch_ += ArrowSensitivity * deltaTime;
-    }
-    if (pressedKeys_.contains(Qt::Key_Down))
-    {
-        pitch_ -= ArrowSensitivity * deltaTime;
-    }
-    pitch_ = std::clamp(pitch_, -1.5f, 1.5f);
-
-    if (pressedKeys_.contains(Qt::Key_E))
-    {
-        roll_ -= 1.5f * deltaTime;
-    }
-    if (pressedKeys_.contains(Qt::Key_R))
-    {
-        roll_ += 1.5f * deltaTime;
-    }
-
-    float forwardAmount = 0.0f;
-    float strafeAmount = 0.0f;
-    if (pressedKeys_.contains(Qt::Key_W) || pressedKeys_.contains(Qt::Key_Z))
-    {
-        forwardAmount += 1.0f;
-    }
-    if (pressedKeys_.contains(Qt::Key_S))
-    {
-        forwardAmount -= 1.0f;
-    }
-    if (pressedKeys_.contains(Qt::Key_D))
-    {
-        strafeAmount += 1.0f;
-    }
-    if (pressedKeys_.contains(Qt::Key_A) || pressedKeys_.contains(Qt::Key_Q))
-    {
-        strafeAmount -= 1.0f;
-    }
-    forwardAmount = std::clamp(forwardAmount, -1.0f, 1.0f);
-    strafeAmount = std::clamp(strafeAmount, -1.0f, 1.0f);
-
-    const float forwardX = -std::sin(yaw_);
-    const float forwardZ = -std::cos(yaw_);
-    const float rightX = std::cos(yaw_);
-    const float rightZ = -std::sin(yaw_);
-    float moveX = forwardX * forwardAmount + rightX * strafeAmount;
-    float moveZ = forwardZ * forwardAmount + rightZ * strafeAmount;
-    const float moveLength = std::sqrt(moveX * moveX + moveZ * moveZ);
-    if (moveLength > 0.001f)
-    {
-        moveX = moveX / moveLength * MoveSpeed * deltaTime;
-        moveZ = moveZ / moveLength * MoveSpeed * deltaTime;
-        headPosition_[0] += moveX;
-        headPosition_[2] += moveZ;
-        leftControllerPosition_[0] += moveX;
-        leftControllerPosition_[2] += moveZ;
-        rightControllerPosition_[0] += moveX;
-        rightControllerPosition_[2] += moveZ;
-    }
+    oxrsys::qt_simulator::advanceSimulatorTracking(
+        trackingPose_,
+        mouseDelta,
+        pressedKeys_,
+        deltaTime);
 }
 
 void SimulatorWidget::fillTrackingPacket(oxr::protocol::TrackingPacket& packet) const
 {
-    packet.timestampNs = QDateTime::currentMSecsSinceEpoch() * 1000000ll;
-    packet.trackingFlags = 0;
-    packet.headPosition[0] = headPosition_[0];
-    packet.headPosition[1] = headPosition_[1];
-    packet.headPosition[2] = headPosition_[2];
-
-    const Quaternion orientation = headQuaternion(yaw_, pitch_, roll_);
-    packet.headOrientation[0] = orientation.x;
-    packet.headOrientation[1] = orientation.y;
-    packet.headOrientation[2] = orientation.z;
-    packet.headOrientation[3] = orientation.w;
-
-    std::copy(std::begin(leftControllerPosition_),
-              std::end(leftControllerPosition_),
-              std::begin(packet.leftControllerPos));
-    std::copy(std::begin(rightControllerPosition_),
-              std::end(rightControllerPosition_),
-              std::begin(packet.rightControllerPos));
-    std::fill(std::begin(packet.leftControllerRot), std::end(packet.leftControllerRot), 0.0f);
-    std::fill(std::begin(packet.rightControllerRot), std::end(packet.rightControllerRot), 0.0f);
-    packet.leftControllerRot[0] = orientation.x;
-    packet.leftControllerRot[1] = orientation.y;
-    packet.leftControllerRot[2] = orientation.z;
-    packet.leftControllerRot[3] = orientation.w;
-    packet.rightControllerRot[0] = orientation.x;
-    packet.rightControllerRot[1] = orientation.y;
-    packet.rightControllerRot[2] = orientation.z;
-    packet.rightControllerRot[3] = orientation.w;
-
-    if (pressedKeys_.contains(Qt::Key_F))
-    {
-        packet.buttonState |= oxr::protocol::BUTTON_LEFT_GRIP;
-        packet.leftGrip = 1.0f;
-    }
-    if (pressedKeys_.contains(Qt::Key_G))
-    {
-        packet.buttonState |= oxr::protocol::BUTTON_RIGHT_GRIP;
-        packet.rightGrip = 1.0f;
-    }
-    packet.ipd = 0.064f;
+    oxrsys::qt_simulator::fillSimulatorTrackingPacket(
+        trackingPose_,
+        pressedKeys_,
+        monotonicNowNs(),
+        packet);
 }
 
 bool SimulatorWidget::startVideoReceiver()
 {
 #if !OXRSYS_QT_SIMULATOR_HAS_FFMPEG
-    return true;
-#else
-    stopVideoReceiver();
-    resetPendingVideoFrame();
+    videoAssembler_.reset();
     videoPacketsReceived_ = 0;
     videoFramesDecoded_ = 0;
     videoFramesDropped_ = 0;
+    videoFecRecoveries_ = 0;
     decodeErrors_ = 0;
+    updatePreviewStatus();
+    return true;
+#else
+    stopVideoReceiver();
+    videoAssembler_.reset();
+    videoPacketsReceived_ = 0;
+    videoFramesDecoded_ = 0;
+    videoFramesDropped_ = 0;
+    videoFecRecoveries_ = 0;
+    decodeErrors_ = 0;
+    consecutiveDecodeErrors_ = 0;
+    lastKeyframeRequestTimeNs_ = 0;
+    updatePreviewStatus();
 
     videoSocket_->setSocketOption(QAbstractSocket::ReceiveBufferSizeSocketOption, 8 * 1024 * 1024);
     const bool bound = videoSocket_->bind(QHostAddress::AnyIPv4,
@@ -848,111 +847,130 @@ void SimulatorWidget::stopVideoReceiver()
     {
         previewWidget_->setVideoFrame(QImage());
     }
-    resetPendingVideoFrame();
+    videoAssembler_.reset();
+    videoPacketsReceived_ = 0;
+    videoFramesDecoded_ = 0;
+    videoFramesDropped_ = 0;
+    videoFecRecoveries_ = 0;
+    decodeErrors_ = 0;
+    consecutiveDecodeErrors_ = 0;
+    lastKeyframeRequestTimeNs_ = 0;
+    updatePreviewStatus();
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
     resetVideoDecoder();
 #endif
 }
 
-void SimulatorWidget::resetPendingVideoFrame()
-{
-    pendingVideoFrameIndex_ = UINT32_MAX;
-    pendingVideoTotalPackets_ = 0;
-    pendingVideoReceivedPackets_ = 0;
-    pendingVideoPresentationTimeNs_ = 0;
-    pendingVideoFrameData_.clear();
-    pendingVideoPacketSizes_.clear();
-    pendingVideoPacketReceived_.clear();
-}
-
 void SimulatorWidget::handleVideoPacket(const oxr::protocol::VideoPacketHeader& header,
                                         const char* payload,
-                                        qsizetype payloadSize)
+                                        qsizetype payloadSize,
+                                        int64_t receiveTimeNs)
 {
-    if ((header.flags & oxr::protocol::VIDEO_FLAG_RENDER_POSE) != 0 ||
-        (header.flags & oxr::protocol::VIDEO_FLAG_FEC) != 0)
-    {
-        return;
-    }
-    if (header.totalPackets == 0 || header.packetIndex >= header.totalPackets ||
-        header.totalPackets > 4096)
-    {
-        return;
-    }
-
-    if (header.frameIndex != pendingVideoFrameIndex_ || pendingVideoTotalPackets_ == 0)
-    {
-        if (pendingVideoTotalPackets_ > 0 &&
-            pendingVideoReceivedPackets_ < pendingVideoTotalPackets_)
-        {
-            ++videoFramesDropped_;
-        }
-
-        pendingVideoFrameIndex_ = header.frameIndex;
-        pendingVideoTotalPackets_ = header.totalPackets;
-        pendingVideoReceivedPackets_ = 0;
-        pendingVideoPresentationTimeNs_ = header.presentationTimeNs;
-        pendingVideoFrameData_.fill(0, static_cast<qsizetype>(header.totalPackets) *
-                                           static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD));
-        pendingVideoPacketSizes_.fill(0, header.totalPackets);
-        pendingVideoPacketReceived_.fill(0, header.totalPackets);
-    }
-
-    if (pendingVideoPacketReceived_[header.packetIndex] != 0)
-    {
-        return;
-    }
-
-    const qsizetype offset = static_cast<qsizetype>(header.packetIndex) *
-        static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD);
-    if (offset < 0 || offset + payloadSize > pendingVideoFrameData_.size())
-    {
-        return;
-    }
-
-    std::memcpy(pendingVideoFrameData_.data() + offset, payload, static_cast<size_t>(payloadSize));
-    pendingVideoPacketReceived_[header.packetIndex] = 1;
-    pendingVideoPacketSizes_[header.packetIndex] = static_cast<uint16_t>(payloadSize);
-    ++pendingVideoReceivedPackets_;
-
-    if (pendingVideoReceivedPackets_ == pendingVideoTotalPackets_)
-    {
-        deliverPendingVideoFrame();
-    }
+    processAssembledVideoFrames(
+        videoAssembler_.addPacket(header, payload, payloadSize, receiveTimeNs));
 }
 
-void SimulatorWidget::deliverPendingVideoFrame()
+void SimulatorWidget::processAssembledVideoFrames(const QList<AssembledVideoFrame>& frames)
 {
-    qsizetype totalSize = 0;
-    for (uint16_t packetSize : pendingVideoPacketSizes_)
+    const quint64 previousDrops = videoFramesDropped_;
+    videoFramesDropped_ = videoAssembler_.droppedFrames();
+    videoFecRecoveries_ = videoAssembler_.fecRecoveries();
+    if (videoFramesDropped_ > previousDrops)
     {
-        totalSize += packetSize;
+        sendKeyframeRequest(oxr::protocol::KEYFRAME_REASON_FRAME_LOSS,
+                            static_cast<uint32_t>(videoFramesDropped_ - previousDrops));
+    }
+    if (frames.isEmpty())
+    {
+        updatePreviewStatus();
+        return;
     }
 
-    QByteArray nalUnit;
-    nalUnit.resize(totalSize);
-    qsizetype destinationOffset = 0;
-    for (int i = 0; i < pendingVideoPacketSizes_.size(); ++i)
+    for (const AssembledVideoFrame& frame : frames)
     {
-        const qsizetype packetSize = pendingVideoPacketSizes_[i];
-        const qsizetype sourceOffset = static_cast<qsizetype>(i) *
-            static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD);
-        if (packetSize > 0)
-        {
-            std::memcpy(nalUnit.data() + destinationOffset,
-                        pendingVideoFrameData_.constData() + sourceOffset,
-                        static_cast<size_t>(packetSize));
-            destinationOffset += packetSize;
-        }
-    }
-
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
-    if (!decodeVideoFrame(nalUnit))
-    {
-        ++decodeErrors_;
-    }
+        const int64_t decodeStartNs = monotonicNowNs();
+        if (decodeVideoFrame(frame))
+        {
+            consecutiveDecodeErrors_ = 0;
+            sendLatencyReport(frame, decodeStartNs, monotonicNowNs());
+        }
+        else
+        {
+            ++decodeErrors_;
+            ++consecutiveDecodeErrors_;
+            if (consecutiveDecodeErrors_ >= 3)
+            {
+                sendKeyframeRequest(oxr::protocol::KEYFRAME_REASON_DECODE_STALL,
+                                    static_cast<uint32_t>(consecutiveDecodeErrors_));
+                consecutiveDecodeErrors_ = 0;
+            }
+        }
+#else
+        Q_UNUSED(frame);
 #endif
-    resetPendingVideoFrame();
+    }
+    updatePreviewStatus();
+}
+
+void SimulatorWidget::sendKeyframeRequest(uint32_t reasonFlags, uint32_t detail)
+{
+    if (state_ != State::Streaming)
+    {
+        return;
+    }
+
+    const uint64_t nowNs = static_cast<uint64_t>(monotonicNowNs());
+    constexpr uint64_t CooldownNs = 1'000'000'000;
+    if (lastKeyframeRequestTimeNs_ != 0 &&
+        nowNs - lastKeyframeRequestTimeNs_ < CooldownNs)
+    {
+        return;
+    }
+    lastKeyframeRequestTimeNs_ = nowNs;
+
+    oxr::protocol::RequestKeyframe request = {};
+    request.reasonFlags = reasonFlags;
+    request.detail = detail;
+    controlSocket_->writeDatagram(
+        reinterpret_cast<const char*>(&request),
+        static_cast<qint64>(sizeof(request)),
+        serverAddress_,
+        oxr::protocol::CONTROL_PORT);
+}
+
+void SimulatorWidget::sendLatencyReport(const AssembledVideoFrame& frame,
+                                        int64_t decodeStartNs,
+                                        int64_t decodeEndNs)
+{
+    if (state_ != State::Streaming)
+    {
+        return;
+    }
+
+    oxr::protocol::LatencyReport report = {};
+    report.receiveToDecoderSubmitMs =
+        static_cast<float>(std::max<int64_t>(0, decodeStartNs - frame.receiveTimeNs)) /
+        1'000'000.0f;
+    report.decodeLatencyMs =
+        static_cast<float>(std::max<int64_t>(0, decodeEndNs - decodeStartNs)) /
+        1'000'000.0f;
+    report.compositorLatencyMs = 0.0f;
+    report.totalClientLatencyMs = report.receiveToDecoderSubmitMs + report.decodeLatencyMs;
+
+    controlSocket_->writeDatagram(
+        reinterpret_cast<const char*>(&report),
+        static_cast<qint64>(sizeof(report)),
+        serverAddress_,
+        oxr::protocol::CONTROL_PORT);
+}
+
+int64_t SimulatorWidget::monotonicNowNs() const
+{
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               clock::now().time_since_epoch())
+        .count();
 }
 
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
@@ -1012,21 +1030,23 @@ void SimulatorWidget::resetVideoDecoder()
     }
 }
 
-bool SimulatorWidget::decodeVideoFrame(const QByteArray& nalUnit)
+bool SimulatorWidget::decodeVideoFrame(const AssembledVideoFrame& frame)
 {
-    if (!ensureVideoDecoder() || nalUnit.isEmpty())
+    if (!ensureVideoDecoder() || frame.nalUnit.isEmpty())
     {
         return false;
     }
 
     av_packet_unref(decodePacket_);
-    const int packetResult = av_new_packet(decodePacket_, static_cast<int>(nalUnit.size()));
+    const int packetResult = av_new_packet(decodePacket_, static_cast<int>(frame.nalUnit.size()));
     if (packetResult < 0)
     {
         return false;
     }
-    std::memcpy(decodePacket_->data, nalUnit.constData(), static_cast<size_t>(nalUnit.size()));
-    decodePacket_->pts = pendingVideoPresentationTimeNs_;
+    std::memcpy(decodePacket_->data,
+                frame.nalUnit.constData(),
+                static_cast<size_t>(frame.nalUnit.size()));
+    decodePacket_->pts = frame.presentationTimeNs;
 
     const int sendResult = avcodec_send_packet(videoDecoder_, decodePacket_);
     av_packet_unref(decodePacket_);
@@ -1151,16 +1171,18 @@ void SimulatorWidget::updateTelemetrySummary()
         return;
     }
 
-    telemetryLabel_->setText(QString("%1 tracking packets sent\n%2 video packets, %3 frames, %4 decode errors\nHead pose: %5, %6, %7\nYaw/pitch: %8 / %9 deg\nIPD: 0.064 m")
+    telemetryLabel_->setText(QString("%1 tracking packets sent\n%2 video packets, %3 frames, %4 drops, %5 fec, %6 decode errors\nHead pose: %7, %8, %9\nYaw/pitch: %10 / %11 deg\nIPD: 0.064 m")
                                  .arg(trackingPacketsSent_)
                                  .arg(videoPacketsReceived_)
                                  .arg(videoFramesDecoded_)
+                                 .arg(videoFramesDropped_)
+                                 .arg(videoFecRecoveries_)
                                  .arg(decodeErrors_)
-                                 .arg(headPosition_[0], 0, 'f', 2)
-                                 .arg(headPosition_[1], 0, 'f', 2)
-                                 .arg(headPosition_[2], 0, 'f', 2)
-                                 .arg(radiansToDegrees(yaw_), 0, 'f', 1)
-                                 .arg(radiansToDegrees(pitch_), 0, 'f', 1));
+                                 .arg(trackingPose_.headPosition[0], 0, 'f', 2)
+                                 .arg(trackingPose_.headPosition[1], 0, 'f', 2)
+                                 .arg(trackingPose_.headPosition[2], 0, 'f', 2)
+                                 .arg(radiansToDegrees(trackingPose_.yaw), 0, 'f', 1)
+                                 .arg(radiansToDegrees(trackingPose_.pitch), 0, 'f', 1));
 }
 
 QString SimulatorWidget::discoveredServerName() const

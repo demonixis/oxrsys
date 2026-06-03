@@ -154,7 +154,23 @@ AdbStatus AdbBridge::status()
     const QString adb = resolveExecutablePath();
     if (adb.isEmpty())
     {
-        return {QString(), "ADB is required for USB mode."};
+        const QString paths = candidatePaths().join(", ");
+#if defined(Q_OS_MACOS)
+        return {QString(),
+                QString("ADB is required for USB mode. Install adb-enhanced with Homebrew: "
+                        "brew install adb-enhanced. Checked: %1.")
+                    .arg(paths)};
+#elif defined(Q_OS_WIN)
+        return {QString(),
+                QString("ADB is required for USB mode. Install Android Platform Tools "
+                        "or add adb.exe to PATH. Checked: %1.")
+                    .arg(paths)};
+#else
+        return {QString(),
+                QString("ADB is required for USB mode. Install Android Platform Tools "
+                        "or make sure adb is in PATH. Checked: %1.")
+                    .arg(paths)};
+#endif
     }
     return {adb, QString("ADB found at %1.").arg(adb)};
 }

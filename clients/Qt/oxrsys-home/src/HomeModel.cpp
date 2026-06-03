@@ -71,6 +71,102 @@ QString portsText(const QSet<int>& ports)
     return portsText(sorted);
 }
 
+struct WifiReadiness
+{
+    bool ready = true;
+    QString message;
+};
+
+QString processOutput(const QString& program,
+                      const QStringList& arguments,
+                      QString* errorMessage = nullptr)
+{
+    QProcess process;
+    process.start(program, arguments);
+    if (!process.waitForFinished(3000))
+    {
+        process.kill();
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = QString("%1 timed out.").arg(program);
+        }
+        return {};
+    }
+
+    const QString stdoutText = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+    const QString stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = stderrText.isEmpty()
+                ? QString("%1 exited with code %2.").arg(program).arg(process.exitCode())
+                : stderrText;
+        }
+        return {};
+    }
+    return stdoutText;
+}
+
+WifiReadiness wifiReadinessStatus()
+{
+#if defined(Q_OS_MACOS)
+    constexpr auto networksetup = "/usr/sbin/networksetup";
+    QString error;
+    const QString hardwarePorts =
+        processOutput(networksetup, {"-listallhardwareports"}, &error);
+    if (hardwarePorts.isEmpty())
+    {
+        return {false, "WiFi readiness unavailable: " + error};
+    }
+
+    bool readingWifiPort = false;
+    QString wifiDevice;
+    const QStringList lines = hardwarePorts.split('\n');
+    for (const QString& rawLine : lines)
+    {
+        const QString line = rawLine.trimmed();
+        if (line.startsWith("Hardware Port:"))
+        {
+            const QString portName = line.mid(QString("Hardware Port:").size()).trimmed();
+            readingWifiPort = portName == "Wi-Fi" || portName == "AirPort";
+            continue;
+        }
+        if (readingWifiPort && line.startsWith("Device:"))
+        {
+            wifiDevice = line.mid(QString("Device:").size()).trimmed();
+            break;
+        }
+    }
+
+    if (wifiDevice.isEmpty())
+    {
+        return {false, "WiFi readiness unavailable: no WiFi network device was reported by networksetup."};
+    }
+
+    const QString power = processOutput(networksetup, {"-getairportpower", wifiDevice}, &error);
+    if (power.isEmpty())
+    {
+        return {false, QString("WiFi readiness unavailable for %1: %2").arg(wifiDevice, error)};
+    }
+    if (power.endsWith(": On", Qt::CaseInsensitive) || power.endsWith(" On", Qt::CaseInsensitive))
+    {
+        return {true, QString("macOS WiFi is enabled on %1.").arg(wifiDevice)};
+    }
+    if (power.endsWith(": Off", Qt::CaseInsensitive) || power.endsWith(" Off", Qt::CaseInsensitive))
+    {
+        return {false, QString("macOS WiFi is disabled on %1.").arg(wifiDevice)};
+    }
+    return {false, QString("macOS WiFi state for %1 is unclear: %2").arg(wifiDevice, power)};
+#elif defined(Q_OS_LINUX)
+    return {true, "Linux will use the WiFi transport. Check the desktop network manager if streaming cannot connect."};
+#elif defined(Q_OS_WIN)
+    return {true, "Windows will use the WiFi transport."};
+#else
+    return {true, QString("%1 will use the WiFi transport.").arg(platformName())};
+#endif
+}
+
 } // namespace
 
 HomeModel::HomeModel(QObject* parent)
@@ -243,11 +339,7 @@ TransportReadiness HomeModel::mainTransportReadiness() const
 {
     if (mainTransportSelection() == "wifi")
     {
-        return {
-            true,
-            false,
-            QString("%1 will use the WiFi transport.").arg(platformName()),
-        };
+        return {wifiReady_, false, wifiStatus_};
     }
 
     if (!adbStatus_.isAvailable())
@@ -359,11 +451,15 @@ void HomeModel::setSelectedLogAppId(const QString& appId)
 
 void HomeModel::setMainTransportSelection(const QString& transport)
 {
-    if (transport == "usb_adb" && !AdbBridge::status().isAvailable())
+    if (transport == "usb_adb")
     {
-        questUsbStatus_ = "ADB is unavailable. USB mode needs adb.";
-        setErrorMessage(questUsbStatus_);
-        return;
+        adbStatus_ = AdbBridge::status();
+        if (!adbStatus_.isAvailable())
+        {
+            questUsbStatus_ = adbStatus_.message;
+            setErrorMessage(questUsbStatus_);
+            return;
+        }
     }
     mainTransportOverride_ = transport;
     serverConfig_.transport = transport;
@@ -593,6 +689,91 @@ void HomeModel::launchApp(const LauncherApp& app)
     emit changed();
 }
 
+void HomeModel::runAppInTerminal(const LauncherApp& app)
+{
+#if defined(Q_OS_WIN)
+    Q_UNUSED(app);
+    return;
+#else
+    const QString manifestPath = activeLaunchRuntimeManifestPath();
+    if (!QFileInfo(manifestPath).isFile())
+    {
+        setErrorMessage("Runtime JSON not found at " + manifestPath);
+        return;
+    }
+    if (!isExecutableFile(app.executablePath))
+    {
+        setErrorMessage("Executable not found: " + app.executablePath);
+        return;
+    }
+
+    const QString scriptsRoot = QDir(paths_.configRoot).filePath("TerminalLaunchers");
+    if (!QDir().mkpath(scriptsRoot))
+    {
+        setErrorMessage("Failed to create terminal launcher directory: " + scriptsRoot);
+        return;
+    }
+
+#if defined(Q_OS_MACOS)
+    constexpr auto scriptSuffix = ".command";
+#else
+    constexpr auto scriptSuffix = ".sh";
+#endif
+    const QString scriptPath =
+        QDir(scriptsRoot).filePath(terminalSafeName(app.name) + scriptSuffix);
+    QFile scriptFile(scriptPath);
+    if (!scriptFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        setErrorMessage("Failed to write terminal launcher script: " + scriptPath);
+        return;
+    }
+    scriptFile.write(terminalLaunchScript(app, manifestPath).toUtf8());
+    scriptFile.close();
+    QFile::setPermissions(scriptPath,
+                          QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
+                              QFile::ReadGroup | QFile::ExeGroup |
+                              QFile::ReadOther | QFile::ExeOther);
+
+    bool started = false;
+#if defined(Q_OS_MACOS)
+    started = QProcess::startDetached("open", {scriptPath});
+#else
+    struct TerminalCommand
+    {
+        const char* program;
+        QStringList arguments;
+    };
+    const QList<TerminalCommand> terminalCommands = {
+        {"x-terminal-emulator", {"-e", scriptPath}},
+        {"gnome-terminal", {"--", scriptPath}},
+        {"konsole", {"-e", scriptPath}},
+        {"xterm", {"-e", scriptPath}},
+    };
+    for (const TerminalCommand& command : terminalCommands)
+    {
+        if (QProcess::startDetached(command.program, command.arguments))
+        {
+            started = true;
+            break;
+        }
+    }
+#endif
+
+    if (!started)
+    {
+        setErrorMessage("Failed to open a terminal for " + app.name);
+        return;
+    }
+
+    selectedLogAppId_ = app.id();
+    appendLog(app.id(),
+              QString("Terminal launcher: %1\nXR_RUNTIME_JSON=%2\n\n")
+                  .arg(scriptPath, manifestPath));
+    setStatusMessage(QString("Opened %1 in a terminal.").arg(app.name));
+    emit changed();
+#endif
+}
+
 void HomeModel::stopApp(const LauncherApp& app)
 {
     QProcess* process = launchedProcesses_.value(app.id(), nullptr);
@@ -624,7 +805,7 @@ void HomeModel::refreshQuestUsbDevices()
         questUsbDevices_.clear();
         selectedQuestUsbSerial_.clear();
         selectedQuestUsbReversePorts_.clear();
-        questUsbStatus_ = "ADB is unavailable. Install Android Platform Tools before using USB mode.";
+        questUsbStatus_ = adbStatus_.message;
         emit changed();
         return;
     }
@@ -689,7 +870,7 @@ void HomeModel::configureQuestUsbReverse()
     adbStatus_ = AdbBridge::status();
     if (!adbStatus_.isAvailable())
     {
-        questUsbStatus_ = "ADB is unavailable. Install Android Platform Tools before configuring USB.";
+        questUsbStatus_ = adbStatus_.message;
         setErrorMessage(questUsbStatus_);
         return;
     }
@@ -794,6 +975,9 @@ void HomeModel::refreshTransportHealth(bool force)
         return;
     }
     lastTransportHealthRefreshDate_ = now;
+    const WifiReadiness wifi = wifiReadinessStatus();
+    wifiReady_ = wifi.ready;
+    wifiStatus_ = wifi.message;
     refreshQuestUsbDevices();
 }
 

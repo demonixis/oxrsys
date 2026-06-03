@@ -2,6 +2,9 @@
 
 #pragma once
 
+#include "SimulatorTracking.h"
+#include "VideoFrameAssembler.h"
+
 #include <QElapsedTimer>
 #include <QHostAddress>
 #include <QPointF>
@@ -69,19 +72,25 @@ private:
     void updateControls();
     void updateServerSummary();
     void updateTelemetrySummary();
+    void updatePreviewStatus();
     void advanceSimulation(float deltaTime);
     void fillTrackingPacket(oxr::protocol::TrackingPacket& packet) const;
     bool startVideoReceiver();
     void stopVideoReceiver();
-    void resetPendingVideoFrame();
     void handleVideoPacket(const oxr::protocol::VideoPacketHeader& header,
                            const char* payload,
-                           qsizetype payloadSize);
-    void deliverPendingVideoFrame();
+                           qsizetype payloadSize,
+                           int64_t receiveTimeNs);
+    void processAssembledVideoFrames(const QList<AssembledVideoFrame>& frames);
+    void sendKeyframeRequest(uint32_t reasonFlags, uint32_t detail);
+    void sendLatencyReport(const AssembledVideoFrame& frame,
+                           int64_t decodeStartNs,
+                           int64_t decodeEndNs);
+    int64_t monotonicNowNs() const;
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
     bool ensureVideoDecoder();
     void resetVideoDecoder();
-    bool decodeVideoFrame(const QByteArray& nalUnit);
+    bool decodeVideoFrame(const AssembledVideoFrame& frame);
 #endif
     void setMouseCaptured(bool captured);
     void toggleMouseCaptured();
@@ -112,14 +121,11 @@ private:
     quint64 videoPacketsReceived_ = 0;
     quint64 videoFramesDecoded_ = 0;
     quint64 videoFramesDropped_ = 0;
+    quint64 videoFecRecoveries_ = 0;
     quint64 decodeErrors_ = 0;
-    uint32_t pendingVideoFrameIndex_ = UINT32_MAX;
-    uint16_t pendingVideoTotalPackets_ = 0;
-    uint16_t pendingVideoReceivedPackets_ = 0;
-    int64_t pendingVideoPresentationTimeNs_ = 0;
-    QByteArray pendingVideoFrameData_;
-    QVector<uint16_t> pendingVideoPacketSizes_;
-    QVector<uint8_t> pendingVideoPacketReceived_;
+    int consecutiveDecodeErrors_ = 0;
+    uint64_t lastKeyframeRequestTimeNs_ = 0;
+    VideoFrameAssembler videoAssembler_;
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
     AVCodecContext* videoDecoder_ = nullptr;
     AVFrame* decodedFrame_ = nullptr;
@@ -132,10 +138,5 @@ private:
     QPointF pendingMouseDelta_;
     bool hasLastMousePosition_ = false;
     bool mouseCaptured_ = false;
-    float yaw_ = 0.0f;
-    float pitch_ = 0.0f;
-    float roll_ = 0.0f;
-    float headPosition_[3] = {0.0f, 1.6f, 0.0f};
-    float leftControllerPosition_[3] = {-0.2f, 1.3f, -0.4f};
-    float rightControllerPosition_[3] = {0.2f, 1.3f, -0.4f};
+    oxrsys::qt_simulator::SimulatorTrackingPose trackingPose_;
 };

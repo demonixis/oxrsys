@@ -77,6 +77,7 @@ public slots:
     void addLauncherApp(const QString& path);
     void removeLauncherApp(const LauncherApp& app);
     void launchApp(const LauncherApp& app);
+    void runAppInTerminal(const LauncherApp& app);
     void stopApp(const LauncherApp& app);
     void clearLog(const LauncherApp& app);
     void showLogs(const LauncherApp& app);
@@ -125,6 +126,8 @@ private:
     QString questUsbStatus_ = "USB ADB transport is not configured.";
     QSet<int> selectedQuestUsbReversePorts_;
     AdbStatus adbStatus_;
+    bool wifiReady_ = true;
+    QString wifiStatus_ = "WiFi transport readiness has not been checked.";
     QString mainTransportOverride_;
     QDateTime lastTransportHealthRefreshDate_;
     QString statusMessage_;

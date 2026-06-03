@@ -15,6 +15,10 @@ brew install cmake ninja gradle adb-enhanced openjdk@17
 
 Install `adb-enhanced` via Homebrew to get `adb` on the command line in this setup.
 
+Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper checks Homebrew,
+MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as
+`~/Qt/6.10.2/macos`.
+
 For the Swift/Xcode applications and Swift package Metal shaders, install the full Xcode app, not only the Command Line Tools. Finish first-launch setup after installing or updating Xcode:
 
 ```bash

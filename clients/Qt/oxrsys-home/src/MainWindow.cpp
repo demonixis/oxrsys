@@ -5,9 +5,13 @@
 #include "PlatformSupport.h"
 #include "SimulatorWidget.h"
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFileIconProvider>
 #include <QFileInfo>
@@ -19,6 +23,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
@@ -30,10 +35,12 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QToolButton>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QVector>
 
 #include <algorithm>
+#include <functional>
 
 namespace
 {
@@ -198,6 +205,61 @@ private:
 
     QList<QLayoutItem*> items_;
     int spacing_ = 12;
+};
+
+class AppDropLabel final : public QLabel
+{
+public:
+    explicit AppDropLabel(QWidget* parent = nullptr)
+        : QLabel(parent)
+    {
+        setAcceptDrops(true);
+        setWordWrap(true);
+        setFrameShape(QFrame::StyledPanel);
+        setMargin(10);
+        setStyleSheet("color: palette(mid);");
+    }
+
+    std::function<void(const QString&)> onPathDropped;
+
+protected:
+    void dragEnterEvent(QDragEnterEvent* event) override
+    {
+        if (hasLocalFile(event->mimeData()))
+        {
+            event->acceptProposedAction();
+        }
+    }
+
+    void dropEvent(QDropEvent* event) override
+    {
+        const QList<QUrl> urls = event->mimeData()->urls();
+        for (const QUrl& url : urls)
+        {
+            if (url.isLocalFile() && onPathDropped)
+            {
+                onPathDropped(url.toLocalFile());
+            }
+        }
+        event->acceptProposedAction();
+    }
+
+private:
+    static bool hasLocalFile(const QMimeData* mimeData)
+    {
+        if (mimeData == nullptr)
+        {
+            return false;
+        }
+        for (const QUrl& url : mimeData->urls())
+        {
+            if (url.isLocalFile())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 QLabel* secondaryLabel(const QString& text = {})
@@ -437,7 +499,28 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(model_, &HomeModel::changed, this, &MainWindow::refreshUi);
     connect(model_, &HomeModel::errorOccurred, this, [this](const QString& message) {
-        QMessageBox::warning(this, "OXRSys Home", message);
+        QMessageBox box(QMessageBox::Warning, "OXRSys Home", message, QMessageBox::Ok, this);
+        QAbstractButton* homebrewButton = nullptr;
+        QAbstractButton* adbHelpButton = nullptr;
+        if (message.contains("adb-enhanced", Qt::CaseInsensitive))
+        {
+            homebrewButton = box.addButton("Open Homebrew", QMessageBox::ActionRole);
+        }
+        else if (message.contains("adb", Qt::CaseInsensitive) ||
+                 message.contains("USB", Qt::CaseInsensitive))
+        {
+            adbHelpButton = box.addButton("ADB Help", QMessageBox::ActionRole);
+        }
+        box.exec();
+        if (homebrewButton != nullptr && box.clickedButton() == homebrewButton)
+        {
+            QDesktopServices::openUrl(
+                QUrl("https://formulae.brew.sh/formula/adb-enhanced#default"));
+        }
+        else if (adbHelpButton != nullptr && box.clickedButton() == adbHelpButton)
+        {
+            QDesktopServices::openUrl(QUrl("https://developer.android.com/tools/adb"));
+        }
     });
 
     refreshUi();
@@ -552,9 +635,11 @@ QWidget* MainWindow::buildAppsTab()
     toolbar->addWidget(addButton);
     layout->addLayout(toolbar);
 
-    auto* dropHint = secondaryLabel("Add Linux executables or .desktop files, macOS .app bundles, or Windows executables.");
-    dropHint->setFrameShape(QFrame::StyledPanel);
-    dropHint->setMargin(10);
+    auto* dropHint = new AppDropLabel(tab);
+    dropHint->setText("Drop Linux executables or .desktop files, macOS .app bundles, or Windows executables here.");
+    dropHint->onPathDropped = [this](const QString& path) {
+        model_->addLauncherApp(path);
+    };
     layout->addWidget(dropHint);
 
     appsScrollArea_ = new QScrollArea(tab);
@@ -850,9 +935,21 @@ QWidget* MainWindow::buildDeveloperTab()
     layout->setSpacing(14);
 
     auto* simulatorBox = new QGroupBox("Simulator", content);
-    auto* simulatorLayout = new QVBoxLayout(simulatorBox);
-    simulatorWidget_ = new SimulatorWidget(simulatorBox);
-    simulatorLayout->addWidget(simulatorWidget_);
+    auto* simulatorLayout = new QHBoxLayout(simulatorBox);
+    auto* simulatorIcon = new QLabel(simulatorBox);
+    simulatorIcon->setPixmap(style()->standardIcon(QStyle::SP_ComputerIcon).pixmap(32, 32));
+    simulatorLayout->addWidget(simulatorIcon);
+    auto* simulatorText = new QVBoxLayout();
+    auto* simulatorTitle = new QLabel("OXRSys Simulator", simulatorBox);
+    simulatorTitle->setStyleSheet("font-weight: 600;");
+    simulatorText->addWidget(simulatorTitle);
+    simulatorText->addWidget(secondaryLabel("Local streaming client"));
+    simulatorLayout->addLayout(simulatorText, 1);
+    auto* openSimulatorButton =
+        iconButton(simulatorBox, QStyle::SP_MediaPlay, "Open Simulator");
+    connect(openSimulatorButton, &QPushButton::clicked,
+            this, &MainWindow::openSimulatorWindow);
+    simulatorLayout->addWidget(openSimulatorButton);
     layout->addWidget(simulatorBox);
 
     auto* statsBox = new QGroupBox("Runtime Stats", content);
@@ -914,11 +1011,19 @@ QWidget* MainWindow::buildAppCard(const LauncherApp& app)
     buttons->setSpacing(6);
     buttons->setContentsMargins(0, 4, 0, 0);
     auto* launchButton = appActionButton(card, QStyle::SP_MediaPlay, "Launch");
+#if !defined(Q_OS_WIN)
+    auto* terminalButton = appActionButton(card, QStyle::SP_ComputerIcon, "Open in terminal");
+#endif
     auto* stopButton = appActionButton(card, QStyle::SP_MediaStop, "Stop");
     auto* logsButton = appActionButton(card, QStyle::SP_FileDialogDetailedView, "Show logs");
     auto* revealButton = appActionButton(card, QStyle::SP_DirOpenIcon, "Reveal in file manager");
     auto* removeButton = appActionButton(card, QStyle::SP_TrashIcon, "Remove");
     connect(launchButton, &QToolButton::clicked, model_, [this, app]() { model_->launchApp(app); });
+#if !defined(Q_OS_WIN)
+    connect(terminalButton, &QToolButton::clicked, model_, [this, app]() {
+        model_->runAppInTerminal(app);
+    });
+#endif
     connect(stopButton, &QToolButton::clicked, model_, [this, app]() { model_->stopApp(app); });
     connect(logsButton, &QToolButton::clicked, model_, [this, app]() { model_->showLogs(app); });
     connect(revealButton, &QToolButton::clicked, this, [app]() { revealInFileManager(app.path); });
@@ -926,6 +1031,9 @@ QWidget* MainWindow::buildAppCard(const LauncherApp& app)
     launchButton->setEnabled(!model_->isAppRunning(app));
     stopButton->setEnabled(model_->isAppRunning(app));
     buttons->addWidget(launchButton);
+#if !defined(Q_OS_WIN)
+    buttons->addWidget(terminalButton);
+#endif
     buttons->addWidget(stopButton);
     buttons->addWidget(logsButton);
     buttons->addWidget(revealButton);
@@ -1217,6 +1325,26 @@ void MainWindow::chooseRuntimeManifest()
     {
         model_->setRuntimeManifestPath(path);
     }
+}
+
+void MainWindow::openSimulatorWindow()
+{
+    if (!simulatorWindow_.isNull())
+    {
+        simulatorWindow_->show();
+        simulatorWindow_->raise();
+        simulatorWindow_->activateWindow();
+        return;
+    }
+
+    auto* window = new QMainWindow(this);
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->setWindowTitle("OXRSys Simulator");
+    auto* simulator = new SimulatorWidget(window);
+    window->setCentralWidget(simulator);
+    window->resize(1280, 720);
+    simulatorWindow_ = window;
+    window->show();
 }
 
 void MainWindow::updateConfigFromControls()

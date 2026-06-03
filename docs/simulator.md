@@ -13,7 +13,7 @@ The reusable SwiftUI simulator implementation lives in
 The Qt simulator shared code lives in `clients/Qt/oxrsys-simulator-shared` and is reused by:
 
 - `clients/Qt/oxrsys-simulator`: standalone simulator shell
-- `clients/Qt/oxrsys-home`: embedded Developer tab simulator
+- `clients/Qt/oxrsys-home`: Developer tab launcher for a dedicated simulator window
 
 The Apple viewer exposes two viewing modes:
 
@@ -23,7 +23,8 @@ The Apple viewer exposes two viewing modes:
 On macOS, the app is primarily used in `Simulator` mode. On iOS, the same target can switch between `Simulator` and `StereoView` from the in-app settings sheet. The macOS Home can also open `OXRSysSimulatorView` from its Developer tab when Developer Mode is enabled.
 
 The Qt simulator is a single `Simulator` mode. It can run as the standalone
-`oxrsys-simulator` app or inside the Qt Home Developer tab.
+`oxrsys-simulator` app or from the Qt Home Developer tab, which opens or reuses a
+dedicated `1280x720` simulator window.
 
 ## How Simulator Mode Works
 
@@ -36,10 +37,17 @@ The viewer connects to the runtime as a streaming client, using the same UDP pro
 - Captures keyboard and mouse input and sends simulated tracking data to the runtime
 - Displays a single-eye preview across the full screen
 
-The Qt simulator uses the same UDP discovery, video, control, and tracking ports. On Linux with
-FFmpeg development libraries available at build time, the Qt widget decodes the H.265 stream into
-its preview panel. If no decoded frame is available yet, it shows a synthetic pose preview using the
-same simulated head pose that is sent to the runtime.
+The Qt simulator uses the same UDP discovery, video, control, and tracking ports. With FFmpeg
+development libraries available at build time, the Qt widget decodes the H.265 stream into its
+preview surface. That surface is also the interaction target for click, drag, scroll, keyboard focus,
+and mouse capture. If no decoded frame is available yet, it shows a synthetic pose preview with a
+`Waiting for video` status. If FFmpeg was not enabled, it shows `Video preview unavailable: FFmpeg
+support was not enabled` and keeps synthetic tracking available.
+
+The Qt video path uses an internal UDP frame assembler with duplicate-packet filtering, partial-frame
+timeouts, existing XOR FEC recovery, dropped-frame counters, and keyframe requests after repeated
+loss or decode failures. After a successful decode, the Qt client sends the existing latency report
+with receive-to-submit, decode, compositor `0`, and total client latency fields.
 
 The settings sheet also lets you:
 
@@ -89,6 +97,8 @@ use the streaming protocol.
 | Mouse move while captured, or left-drag | Head look |
 | Mouse wheel | Move forward or backward |
 | `Z Q S D` or `W A S D` | Move head |
+| `Left Shift` + movement | Move left controller |
+| `Right Shift` + movement | Move right controller |
 | Arrow keys | Alternate head look |
 | `R / E` | Roll head |
 | `F / G` | Left or right grip |
@@ -98,7 +108,5 @@ use the streaming protocol.
 
 - Pose quality does not match real headset tracking.
 - Simulator timing does not replace real streaming latency measurements.
-- The Qt video preview currently requires complete non-FEC UDP frame reassembly; missing video
-  packets can drop a frame instead of requesting retransmission.
 - Optical characteristics, compositor behavior, and headset-specific runtime behavior still require device validation.
 - `StereoView` is a side-by-side viewer mode, not a full optical distortion pipeline.

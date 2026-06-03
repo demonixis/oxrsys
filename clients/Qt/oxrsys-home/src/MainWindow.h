@@ -5,6 +5,7 @@
 #include "HomeModel.h"
 
 #include <QMainWindow>
+#include <QPointer>
 
 class QCheckBox;
 class QComboBox;
@@ -51,6 +52,7 @@ private:
     void revealPath(const QString& path, const QString& label);
     void chooseLauncherApp();
     void chooseRuntimeManifest();
+    void openSimulatorWindow();
     void updateConfigFromControls();
 
     HomeModel* model_ = nullptr;
@@ -120,5 +122,5 @@ private:
     QLabel* runtimeStatsEmptyLabel_ = nullptr;
     RuntimeStatsChart* pipelineChart_ = nullptr;
     RuntimeStatsChart* encodeChart_ = nullptr;
-    SimulatorWidget* simulatorWidget_ = nullptr;
+    QPointer<QMainWindow> simulatorWindow_;
 };

@@ -14,7 +14,7 @@ The Android VR client can be used over WiFi or USB. The USB path is the best way
 
 ### Home Apps
 
-OXRSys Home exists as a native Apple app and a Qt app. The Apple app owns the macOS direct-distribution workflow. The Qt app is Linux-first and also keeps its launcher code portable for macOS and Windows.
+OXRSys Home exists as a native Apple app and a Qt app. The Apple app owns the macOS direct-distribution workflow. The Qt app is Linux-first and also keeps its launcher, transport readiness, and simulator window code portable for macOS and Windows.
 
 ## Disclaimer
 
@@ -53,7 +53,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
 - The Android VR client feeds real Quest/PICO hand joints into the runtime, gates controller poses with explicit active flags, supports WiFi UDP and reconnecting USB ADB reverse TCP streaming, matches per-frame render poses for smoother headset reprojection, exposes a first-pass `XR_FB_foveation` path when supported by the headset, and can request a build-configured display refresh rate.
 - The visionOS viewer uses a minimal floating search window, then enters immersive VR automatically once the stream connects and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.
-- OXRSys Home is now a direct-distribution launcher and runtime installer for compatible apps such as Godot and Unity, with a main-window runtime activity summary, transport readiness controls, and an optional Developer tab for opening the integrated simulator preview, mouse-driven head tracking, and live runtime streaming stats.
+- OXRSys Home is now a direct-distribution launcher and runtime installer for compatible apps such as Godot and Unity, with a main-window runtime activity summary, transport readiness controls, and optional Developer simulator workflows. The Qt Home simulator opens in a dedicated window, uses decoded video as the interaction surface when FFmpeg is available, and keeps tracking-only fallback visible when it is not.
 - As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed, 36 skipped, 0 failed.
 
 ## Documentation

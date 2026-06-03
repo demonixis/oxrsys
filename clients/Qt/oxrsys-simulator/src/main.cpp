@@ -10,7 +10,7 @@ int main(int argc, char** argv)
 
     SimulatorWidget widget;
     widget.setWindowTitle("OXRSys Simulator");
-    widget.resize(720, 420);
+    widget.resize(1280, 720);
     widget.show();
 
     return app.exec();

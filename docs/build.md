@@ -188,7 +188,11 @@ cmake --build build-qt
 ctest --test-dir build-qt --output-on-failure
 ```
 
-The standalone targets are `oxrsys-home` and `oxrsys-simulator`. See [qt-home.md](platforms/qt-home.md) for Linux registration/install behavior.
+The standalone targets are `oxrsys-home` and `oxrsys-simulator`. The Qt Home Developer tab opens
+the same shared simulator widget in a dedicated window. FFmpeg development libraries are optional;
+when they are found at configure time, the Qt simulator decodes video into the preview surface,
+otherwise it stays in tracking-only preview mode with an explicit status message. See
+[qt-home.md](platforms/qt-home.md) for Linux registration/install behavior.
 
 ### Unity Editor Helper
 

@@ -6,14 +6,18 @@ Current responsibilities:
 
 - launch compatible apps with `XR_RUNTIME_JSON` and capture stdout/stderr logs
 - persist manually added launcher apps under the platform config directory
-- scan Linux `.desktop` files and macOS `.app` bundles for Godot/Unity candidates
+- scan and accept dropped Linux `.desktop` files, executables, and macOS `.app` bundles for
+  Godot/Unity candidates
+- create terminal launch scripts for app cards on macOS and Linux without changing the runtime
+  manifest selection model
 - edit the shared runtime TOML keys for streaming, logging, encoder preset, and transport
 - detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, and `9946`
+- report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - show runtime activity and streaming stats from `runtime_status.json`
 - install and register the user OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
 - launch apps with either the installed runtime manifest or the manually selected manifest
-- host the shared Qt simulator widget from the Developer tab, including H.265 video preview when
-  FFmpeg is available and mouse-driven synthetic head tracking
+- open the shared Qt simulator widget from the Developer tab in a reusable `1280x720` window,
+  including H.265 video preview when FFmpeg is available and mouse-driven synthetic head tracking
 
 Build with the top-level CMake project:
 
@@ -24,6 +28,11 @@ ctest --test-dir build --output-on-failure
 ```
 
 On Linux, `OXRSYS_BUILD_QT_FRONTENDS=AUTO` enables the Qt apps when Qt6 Core/Widgets/Network are found.
+On macOS, the Qt finder also checks Qt Online Installer prefixes under `~/Qt/<version>/<kit>`,
+for example `~/Qt/6.10.2/macos`, in addition to Homebrew, MacPorts, `QTDIR`, and `Qt6_DIR`.
+
+The simulator shared target also has internal tests for UDP frame assembly, FEC recovery, partial
+frame drops, ignored render-pose packets, tracking flags, and shift-modified controller movement.
 
 The Settings tab separates registration from launch selection. `Update Registration`
 writes `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json` to the selected
@@ -34,5 +43,19 @@ or use the manifest selected in the registration field.
 Platform behavior:
 
 - Linux is the complete target for runtime installation, OpenXR registration, `.desktop` launch, USB ADB, config, state, and launcher persistence.
-- macOS can build and use the Qt launcher with `.app` bundles and executables. Runtime registration and installation stay owned by the SwiftUI Home app for now.
-- Windows can build the launcher scaffold later, but runtime install and registration are intentionally not implemented yet.
+- macOS can build and use the Qt launcher with `.app` bundles and executables, drag-and-drop
+  additions, app-card terminal launch via generated `.command` files, macOS WiFi readiness checks,
+  and improved ADB guidance. Runtime registration and installation stay owned by the SwiftUI Home
+  app for now.
+- Linux app-card terminal launch tries `x-terminal-emulator`, `gnome-terminal`, `konsole`, then
+  `xterm`. No new terminal dependency is required.
+- Windows can build the launcher scaffold later, but runtime install, registration, and app-card
+  terminal actions are intentionally not implemented yet.
+
+If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
+
+```bash
+brew install adb-enhanced
+```
+
+The error message lists the candidate paths that were checked.

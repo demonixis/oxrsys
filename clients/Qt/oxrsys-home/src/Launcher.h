@@ -48,3 +48,5 @@ QString launcherKindForMetadata(const QString& name,
                                 const QString& identifier,
                                 const QString& path,
                                 const QString& executablePath);
+QString terminalSafeName(const QString& value);
+QString terminalLaunchScript(const LauncherApp& app, const QString& runtimeManifestPath);
