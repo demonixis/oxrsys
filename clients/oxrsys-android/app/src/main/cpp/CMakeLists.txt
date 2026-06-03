@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ "72" CACHE STRING
     "Preferred headset display refresh rate requested by the Android client")
+set(OXRSYS_BUILD "1" CACHE STRING
+    "Global OXRSys build number used by the Android client")
+if(NOT "${OXRSYS_BUILD}" MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "OXRSYS_BUILD must be an integer")
+endif()
 
 # ─── OpenXR SDK (headers + loader) ──────────────────────────────────────────
 include(FetchContent)
@@ -67,5 +72,6 @@ target_link_libraries(oxrsys_android PRIVATE
 target_compile_definitions(oxrsys_android PRIVATE
     XR_USE_PLATFORM_ANDROID
     XR_USE_GRAPHICS_API_OPENGL_ES
+    OXRSYS_BUILD=${OXRSYS_BUILD}
     OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ=${OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ}
 )

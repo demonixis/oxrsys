@@ -11,6 +11,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AADA22AA2F71000000F517AB /* OXRSysVersion.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = OXRSysVersion.xcconfig; path = ../../config/OXRSysVersion.xcconfig; sourceTree = "<group>"; };
 		AADA22992F6BFD7600F517AB /* OXRSys Home.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OXRSys Home.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -37,6 +38,7 @@
 		AADA22902F6BFD7600F517AB = {
 			isa = PBXGroup;
 			children = (
+				AADA22AA2F71000000F517AB /* OXRSysVersion.xcconfig */,
 				AADA229B2F6BFD7600F517AB /* OXRSys Home */,
 				AADA229A2F6BFD7600F517AB /* Products */,
 			);
@@ -252,6 +254,7 @@
 		};
 		AADA22A52F6BFD7700F517AB /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AADA22AA2F71000000F517AB /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -260,7 +263,6 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -283,7 +285,6 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-home";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -303,6 +304,7 @@
 		};
 		AADA22A62F6BFD7700F517AB /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AADA22AA2F71000000F517AB /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -311,7 +313,6 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -334,7 +335,6 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
-				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-home";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

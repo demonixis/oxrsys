@@ -39,6 +39,21 @@ Key outputs:
 
 All third-party C++ dependencies are fetched through CMake `FetchContent`.
 
+## Versioning
+
+Product versioning is centralized in `config/OXRSysVersion.xcconfig`.
+
+- `OXRSYS_VERSION` is the global marketing version used by the CMake runtime, Xcode app
+  `MARKETING_VERSION`, and Android `versionName`.
+- `OXRSYS_BUILD` is the global integer build number used by Xcode
+  `CURRENT_PROJECT_VERSION`, Android `versionCode`, and the Android native
+  `XrApplicationInfo.applicationVersion`.
+- For a release, update `OXRSYS_VERSION` when the public version changes and increment
+  `OXRSYS_BUILD` for each distributable build.
+- Do not edit product versions directly in `.pbxproj`, Gradle, or native source files.
+  Streaming protocol versions and the OpenXR manifest `file_format_version` are separate
+  compatibility values and are not tied to the product version.
+
 ## Run The Runtime
 
 For terminal-launched applications:

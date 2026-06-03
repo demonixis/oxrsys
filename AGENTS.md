@@ -32,6 +32,8 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 - **Always build and verify before declaring success** — run the macOS build + tests and/or Android build as appropriate before saying everything works
 - **Always update `README.md`, `AGENTS.md`, and the relevant files in `docs/` when making significant project changes**
 - All dependencies are fetched via CMake FetchContent
+- Product versions are centralized in `config/OXRSysVersion.xcconfig`; do not hardcode
+  marketing versions or build numbers in CMake, Xcode, Gradle, or native client code.
 - All source code and documentation must be in English
 - Project-owned source code is licensed under MPL-2.0; preserve SPDX headers and keep third-party code under its upstream license.
 
@@ -71,6 +73,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 oxrsys_runtime/
 ├── CMakeLists.txt
 ├── cmake/RunOpenXRCTS.cmake
+├── config/OXRSysVersion.xcconfig
 ├── runtime/
 ├── clients/
 │   ├── common/

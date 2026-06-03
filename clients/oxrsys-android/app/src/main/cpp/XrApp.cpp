@@ -458,7 +458,7 @@ bool XrApp::CreateInstance(struct android_app* app)
     createInfo.enabledExtensionNames = extensions.data();
     strncpy(createInfo.applicationInfo.applicationName, "OXRSys Android",
             XR_MAX_APPLICATION_NAME_SIZE);
-    createInfo.applicationInfo.applicationVersion = 1;
+    createInfo.applicationInfo.applicationVersion = OXRSYS_BUILD;
     createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     strncpy(createInfo.applicationInfo.engineName, "OXRSys",
             XR_MAX_ENGINE_NAME_SIZE);

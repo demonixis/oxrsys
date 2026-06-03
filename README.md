@@ -56,7 +56,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 ## Documentation
 
 - [Install](docs/install.md)
-- [Build](docs/build.md)
+- [Build and versioning](docs/build.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
 - [Simulator](docs/simulator.md)

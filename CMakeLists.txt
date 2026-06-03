@@ -1,13 +1,38 @@
 # SPDX-License-Identifier: MPL-2.0
 
 cmake_minimum_required(VERSION 3.24)
-project(OXRSys LANGUAGES C CXX OBJCXX)
+
+set(OXRSYS_VERSION_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/config/OXRSysVersion.xcconfig")
+file(STRINGS "${OXRSYS_VERSION_CONFIG_FILE}" OXRSYS_VERSION_CONFIG_LINES)
+foreach(oxrsys_version_config_line IN LISTS OXRSYS_VERSION_CONFIG_LINES)
+    string(REGEX REPLACE "//.*$" "" oxrsys_version_config_line "${oxrsys_version_config_line}")
+    string(STRIP "${oxrsys_version_config_line}" oxrsys_version_config_line)
+    if(oxrsys_version_config_line MATCHES "^([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*(.*)$")
+        set("${CMAKE_MATCH_1}" "${CMAKE_MATCH_2}")
+    endif()
+endforeach()
+
+if(NOT "${OXRSYS_VERSION}" MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "OXRSYS_VERSION must use MAJOR.MINOR.PATCH in ${OXRSYS_VERSION_CONFIG_FILE}")
+endif()
+set(OXRSYS_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(OXRSYS_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(OXRSYS_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+if(NOT "${OXRSYS_BUILD}" MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "OXRSYS_BUILD must be an integer in ${OXRSYS_VERSION_CONFIG_FILE}")
+endif()
+
+project(OXRSys VERSION "${OXRSYS_VERSION}" LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OBJCXX_STANDARD 20)
-set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 enable_testing()
 
 execute_process(
@@ -125,6 +150,9 @@ target_link_libraries(oxrsys_runtime_api_tests PRIVATE
 )
 target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
+    OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
+    OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
+    OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
 )
 add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
 add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)

@@ -11,6 +11,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AA316C812F71000000BA3729 /* OXRSysVersion.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = OXRSysVersion.xcconfig; path = ../../config/OXRSysVersion.xcconfig; sourceTree = "<group>"; };
 		AA316C6B2F6ED21800BA3729 /* OXRSys Simulator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OXRSys Simulator.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -37,6 +38,7 @@
 		AA316C622F6ED21800BA3729 = {
 			isa = PBXGroup;
 			children = (
+				AA316C812F71000000BA3729 /* OXRSysVersion.xcconfig */,
 				AA316C6D2F6ED21800BA3729 /* OXRSys Simulator */,
 				AA316C6C2F6ED21800BA3729 /* Products */,
 			);
@@ -252,12 +254,12 @@
 		};
 		AA316C772F6ED21900BA3729 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA316C812F71000000BA3729 /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "OXRSys Simulator/OXRSys Simulator.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -278,7 +280,6 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-simulator";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -299,12 +300,12 @@
 		};
 		AA316C782F6ED21900BA3729 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA316C812F71000000BA3729 /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "OXRSys Simulator/OXRSys Simulator.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -325,7 +326,6 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-simulator";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

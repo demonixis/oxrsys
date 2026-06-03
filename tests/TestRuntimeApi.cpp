@@ -278,6 +278,25 @@ TEST_CASE("Loader-backed runtime exposes CTS-focused extensions", "[runtime][loa
     CHECK(hasExtension(XR_EXT_DEBUG_UTILS_EXTENSION_NAME));
 }
 
+TEST_CASE("Loader-backed runtime reports configured product version", "[runtime][loader]")
+{
+    XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_version_test",
+                 XR_MAX_APPLICATION_NAME_SIZE);
+    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+
+    XrInstance instance = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+    XrInstanceProperties properties = {XR_TYPE_INSTANCE_PROPERTIES};
+    XR_CHECK(xrGetInstanceProperties(instance, &properties));
+    CHECK(properties.runtimeVersion ==
+          XR_MAKE_VERSION(OXRSYS_VERSION_MAJOR, OXRSYS_VERSION_MINOR, OXRSYS_VERSION_PATCH));
+    CHECK(std::string(properties.runtimeName) == "OXRSys Runtime");
+
+    xrDestroyInstance(instance);
+}
+
 TEST_CASE("Runtime accepts Unity metal extension alias", "[runtime][loader]")
 {
     std::array<const char*, 2> enabledExtensions = {

@@ -83,7 +83,8 @@ XrResult Instance::GetInstanceProperties(XrInstanceProperties* properties)
     }
 
     properties->type = XR_TYPE_INSTANCE_PROPERTIES;
-    properties->runtimeVersion = XR_MAKE_VERSION(0, 1, 0);
+    properties->runtimeVersion =
+        XR_MAKE_VERSION(OXRSYS_VERSION_MAJOR, OXRSYS_VERSION_MINOR, OXRSYS_VERSION_PATCH);
     std::strncpy(properties->runtimeName, "OXRSys Runtime", XR_MAX_RUNTIME_NAME_SIZE);
 
     return XR_SUCCESS;

@@ -11,6 +11,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		AA316C962F71000000BA3729 /* OXRSysVersion.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = OXRSysVersion.xcconfig; path = ../../config/OXRSysVersion.xcconfig; sourceTree = "<group>"; };
 		AA316C822F6ED29B00BA3729 /* OXRSys visionOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "OXRSys visionOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -51,6 +52,7 @@
 		AA316C792F6ED29B00BA3729 = {
 			isa = PBXGroup;
 			children = (
+				AA316C962F71000000BA3729 /* OXRSysVersion.xcconfig */,
 				AA316C842F6ED29B00BA3729 /* OXRSys visionOS */,
 				AA316C832F6ED29B00BA3729 /* Products */,
 			);
@@ -150,11 +152,11 @@
 /* Begin XCBuildConfiguration section */
 		AA316C922F6ED29D00BA3729 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA316C962F71000000BA3729 /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -165,7 +167,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-visionos";
 				PRODUCT_NAME = "OXRSys visionOS";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -182,11 +183,11 @@
 		};
 		AA316C932F6ED29D00BA3729 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA316C962F71000000BA3729 /* OXRSysVersion.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -197,7 +198,6 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "net.demonixis.oxrsys-visionos";
 				PRODUCT_NAME = "OXRSys visionOS";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

@@ -29,6 +29,9 @@ target_include_directories(oxrsys_runtime PRIVATE
 target_compile_definitions(oxrsys_runtime PRIVATE
     XR_USE_GRAPHICS_API_METAL
     XR_USE_GRAPHICS_API_VULKAN
+    OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
+    OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
+    OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
 )
 
 # NOTE: We intentionally do NOT link against Vulkan::Vulkan.
