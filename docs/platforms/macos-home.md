@@ -37,6 +37,16 @@ team. Home does not embed or install a runtime; the user selects the OpenXR runt
 The Home app links the shared `OXRSysSimulator` Swift package so the Developer tab can host the
 simulator without launching a separate app bundle.
 
+## Direct Distribution Package
+
+Use `scripts/macos_sign_notarize.sh` from the repository root for Developer ID signing and optional
+notarization. The script signs `OXRSys Home.app` and the built runtime dylib, then creates one zip
+archive containing the app and a `runtime/` directory. With `--notarize`, it submits that archive to
+Apple using the provided Apple Developer account email and app-specific password, staples the Home
+app after acceptance, and rebuilds the zip so the app in the archive carries the stapled ticket.
+
+The full command examples live in [build.md](../build.md#macos-release-signing-and-notarization).
+
 ## Apps Launcher
 
 On startup and when `Rescan` is pressed, the Home app scans:

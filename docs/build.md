@@ -119,6 +119,38 @@ The default Debug build pre-fills the runtime manifest field with
 `build/runtime/oxrsys-runtime.json` for local development. Home-launched apps use the manifest path
 shown in that field; Home does not embed, install, or silently prefer another runtime.
 
+### macOS Release Signing And Notarization
+
+Use `scripts/macos_sign_notarize.sh` for direct-distribution macOS packages. It signs the runtime
+dylib and `OXRSys Home.app`, then creates a single zip containing the Home app plus a `runtime/`
+folder with the dylib, manifest, and TOML config. The manifest copy in the archive is rewritten to
+load the packaged dylib with a relative path; the build-tree manifest is left unchanged.
+
+Signing-only package:
+
+```bash
+./scripts/macos_sign_notarize.sh \
+  --build-runtime \
+  --build-home \
+  --identity "Developer ID Application: OXRSys Team (ABCDE12345)"
+```
+
+Signing plus notarization:
+
+```bash
+./scripts/macos_sign_notarize.sh --notarize \
+  --build-runtime \
+  --build-home \
+  --identity "Developer ID Application: OXRSys Team (ABCDE12345)" \
+  --team-id ABCDE12345 \
+  --apple-id developer@example.com \
+  --password "xxxx-xxxx-xxxx-xxxx"
+```
+
+`--apple-id` is the Apple Developer account email and `--password` is an app-specific password for
+`notarytool`. If `--identity` is omitted, the script auto-selects the only Developer ID Application
+certificate in the keychain; pass it explicitly when more than one identity is installed.
+
 ### Unified Viewer App
 
 The shared simulator package can be checked directly:

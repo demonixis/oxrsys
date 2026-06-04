@@ -1,5 +1,18 @@
 # Scripts
 
+## macOS Signing And Notarization
+
+`scripts/macos_sign_notarize.sh` signs the built macOS runtime dylib and `OXRSys Home.app`, then
+creates one distribution archive under `build/dist/` by default. The archive contains the Home app
+and a `runtime/` directory with `liboxrsys-runtime.dylib`, `oxrsys-runtime.json`, and
+`oxrsys-runtime.toml`. The manifest copy inside the archive is rewritten to load the packaged dylib
+with a relative path.
+
+Pass `--notarize` with `--apple-id`, `--password`, and preferably `--team-id` to submit the same
+archive through `xcrun notarytool`. After acceptance, the script staples the ticket to
+`OXRSys Home.app` and rebuilds the archive so the distributed zip contains the stapled app. Run
+`scripts/macos_sign_notarize.sh --help` for the full option list and command examples.
+
 ## Unity
 
 `scripts/unity/Editor/` contains Unity Editor helpers for projects that target OXRSys:

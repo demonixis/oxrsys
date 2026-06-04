@@ -117,3 +117,5 @@ clients/common/OpenXRSimulator/.build
 clients/Android/android-vr/.gradle
 clients/Android/android-vr/app/.cxx
 clients/oxrsys-android/.gradle
+clients/Apple/common/OXRSysSimulator/.build
+clients/Apple/common/OXRSysStreaming/.build
