@@ -8,6 +8,7 @@ The repository also includes a native SwiftUI macOS Home app and a Qt Home app f
 launching, runtime installation, runtime configuration, and runtime registration workflows.
 
 **Current state:** Metal/core runtime, Vulkan interop, Linux Vulkan/FFmpeg scaffolding,
+typed internal graphics/frame plumbing, portable platform/socket helpers,
 controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
 are in place. Windows is scaffolded in layout/docs only for this pass. The Android VR client now feeds
@@ -29,6 +30,8 @@ same-process window backed by the shared `OXRSysSimulator` Swift package, and sh
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
 Qt simulator widget in a dedicated window with UDP video preview, mouse-driven synthetic head
 tracking, explicit FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe recovery requests.
+Unity project helper scripts under `scripts/unity/Editor/` cover editor runtime selection and the
+macOS Player OpenXR loader bundle-name workaround needed by exported Unity apps.
 As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully green locally:
 63 passed, 36 skipped, 0 failed.
 
@@ -57,9 +60,9 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 
 ## Important Technical Constraints
 
-- The runtime does not link directly against Vulkan. Resolve Vulkan functions through the app-provided loader path.
+- The runtime does not link directly against Vulkan. Resolve Vulkan functions through the app-provided loader path; Vulkan v1 may fall back only to an already-loaded process `vkGetInstanceProcAddr` and must not call `LoadLibrary`/`dlopen` for the Vulkan loader.
 - `Session::EndFrame()` must stay non-blocking.
-- The streaming encoder queue is latest-frame-only.
+- The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
 - Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming.
 - Headset refresh rate is negotiated from the client.
 - The Quest Android client requests its preferred display refresh rate from the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value.
@@ -72,7 +75,8 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
 - Runtime configuration is loaded from the platform config directory:
   macOS `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
-  Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`.
+  Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`,
+  Windows `%APPDATA%/OXRSys/oxrsys-runtime.toml`.
 
 ## Project Layout
 
@@ -98,11 +102,18 @@ oxrsys_runtime/
 │       └── libs/
 ├── common/
 │   └── protocol/include/oxrsys/protocol/
+├── scripts/
+│   └── unity/
+│       └── Editor/
 ├── tests/
 │   ├── TestConfig.cpp
 │   ├── TestInputManager.cpp
+│   ├── TestRuntimePlatform.cpp
+│   ├── TestStreamingFrameQueue.cpp
+│   ├── TestVulkanDispatch.cpp
 │   ├── HomeLauncherTests.swift
 │   ├── TestProtocolLayout.cpp
+│   ├── TestRuntimeStatus.cpp
 │   └── TestRuntimeApi.cpp
 └── docs/
 ```

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <openxr/openxr.h>
+#include "GraphicsTypes.h"
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
 #endif
@@ -12,12 +13,6 @@
 #include <deque>
 #include <mutex>
 
-enum class GraphicsApi
-{
-    Metal,
-    Vulkan,
-};
-
 class Swapchain
 {
 public:
@@ -26,7 +21,7 @@ public:
 
     // Vulkan constructor (also takes metalDevice for debug renderer MTLTexture extraction)
     Swapchain(GraphicsApi api, void* metalDevice,
-              void* vkDevice, void* vkPhysicalDevice,
+              const VulkanGraphicsContext& vulkanContext,
               const XrSwapchainCreateInfo* createInfo);
 
     ~Swapchain();
@@ -93,7 +88,7 @@ private:
     };
 
     void InitMetal(void* metalDevice, const XrSwapchainCreateInfo* createInfo);
-    void InitVulkan(void* metalDevice, void* vkDevice, void* vkPhysicalDevice,
+    void InitVulkan(void* metalDevice, const VulkanGraphicsContext& vulkanContext,
                      const XrSwapchainCreateInfo* createInfo);
 
     uint64_t handle_ = 0;

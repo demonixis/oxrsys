@@ -22,7 +22,7 @@ OXRSys Home exists as a native Apple app and a Qt app. The Apple app owns the ma
 
 ### Technical Limitations
 
-- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging.
+- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging. Unity macOS Player exports should include the helper scripts under `scripts/unity/Editor/`.
 - Meta Quest Integration: The interface is currently minimal; the app displays a blue screen during standby and a green screen during loading.
 
 ### Stability & Contributions
@@ -47,9 +47,9 @@ This project uses AI-generated code and documentation. We appreciate professiona
 
 ## Status
 
-- macOS: Metal rendering, core runtime flow, Vulkan interop, and loader-backed runtime tests are in place.
+- macOS: Metal rendering, core runtime flow, Vulkan interop, typed graphics/frame plumbing, and loader-backed runtime tests are in place.
 - Linux: Vulkan runtime scaffolding and an FFmpeg encoder path are wired; real Vulkan image readback is still the main remaining Linux video gap.
-- Windows: layout and documentation scaffolding only in this pass.
+- Windows: the runtime backend remains scaffold-only, while shared platform, config, status, and socket helpers are being kept portable.
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
 - The Android VR client feeds real Quest/PICO hand joints into the runtime, gates controller poses with explicit active flags, supports WiFi UDP and reconnecting USB ADB reverse TCP streaming, matches per-frame render poses for smoother headset reprojection, exposes a first-pass `XR_FB_foveation` path when supported by the headset, and can request a build-configured display refresh rate.
 - The visionOS viewer uses a minimal floating search window, then enters immersive VR automatically once the stream connects and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.

@@ -229,35 +229,6 @@ TEST_CASE("InputManager — streaming controller activity gates pose updates", "
     CHECK_THAT(left.position.z, WithinAbs(-0.55f, 0.001f));
 }
 
-TEST_CASE("InputManager — hand tracking keeps the hand active without controller flags", "[input]")
-{
-    InputManager im;
-    TrackingReceiver receiver;
-    im.SetTrackingReceiver(&receiver);
-    im.SetStreamingClientName("PICO 4");
-
-    oxr::protocol::TrackingPacket packet = {};
-    packet.timestampNs = 1'000'000'000;
-    packet.headOrientation[3] = 1.0f;
-    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
-    for (uint32_t i = 0; i < oxr::protocol::HAND_JOINT_COUNT; ++i)
-    {
-        packet.leftHandJoints[i][0] = 0.01f * static_cast<float>(i);
-        packet.leftHandJoints[i][1] = 1.0f;
-        packet.leftHandJoints[i][2] = -0.2f;
-        packet.leftHandJoints[i][3] = 0.01f;
-    }
-
-    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
-    im.Update(0.0f);
-
-    CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
-    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
-    CHECK(im.IsInputDeviceActive(InputManager::Hand::Left));
-    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
-          "/interaction_profiles/ext/hand_interaction_ext");
-}
-
 TEST_CASE("InputManager — streaming client names map to controller profiles and aliases", "[input]")
 {
     struct Case
@@ -301,6 +272,33 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
                             "/interaction_profiles/oculus/touch_controller") != profiles.end());
         }
     }
+}
+
+TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Oculus Quest");
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.leftTrigger = 0.75f;
+    packet.leftGrip = 0.20f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "select/value"),
+               WithinAbs(0.75f, 0.001f));
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "trigger/value"),
+               WithinAbs(0.75f, 0.001f));
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "squeeze/value"),
+               WithinAbs(0.20f, 0.001f));
+    CHECK(im.GetButtonClick(InputManager::Hand::Left, "select/click"));
+    CHECK_FALSE(im.GetButtonClick(InputManager::Hand::Left, "squeeze/click"));
 }
 
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")

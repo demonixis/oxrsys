@@ -16,6 +16,7 @@ struct AggregatedActionState
     XrVector2f vector2fValue = {0.0f, 0.0f};
     bool poseActive = false;
     XrPath poseSourcePath = XR_NULL_PATH;
+    std::string poseSourceProfile;
     std::vector<XrPath> boundSources;
 };
 
@@ -60,6 +61,7 @@ public:
         bool vector2fChanged = false;
         bool poseActive = false;
         XrPath poseSourcePath = XR_NULL_PATH;
+        std::string poseSourceProfile;
         XrTime lastChangeTime = 0;
         std::vector<XrPath> boundSources;
     };

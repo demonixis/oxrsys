@@ -70,7 +70,7 @@ VideoEncoder::~VideoEncoder()
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                              uint32_t bitrateMbps, void* /*graphicsDevice*/)
+                              uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {
     Shutdown();
 
@@ -79,6 +79,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     eyeWidth_ = width / 2;
     fps_ = std::max(fps, 1u);
     bitrateMbps_ = bitrateMbps;
+    graphicsContext_ = graphicsContext;
     frameCount_ = 0;
     forceKeyframe_.store(false);
     shuttingDown_.store(false);
@@ -142,9 +143,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         return false;
     }
 
-    session_ = context;
-    pixelBufferPool_ = frame;
-    textureCache_ = packet;
+    ffmpeg_.codecContext = context;
+    ffmpeg_.frame = frame;
+    ffmpeg_.packet = packet;
 
     spdlog::info("FFmpegVideoEncoder: initialized HEVC encoder {}x{} @ {}Hz {}Mbps",
                  width_, height_, fps_, bitrateMbps_);
@@ -155,9 +156,9 @@ void VideoEncoder::Shutdown()
 {
     shuttingDown_.store(true);
 
-    AVCodecContext* context = CodecContext(session_);
-    AVFrame* frame = Frame(pixelBufferPool_);
-    AVPacket* packet = Packet(textureCache_);
+    AVCodecContext* context = CodecContext(ffmpeg_.codecContext);
+    AVFrame* frame = Frame(ffmpeg_.frame);
+    AVPacket* packet = Packet(ffmpeg_.packet);
 
     if (context != nullptr)
     {
@@ -172,9 +173,9 @@ void VideoEncoder::Shutdown()
         av_packet_free(&packet);
     }
 
-    session_ = nullptr;
-    pixelBufferPool_ = nullptr;
-    textureCache_ = nullptr;
+    ffmpeg_.codecContext = nullptr;
+    ffmpeg_.frame = nullptr;
+    ffmpeg_.packet = nullptr;
     inFlightFrameCount_.store(0);
 }
 
@@ -195,9 +196,9 @@ bool VideoEncoder::EncodeInternal(void* /*leftTexture*/, void* /*rightTexture*/,
                                   int64_t timestampNs, OnNalUnitCallback callback,
                                   OnFrameEncodedCallback frameCallback)
 {
-    AVCodecContext* context = CodecContext(session_);
-    AVFrame* frame = Frame(pixelBufferPool_);
-    AVPacket* packet = Packet(textureCache_);
+    AVCodecContext* context = CodecContext(ffmpeg_.codecContext);
+    AVFrame* frame = Frame(ffmpeg_.frame);
+    AVPacket* packet = Packet(ffmpeg_.packet);
     if (context == nullptr || frame == nullptr || packet == nullptr)
     {
         return false;
@@ -302,7 +303,7 @@ void VideoEncoder::ForceKeyframe()
 void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
 {
     bitrateMbps_ = bitrateMbps;
-    if (AVCodecContext* context = CodecContext(session_))
+    if (AVCodecContext* context = CodecContext(ffmpeg_.codecContext))
     {
         context->bit_rate = static_cast<int64_t>(bitrateMbps_) * 1000 * 1000;
     }

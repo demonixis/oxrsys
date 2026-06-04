@@ -194,29 +194,32 @@ VideoEncoder::~VideoEncoder()
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                               uint32_t bitrateMbps, void* metalDevice)
+                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {
+    Shutdown();
+
     width_ = width;
     height_ = height;
     eyeWidth_ = width / 2;
     fps_ = fps;
     bitrateMbps_ = bitrateMbps;
-    metalDevice_ = metalDevice;
+    graphicsContext_ = graphicsContext;
+    videoToolbox_.metalDevice = graphicsContext.metalDevice;
     shuttingDown_.store(false);
     droppedFrameCount_.store(0);
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
     frameCount_ = 0;
 
-    id<MTLDevice> device = (__bridge id<MTLDevice>)metalDevice;
+    id<MTLDevice> device = (__bridge id<MTLDevice>)graphicsContext.metalDevice;
     if (device == nil)
     {
         spdlog::error("VideoEncoder: No Metal device");
         return false;
     }
 
-    commandQueue_ = (void*)[device newCommandQueue];
-    scaler_ = (void*)[[MPSImageBilinearScale alloc] initWithDevice:device];
+    videoToolbox_.commandQueue = (void*)[device newCommandQueue];
+    videoToolbox_.scaler = (void*)[[MPSImageBilinearScale alloc] initWithDevice:device];
 
     CVMetalTextureCacheRef cache = nullptr;
     CVReturn cvResult = CVMetalTextureCacheCreate(
@@ -226,7 +229,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         spdlog::error("VideoEncoder: Failed to create Metal texture cache: {}", cvResult);
         return false;
     }
-    textureCache_ = cache;
+    videoToolbox_.textureCache = cache;
 
     NSDictionary* poolConfig = @{
         (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @(SlotCount),
@@ -251,7 +254,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         Shutdown();
         return false;
     }
-    pixelBufferPool_ = pool;
+    videoToolbox_.pixelBufferPool = pool;
 
     MTLTextureDescriptor* tmpDesc = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -265,7 +268,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     {
         CVPixelBufferRef pixelBuffer = nullptr;
         cvResult = CVPixelBufferPoolCreatePixelBuffer(
-            kCFAllocatorDefault, (CVPixelBufferPoolRef)pixelBufferPool_, &pixelBuffer);
+            kCFAllocatorDefault, (CVPixelBufferPoolRef)videoToolbox_.pixelBufferPool, &pixelBuffer);
         if (cvResult != kCVReturnSuccess || pixelBuffer == nullptr)
         {
             spdlog::error("VideoEncoder: Failed to preallocate pixel buffer slot {}", i);
@@ -276,7 +279,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CVMetalTextureRef cvMetalTexture = nullptr;
         cvResult = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,
-            (CVMetalTextureCacheRef)textureCache_,
+            (CVMetalTextureCacheRef)videoToolbox_.textureCache,
             pixelBuffer,
             nullptr,
             MTLPixelFormatBGRA8Unorm,
@@ -387,7 +390,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     CFRelease(delayRef);
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
-    session_ = compressionSession;
+    videoToolbox_.session = compressionSession;
 
     spdlog::info("VideoEncoder: Initialized H.265 encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
                   width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
@@ -398,13 +401,13 @@ void VideoEncoder::Shutdown()
 {
     shuttingDown_.store(true);
 
-    if (session_ != nullptr)
+    if (videoToolbox_.session != nullptr)
     {
-        VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)session_;
+        VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
         VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid);
         VTCompressionSessionInvalidate(compressionSession);
         CFRelease(compressionSession);
-        session_ = nullptr;
+        videoToolbox_.session = nullptr;
     }
 
     for (int i = 0; i < 200 && inFlightFrameCount_.load() > 0; i++)
@@ -414,25 +417,25 @@ void VideoEncoder::Shutdown()
 
     DestroySlots();
 
-    if (scaler_ != nullptr)
+    if (videoToolbox_.scaler != nullptr)
     {
-        [(MPSImageBilinearScale*)scaler_ release];
-        scaler_ = nullptr;
+        [(MPSImageBilinearScale*)videoToolbox_.scaler release];
+        videoToolbox_.scaler = nullptr;
     }
-    if (commandQueue_ != nullptr)
+    if (videoToolbox_.commandQueue != nullptr)
     {
-        [(id<MTLCommandQueue>)commandQueue_ release];
-        commandQueue_ = nullptr;
+        [(id<MTLCommandQueue>)videoToolbox_.commandQueue release];
+        videoToolbox_.commandQueue = nullptr;
     }
-    if (pixelBufferPool_ != nullptr)
+    if (videoToolbox_.pixelBufferPool != nullptr)
     {
-        CFRelease(pixelBufferPool_);
-        pixelBufferPool_ = nullptr;
+        CFRelease(videoToolbox_.pixelBufferPool);
+        videoToolbox_.pixelBufferPool = nullptr;
     }
-    if (textureCache_ != nullptr)
+    if (videoToolbox_.textureCache != nullptr)
     {
-        CFRelease(textureCache_);
-        textureCache_ = nullptr;
+        CFRelease(videoToolbox_.textureCache);
+        videoToolbox_.textureCache = nullptr;
     }
 
     spdlog::info("VideoEncoder: Shut down (submitted={} dropped={})",
@@ -458,7 +461,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
                                    int64_t timestampNs, OnNalUnitCallback callback,
                                    OnFrameEncodedCallback frameCallback)
 {
-    if (session_ == nullptr || leftTexture == nullptr || (stereo && rightTexture == nullptr))
+    if (videoToolbox_.session == nullptr || leftTexture == nullptr || (stereo && rightTexture == nullptr))
     {
         return false;
     }
@@ -493,7 +496,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
 
     id<MTLTexture> leftTex = (__bridge id<MTLTexture>)leftTexture;
     id<MTLTexture> rightTex = stereo ? (__bridge id<MTLTexture>)rightTexture : nil;
-    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)commandQueue_;
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)videoToolbox_.commandQueue;
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     if (cmdBuf == nil)
     {
@@ -522,7 +525,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
     {
         id<MTLTexture> tmpLeft = (id<MTLTexture>)slot.tmpLeftTexture;
         id<MTLTexture> tmpRight = (id<MTLTexture>)slot.tmpRightTexture;
-        MPSImageBilinearScale* scaler = (MPSImageBilinearScale*)scaler_;
+        MPSImageBilinearScale* scaler = (MPSImageBilinearScale*)videoToolbox_.scaler;
         [scaler encodeToCommandBuffer:cmdBuf sourceTexture:leftTex destinationTexture:tmpLeft];
         [scaler encodeToCommandBuffer:cmdBuf sourceTexture:rightTex destinationTexture:tmpRight];
 
@@ -577,7 +580,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
     }
     else if (needsDownscale)
     {
-        MPSImageBilinearScale* scaler = (MPSImageBilinearScale*)scaler_;
+        MPSImageBilinearScale* scaler = (MPSImageBilinearScale*)videoToolbox_.scaler;
         [scaler encodeToCommandBuffer:cmdBuf sourceTexture:leftTex destinationTexture:dstTexture];
     }
     else
@@ -610,7 +613,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
     context->encodeStart = Clock::now();
     context->encodeSubmitFinished = context->encodeStart;
 
-    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)session_;
+    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer)
     {
         if (commandBuffer.status != MTLCommandBufferStatusCompleted || this->shuttingDown_.load())
@@ -734,12 +737,12 @@ void VideoEncoder::ForceKeyframe()
 
 void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
 {
-    if (session_ == nullptr || bitrateMbps == bitrateMbps_)
+    if (videoToolbox_.session == nullptr || bitrateMbps == bitrateMbps_)
     {
         return;
     }
 
-    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)session_;
+    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
 
     int avgBitrate = bitrateMbps * 1000000;
     CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &avgBitrate);

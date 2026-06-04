@@ -4,15 +4,17 @@
 
 #include <array>
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <netinet/in.h>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "RuntimeSockets.h"
+#include "GraphicsTypes.h"
+#include "StreamingFrameQueue.h"
 
 // Shared protocol definitions
 #include <oxrsys/protocol/Protocol.h>
@@ -57,7 +59,8 @@ public:
     void SendFrame(void* leftTexture, void* rightTexture);
 
     // Set the platform graphics device for VideoEncoder initialization.
-    void SetGraphicsDevice(void* graphicsDevice) { graphicsDevice_ = graphicsDevice; }
+    void SetGraphicsContext(const GraphicsContext& graphicsContext) { graphicsContext_ = graphicsContext; }
+    void SetGraphicsDevice(void* graphicsDevice) { SetGraphicsContext(GraphicsContext::Metal(graphicsDevice)); }
     void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(metalDevice); }
 
     // Check if a client is connected
@@ -72,6 +75,8 @@ public:
     TrackingReceiver* GetTrackingReceiver() { return trackingReceiver_.get(); }
 
 private:
+    using SocketHandle = oxrsys::runtime_socket::SocketHandle;
+
     struct CachedPacket
     {
         std::vector<uint8_t> data;  // Full packet (header + payload)
@@ -88,7 +93,7 @@ private:
         std::mutex mutex;
         std::mutex sendMutex;
         std::string clientIp;
-        int videoSocket = -1;
+        SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
         bool videoUsesTcp = false;
         bool acceptingPackets = false;
 
@@ -96,20 +101,6 @@ private:
         static constexpr size_t MaxCachedFrames = 5;
         std::array<CachedFrame, MaxCachedFrames> cachedFrames;
         size_t cacheWriteIndex = 0;
-    };
-
-    struct PendingFrame
-    {
-        void* leftTexture = nullptr;
-        void* rightTexture = nullptr;
-        uint32_t frameIndex = 0;
-        int64_t timestampNs = 0;
-        bool valid = false;
-
-        // Render pose at the time this frame was submitted (for ATW correction)
-        float headPosition[3] = {};
-        float headOrientation[4] = {0, 0, 0, 1};
-        bool hasPose = false;
     };
 
     void BroadcastThread();
@@ -120,7 +111,7 @@ private:
     void TcpTrackingThread();
     std::string GetLocalIpAddress() const;
     oxr::protocol::ServerAnnounce BuildServerAnnounce() const;
-    void ReleasePendingFrame(PendingFrame& frame);
+    void ReleaseStreamingFrame(StreamingFrame& frame);
     void HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                              const sockaddr_in& clientAddr);
     void HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect);
@@ -156,15 +147,15 @@ private:
     uint32_t lastKeyframeRequestCountForAbr_ = 0;
 
     // Sockets
-    int broadcastSocket_ = -1;
-    int controlSocket_ = -1;
-    int videoSocket_ = -1;
-    int tcpControlListenSocket_ = -1;
-    int tcpVideoListenSocket_ = -1;
-    int tcpTrackingListenSocket_ = -1;
-    int tcpControlClientSocket_ = -1;
-    int tcpVideoClientSocket_ = -1;
-    int tcpTrackingClientSocket_ = -1;
+    SocketHandle broadcastSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle controlSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle videoSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpControlListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpVideoListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpTrackingListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpControlClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpVideoClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpTrackingClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
     std::mutex tcpSocketMutex_;
     std::mutex disconnectMutex_;
     bool wifiEnabled_ = true;
@@ -185,9 +176,7 @@ private:
     std::thread tcpVideoThread_;
     std::thread tcpTrackingThread_;
     std::atomic<bool> running_{false};
-    std::condition_variable frameReadyCv_;
-    std::mutex frameMutex_;
-    PendingFrame pendingFrame_;
+    StreamingFrameQueue frameQueue_;
     std::shared_ptr<PacketDispatchState> packetDispatchState_;
     std::atomic<uint32_t> pendingFrameDepthMax_{0};
     std::atomic<uint32_t> replacedFrameCount_{0};
@@ -197,13 +186,13 @@ private:
     static void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                             uint32_t frameIndex, const uint8_t* data, size_t size,
                             bool isKeyframe, int64_t timestampNs);
-    static bool SendTcpRecord(int socket, oxr::protocol::TcpRecordType type,
+    static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
 
     // Sub-components
     std::shared_ptr<VideoEncoder> encoder_;
     std::unique_ptr<TrackingReceiver> trackingReceiver_;
-    void* graphicsDevice_ = nullptr;
+    GraphicsContext graphicsContext_ = {};
 
     // Frame sending state
     uint32_t frameIndex_ = 0;

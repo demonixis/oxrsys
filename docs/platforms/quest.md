@@ -78,6 +78,8 @@ The client suggests bindings for:
 Unsupported profile suggestions are logged and ignored so the active headset runtime can select the profile it actually exposes. The macOS runtime maps the connected `ClientConnect.deviceName` to the matching canonical OpenXR profile and accepts compatible fallback bindings such as Oculus Touch for Quest and Khronos simple controller where appropriate.
 When announced by the headset runtime, the Android client also enables `XR_META_touch_controller_plus` and `XR_BD_controller_interaction` before suggesting those profile families.
 
+Expected Quest profile paths are `/interaction_profiles/oculus/touch_controller` or `/interaction_profiles/meta/touch_controller_quest_1_rift_s` for Quest 1, `/interaction_profiles/meta/touch_controller_quest_2` for Quest 2, and `/interaction_profiles/meta/touch_plus_controller` or `/interaction_profiles/meta/touch_controller_plus` for Quest 3-class Touch Plus controllers.
+
 Controller poses are valid only when the client sets `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. When a controller flag is missing, the runtime leaves that hand's controller actions inactive and keeps the last valid pose internally instead of consuming zeroed packet fields. Hand tracking uses separate hand-active flags and can keep hand-interaction actions active while controller tracking is inactive.
 
 ## Log Validation Matrix
@@ -90,6 +92,7 @@ For Quest 1, Quest 2, Quest 3, PICO Neo3/PICO 3, and PICO 4, collect `adb logcat
 - controller locate logs transition to active and tracking packets include controller-active flags while controllers are visible
 - runtime logs show nonzero controller poses and the expected canonical profile
 - hand tracking logs transition active and set hand-active flags when the headset reports usable joints
+- trigger values change independently from squeeze/grab values
 
 ## USB ADB Transport
 

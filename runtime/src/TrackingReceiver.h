@@ -3,10 +3,13 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <thread>
+
+#include "RuntimeSockets.h"
 
 #include <oxrsys/protocol/Protocol.h>
 
@@ -57,7 +60,7 @@ private:
     void ReceiveThread();
     void StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs);
 
-    int socket_ = -1;
+    oxrsys::runtime_socket::SocketHandle socket_ = oxrsys::runtime_socket::InvalidSocket;
     std::thread receiveThread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> hasData_{false};

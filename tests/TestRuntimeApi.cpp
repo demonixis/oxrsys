@@ -135,13 +135,14 @@ XrBool32 XRAPI_PTR CaptureDebugUtilsCallback(
 
 struct RuntimeSessionContext
 {
-    explicit RuntimeSessionContext(std::initializer_list<const char*> extensions, bool beginSession = true)
+    explicit RuntimeSessionContext(std::initializer_list<const char*> extensions, bool beginSession = true,
+                                   XrVersion apiVersion = XR_CURRENT_API_VERSION)
         : enabledExtensions(extensions)
     {
         XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
         std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_tests",
                      XR_MAX_APPLICATION_NAME_SIZE);
-        createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+        createInfo.applicationInfo.apiVersion = apiVersion;
         createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
         createInfo.enabledExtensionNames = enabledExtensions.data();
         XR_CHECK(xrCreateInstance(&createInfo, &instance));
@@ -276,6 +277,9 @@ TEST_CASE("Loader-backed runtime exposes CTS-focused extensions", "[runtime][loa
     CHECK(hasExtension(XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME));
     CHECK(hasExtension(XR_EXT_HAND_INTERACTION_EXTENSION_NAME));
     CHECK(hasExtension(XR_EXT_DEBUG_UTILS_EXTENSION_NAME));
+#ifdef XR_META_touch_controller_plus
+    CHECK(hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME));
+#endif
 }
 
 TEST_CASE("Loader-backed runtime reports configured product version", "[runtime][loader]")
@@ -293,6 +297,51 @@ TEST_CASE("Loader-backed runtime reports configured product version", "[runtime]
     CHECK(properties.runtimeVersion ==
           XR_MAKE_VERSION(OXRSYS_VERSION_MAJOR, OXRSYS_VERSION_MINOR, OXRSYS_VERSION_PATCH));
     CHECK(std::string(properties.runtimeName) == "OXRSys Runtime");
+
+    xrDestroyInstance(instance);
+}
+
+TEST_CASE("Instance view and blend APIs reject missing output pointers", "[runtime][validation]")
+{
+    XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_validation_tests",
+                 XR_MAX_APPLICATION_NAME_SIZE);
+    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+
+    XrInstance instance = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+    XrSystemGetInfo systemGetInfo = {XR_TYPE_SYSTEM_GET_INFO};
+    systemGetInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemId systemId = XR_NULL_SYSTEM_ID;
+    XR_CHECK(xrGetSystem(instance, &systemGetInfo, &systemId));
+
+    CHECK(xrEnumerateViewConfigurations(instance, systemId, 0, nullptr, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    uint32_t count = 0;
+    CHECK(xrEnumerateViewConfigurations(instance, systemId, 1, &count, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    CHECK(xrGetViewConfigurationProperties(
+              instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    CHECK(xrEnumerateViewConfigurationViews(
+              instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, nullptr, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    CHECK(xrEnumerateViewConfigurationViews(
+              instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &count, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    CHECK(xrEnumerateEnvironmentBlendModes(
+              instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, nullptr, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
+
+    CHECK(xrEnumerateEnvironmentBlendModes(
+              instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 1, &count, nullptr) ==
+          XR_ERROR_VALIDATION_FAILURE);
 
     xrDestroyInstance(instance);
 }
@@ -1032,6 +1081,9 @@ TEST_CASE("Conformance automation drives Khronos simple controller actions", "[r
     RuntimeSessionContext context({
         XR_KHR_METAL_ENABLE_EXTENSION_NAME,
         XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+#ifdef XR_META_touch_controller_plus
+        XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
+#endif
     });
 
     XrPath leftHandPath = context.Path("/user/hand/left");
@@ -1655,6 +1707,9 @@ TEST_CASE("Quest Pico and simple profiles report float inputs through automation
     RuntimeSessionContext context({
         XR_KHR_METAL_ENABLE_EXTENSION_NAME,
         XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+#ifdef XR_META_touch_controller_plus
+        XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
+#endif
     });
 
     XrPath leftHandPath = context.Path("/user/hand/left");
@@ -1698,6 +1753,12 @@ TEST_CASE("Quest Pico and simple profiles report float inputs through automation
          "/user/hand/left/input/trigger/value",
          "/input/trigger/value",
          0.50f},
+#ifdef XR_META_touch_controller_plus
+        {"/interaction_profiles/meta/touch_controller_plus",
+         "/user/hand/left/input/trigger/value",
+         "/input/trigger/value",
+         0.55f},
+#endif
         {"/interaction_profiles/bytedance/pico_neo3_controller",
          "/user/hand/left/input/trigger/value",
          "/input/trigger/value",
@@ -1761,6 +1822,157 @@ TEST_CASE("Quest Pico and simple profiles report float inputs through automation
     }
 
     XR_CHECK(xrDestroyAction(valueAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+#ifdef XR_META_touch_controller_plus
+TEST_CASE("Touch Plus extension profile is selectable for OpenXR 1.0 apps",
+          "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+        XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
+    },
+                                  true, XR_MAKE_VERSION(1, 0, 57));
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath touchPlusPath = context.Path("/interaction_profiles/meta/touch_controller_plus");
+    XrPath triggerValuePath = context.Path("/user/hand/left/input/trigger/value");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "touch_plus_ext",
+                 XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Touch Plus Ext",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction triggerAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    actionCreateInfo.countSubactionPaths = 1;
+    actionCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(actionCreateInfo.actionName, "touch_plus_ext_trigger",
+                 XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Touch Plus Ext Trigger",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &triggerAction));
+
+    XrActionSuggestedBinding binding = {triggerAction, triggerValuePath};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchPlusPath;
+    suggestedBindings.suggestedBindings = &binding;
+    suggestedBindings.countSuggestedBindings = 1;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchPlusPath,
+                                             leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/trigger/value"), 0.66f));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrInteractionProfileState interactionProfileState = {XR_TYPE_INTERACTION_PROFILE_STATE};
+    XR_CHECK(xrGetCurrentInteractionProfile(context.session, leftHandPath,
+                                            &interactionProfileState));
+    CHECK(interactionProfileState.interactionProfile == touchPlusPath);
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = triggerAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateFloat state = {XR_TYPE_ACTION_STATE_FLOAT};
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &state));
+    CHECK(state.isActive == XR_TRUE);
+    CHECK_THAT(state.currentState, WithinAbs(0.66f, 0.001f));
+
+    XR_CHECK(xrDestroyAction(triggerAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+#endif
+
+TEST_CASE("Touch Plus promoted profile is selectable for OpenXR 1.1 apps",
+          "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    },
+                                  true, XR_MAKE_VERSION(1, 1, 0));
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath promotedTouchPlusPath = context.Path("/interaction_profiles/meta/touch_plus_controller");
+    XrPath triggerValuePath = context.Path("/user/hand/left/input/trigger/value");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "touch_plus_11",
+                 XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Touch Plus 11",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction triggerAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    actionCreateInfo.countSubactionPaths = 1;
+    actionCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(actionCreateInfo.actionName, "touch_plus_11_trigger",
+                 XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Touch Plus 11 Trigger",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &triggerAction));
+
+    XrActionSuggestedBinding binding = {triggerAction, triggerValuePath};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = promotedTouchPlusPath;
+    suggestedBindings.suggestedBindings = &binding;
+    suggestedBindings.countSuggestedBindings = 1;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, promotedTouchPlusPath,
+                                             leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/trigger/value"), 0.58f));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrInteractionProfileState interactionProfileState = {XR_TYPE_INTERACTION_PROFILE_STATE};
+    XR_CHECK(xrGetCurrentInteractionProfile(context.session, leftHandPath,
+                                            &interactionProfileState));
+    CHECK(interactionProfileState.interactionProfile == promotedTouchPlusPath);
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = triggerAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateFloat state = {XR_TYPE_ACTION_STATE_FLOAT};
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &state));
+    CHECK(state.isActive == XR_TRUE);
+    CHECK_THAT(state.currentState, WithinAbs(0.58f, 0.001f));
+
+    XR_CHECK(xrDestroyAction(triggerAction));
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 

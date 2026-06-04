@@ -91,7 +91,7 @@ bool IsFiniteFov(const XrFovf& fov)
 } // namespace
 
 Session::Session(Instance* instance, void* metalDevice)
-    : instance_(instance), metalDevice_(metalDevice), graphicsApi_(GraphicsApi::Metal)
+    : instance_(instance), graphicsContext_(GraphicsContext::Metal(metalDevice))
 {
     inputManager_ = std::make_unique<InputManager>();
 
@@ -107,11 +107,8 @@ Session::Session(Instance* instance, void* metalDevice)
     spdlog::info("OXRSys: Metal session created");
 }
 
-Session::Session(Instance* instance, void* metalDevice,
-                  void* vkDevice, void* vkPhysicalDevice)
-    : instance_(instance), metalDevice_(metalDevice),
-      graphicsApi_(GraphicsApi::Vulkan),
-      vkDevice_(vkDevice), vkPhysicalDevice_(vkPhysicalDevice)
+Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
+    : instance_(instance), graphicsContext_(graphicsContext)
 {
     inputManager_ = std::make_unique<InputManager>();
 
@@ -771,14 +768,15 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     }
 
     std::unique_ptr<Swapchain> sc;
-    if (graphicsApi_ == GraphicsApi::Vulkan)
+    if (graphicsContext_.api == GraphicsApi::Vulkan)
     {
-        sc = std::make_unique<Swapchain>(GraphicsApi::Vulkan, metalDevice_,
-                                          vkDevice_, vkPhysicalDevice_, createInfo);
+        sc = std::make_unique<Swapchain>(GraphicsApi::Vulkan, graphicsContext_.metalDevice,
+                                          graphicsContext_.vulkan,
+                                          createInfo);
     }
     else
     {
-        sc = std::make_unique<Swapchain>(metalDevice_, createInfo);
+        sc = std::make_unique<Swapchain>(graphicsContext_.metalDevice, createInfo);
     }
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
@@ -867,7 +865,7 @@ void Session::StartStreamingIfNeeded()
     }
 
     streamingServer_ = std::make_unique<StreamingServer>();
-    streamingServer_->SetGraphicsDevice(graphicsApi_ == GraphicsApi::Vulkan ? vkDevice_ : metalDevice_);
+    streamingServer_->SetGraphicsContext(graphicsContext_);
 
     // Use default resolution until first swapchain is created
     // Will be updated when we know the actual render resolution

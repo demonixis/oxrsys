@@ -3,7 +3,7 @@
 #pragma once
 
 #include <openxr/openxr.h>
-#include "Swapchain.h" // for GraphicsApi enum
+#include "GraphicsTypes.h"
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -25,8 +25,7 @@ public:
     Session(Instance* instance, void* metalDevice);
 
     // Vulkan session (metalDevice for Renderer, Vulkan handles for swapchains)
-    Session(Instance* instance, void* metalDevice,
-            void* vkDevice, void* vkPhysicalDevice);
+    Session(Instance* instance, const GraphicsContext& graphicsContext);
     ~Session();
 
     uint64_t GetHandle() const
@@ -41,7 +40,7 @@ public:
 
     void* GetMetalDevice() const
     {
-        return metalDevice_;
+        return graphicsContext_.metalDevice;
     }
 
     // Session lifecycle
@@ -116,10 +115,7 @@ private:
 
     uint64_t handle_ = 0;
     Instance* instance_;
-    void* metalDevice_;
-    GraphicsApi graphicsApi_ = GraphicsApi::Metal;
-    void* vkDevice_ = nullptr;
-    void* vkPhysicalDevice_ = nullptr;
+    GraphicsContext graphicsContext_ = {};
 
     XrSessionState state_ = XR_SESSION_STATE_IDLE;
     bool running_ = false;

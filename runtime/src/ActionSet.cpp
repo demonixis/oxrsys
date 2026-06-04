@@ -65,6 +65,7 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
     XrVector2f oldVector = data.vector2fValue;
     bool oldPoseActive = data.poseActive;
     XrPath oldPoseSourcePath = data.poseSourcePath;
+    std::string oldPoseSourceProfile = data.poseSourceProfile;
 
     if (aggregatedState != nullptr)
     {
@@ -74,6 +75,7 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
         data.vector2fValue = aggregatedState->vector2fValue;
         data.poseActive = aggregatedState->poseActive;
         data.poseSourcePath = aggregatedState->poseSourcePath;
+        data.poseSourceProfile = aggregatedState->poseSourceProfile;
         data.boundSources = aggregatedState->boundSources;
     }
     else
@@ -84,6 +86,7 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
         data.vector2fValue = {0.0f, 0.0f};
         data.poseActive = false;
         data.poseSourcePath = XR_NULL_PATH;
+        data.poseSourceProfile.clear();
         data.boundSources.clear();
     }
 
@@ -92,7 +95,9 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
     data.vector2fChanged = (std::fabs(data.vector2fValue.x - oldVector.x) > 0.0001f) ||
                            (std::fabs(data.vector2fValue.y - oldVector.y) > 0.0001f);
 
-    bool poseChanged = (data.poseActive != oldPoseActive) || (data.poseSourcePath != oldPoseSourcePath);
+    bool poseChanged = (data.poseActive != oldPoseActive) ||
+                       (data.poseSourcePath != oldPoseSourcePath) ||
+                       (data.poseSourceProfile != oldPoseSourceProfile);
     if (data.boolChanged || data.floatChanged || data.vector2fChanged || poseChanged)
     {
         data.lastChangeTime = syncTime;

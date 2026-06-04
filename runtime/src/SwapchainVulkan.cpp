@@ -97,13 +97,13 @@ Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
 }
 
 Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
-                     void* vkDevice, void* vkPhysicalDevice,
+                     const VulkanGraphicsContext& vulkanContext,
                      const XrSwapchainCreateInfo* createInfo)
     : device_(metalDevice), graphicsApi_(api)
 {
     if (api == GraphicsApi::Vulkan)
     {
-        InitVulkan(metalDevice, vkDevice, vkPhysicalDevice, createInfo);
+        InitVulkan(metalDevice, vulkanContext, createInfo);
     }
     else
     {
@@ -117,7 +117,7 @@ void Swapchain::InitMetal(void* /*metalDevice*/, const XrSwapchainCreateInfo* /*
     spdlog::error("OXRSys: InitMetal called in a non-Apple runtime build");
 }
 
-void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysicalDevice,
+void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext& vulkanContext,
                            const XrSwapchainCreateInfo* createInfo)
 {
     if (createInfo == nullptr)
@@ -133,11 +133,11 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
     imageCount_ = (createInfo->createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0
         ? 1
         : SwapchainImageCount;
-    vkDevice_ = vkDevice;
+    vkDevice_ = vulkanContext.device;
     graphicsApi_ = GraphicsApi::Vulkan;
 
-    VkDevice device = reinterpret_cast<VkDevice>(vkDevice);
-    VkPhysicalDevice physDevice = reinterpret_cast<VkPhysicalDevice>(vkPhysicalDevice);
+    VkDevice device = reinterpret_cast<VkDevice>(vulkanContext.device);
+    VkPhysicalDevice physDevice = reinterpret_cast<VkPhysicalDevice>(vulkanContext.physicalDevice);
     LoadDeviceFunctions(device);
 
     if (gDeviceFuncs.createImage == nullptr ||

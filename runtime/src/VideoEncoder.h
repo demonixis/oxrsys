@@ -9,14 +9,13 @@
 #include <mutex>
 #include <vector>
 
+#include "GraphicsTypes.h"
+
 /**
- * H.265 hardware video encoder using Apple VideoToolbox.
+ * H.265 video encoder facade.
  *
- * Takes Metal textures from the OpenXR swapchain and encodes them
- * to H.265 NAL units for streaming to the headset client.
- *
- * Uses the dedicated Media Engine on Apple Silicon for encoding,
- * leaving the GPU free for rendering.
+ * Apple builds use VideoToolbox with Metal textures. Linux builds use FFmpeg
+ * and keep backend-specific graphics readback state behind GraphicsContext.
  */
 class VideoEncoder
 {
@@ -46,15 +45,15 @@ public:
     VideoEncoder& operator=(const VideoEncoder&) = delete;
 
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                    uint32_t bitrateMbps, void* metalDevice);
+                    uint32_t bitrateMbps, const GraphicsContext& graphicsContext);
     void Shutdown();
 
-    // Encode a Metal texture (id<MTLTexture>)
+    // Encode one backend-native texture/image source.
     // The callback is invoked for each NAL unit produced
     bool Encode(void* metalTexture, int64_t timestampNs, OnNalUnitCallback callback,
                 OnFrameEncodedCallback frameCallback = {});
 
-    // Encode two Metal textures side-by-side (left eye | right eye)
+    // Encode two backend-native texture/image sources side-by-side (left eye | right eye)
     // The combined image has double the width of a single eye
     bool EncodeStereo(void* leftTexture, void* rightTexture,
                       int64_t timestampNs, OnNalUnitCallback callback,
@@ -67,7 +66,10 @@ public:
     void SetBitrate(uint32_t bitrateMbps);
     uint32_t GetBitrateMbps() const { return bitrateMbps_; }
 
-    bool IsInitialized() const { return session_ != nullptr; }
+    bool IsInitialized() const
+    {
+        return videoToolbox_.session != nullptr || ffmpeg_.codecContext != nullptr;
+    }
 
     // Stats
     uint32_t GetEncodedFrameCount() const { return frameCount_; }
@@ -91,12 +93,26 @@ private:
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();
 
-    void* session_ = nullptr;           // VTCompressionSessionRef
-    void* pixelBufferPool_ = nullptr;   // CVPixelBufferPoolRef
-    void* textureCache_ = nullptr;      // CVMetalTextureCacheRef
-    void* metalDevice_ = nullptr;       // id<MTLDevice>
-    void* commandQueue_ = nullptr;      // id<MTLCommandQueue>
-    void* scaler_ = nullptr;            // MPSImageBilinearScale*
+    struct VideoToolboxState
+    {
+        void* session = nullptr;          // VTCompressionSessionRef
+        void* pixelBufferPool = nullptr;  // CVPixelBufferPoolRef
+        void* textureCache = nullptr;     // CVMetalTextureCacheRef
+        void* metalDevice = nullptr;      // id<MTLDevice>
+        void* commandQueue = nullptr;     // id<MTLCommandQueue>
+        void* scaler = nullptr;           // MPSImageBilinearScale*
+    };
+
+    struct FfmpegState
+    {
+        void* codecContext = nullptr; // AVCodecContext*
+        void* frame = nullptr;        // AVFrame*
+        void* packet = nullptr;       // AVPacket*
+    };
+
+    GraphicsContext graphicsContext_ = {};
+    VideoToolboxState videoToolbox_ = {};
+    FfmpegState ffmpeg_ = {};
 
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
     uint32_t height_ = 0;

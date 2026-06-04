@@ -109,13 +109,13 @@ Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
 // ============================================================================
 
 Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
-                      void* vkDevice, void* vkPhysicalDevice,
+                      const VulkanGraphicsContext& vulkanContext,
                       const XrSwapchainCreateInfo* createInfo)
     : device_(metalDevice), graphicsApi_(api)
 {
     if (api == GraphicsApi::Vulkan)
     {
-        InitVulkan(metalDevice, vkDevice, vkPhysicalDevice, createInfo);
+        InitVulkan(metalDevice, vulkanContext, createInfo);
     }
     else
     {
@@ -166,7 +166,7 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
 // Vulkan initialization (VkImage + MoltenVK MTLTexture extraction)
 // ============================================================================
 
-void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysicalDevice,
+void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext& vulkanContext,
                             const XrSwapchainCreateInfo* createInfo)
 {
 #ifdef XR_USE_GRAPHICS_API_VULKAN
@@ -175,11 +175,11 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
     format_ = createInfo->format;
     arraySize_ = createInfo->arraySize > 0 ? createInfo->arraySize : 1;
     imageCount_ = (createInfo->createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0 ? 1 : SwapchainImageCount;
-    vkDevice_ = vkDevice;
+    vkDevice_ = vulkanContext.device;
 
-    VkDevice device = reinterpret_cast<VkDevice>(vkDevice);
+    VkDevice device = reinterpret_cast<VkDevice>(vulkanContext.device);
     LoadDeviceFunctions(device);
-    VkPhysicalDevice physDevice = reinterpret_cast<VkPhysicalDevice>(vkPhysicalDevice);
+    VkPhysicalDevice physDevice = reinterpret_cast<VkPhysicalDevice>(vulkanContext.physicalDevice);
 
     bool isDepth = IsDepthFormat(format_);
     bool hasExportMetalObjects = (gDeviceFuncs.exportMetalObjects != nullptr);
