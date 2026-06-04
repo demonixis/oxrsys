@@ -15,7 +15,7 @@ The Android VR client can be used over WiFi or USB. The USB path is the best way
 ### Home Apps
 
 OXRSys Home exists as a native Apple app and a Qt app. The Apple app owns the macOS direct-distribution workflow. The Qt app is Linux-first and also keeps its launcher, transport readiness, custom ADB selection, and simulator window code portable for macOS and Windows.
-The macOS distribution helper signs the runtime and Home app, packages them together, and can submit the archive for notarization.
+The macOS package helper builds the runtime and Home app into one local folder; the distribution helper signs that package and can submit the archive for notarization.
 
 ## Disclaimer
 

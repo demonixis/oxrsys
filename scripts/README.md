@@ -1,5 +1,22 @@
 # Scripts
 
+## macOS Build Package
+
+`scripts/macos_build_package.sh` builds the macOS runtime and `OXRSys Home.app`, then assembles a
+single local package folder at `build/OXRSys-macOS/` by default. The folder contains the Home app
+and a `runtime/` directory with `liboxrsys-runtime.dylib`, `oxrsys-runtime.json`, and
+`oxrsys-runtime.toml`. The manifest copy inside the package is rewritten to load the packaged dylib
+with a relative path.
+
+Run it from the repository root:
+
+```bash
+./scripts/macos_build_package.sh
+```
+
+Use `--configuration Debug` for a debug package, or `--output-dir` to choose a different package
+folder.
+
 ## macOS Signing And Notarization
 
 `scripts/macos_sign_notarize.sh` signs the built macOS runtime dylib and `OXRSys Home.app`, then

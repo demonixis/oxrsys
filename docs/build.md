@@ -119,28 +119,54 @@ The default Debug build pre-fills the runtime manifest field with
 `build/runtime/oxrsys-runtime.json` for local development. Home-launched apps use the manifest path
 shown in that field; Home does not embed, install, or silently prefer another runtime.
 
+### macOS Local Package Folder
+
+Use `scripts/macos_build_package.sh` to build the runtime and Home app without opening Xcode, then
+copy the outputs into one local package folder:
+
+```bash
+./scripts/macos_build_package.sh
+```
+
+The default output is:
+
+```text
+build/OXRSys-macOS/
+├── OXRSys Home.app
+└── runtime/
+    ├── liboxrsys-runtime.dylib
+    ├── oxrsys-runtime.json
+    └── oxrsys-runtime.toml
+```
+
+The packaged manifest is rewritten to load `./liboxrsys-runtime.dylib` from the same `runtime/`
+directory. Use `--configuration Debug` for a debug package or `--output-dir` for another package
+location.
+
 ### macOS Release Signing And Notarization
 
-Use `scripts/macos_sign_notarize.sh` for direct-distribution macOS packages. It signs the runtime
-dylib and `OXRSys Home.app`, then creates a single zip containing the Home app plus a `runtime/`
-folder with the dylib, manifest, and TOML config. The manifest copy in the archive is rewritten to
-load the packaged dylib with a relative path; the build-tree manifest is left unchanged.
+Use `scripts/macos_sign_notarize.sh` for direct-distribution macOS packages. It signs the packaged
+runtime dylib and `OXRSys Home.app`, then creates a single zip containing the Home app plus the
+`runtime/` folder. The manifest copy in the archive is rewritten to load the packaged dylib with a
+relative path; the build-tree manifest is left unchanged.
 
 Signing-only package:
 
 ```bash
+./scripts/macos_build_package.sh
 ./scripts/macos_sign_notarize.sh \
-  --build-runtime \
-  --build-home \
+  --runtime-dir build/OXRSys-macOS/runtime \
+  --home-app "build/OXRSys-macOS/OXRSys Home.app" \
   --identity "Developer ID Application: OXRSys Team (ABCDE12345)"
 ```
 
 Signing plus notarization:
 
 ```bash
+./scripts/macos_build_package.sh
 ./scripts/macos_sign_notarize.sh --notarize \
-  --build-runtime \
-  --build-home \
+  --runtime-dir build/OXRSys-macOS/runtime \
+  --home-app "build/OXRSys-macOS/OXRSys Home.app" \
   --identity "Developer ID Application: OXRSys Team (ABCDE12345)" \
   --team-id ABCDE12345 \
   --apple-id developer@example.com \

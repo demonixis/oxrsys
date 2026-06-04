@@ -31,8 +31,9 @@ same-process window backed by the shared `OXRSysSimulator` Swift package, and sh
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
 Qt simulator widget in a dedicated window with UDP video preview, mouse-driven synthetic head
 tracking, explicit FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe recovery requests.
-The macOS distribution helper signs the runtime dylib and Home app together, creates a combined
-archive, and can submit that archive for notarization with Apple Developer account credentials.
+The macOS package helper builds the runtime dylib and Home app into one local folder with a complete
+`runtime/` directory; the distribution helper signs that package, creates a combined archive, and can
+submit that archive for notarization with Apple Developer account credentials.
 Unity project helper scripts under `scripts/unity/Editor/` cover editor runtime selection and the
 macOS Player OpenXR loader bundle-name workaround needed by exported Unity apps.
 As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully green locally:
@@ -107,6 +108,7 @@ oxrsys_runtime/
 ├── common/
 │   └── protocol/include/oxrsys/protocol/
 ├── scripts/
+│   ├── macos_build_package.sh
 │   ├── macos_sign_notarize.sh
 │   └── unity/
 │       └── Editor/
