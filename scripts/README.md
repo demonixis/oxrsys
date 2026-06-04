@@ -14,8 +14,8 @@ Run it from the repository root:
 ./scripts/macos_build_package.sh
 ```
 
-Use `--configuration Debug` for a debug package, or `--output-dir` to choose a different package
-folder.
+The default configuration is `Debug`; use `--configuration Release` for a release package, or
+`--output-dir` to choose a different package folder.
 
 ## macOS Signing And Notarization
 

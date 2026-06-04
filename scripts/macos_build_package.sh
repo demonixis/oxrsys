@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_NAME="$(basename "$0")"
 
-CONFIGURATION="Release"
+CONFIGURATION="Debug"
 DEFAULT_PACKAGE_BUILD_ROOT="${REPO_ROOT}/build/macos-package"
 CMAKE_BUILD_DIR="${DEFAULT_PACKAGE_BUILD_ROOT}/cmake"
 HOME_DERIVED_DATA="${DEFAULT_PACKAGE_BUILD_ROOT}/xcode/OXRSysHome"
@@ -29,7 +29,7 @@ Builds the macOS runtime and OXRSys Home, then assembles one local package direc
     runtime/oxrsys-runtime.toml
 
 Options:
-  --configuration NAME    Xcode and CMake configuration. Default: Release
+  --configuration NAME    Xcode and CMake configuration. Default: Debug
   --cmake-build-dir DIR   CMake build directory. Default: build/macos-package/cmake
   --home-derived-data DIR DerivedData path for the Home build. Default: build/macos-package/xcode/OXRSysHome
   --output-dir DIR        Assembled package directory. Default: build/OXRSys-macOS
@@ -40,7 +40,7 @@ Options:
 
 Examples:
   ${SCRIPT_NAME}
-  ${SCRIPT_NAME} --configuration Debug --output-dir build/OXRSys-macOS-Debug
+  ${SCRIPT_NAME} --configuration Release --output-dir build/OXRSys-macOS-Release
 EOF
 }
 

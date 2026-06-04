@@ -140,8 +140,8 @@ build/OXRSys-macOS/
 ```
 
 The packaged manifest is rewritten to load `./liboxrsys-runtime.dylib` from the same `runtime/`
-directory. Use `--configuration Debug` for a debug package or `--output-dir` for another package
-location.
+directory. The default configuration is `Debug`; use `--configuration Release` for a release package
+or `--output-dir` for another package location.
 
 ### macOS Release Signing And Notarization
 
@@ -153,7 +153,8 @@ relative path; the build-tree manifest is left unchanged.
 Signing-only package:
 
 ```bash
-./scripts/macos_build_package.sh
+./scripts/macos_build_package.sh \
+  --configuration Release
 ./scripts/macos_sign_notarize.sh \
   --runtime-dir build/OXRSys-macOS/runtime \
   --home-app "build/OXRSys-macOS/OXRSys Home.app" \
@@ -163,7 +164,8 @@ Signing-only package:
 Signing plus notarization:
 
 ```bash
-./scripts/macos_build_package.sh
+./scripts/macos_build_package.sh \
+  --configuration Release
 ./scripts/macos_sign_notarize.sh --notarize \
   --runtime-dir build/OXRSys-macOS/runtime \
   --home-app "build/OXRSys-macOS/OXRSys Home.app" \
