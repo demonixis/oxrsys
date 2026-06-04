@@ -2,7 +2,7 @@
 
 ## Overview
 
-OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux is being added through Vulkan + FFmpeg scaffolding, and Windows is documented as a future scaffold in this pass. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
+OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux uses the Vulkan + FFmpeg runtime path, and Windows supports Vulkan plus first-pass Direct3D 11/12 runtime paths. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
 
 ## Repository Layout
 
@@ -46,7 +46,11 @@ Metal is the native Apple rendering path. Applications provide an `MTLDevice` th
 
 Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. The runtime does not link directly against Vulkan. Instead, it resolves Vulkan functions through the application-provided loader path to avoid dual-loader and dual-MoltenVK issues.
 
-On Apple, Vulkan images can use `VK_EXT_metal_objects` to bridge Vulkan-backed images to Metal textures. On Linux, the first-pass Vulkan swapchain allocates Vulkan images directly and the FFmpeg encoder path is wired, with real Vulkan image readback still pending.
+On Apple, Vulkan images can use `VK_EXT_metal_objects` to bridge Vulkan-backed images to Metal textures. On Linux and Windows, Vulkan swapchains allocate Vulkan images directly. The non-Apple FFmpeg encoder reads released swapchain images on the encode thread, currently for common RGBA/BGRA 8-bit color formats, and preserves the latest-frame-only queue so `xrEndFrame` stays non-blocking.
+
+### Direct3D
+
+Windows exposes `XR_KHR_D3D11_enable` and `XR_KHR_D3D12_enable`. D3D11 swapchains are backed by `ID3D11Texture2D`, and D3D12 swapchains are backed by `ID3D12Resource`. The FFmpeg streaming path reads D3D11 frames through a staging texture and D3D12 frames through a readback heap using the app-provided command queue. The first-pass video path supports common `DXGI_FORMAT_R8G8B8A8_*` and `DXGI_FORMAT_B8G8R8A8_*` color formats; depth and other color formats can be enumerated for app compatibility but are dropped from video streaming.
 
 ## Input And Actions
 
@@ -71,12 +75,13 @@ Runtime configuration is loaded from:
 
 - macOS: `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`
+- Windows: `%APPDATA%\OXRSys\oxrsys-runtime.toml`
 - fallback: `build/runtime/oxrsys-runtime.toml`
 
-Runtime status and logs are written to the platform state directory. On Linux this is `${XDG_STATE_HOME:-~/.local/state}/oxrsys`.
+Runtime status and logs are written to the platform state directory. On Linux this is `${XDG_STATE_HOME:-~/.local/state}/oxrsys`; on Windows it is `%LOCALAPPDATA%\OXRSys`.
 
 For terminal-launched applications, use `XR_RUNTIME_JSON`. On macOS, `scripts/oxrsys_runtime_default.sh` can register `build/runtime/oxrsys-runtime.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
 
-The native Home app in `clients/Apple/oxrsys-home/` manages the macOS workflow. The Qt Home app in `clients/Qt/oxrsys-home/` owns Linux runtime install/registration and can manually launch apps with `XR_RUNTIME_JSON` on other desktop platforms.
+The native Home app in `clients/Apple/oxrsys-home/` manages the macOS workflow. The Qt Home app in `clients/Qt/oxrsys-home/` owns Linux runtime install/registration and now installs, launches, and optionally registers the Windows runtime. Windows app launches use `XR_RUNTIME_JSON` without admin; global OpenXR registration writes `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC.
 
 The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as FOV and keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart.

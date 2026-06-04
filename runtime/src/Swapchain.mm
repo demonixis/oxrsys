@@ -109,13 +109,13 @@ Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
 // ============================================================================
 
 Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
-                      void* vkDevice, void* vkPhysicalDevice,
-                      const XrSwapchainCreateInfo* createInfo)
+                     const VulkanGraphicsContext* vulkanContext,
+                     const XrSwapchainCreateInfo* createInfo)
     : device_(metalDevice), graphicsApi_(api)
 {
     if (api == GraphicsApi::Vulkan)
     {
-        InitVulkan(metalDevice, vkDevice, vkPhysicalDevice, createInfo);
+        InitVulkan(metalDevice, vulkanContext, createInfo);
     }
     else
     {
@@ -150,6 +150,7 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
     }
 
     textures_.resize(imageCount_);
+    imageRetainCounts_.assign(imageCount_, 0);
     imageStates_.assign(imageCount_, ImageState::Available);
     for (uint32_t i = 0; i < imageCount_; i++)
     {
@@ -166,8 +167,8 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
 // Vulkan initialization (VkImage + MoltenVK MTLTexture extraction)
 // ============================================================================
 
-void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysicalDevice,
-                            const XrSwapchainCreateInfo* createInfo)
+void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* vulkanContext,
+                           const XrSwapchainCreateInfo* createInfo)
 {
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     width_ = createInfo->width;
@@ -175,11 +176,18 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
     format_ = createInfo->format;
     arraySize_ = createInfo->arraySize > 0 ? createInfo->arraySize : 1;
     imageCount_ = (createInfo->createFlags & XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0 ? 1 : SwapchainImageCount;
-    vkDevice_ = vkDevice;
+    vulkanContext_ = vulkanContext;
+    if (vulkanContext_ == nullptr || vulkanContext_->device == VK_NULL_HANDLE ||
+        vulkanContext_->physicalDevice == VK_NULL_HANDLE)
+    {
+        spdlog::error("OXRSys: Missing Vulkan graphics context for swapchain creation");
+        Runtime::Get().RegisterHandle(handle_, this);
+        return;
+    }
 
-    VkDevice device = reinterpret_cast<VkDevice>(vkDevice);
+    VkDevice device = vulkanContext_->device;
     LoadDeviceFunctions(device);
-    VkPhysicalDevice physDevice = reinterpret_cast<VkPhysicalDevice>(vkPhysicalDevice);
+    VkPhysicalDevice physDevice = vulkanContext_->physicalDevice;
 
     bool isDepth = IsDepthFormat(format_);
     bool hasExportMetalObjects = (gDeviceFuncs.exportMetalObjects != nullptr);
@@ -212,6 +220,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
     vkImages_.resize(imageCount_);
     vkMemories_.resize(imageCount_);
     textures_.resize(imageCount_, nullptr);
+    imageRetainCounts_.assign(imageCount_, 0);
     imageStates_.assign(imageCount_, ImageState::Available);
 
     for (uint32_t i = 0; i < imageCount_; i++)
@@ -284,9 +293,10 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, void* vkDevice, void* vkPhysic
 Swapchain::~Swapchain()
 {
 #ifdef XR_USE_GRAPHICS_API_VULKAN
-    if (graphicsApi_ == GraphicsApi::Vulkan && vkDevice_)
+    if (graphicsApi_ == GraphicsApi::Vulkan && vulkanContext_ != nullptr &&
+        vulkanContext_->device != VK_NULL_HANDLE)
     {
-        VkDevice device = reinterpret_cast<VkDevice>(vkDevice_);
+        VkDevice device = vulkanContext_->device;
         LoadDeviceFunctions(device);
         for (uint32_t i = 0; i < imageCount_; i++)
         {
@@ -391,7 +401,8 @@ XrResult Swapchain::AcquireImage(const XrSwapchainImageAcquireInfo* acquireInfo,
     for (uint32_t i = 0; i < imageCount_; ++i)
     {
         uint32_t candidateIndex = (nextAcquireIndex_ + i) % imageCount_;
-        if (imageStates_[candidateIndex] == ImageState::Available)
+        if (imageStates_[candidateIndex] == ImageState::Available &&
+            (candidateIndex >= imageRetainCounts_.size() || imageRetainCounts_[candidateIndex] == 0))
         {
             acquiredIndex = candidateIndex;
             break;
@@ -513,6 +524,30 @@ void Swapchain::ReleaseTextureSlice(void* textureSlice)
         [(id<MTLTexture>)textureSlice release];
     }
 }
+
+void Swapchain::RetainImage(uint32_t imageIndex)
+{
+    if (imageIndex < imageRetainCounts_.size())
+    {
+        imageRetainCounts_[imageIndex]++;
+    }
+}
+
+void Swapchain::ReleaseImageRetention(uint32_t imageIndex)
+{
+    std::scoped_lock lock(stateMutex_);
+    if (imageIndex < imageRetainCounts_.size() && imageRetainCounts_[imageIndex] > 0)
+    {
+        imageRetainCounts_[imageIndex]--;
+    }
+}
+
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+bool Swapchain::TryReleaseVulkanFrameSource(void* /*textureSlice*/)
+{
+    return false;
+}
+#endif
 
 bool Swapchain::HasReleasedImage() const
 {

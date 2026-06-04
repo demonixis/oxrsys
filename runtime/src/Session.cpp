@@ -82,6 +82,27 @@ bool IsValidPose(const XrPosef& pose)
     return std::fabs(magnitude - 1.0f) <= 0.01f;
 }
 
+#if defined(_WIN32)
+template <typename T>
+void AddRefIfNotNull(T* value)
+{
+    if (value != nullptr)
+    {
+        value->AddRef();
+    }
+}
+
+template <typename T>
+void ReleaseIfNotNull(T*& value)
+{
+    if (value != nullptr)
+    {
+        value->Release();
+        value = nullptr;
+    }
+}
+#endif
+
 bool IsFiniteFov(const XrFovf& fov)
 {
     return std::isfinite(fov.angleLeft) && std::isfinite(fov.angleRight) &&
@@ -108,10 +129,10 @@ Session::Session(Instance* instance, void* metalDevice)
 }
 
 Session::Session(Instance* instance, void* metalDevice,
-                  void* vkDevice, void* vkPhysicalDevice)
+                  const VulkanGraphicsContext& vulkanContext)
     : instance_(instance), metalDevice_(metalDevice),
       graphicsApi_(GraphicsApi::Vulkan),
-      vkDevice_(vkDevice), vkPhysicalDevice_(vkPhysicalDevice)
+      vulkanContext_(vulkanContext)
 {
     inputManager_ = std::make_unique<InputManager>();
 
@@ -127,9 +148,61 @@ Session::Session(Instance* instance, void* metalDevice,
     spdlog::info("OXRSys: Vulkan session created");
 }
 
+#if defined(_WIN32)
+Session::Session(Instance* instance, const D3D11GraphicsContext& d3d11Context)
+    : instance_(instance), metalDevice_(nullptr),
+      graphicsApi_(GraphicsApi::D3D11),
+      d3d11Context_(d3d11Context)
+{
+    AddRefIfNotNull(d3d11Context_.device);
+    AddRefIfNotNull(d3d11Context_.immediateContext);
+
+    inputManager_ = std::make_unique<InputManager>();
+
+    startTime_ = std::chrono::steady_clock::now();
+    lastFrameTime_ = startTime_;
+
+    Runtime::Get().RegisterHandle(handle_, this);
+    instance_->SetSession(this);
+
+    TransitionState(XR_SESSION_STATE_IDLE);
+    TransitionState(XR_SESSION_STATE_READY);
+
+    spdlog::info("OXRSys: D3D11 session created");
+}
+
+Session::Session(Instance* instance, const D3D12GraphicsContext& d3d12Context)
+    : instance_(instance), metalDevice_(nullptr),
+      graphicsApi_(GraphicsApi::D3D12),
+      d3d12Context_(d3d12Context)
+{
+    AddRefIfNotNull(d3d12Context_.device);
+    AddRefIfNotNull(d3d12Context_.queue);
+
+    inputManager_ = std::make_unique<InputManager>();
+
+    startTime_ = std::chrono::steady_clock::now();
+    lastFrameTime_ = startTime_;
+
+    Runtime::Get().RegisterHandle(handle_, this);
+    instance_->SetSession(this);
+
+    TransitionState(XR_SESSION_STATE_IDLE);
+    TransitionState(XR_SESSION_STATE_READY);
+
+    spdlog::info("OXRSys: D3D12 session created");
+}
+#endif
+
 Session::~Session()
 {
     Shutdown();
+#if defined(_WIN32)
+    ReleaseIfNotNull(d3d11Context_.immediateContext);
+    ReleaseIfNotNull(d3d11Context_.device);
+    ReleaseIfNotNull(d3d12Context_.queue);
+    ReleaseIfNotNull(d3d12Context_.device);
+#endif
     instance_->RemoveEventsForSession(reinterpret_cast<XrSession>(handle_));
     instance_->SetSession(nullptr);
     Runtime::Get().RemoveHandle(handle_);
@@ -774,8 +847,18 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     if (graphicsApi_ == GraphicsApi::Vulkan)
     {
         sc = std::make_unique<Swapchain>(GraphicsApi::Vulkan, metalDevice_,
-                                          vkDevice_, vkPhysicalDevice_, createInfo);
+                                         &vulkanContext_, createInfo);
     }
+#if defined(_WIN32)
+    else if (graphicsApi_ == GraphicsApi::D3D11)
+    {
+        sc = std::make_unique<Swapchain>(GraphicsApi::D3D11, &d3d11Context_, createInfo);
+    }
+    else if (graphicsApi_ == GraphicsApi::D3D12)
+    {
+        sc = std::make_unique<Swapchain>(GraphicsApi::D3D12, &d3d12Context_, createInfo);
+    }
+#endif
     else
     {
         sc = std::make_unique<Swapchain>(metalDevice_, createInfo);
@@ -867,7 +950,22 @@ void Session::StartStreamingIfNeeded()
     }
 
     streamingServer_ = std::make_unique<StreamingServer>();
-    streamingServer_->SetGraphicsDevice(graphicsApi_ == GraphicsApi::Vulkan ? vkDevice_ : metalDevice_);
+    void* graphicsDevice = metalDevice_;
+    if (graphicsApi_ == GraphicsApi::Vulkan)
+    {
+        graphicsDevice = &vulkanContext_;
+    }
+#if defined(_WIN32)
+    else if (graphicsApi_ == GraphicsApi::D3D11)
+    {
+        graphicsDevice = &d3d11Context_;
+    }
+    else if (graphicsApi_ == GraphicsApi::D3D12)
+    {
+        graphicsDevice = &d3d12Context_;
+    }
+#endif
+    streamingServer_->SetGraphicsDevice(graphicsApi_, graphicsDevice);
 
     // Use default resolution until first swapchain is created
     // Will be updated when we know the actual render resolution

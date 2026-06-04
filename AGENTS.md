@@ -7,10 +7,12 @@ client, and Linux-first Qt frontends.
 The repository also includes a native SwiftUI macOS Home app and a Qt Home app for compatible app
 launching, runtime installation, runtime configuration, and runtime registration workflows.
 
-**Current state:** Metal/core runtime, Vulkan interop, Linux Vulkan/FFmpeg scaffolding,
+**Current state:** Metal/core runtime, Vulkan interop, Linux/Windows FFmpeg runtime paths,
 controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
-are in place. Windows is scaffolded in layout/docs only for this pass. The Android VR client now feeds
+are in place. Windows now supports Vulkan plus first-pass D3D11/D3D12 session, swapchain, and
+streaming readback paths, with Qt Home install/launch support and explicit HKLM OpenXR registration
+through UAC. The Android VR client now feeds
 real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with explicit active flags,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
@@ -72,7 +74,8 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
 - Runtime configuration is loaded from the platform config directory:
   macOS `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
-  Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`.
+  Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`,
+  Windows `%APPDATA%\OXRSys\oxrsys-runtime.toml`.
 
 ## Project Layout
 
@@ -101,6 +104,7 @@ oxrsys_runtime/
 ├── tests/
 │   ├── TestConfig.cpp
 │   ├── TestInputManager.cpp
+│   ├── TestRuntimePlatform.cpp
 │   ├── HomeLauncherTests.swift
 │   ├── TestProtocolLayout.cpp
 │   └── TestRuntimeApi.cpp
@@ -144,6 +148,16 @@ cd clients/Android/android-vr && ./gradlew assembleDebug
 cmake -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_BUILD_QT_FRONTENDS=ON
 cmake --build build-qt
 ctest --test-dir build-qt --output-on-failure
+
+# Windows host, with FFmpeg development files installed:
+cmake --preset windows-x64 -DFFMPEG_ROOT=C:\path\to\ffmpeg
+cmake --build build/windows-x64
+ctest --test-dir build/windows-x64 --output-on-failure
+
+# Windows ARM64 host/toolchain, with ARM64 FFmpeg development files installed:
+cmake --preset windows-arm64 -DFFMPEG_ROOT=C:\path\to\ffmpeg-arm64
+cmake --build build/windows-arm64
+ctest --test-dir build/windows-arm64 --output-on-failure
 ```
 
 Optional CTS lane:

@@ -3,6 +3,7 @@
 #include "StreamingServer.h"
 #include "Config.h"
 #include "RuntimeStatus.h"
+#include "RuntimeSockets.h"
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
@@ -11,23 +12,27 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <bit>
+#if !defined(_WIN32)
 #include <arpa/inet.h>
-#include <chrono>
-#include <cstring>
-#include <cerrno>
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#endif
+#include <chrono>
+#include <cstring>
 #include <numeric>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <unistd.h>
 
 namespace
 {
 
 using Clock = std::chrono::steady_clock;
+using oxrsys::runtime_socket::SocketHandle;
+
+#if defined(MSG_DONTWAIT)
+constexpr int kBestEffortSendFlags = MSG_DONTWAIT;
+#else
+constexpr int kBestEffortSendFlags = 0;
+#endif
 
 int64_t SteadyClockNowNs()
 {
@@ -40,16 +45,16 @@ double ToMilliseconds(Clock::duration duration)
     return std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(duration).count();
 }
 
-bool SendAll(int socket, const void* data, size_t size)
+bool SendAll(SocketHandle socket, const void* data, size_t size)
 {
     const auto* bytes = static_cast<const uint8_t*>(data);
     size_t sentTotal = 0;
     while (sentTotal < size)
     {
-        ssize_t sent = send(socket, bytes + sentTotal, size - sentTotal, 0);
+        int64_t sent = oxrsys::runtime_socket::Send(socket, bytes + sentTotal, size - sentTotal, 0);
         if (sent < 0)
         {
-            if (errno == EINTR)
+            if (oxrsys::runtime_socket::IsInterruptedOrWouldBlock())
             {
                 continue;
             }
@@ -64,16 +69,16 @@ bool SendAll(int socket, const void* data, size_t size)
     return true;
 }
 
-bool ReadAll(int socket, void* data, size_t size)
+bool ReadAll(SocketHandle socket, void* data, size_t size)
 {
     auto* bytes = static_cast<uint8_t*>(data);
     size_t receivedTotal = 0;
     while (receivedTotal < size)
     {
-        ssize_t received = recv(socket, bytes + receivedTotal, size - receivedTotal, 0);
+        int64_t received = oxrsys::runtime_socket::Receive(socket, bytes + receivedTotal, size - receivedTotal, 0);
         if (received < 0)
         {
-            if (errno == EINTR)
+            if (oxrsys::runtime_socket::IsInterruptedOrWouldBlock())
             {
                 continue;
             }
@@ -88,7 +93,7 @@ bool ReadAll(int socket, void* data, size_t size)
     return true;
 }
 
-bool ReadTcpRecord(int socket, oxr::protocol::TcpRecordHeader& header,
+bool ReadTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordHeader& header,
                    std::vector<uint8_t>& payload)
 {
     if (!ReadAll(socket, &header, sizeof(header)))
@@ -111,70 +116,56 @@ bool ReadTcpRecord(int socket, oxr::protocol::TcpRecordHeader& header,
     return ReadAll(socket, payload.data(), payload.size());
 }
 
-void ConfigureTcpSocket(int socket)
+void ConfigureTcpSocket(SocketHandle socket)
 {
-    int yes = 1;
-    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
-#ifdef SO_NOSIGPIPE
-    setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
-#endif
+    oxrsys::runtime_socket::SetTcpNoDelay(socket);
+    oxrsys::runtime_socket::SetNoSigpipe(socket);
 }
 
-void CloseTcpSocket(int& socket)
+void CloseTcpSocket(SocketHandle& socket)
 {
-    if (socket >= 0)
-    {
-        shutdown(socket, SHUT_RDWR);
-        close(socket);
-        socket = -1;
-    }
+    oxrsys::runtime_socket::ShutdownAndClose(socket);
 }
 
-int CreateLoopbackListener(uint16_t port)
+SocketHandle CreateLoopbackListener(uint16_t port)
 {
-    int listenSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenSocket < 0)
+    SocketHandle listenSocket = oxrsys::runtime_socket::Create(AF_INET, SOCK_STREAM, 0);
+    if (!oxrsys::runtime_socket::IsValid(listenSocket))
     {
-        return -1;
+        return oxrsys::runtime_socket::InvalidSocket;
     }
 
-    int yes = 1;
-    setsockopt(listenSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    oxrsys::runtime_socket::SetReuseAddress(listenSocket);
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(listenSocket, (sockaddr*)&addr, sizeof(addr)) < 0)
+    if (bind(listenSocket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
     {
-        close(listenSocket);
-        return -1;
+        oxrsys::runtime_socket::Close(listenSocket);
+        return oxrsys::runtime_socket::InvalidSocket;
     }
 
     if (listen(listenSocket, 1) < 0)
     {
-        close(listenSocket);
-        return -1;
+        oxrsys::runtime_socket::Close(listenSocket);
+        return oxrsys::runtime_socket::InvalidSocket;
     }
 
     return listenSocket;
 }
 
-int AcceptWithTimeout(int listenSocket)
+SocketHandle AcceptWithTimeout(SocketHandle listenSocket)
 {
-    fd_set readSet;
-    FD_ZERO(&readSet);
-    FD_SET(listenSocket, &readSet);
-    timeval timeout = {1, 0};
-
-    int ready = select(listenSocket + 1, &readSet, nullptr, nullptr, &timeout);
-    if (ready <= 0 || !FD_ISSET(listenSocket, &readSet))
+    int ready = oxrsys::runtime_socket::SelectOneReadable(listenSocket, 1, 0);
+    if (ready <= 0)
     {
-        return -1;
+        return oxrsys::runtime_socket::InvalidSocket;
     }
 
-    int clientSocket = accept(listenSocket, nullptr, nullptr);
-    if (clientSocket >= 0)
+    SocketHandle clientSocket = accept(listenSocket, nullptr, nullptr);
+    if (oxrsys::runtime_socket::IsValid(clientSocket))
     {
         ConfigureTcpSocket(clientSocket);
     }
@@ -282,56 +273,54 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     spdlog::info("StreamingServer: Resolution scaling {:.0f}%: {}x{} -> {}x{} per eye",
                   scale * 100.0f, renderWidth, renderHeight, scaledWidth_, scaledHeight_);
 
-    broadcastSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (broadcastSocket_ < 0)
+    broadcastSocket_ = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
+    if (!oxrsys::runtime_socket::IsValid(broadcastSocket_))
     {
-        spdlog::error("StreamingServer: Failed to create broadcast socket");
+        spdlog::error("StreamingServer: Failed to create broadcast socket: {}",
+                      oxrsys::runtime_socket::LastErrorText());
         return false;
     }
 
-    int opt = 1;
-    setsockopt(broadcastSocket_, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
-    setsockopt(broadcastSocket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    oxrsys::runtime_socket::SetBroadcast(broadcastSocket_);
+    oxrsys::runtime_socket::SetReuseAddress(broadcastSocket_);
 
-    controlSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (controlSocket_ < 0)
+    controlSocket_ = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
+    if (!oxrsys::runtime_socket::IsValid(controlSocket_))
     {
-        spdlog::error("StreamingServer: Failed to create control socket");
-        close(broadcastSocket_);
-        broadcastSocket_ = -1;
+        spdlog::error("StreamingServer: Failed to create control socket: {}",
+                      oxrsys::runtime_socket::LastErrorText());
+        oxrsys::runtime_socket::Close(broadcastSocket_);
         return false;
     }
 
-    setsockopt(controlSocket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    oxrsys::runtime_socket::SetReuseAddress(controlSocket_);
 
     sockaddr_in controlAddr = {};
     controlAddr.sin_family = AF_INET;
     controlAddr.sin_port = htons(oxr::protocol::CONTROL_PORT);
     controlAddr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(controlSocket_, (sockaddr*)&controlAddr, sizeof(controlAddr)) < 0)
+    if (bind(controlSocket_, reinterpret_cast<sockaddr*>(&controlAddr), sizeof(controlAddr)) < 0)
     {
-        spdlog::error("StreamingServer: Failed to bind control socket on port {}",
-                       oxr::protocol::CONTROL_PORT);
-        close(broadcastSocket_);
-        close(controlSocket_);
-        broadcastSocket_ = -1;
-        controlSocket_ = -1;
+        spdlog::error("StreamingServer: Failed to bind control socket on port {}: {}",
+                       oxr::protocol::CONTROL_PORT, oxrsys::runtime_socket::LastErrorText());
+        oxrsys::runtime_socket::Close(broadcastSocket_);
+        oxrsys::runtime_socket::Close(controlSocket_);
         return false;
     }
 
-    videoSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (videoSocket_ < 0)
+    videoSocket_ = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
+    if (!oxrsys::runtime_socket::IsValid(videoSocket_))
     {
-        spdlog::error("StreamingServer: Failed to create video socket");
-        close(broadcastSocket_);
-        close(controlSocket_);
-        broadcastSocket_ = -1;
-        controlSocket_ = -1;
+        spdlog::error("StreamingServer: Failed to create video socket: {}",
+                      oxrsys::runtime_socket::LastErrorText());
+        oxrsys::runtime_socket::Close(broadcastSocket_);
+        oxrsys::runtime_socket::Close(controlSocket_);
         return false;
     }
 
     int bufferSize = 4 * 1024 * 1024;
-    setsockopt(videoSocket_, SOL_SOCKET, SO_SNDBUF, &bufferSize, sizeof(bufferSize));
+    oxrsys::runtime_socket::SetSendBuffer(videoSocket_, bufferSize);
+    oxrsys::runtime_socket::SetNonBlocking(videoSocket_, true);
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->videoSocket = videoSocket_;
@@ -342,12 +331,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     if (!trackingReceiver_->Start())
     {
         spdlog::error("StreamingServer: Failed to start tracking receiver");
-        close(broadcastSocket_);
-        close(controlSocket_);
-        close(videoSocket_);
-        broadcastSocket_ = -1;
-        controlSocket_ = -1;
-        videoSocket_ = -1;
+        oxrsys::runtime_socket::Close(broadcastSocket_);
+        oxrsys::runtime_socket::Close(controlSocket_);
+        oxrsys::runtime_socket::Close(videoSocket_);
         trackingReceiver_.reset();
         return false;
     }
@@ -362,12 +348,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
         {
             spdlog::error("StreamingServer: Failed to start required USB ADB TCP listeners");
             running_.store(false);
-            close(broadcastSocket_);
-            close(controlSocket_);
-            close(videoSocket_);
-            broadcastSocket_ = -1;
-            controlSocket_ = -1;
-            videoSocket_ = -1;
+            oxrsys::runtime_socket::Close(broadcastSocket_);
+            oxrsys::runtime_socket::Close(controlSocket_);
+            oxrsys::runtime_socket::Close(videoSocket_);
             trackingReceiver_->Stop();
             trackingReceiver_.reset();
             return false;
@@ -403,7 +386,7 @@ void StreamingServer::Stop()
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->acceptingPackets = false;
         packetDispatchState_->clientIp.clear();
-        packetDispatchState_->videoSocket = -1;
+        packetDispatchState_->videoSocket = oxrsys::runtime_socket::InvalidSocket;
         packetDispatchState_->videoUsesTcp = false;
     }
     {
@@ -414,20 +397,17 @@ void StreamingServer::Stop()
         clientUsesUsbAdb_ = false;
     }
 
-    if (broadcastSocket_ >= 0)
+    if (oxrsys::runtime_socket::IsValid(broadcastSocket_))
     {
-        close(broadcastSocket_);
-        broadcastSocket_ = -1;
+        oxrsys::runtime_socket::Close(broadcastSocket_);
     }
-    if (controlSocket_ >= 0)
+    if (oxrsys::runtime_socket::IsValid(controlSocket_))
     {
-        close(controlSocket_);
-        controlSocket_ = -1;
+        oxrsys::runtime_socket::Close(controlSocket_);
     }
-    if (videoSocket_ >= 0)
+    if (oxrsys::runtime_socket::IsValid(videoSocket_))
     {
-        close(videoSocket_);
-        videoSocket_ = -1;
+        oxrsys::runtime_socket::Close(videoSocket_);
     }
 
     if (broadcastThread_.joinable())
@@ -484,8 +464,9 @@ void StreamingServer::BroadcastThread()
 
     while (running_.load() && state_.load() == State::Broadcasting)
     {
-        sendto(broadcastSocket_, &announce, sizeof(announce), 0,
-               (sockaddr*)&broadcastAddr, sizeof(broadcastAddr));
+        oxrsys::runtime_socket::SendTo(
+            broadcastSocket_, &announce, sizeof(announce), 0,
+            reinterpret_cast<sockaddr*>(&broadcastAddr), sizeof(broadcastAddr));
 
         for (int i = 0; i < 10 && running_.load() && state_.load() == State::Broadcasting; i++)
         {
@@ -519,13 +500,13 @@ void StreamingServer::ControlThread()
 
     while (running_.load())
     {
-        timeval tv = {1, 0};
-        setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        oxrsys::runtime_socket::SetReceiveTimeout(controlSocket_, 1, 0);
 
         sockaddr_in clientAddr = {};
-        socklen_t addrLen = sizeof(clientAddr);
-        ssize_t received = recvfrom(controlSocket_, buffer, sizeof(buffer), 0,
-                                     (sockaddr*)&clientAddr, &addrLen);
+        oxrsys::runtime_socket::SockLen addrLen = sizeof(clientAddr);
+        int64_t received = oxrsys::runtime_socket::ReceiveFrom(
+            controlSocket_, buffer, sizeof(buffer), 0,
+            reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
         if (received < 1)
         {
             continue;
@@ -533,7 +514,7 @@ void StreamingServer::ControlThread()
 
         uint8_t type = buffer[0];
         if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
-            received >= (ssize_t)sizeof(oxr::protocol::ClientConnect))
+            received >= static_cast<int64_t>(sizeof(oxr::protocol::ClientConnect)))
         {
             if (wifiEnabled_)
             {
@@ -558,7 +539,9 @@ bool StreamingServer::StartUsbTcpListeners()
     tcpControlListenSocket_ = CreateLoopbackListener(oxr::protocol::CONTROL_PORT);
     tcpVideoListenSocket_ = CreateLoopbackListener(oxr::protocol::VIDEO_PORT);
     tcpTrackingListenSocket_ = CreateLoopbackListener(oxr::protocol::TRACKING_PORT);
-    if (tcpControlListenSocket_ < 0 || tcpVideoListenSocket_ < 0 || tcpTrackingListenSocket_ < 0)
+    if (!oxrsys::runtime_socket::IsValid(tcpControlListenSocket_) ||
+        !oxrsys::runtime_socket::IsValid(tcpVideoListenSocket_) ||
+        !oxrsys::runtime_socket::IsValid(tcpTrackingListenSocket_))
     {
         StopUsbTcpSockets();
         return false;
@@ -576,12 +559,12 @@ bool StreamingServer::StartUsbTcpListeners()
 
 void StreamingServer::SendUsbDisconnectBestEffort()
 {
-    int controlSocket = -1;
+    SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
     {
         std::lock_guard<std::mutex> lock(tcpSocketMutex_);
         controlSocket = tcpControlClientSocket_;
     }
-    if (controlSocket >= 0)
+    if (oxrsys::runtime_socket::IsValid(controlSocket))
     {
         SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
     }
@@ -590,7 +573,7 @@ void StreamingServer::SendUsbDisconnectBestEffort()
 void StreamingServer::StopUsbTcpSockets()
 {
     std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-    int* sockets[] = {
+    SocketHandle* sockets[] = {
         &tcpControlListenSocket_,
         &tcpVideoListenSocket_,
         &tcpTrackingListenSocket_,
@@ -608,15 +591,15 @@ void StreamingServer::TcpControlThread()
 {
     while (running_.load() && usbAdbEnabled_)
     {
-        int clientSocket = AcceptWithTimeout(tcpControlListenSocket_);
-        if (clientSocket < 0)
+        SocketHandle clientSocket = AcceptWithTimeout(tcpControlListenSocket_);
+        if (!oxrsys::runtime_socket::IsValid(clientSocket))
         {
             continue;
         }
 
         {
             std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            if (tcpControlClientSocket_ >= 0)
+            if (oxrsys::runtime_socket::IsValid(tcpControlClientSocket_))
             {
                 CloseTcpSocket(tcpControlClientSocket_);
             }
@@ -631,7 +614,7 @@ void StreamingServer::TcpControlThread()
                 std::lock_guard<std::mutex> lock(tcpSocketMutex_);
                 if (tcpControlClientSocket_ == clientSocket)
                 {
-                    tcpControlClientSocket_ = -1;
+                    tcpControlClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
                 }
             }
             CloseTcpSocket(clientSocket);
@@ -670,7 +653,7 @@ void StreamingServer::TcpControlThread()
             std::lock_guard<std::mutex> lock(tcpSocketMutex_);
             if (tcpControlClientSocket_ == clientSocket)
             {
-                tcpControlClientSocket_ = -1;
+                tcpControlClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
             }
             else
             {
@@ -694,15 +677,15 @@ void StreamingServer::TcpVideoThread()
 {
     while (running_.load() && usbAdbEnabled_)
     {
-        int clientSocket = AcceptWithTimeout(tcpVideoListenSocket_);
-        if (clientSocket < 0)
+        SocketHandle clientSocket = AcceptWithTimeout(tcpVideoListenSocket_);
+        if (!oxrsys::runtime_socket::IsValid(clientSocket))
         {
             continue;
         }
 
         {
             std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            if (tcpVideoClientSocket_ >= 0)
+            if (oxrsys::runtime_socket::IsValid(tcpVideoClientSocket_))
             {
                 CloseTcpSocket(tcpVideoClientSocket_);
             }
@@ -726,15 +709,15 @@ void StreamingServer::TcpTrackingThread()
 {
     while (running_.load() && usbAdbEnabled_)
     {
-        int clientSocket = AcceptWithTimeout(tcpTrackingListenSocket_);
-        if (clientSocket < 0)
+        SocketHandle clientSocket = AcceptWithTimeout(tcpTrackingListenSocket_);
+        if (!oxrsys::runtime_socket::IsValid(clientSocket))
         {
             continue;
         }
 
         {
             std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            if (tcpTrackingClientSocket_ >= 0)
+            if (oxrsys::runtime_socket::IsValid(tcpTrackingClientSocket_))
             {
                 CloseTcpSocket(tcpTrackingClientSocket_);
             }
@@ -763,7 +746,7 @@ void StreamingServer::TcpTrackingThread()
             std::lock_guard<std::mutex> lock(tcpSocketMutex_);
             if (tcpTrackingClientSocket_ == clientSocket)
             {
-                tcpTrackingClientSocket_ = -1;
+                tcpTrackingClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
             }
             else
             {
@@ -840,7 +823,7 @@ void StreamingServer::EncodeThread()
         if (frame.hasPose)
         {
             std::string clientIp;
-            int videoSocket = -1;
+            SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
             bool videoUsesTcp = false;
             {
                 std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
@@ -851,7 +834,7 @@ void StreamingServer::EncodeThread()
                     videoUsesTcp = packetDispatchState_->videoUsesTcp;
                 }
             }
-            if (videoUsesTcp && videoSocket >= 0)
+            if (videoUsesTcp && oxrsys::runtime_socket::IsValid(videoSocket))
             {
                 oxr::protocol::TcpRenderPose pose = {};
                 pose.frameIndex = frame.frameIndex;
@@ -863,7 +846,7 @@ void StreamingServer::EncodeThread()
                 SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::RenderPose,
                               &pose, sizeof(pose));
             }
-            else if (!clientIp.empty() && videoSocket >= 0)
+            else if (!clientIp.empty() && oxrsys::runtime_socket::IsValid(videoSocket))
             {
                 // Payload: 7 floats (position[3] + orientation[4])
                 float posePayload[7];
@@ -887,8 +870,9 @@ void StreamingServer::EncodeThread()
                 destAddr.sin_family = AF_INET;
                 destAddr.sin_port = htons(oxr::protocol::VIDEO_PORT);
                 inet_pton(AF_INET, clientIp.c_str(), &destAddr.sin_addr);
-                sendto(videoSocket, buf, sizeof(buf), MSG_DONTWAIT,
-                       (sockaddr*)&destAddr, sizeof(destAddr));
+                oxrsys::runtime_socket::SendTo(
+                    videoSocket, buf, sizeof(buf), kBestEffortSendFlags,
+                    reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr));
             }
         }
 
@@ -1051,7 +1035,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             lastKeyframeRequestCountForAbr_ = 0;
             uint32_t stereoWidth = scaledWidth_ * 2;
             if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
-                                     bitrateMbps, graphicsDevice_))
+                                     bitrateMbps, graphicsApi_, graphicsDevice_))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
@@ -1133,7 +1117,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
             lastKeyframeRequestCountForAbr_ = 0;
             uint32_t stereoWidth = scaledWidth_ * 2;
             if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
-                                     bitrateMbps, graphicsDevice_))
+                                     bitrateMbps, graphicsApi_, graphicsDevice_))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
@@ -1425,7 +1409,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
                                   bool isKeyframe, int64_t timestampNs)
 {
     std::string clientIp;
-    int videoSocket = -1;
+    SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
     bool videoUsesTcp = false;
     {
         if (!dispatchState)
@@ -1442,7 +1426,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         videoUsesTcp = dispatchState->videoUsesTcp;
     }
 
-    if (videoSocket < 0 || (!videoUsesTcp && clientIp.empty()))
+    if (!oxrsys::runtime_socket::IsValid(videoSocket) || (!videoUsesTcp && clientIp.empty()))
     {
         return;
     }
@@ -1528,8 +1512,9 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         size_t packetSize = sizeof(header) + payloadSize;
         memcpy(packetBuffer, &header, sizeof(header));
         memcpy(packetBuffer + sizeof(header), data + offset, payloadSize);
-        sendto(videoSocket, packetBuffer, packetSize, MSG_DONTWAIT,
-               (sockaddr*)&destAddr, sizeof(destAddr));
+        oxrsys::runtime_socket::SendTo(
+            videoSocket, packetBuffer, packetSize, kBestEffortSendFlags,
+            reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr));
 
         // Cache for NACK retransmission
         cachedFrame->packets[i].data.assign(packetBuffer, packetBuffer + packetSize);
@@ -1565,17 +1550,19 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 
             memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
             memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
-            sendto(videoSocket, packetBuffer,
-                   sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD, MSG_DONTWAIT,
-                   (sockaddr*)&destAddr, sizeof(destAddr));
+            oxrsys::runtime_socket::SendTo(
+                videoSocket, packetBuffer,
+                sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
+                kBestEffortSendFlags, reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr));
         }
     }
 }
 
-bool StreamingServer::SendTcpRecord(int socket, oxr::protocol::TcpRecordType type,
+bool StreamingServer::SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                                     const void* payload, size_t payloadSize)
 {
-    if (socket < 0 || payloadSize > oxr::protocol::TCP_MAX_RECORD_PAYLOAD)
+    if (!oxrsys::runtime_socket::IsValid(socket) ||
+        payloadSize > oxr::protocol::TCP_MAX_RECORD_PAYLOAD)
     {
         return false;
     }
@@ -1598,7 +1585,7 @@ void StreamingServer::HandleNackRequest(const oxr::protocol::NackRequest& reques
 {
     std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
     if (!packetDispatchState_->acceptingPackets || packetDispatchState_->clientIp.empty() ||
-        packetDispatchState_->videoSocket < 0)
+        !oxrsys::runtime_socket::IsValid(packetDispatchState_->videoSocket))
     {
         return;
     }
@@ -1641,15 +1628,16 @@ void StreamingServer::HandleNackRequest(const oxr::protocol::NackRequest& reques
         }
 
         const auto& pkt = cached->packets[pktIdx];
-        sendto(packetDispatchState_->videoSocket, pkt.data.data(), pkt.data.size(),
-               MSG_DONTWAIT, (sockaddr*)&destAddr, sizeof(destAddr));
+        oxrsys::runtime_socket::SendTo(
+            packetDispatchState_->videoSocket, pkt.data.data(), pkt.data.size(),
+            kBestEffortSendFlags, reinterpret_cast<sockaddr*>(&destAddr), sizeof(destAddr));
         retransmitted++;
     }
 
     if (retransmitted > 0)
     {
         spdlog::info("StreamingServer: NACK retransmitted {}/{} packets for frame {}",
-                      retransmitted, __builtin_popcountll(request.missingBitmask),
+                      retransmitted, std::popcount(request.missingBitmask),
                       request.frameIndex);
     }
 }
@@ -1662,6 +1650,47 @@ std::string StreamingServer::GetClientName() const
 
 std::string StreamingServer::GetLocalIpAddress() const
 {
+#if defined(_WIN32)
+    if (!oxrsys::runtime_socket::EnsureInitialized())
+    {
+        return "0.0.0.0";
+    }
+
+    char hostName[256] = {};
+    if (gethostname(hostName, sizeof(hostName)) != 0)
+    {
+        return "0.0.0.0";
+    }
+
+    addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* addresses = nullptr;
+    if (getaddrinfo(hostName, nullptr, &hints, &addresses) != 0)
+    {
+        return "0.0.0.0";
+    }
+
+    std::string result = "0.0.0.0";
+    for (addrinfo* current = addresses; current != nullptr; current = current->ai_next)
+    {
+        if (current->ai_family != AF_INET || current->ai_addr == nullptr)
+        {
+            continue;
+        }
+        auto* addr = reinterpret_cast<sockaddr_in*>(current->ai_addr);
+        if (ntohl(addr->sin_addr.s_addr) == INADDR_LOOPBACK)
+        {
+            continue;
+        }
+        char ipStr[INET_ADDRSTRLEN] = {};
+        inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr));
+        result = ipStr;
+        break;
+    }
+    freeaddrinfo(addresses);
+    return result;
+#else
     struct ifaddrs* ifas = nullptr;
     if (getifaddrs(&ifas) != 0)
     {
@@ -1698,4 +1727,5 @@ std::string StreamingServer::GetLocalIpAddress() const
 
     freeifaddrs(ifas);
     return result;
+#endif
 }

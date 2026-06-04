@@ -9,6 +9,7 @@
 #include <thread>
 
 #include <oxrsys/protocol/Protocol.h>
+#include "RuntimeSockets.h"
 
 /**
  * Receives 6DOF tracking data from the headset client via UDP.
@@ -57,7 +58,7 @@ private:
     void ReceiveThread();
     void StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs);
 
-    int socket_ = -1;
+    oxrsys::runtime_socket::SocketHandle socket_ = oxrsys::runtime_socket::InvalidSocket;
     std::thread receiveThread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> hasData_{false};

@@ -5,6 +5,7 @@
 #include "PlatformSupport.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -13,6 +14,16 @@
 #include <QMap>
 #include <QSet>
 #include <algorithm>
+
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <objbase.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -192,6 +203,119 @@ LauncherApp inspectExecutable(const QString& path, const QString& source, bool a
     app.lastSeen = QDateTime::currentDateTimeUtc();
     return app;
 }
+
+#if defined(Q_OS_WIN)
+QString windowsShortcutTarget(const QString& path)
+{
+    HRESULT initResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool shouldUninitialize = SUCCEEDED(initResult);
+    if (FAILED(initResult) && initResult != RPC_E_CHANGED_MODE)
+    {
+        return {};
+    }
+
+    IShellLinkW* shellLink = nullptr;
+    HRESULT result = CoCreateInstance(CLSID_ShellLink,
+                                      nullptr,
+                                      CLSCTX_INPROC_SERVER,
+                                      IID_IShellLinkW,
+                                      reinterpret_cast<void**>(&shellLink));
+    if (FAILED(result) || shellLink == nullptr)
+    {
+        if (shouldUninitialize)
+        {
+            CoUninitialize();
+        }
+        return {};
+    }
+
+    IPersistFile* persistFile = nullptr;
+    result = shellLink->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persistFile));
+    if (FAILED(result) || persistFile == nullptr)
+    {
+        shellLink->Release();
+        if (shouldUninitialize)
+        {
+            CoUninitialize();
+        }
+        return {};
+    }
+
+    const std::wstring shortcutPath = QDir::toNativeSeparators(path).toStdWString();
+    result = persistFile->Load(shortcutPath.c_str(), STGM_READ);
+    QString target;
+    if (SUCCEEDED(result))
+    {
+        wchar_t targetPath[MAX_PATH] = {};
+        WIN32_FIND_DATAW findData = {};
+        result = shellLink->GetPath(targetPath, MAX_PATH, &findData, SLGP_UNCPRIORITY);
+        if (SUCCEEDED(result) && targetPath[0] != L'\0')
+        {
+            target = QString::fromWCharArray(targetPath);
+        }
+    }
+
+    persistFile->Release();
+    shellLink->Release();
+    if (shouldUninitialize)
+    {
+        CoUninitialize();
+    }
+    return target;
+}
+
+LauncherApp inspectWindowsShortcut(const QString& path, const QString& source, bool allowUnknown)
+{
+    const QString target = windowsShortcutTarget(path);
+    if (target.isEmpty() || !isExecutableFile(target))
+    {
+        return {};
+    }
+
+    LauncherApp app;
+    app.name = QFileInfo(path).completeBaseName();
+    app.path = QFileInfo(path).absoluteFilePath();
+    app.executablePath = QFileInfo(target).absoluteFilePath();
+    app.kind = launcherKindForMetadata(app.name, QString(), app.path, app.executablePath);
+    if (!allowUnknown && app.kind == "custom")
+    {
+        return {};
+    }
+    app.source = source;
+    app.lastSeen = QDateTime::currentDateTimeUtc();
+    return app;
+}
+
+QList<LauncherApp> scanWindowsStartMenu()
+{
+    QList<LauncherApp> apps;
+    QStringList roots;
+    const QString programData = qEnvironmentVariable("ProgramData");
+    const QString appData = qEnvironmentVariable("APPDATA");
+    if (!programData.isEmpty())
+    {
+        roots << QDir(programData).filePath("Microsoft/Windows/Start Menu/Programs");
+    }
+    if (!appData.isEmpty())
+    {
+        roots << QDir(appData).filePath("Microsoft/Windows/Start Menu/Programs");
+    }
+
+    for (const QString& root : roots)
+    {
+        QDirIterator iterator(root, {"*.lnk"}, QDir::Files, QDirIterator::Subdirectories);
+        while (iterator.hasNext())
+        {
+            const LauncherApp app = inspectWindowsShortcut(iterator.next(), "automatic", false);
+            if (!app.name.isEmpty())
+            {
+                apps.append(app);
+            }
+        }
+    }
+    return apps;
+}
+#endif
 
 QList<LauncherApp> scanDesktopFiles()
 {
@@ -403,6 +527,12 @@ LauncherApp LauncherScanner::inspectPath(const QString& path,
     {
         return inspectMacAppBundle(path, source, allowUnknown);
     }
+#if defined(Q_OS_WIN)
+    if (info.suffix().toLower() == "lnk")
+    {
+        return inspectWindowsShortcut(path, source, allowUnknown);
+    }
+#endif
     return inspectExecutable(path, source, allowUnknown);
 }
 
@@ -411,7 +541,7 @@ QList<LauncherApp> LauncherScanner::scanAutomaticApps()
 #if defined(Q_OS_MACOS)
     return scanMacApps();
 #elif defined(Q_OS_WIN)
-    return {};
+    return scanWindowsStartMenu();
 #else
     return scanDesktopFiles();
 #endif

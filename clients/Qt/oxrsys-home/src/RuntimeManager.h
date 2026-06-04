@@ -5,6 +5,7 @@
 #include "PlatformSupport.h"
 
 #include <QString>
+#include <QStringList>
 
 struct RuntimeRegistrationStatus
 {
@@ -39,6 +40,7 @@ public:
     bool installBundledRuntime(QString* installedManifestPath, QString* errorMessage) const;
 
     static QString runtimeManifestJson(const QString& libraryPath);
+    static int handleElevatedWindowsCommand(const QStringList& arguments, QString* errorMessage);
 
 private:
     QString bundledRuntimeDirectory() const;

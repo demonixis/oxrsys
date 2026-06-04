@@ -57,18 +57,30 @@ cmake --build build/linux-native
 ctest --test-dir build/linux-native --output-on-failure
 ```
 
+Windows x64 and ARM64 presets:
+
+```powershell
+cmake --preset windows-x64 -DFFMPEG_ROOT=C:\path\to\ffmpeg
+cmake --build build/windows-x64
+ctest --test-dir build/windows-x64 --output-on-failure
+
+cmake --preset windows-arm64 -DFFMPEG_ROOT=C:\path\to\ffmpeg-arm64
+cmake --build build/windows-arm64
+ctest --test-dir build/windows-arm64 --output-on-failure
+```
+
 Key outputs in the selected build directory. With the default build these are under `build/runtime`; with a preset they are under `build/<preset>/runtime`.
 
 - `build/runtime/liboxrsys-runtime.dylib`
 - `build/runtime/liboxrsys-runtime.so` on Linux
+- `build/runtime/oxrsys-runtime.dll` on Windows
 - `build/runtime/oxrsys-runtime.json`
 - `build/runtime/oxrsys-runtime.toml`
 - `compile_commands.json` symlinked at the project root for editor integration
 
 All third-party C++ dependencies are fetched through CMake `FetchContent`.
 Linux additionally requires system/toolchain packages for Vulkan headers, FFmpeg development libraries, and pkg-config.
-
-Windows is a scaffold only in this pass; do not treat Windows runtime builds as an acceptance gate yet.
+Windows additionally requires the Windows SDK, Vulkan SDK headers, FFmpeg development headers/import libraries, and the platform `ws2_32`, `d3d11`, `d3d12`, and `dxgi` libraries. Set `FFMPEG_ROOT` to a directory containing `include/` and `lib/` for `avcodec`, `avutil`, and `swscale`, matching the selected architecture. The ARM64 preset expects an ARM64-capable Visual Studio developer environment or an IDE that honors the preset architecture. The Windows runtime advertises Vulkan, `XR_KHR_D3D11_enable`, and `XR_KHR_D3D12_enable`; D3D video streaming is currently limited to common RGBA/BGRA 8-bit DXGI color swapchains.
 
 ## Versioning
 
@@ -102,6 +114,9 @@ For GUI applications such as Unity, Steam, or Godot launched outside a shell:
 ```
 
 The helper creates `~/.config/openxr/1/active_runtime.json` and installs a per-user LaunchAgent that restores `XR_RUNTIME_JSON` for GUI sessions.
+
+On Windows, Qt Home-launched apps use `XR_RUNTIME_JSON` and do not require admin. Global OpenXR registration is optional and writes `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC from Qt Home.
+The Windows test lane includes `oxrsys_runtime_d3d_tests`, which uses WARP where available to cover D3D extension advertisement, graphics requirements, session creation, and D3D swapchain image enumeration.
 
 ### Native macOS Home App
 
@@ -192,7 +207,7 @@ The standalone targets are `oxrsys-home` and `oxrsys-simulator`. The Qt Home Dev
 the same shared simulator widget in a dedicated window. FFmpeg development libraries are optional;
 when they are found at configure time, the Qt simulator decodes video into the preview surface,
 otherwise it stays in tracking-only preview mode with an explicit status message. See
-[qt-home.md](platforms/qt-home.md) for Linux registration/install behavior.
+[qt-home.md](platforms/qt-home.md) for Linux and Windows registration/install behavior.
 
 ### Unity Editor Helper
 
@@ -215,5 +230,6 @@ If you want to force the runtime only inside a Unity project, use the editor hel
   `build/runtime/oxrsys-runtime.json`.
 - If Android tooling is not found, verify `clients/Android/android-vr/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
 - If the runtime is not discovered, check that `XR_RUNTIME_JSON` or `~/.config/openxr/1/active_runtime.json` points to `build/runtime/oxrsys-runtime.json`.
+- On Windows, if apps launched outside Qt Home do not use OXRSys, check `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` or use Qt Home's global registration action.
 - If Xcode cannot execute the `metal` tool, install the Metal Toolchain component as described in [install.md](install.md).
 - If simulator builds fail with a `CoreSimulator` version mismatch, update Xcode and the simulator runtime components together.

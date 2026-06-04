@@ -636,7 +636,7 @@ QWidget* MainWindow::buildAppsTab()
     layout->addLayout(toolbar);
 
     auto* dropHint = new AppDropLabel(tab);
-    dropHint->setText("Drop Linux executables or .desktop files, macOS .app bundles, or Windows executables here.");
+    dropHint->setText("Drop Linux executables or .desktop files, macOS .app bundles, or Windows executables/shortcuts here.");
     dropHint->onPathDropped = [this](const QString& path) {
         model_->addLauncherApp(path);
     };
@@ -1165,7 +1165,7 @@ void MainWindow::refreshSettings()
     setElidedText(installedRuntimePathLabel_, install.installedManifestPath);
     setElidedText(bundledRuntimePathLabel_, install.bundledRuntimePath);
     installRuntimeButton_->setText(runtimeInstallButtonTitle(install));
-    installRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() && install.bundledRuntimeExists);
+    installRuntimeButton_->setEnabled(supportsRuntimeInstall() && install.bundledRuntimeExists);
     useInstalledManifestButton_->setEnabled(install.installedManifestExists);
     revealInstalledRuntimeButton_->setEnabled(install.installedRuntimeExists ||
                                               install.installedManifestExists);
@@ -1190,8 +1190,8 @@ void MainWindow::refreshSettings()
     selectedRuntimeActiveLabel_->setText(selectedActive ? "Yes" : "No");
     setElidedText(launchTargetLabel_, model_->activeLaunchRuntimeManifestPath());
     registerRuntimeButton_->setText(registrationButtonTitle(*model_));
-    registerRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration());
-    unregisterRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() &&
+    registerRuntimeButton_->setEnabled(supportsRuntimeGlobalRegistration());
+    unregisterRuntimeButton_->setEnabled(supportsRuntimeGlobalRegistration() &&
                                          model_->runtimeRegistrationStatus().activeRuntimeExists);
 }
 
@@ -1315,7 +1315,7 @@ void MainWindow::chooseLauncherApp()
         "Add App",
         QDir::homePath(),
 #if defined(Q_OS_WIN)
-        "Applications (*.exe *.bat *.cmd);;All files (*)"
+        "Applications (*.exe *.bat *.cmd *.lnk);;All files (*)"
 #elif defined(Q_OS_MACOS)
         "Applications and Executables (*.app *);;All files (*)"
 #else

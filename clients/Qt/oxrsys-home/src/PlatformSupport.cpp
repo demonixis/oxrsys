@@ -109,7 +109,7 @@ QString stateDirectory()
 QString openXrConfigDirectory()
 {
 #if defined(Q_OS_WIN)
-    return QDir(appSupportDirectory()).filePath("openxr/1");
+    return "HKLM\\SOFTWARE\\Khronos\\OpenXR\\1";
 #else
     const QString xdgConfig = envValue("XDG_CONFIG_HOME");
     const QString configRoot = xdgConfig.isEmpty()
@@ -378,7 +378,11 @@ HomePaths homePaths()
     paths.dataRoot = dataDirectory();
     paths.stateRoot = stateDirectory();
     paths.activeRuntimeDirectory = openXrConfigDirectory();
+#if defined(Q_OS_WIN)
+    paths.activeRuntimePath = paths.activeRuntimeDirectory + "\\ActiveRuntime";
+#else
     paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
+#endif
     paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
     paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
     paths.installedRuntimeDirectory = QDir(paths.dataRoot).filePath("runtime/current");
@@ -435,7 +439,25 @@ QString defaultRuntimeDirectoryPath()
 
 bool supportsRuntimeInstallAndRegistration()
 {
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) || defined(Q_OS_WIN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool supportsRuntimeInstall()
+{
+#if defined(Q_OS_LINUX) || defined(Q_OS_WIN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool supportsRuntimeGlobalRegistration()
+{
+#if defined(Q_OS_LINUX) || defined(Q_OS_WIN)
     return true;
 #else
     return false;

@@ -1,13 +1,13 @@
 # Qt Home
 
-The Qt Home app lives in `clients/Qt/oxrsys-home`. It is Linux-first, with portable launcher paths for macOS and Windows.
+The Qt Home app lives in `clients/Qt/oxrsys-home`. It is Linux-first, with active Windows support for runtime install, app launching, and optional global OpenXR registration.
 
 Current responsibilities:
 
 - launch compatible apps with `XR_RUNTIME_JSON` and capture stdout/stderr logs
 - persist manually added launcher apps under the platform config directory
-- scan and accept dropped Linux `.desktop` files, executables, and macOS `.app` bundles for
-  Godot/Unity candidates
+- scan and accept dropped Linux `.desktop` files, executables, macOS `.app` bundles, and Windows
+  `.exe`/`.bat`/`.cmd`/`.lnk` launchers for Godot/Unity candidates
 - create terminal launch scripts for app cards on macOS and Linux without changing the runtime
   manifest selection model
 - edit the shared runtime TOML keys for streaming, logging, encoder preset, and transport
@@ -15,6 +15,8 @@ Current responsibilities:
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - show runtime activity and streaming stats from `runtime_status.json`
 - install and register the user OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
+- install the Windows runtime under `%LOCALAPPDATA%\OXRSys\runtime\current`, launch apps with
+  `XR_RUNTIME_JSON`, and optionally register `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC
 - launch apps with either the installed runtime manifest or the manually selected manifest
 - open the shared Qt simulator widget from the Developer tab in a reusable `1280x720` window,
   including H.265 video preview when FFmpeg is available and mouse-driven synthetic head tracking
@@ -34,11 +36,13 @@ for example `~/Qt/6.10.2/macos`, in addition to Homebrew, MacPorts, `QTDIR`, and
 The simulator shared target also has internal tests for UDP frame assembly, FEC recovery, partial
 frame drops, ignored render-pose packets, tracking flags, and shift-modified controller movement.
 
-The Settings tab separates registration from launch selection. `Update Registration`
-writes `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json` to the selected
-manifest. The `Use installed runtime for launches` checkbox controls whether Home-launched
-apps prefer the installed copy under `${XDG_DATA_HOME:-~/.local/share}/oxrsys/runtime/current`
-or use the manifest selected in the registration field.
+The Settings tab separates registration from launch selection. On Linux, `Update Registration`
+writes `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json` to the selected manifest.
+On Windows, `Update Registration` writes `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through
+an explicit UAC prompt, stores the previous runtime in `QSettings`, and restores it on unregister
+only if ActiveRuntime still points to the OXRSys manifest. The `Use installed runtime for launches`
+checkbox controls whether Home-launched apps prefer the installed copy under the platform data
+directory or use the manifest selected in the registration field.
 
 Platform behavior:
 
@@ -49,8 +53,21 @@ Platform behavior:
   app for now.
 - Linux app-card terminal launch tries `x-terminal-emulator`, `gnome-terminal`, `konsole`, then
   `xterm`. No new terminal dependency is required.
-- Windows can build the launcher scaffold later, but runtime install, registration, and app-card
-  terminal actions are intentionally not implemented yet.
+- Windows scans Start Menu `.lnk` files via the Shell COM API, accepts manual `.exe`, `.bat`,
+  `.cmd`, and `.lnk` additions, installs the bundled runtime locally, and launches apps with
+  `XR_RUNTIME_JSON` without admin. App-card terminal actions remain hidden on Windows.
+
+Windows notes:
+
+- Build with `-DFFMPEG_ROOT=<path>` when FFmpeg is not discoverable through pkg-config. The runtime
+  requires FFmpeg headers/import libraries; the Qt simulator uses the same root opportunistically.
+  For `windows-arm64`, use ARM64 FFmpeg and Qt packages and run from an ARM64-capable Visual Studio
+  developer environment or matching IDE preset activation.
+- Global registration is machine-wide HKLM state. Qt Home uses `ShellExecuteEx(..., "runas")` for
+  register/unregister and waits for the elevated helper to finish before refreshing the status.
+- Windows runtime launches can use Vulkan, D3D11, or D3D12 OpenXR applications. Video streaming is
+  currently limited to common RGBA/BGRA 8-bit Vulkan or DXGI color swapchain formats; unsupported
+  formats are logged and dropped without changing the OpenXR wire protocol.
 
 If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
 

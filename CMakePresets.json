@@ -68,6 +68,45 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64 Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "OXRSYS_BUILD_QT_FRONTENDS": "ON"
+      }
+    },
+    {
+      "name": "windows-arm64",
+      "displayName": "Windows ARM64 Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-arm64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "architecture": {
+        "value": "arm64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_SYSTEM_PROCESSOR": "ARM64",
+        "OXRSYS_BUILD_QT_FRONTENDS": "ON"
+      }
     }
   ]
 }

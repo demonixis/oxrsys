@@ -2,6 +2,12 @@
 
 #include "VideoEncoder.h"
 #include "Config.h"
+#include "Swapchain.h"
+#include "VulkanDispatch.h"
+#include "VulkanGraphicsContext.h"
+#if defined(_WIN32)
+#include "D3DGraphicsContext.h"
+#endif
 
 #include <spdlog/spdlog.h>
 
@@ -10,12 +16,19 @@ extern "C"
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libswscale/swscale.h>
 }
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -42,22 +55,820 @@ AVPacket* Packet(void* ptr)
     return static_cast<AVPacket*>(ptr);
 }
 
-void FillBlackYuv420Frame(AVFrame* frame)
+struct VulkanEncoderState
 {
-    if (frame == nullptr)
+    GraphicsApi graphicsApi = GraphicsApi::Vulkan;
+    VulkanGraphicsContext context = {};
+#if defined(_WIN32)
+    D3D11GraphicsContext d3d11Context = {};
+    ID3D11Texture2D* d3d11StagingTexture = nullptr;
+    DXGI_FORMAT d3d11StagingFormat = DXGI_FORMAT_UNKNOWN;
+    uint32_t d3d11StagingWidth = 0;
+    uint32_t d3d11StagingHeight = 0;
+
+    D3D12GraphicsContext d3d12Context = {};
+    ID3D12CommandAllocator* d3d12CommandAllocator = nullptr;
+    ID3D12GraphicsCommandList* d3d12CommandList = nullptr;
+    ID3D12Fence* d3d12Fence = nullptr;
+    HANDLE d3d12FenceEvent = nullptr;
+    uint64_t d3d12FenceValue = 0;
+    ID3D12Resource* d3d12ReadbackBuffer = nullptr;
+    size_t d3d12ReadbackSize = 0;
+    D3D12_COMMAND_LIST_TYPE d3d12CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
+#endif
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    size_t stagingSize = 0;
+    SwsContext* eyeScaleContext = nullptr;
+    SwsContext* rgbaToYuvContext = nullptr;
+    std::vector<uint8_t> stagingReadback;
+    std::vector<uint8_t> stereoRgba;
+
+    PFN_vkCreateCommandPool createCommandPool = nullptr;
+    PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
+    PFN_vkAllocateCommandBuffers allocateCommandBuffers = nullptr;
+    PFN_vkResetCommandPool resetCommandPool = nullptr;
+    PFN_vkCreateFence createFence = nullptr;
+    PFN_vkDestroyFence destroyFence = nullptr;
+    PFN_vkResetFences resetFences = nullptr;
+    PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+    PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+    PFN_vkCmdCopyImageToBuffer cmdCopyImageToBuffer = nullptr;
+    PFN_vkQueueSubmit queueSubmit = nullptr;
+    PFN_vkCreateBuffer createBuffer = nullptr;
+    PFN_vkDestroyBuffer destroyBuffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements getBufferMemoryRequirements = nullptr;
+    PFN_vkAllocateMemory allocateMemory = nullptr;
+    PFN_vkFreeMemory freeMemory = nullptr;
+    PFN_vkBindBufferMemory bindBufferMemory = nullptr;
+    PFN_vkMapMemory mapMemory = nullptr;
+    PFN_vkUnmapMemory unmapMemory = nullptr;
+};
+
+VulkanEncoderState* State(void* ptr)
+{
+    return static_cast<VulkanEncoderState*>(ptr);
+}
+
+std::optional<AVPixelFormat> AvPixelFormatForVulkanFormat(VkFormat format)
+{
+    switch (format)
+    {
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            return AV_PIX_FMT_RGBA;
+        case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return AV_PIX_FMT_BGRA;
+        default:
+            return std::nullopt;
+    }
+}
+
+#if defined(_WIN32)
+std::optional<AVPixelFormat> AvPixelFormatForDxgiFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return AV_PIX_FMT_RGBA;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return AV_PIX_FMT_BGRA;
+        default:
+            return std::nullopt;
+    }
+}
+
+void ReleaseD3D11StagingTexture(VulkanEncoderState& state)
+{
+    if (state.d3d11StagingTexture != nullptr)
+    {
+        state.d3d11StagingTexture->Release();
+        state.d3d11StagingTexture = nullptr;
+    }
+    state.d3d11StagingFormat = DXGI_FORMAT_UNKNOWN;
+    state.d3d11StagingWidth = 0;
+    state.d3d11StagingHeight = 0;
+}
+
+bool EnsureD3D11StagingTexture(VulkanEncoderState& state,
+                               const Swapchain::D3D11FrameSource& source)
+{
+    if (state.d3d11StagingTexture != nullptr &&
+        state.d3d11StagingFormat == source.format &&
+        state.d3d11StagingWidth == source.width &&
+        state.d3d11StagingHeight == source.height)
+    {
+        return true;
+    }
+
+    ReleaseD3D11StagingTexture(state);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = source.width;
+    desc.Height = source.height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = source.format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    HRESULT result = state.d3d11Context.device->CreateTexture2D(
+        &desc, nullptr, &state.d3d11StagingTexture);
+    if (FAILED(result))
+    {
+        return false;
+    }
+
+    state.d3d11StagingFormat = source.format;
+    state.d3d11StagingWidth = source.width;
+    state.d3d11StagingHeight = source.height;
+    return true;
+}
+
+bool InitializeD3D12State(VulkanEncoderState& state)
+{
+    if (state.d3d12Context.device == nullptr || state.d3d12Context.queue == nullptr)
+    {
+        return false;
+    }
+
+    state.d3d12CommandListType = state.d3d12Context.queue->GetDesc().Type;
+    if (state.d3d12CommandListType != D3D12_COMMAND_LIST_TYPE_DIRECT &&
+        state.d3d12CommandListType != D3D12_COMMAND_LIST_TYPE_COPY)
+    {
+        return false;
+    }
+
+    if (FAILED(state.d3d12Context.device->CreateCommandAllocator(
+            state.d3d12CommandListType,
+            __uuidof(ID3D12CommandAllocator),
+            reinterpret_cast<void**>(&state.d3d12CommandAllocator))))
+    {
+        return false;
+    }
+
+    if (FAILED(state.d3d12Context.device->CreateCommandList(
+            0,
+            state.d3d12CommandListType,
+            state.d3d12CommandAllocator,
+            nullptr,
+            __uuidof(ID3D12GraphicsCommandList),
+            reinterpret_cast<void**>(&state.d3d12CommandList))))
+    {
+        return false;
+    }
+    state.d3d12CommandList->Close();
+
+    if (FAILED(state.d3d12Context.device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            __uuidof(ID3D12Fence),
+            reinterpret_cast<void**>(&state.d3d12Fence))))
+    {
+        return false;
+    }
+
+    state.d3d12FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    return state.d3d12FenceEvent != nullptr;
+}
+
+void ReleaseD3D12ReadbackBuffer(VulkanEncoderState& state)
+{
+    if (state.d3d12ReadbackBuffer != nullptr)
+    {
+        state.d3d12ReadbackBuffer->Release();
+        state.d3d12ReadbackBuffer = nullptr;
+    }
+    state.d3d12ReadbackSize = 0;
+}
+
+bool EnsureD3D12ReadbackBuffer(VulkanEncoderState& state, size_t size)
+{
+    if (state.d3d12ReadbackBuffer != nullptr && state.d3d12ReadbackSize >= size)
+    {
+        return true;
+    }
+
+    ReleaseD3D12ReadbackBuffer(state);
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1;
+    heapProps.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment = 0;
+    desc.Width = size;
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.SampleDesc.Count = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    HRESULT result = state.d3d12Context.device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        __uuidof(ID3D12Resource),
+        reinterpret_cast<void**>(&state.d3d12ReadbackBuffer));
+    if (FAILED(result))
+    {
+        return false;
+    }
+    state.d3d12ReadbackSize = size;
+    return true;
+}
+#endif
+
+bool LoadVulkanEncoderFunctions(VulkanEncoderState& state)
+{
+    if (gVulkanDispatch.getDeviceProcAddr == nullptr || state.context.device == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+
+    auto get = [&state](const char* name) {
+        return gVulkanDispatch.getDeviceProcAddr(state.context.device, name);
+    };
+
+    state.createCommandPool = reinterpret_cast<PFN_vkCreateCommandPool>(get("vkCreateCommandPool"));
+    state.destroyCommandPool = reinterpret_cast<PFN_vkDestroyCommandPool>(get("vkDestroyCommandPool"));
+    state.allocateCommandBuffers = reinterpret_cast<PFN_vkAllocateCommandBuffers>(get("vkAllocateCommandBuffers"));
+    state.resetCommandPool = reinterpret_cast<PFN_vkResetCommandPool>(get("vkResetCommandPool"));
+    state.createFence = reinterpret_cast<PFN_vkCreateFence>(get("vkCreateFence"));
+    state.destroyFence = reinterpret_cast<PFN_vkDestroyFence>(get("vkDestroyFence"));
+    state.resetFences = reinterpret_cast<PFN_vkResetFences>(get("vkResetFences"));
+    state.waitForFences = reinterpret_cast<PFN_vkWaitForFences>(get("vkWaitForFences"));
+    state.beginCommandBuffer = reinterpret_cast<PFN_vkBeginCommandBuffer>(get("vkBeginCommandBuffer"));
+    state.endCommandBuffer = reinterpret_cast<PFN_vkEndCommandBuffer>(get("vkEndCommandBuffer"));
+    state.cmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(get("vkCmdPipelineBarrier"));
+    state.cmdCopyImageToBuffer = reinterpret_cast<PFN_vkCmdCopyImageToBuffer>(get("vkCmdCopyImageToBuffer"));
+    state.queueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(get("vkQueueSubmit"));
+    state.createBuffer = reinterpret_cast<PFN_vkCreateBuffer>(get("vkCreateBuffer"));
+    state.destroyBuffer = reinterpret_cast<PFN_vkDestroyBuffer>(get("vkDestroyBuffer"));
+    state.getBufferMemoryRequirements =
+        reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(get("vkGetBufferMemoryRequirements"));
+    state.allocateMemory = reinterpret_cast<PFN_vkAllocateMemory>(get("vkAllocateMemory"));
+    state.freeMemory = reinterpret_cast<PFN_vkFreeMemory>(get("vkFreeMemory"));
+    state.bindBufferMemory = reinterpret_cast<PFN_vkBindBufferMemory>(get("vkBindBufferMemory"));
+    state.mapMemory = reinterpret_cast<PFN_vkMapMemory>(get("vkMapMemory"));
+    state.unmapMemory = reinterpret_cast<PFN_vkUnmapMemory>(get("vkUnmapMemory"));
+
+    return state.createCommandPool && state.destroyCommandPool && state.allocateCommandBuffers &&
+           state.resetCommandPool && state.createFence && state.destroyFence &&
+           state.resetFences && state.waitForFences && state.beginCommandBuffer &&
+           state.endCommandBuffer && state.cmdPipelineBarrier && state.cmdCopyImageToBuffer &&
+           state.queueSubmit && state.createBuffer && state.destroyBuffer &&
+           state.getBufferMemoryRequirements && state.allocateMemory && state.freeMemory &&
+           state.bindBufferMemory && state.mapMemory && state.unmapMemory &&
+           gVulkanDispatch.getPhysicalDeviceMemoryProperties != nullptr;
+}
+
+uint32_t FindMemoryType(VkPhysicalDevice physicalDevice,
+                        uint32_t typeFilter,
+                        VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memoryProperties = {};
+    gVulkanDispatch.getPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
+    {
+        if ((typeFilter & (1u << i)) &&
+            (memoryProperties.memoryTypes[i].propertyFlags & properties) == properties)
+        {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+void DestroyStagingBuffer(VulkanEncoderState& state)
+{
+    if (state.stagingBuffer != VK_NULL_HANDLE && state.destroyBuffer != nullptr)
+    {
+        state.destroyBuffer(state.context.device, state.stagingBuffer, nullptr);
+    }
+    if (state.stagingMemory != VK_NULL_HANDLE && state.freeMemory != nullptr)
+    {
+        state.freeMemory(state.context.device, state.stagingMemory, nullptr);
+    }
+    state.stagingBuffer = VK_NULL_HANDLE;
+    state.stagingMemory = VK_NULL_HANDLE;
+    state.stagingSize = 0;
+}
+
+bool EnsureStagingBuffer(VulkanEncoderState& state, size_t size)
+{
+    if (state.stagingBuffer != VK_NULL_HANDLE && state.stagingSize >= size)
+    {
+        return true;
+    }
+
+    DestroyStagingBuffer(state);
+
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (state.createBuffer(state.context.device, &bufferInfo, nullptr, &state.stagingBuffer) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkMemoryRequirements requirements = {};
+    state.getBufferMemoryRequirements(state.context.device, state.stagingBuffer, &requirements);
+    const uint32_t memoryType = FindMemoryType(
+        state.context.physicalDevice,
+        requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memoryType == UINT32_MAX)
+    {
+        DestroyStagingBuffer(state);
+        return false;
+    }
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = requirements.size;
+    allocInfo.memoryTypeIndex = memoryType;
+    if (state.allocateMemory(state.context.device, &allocInfo, nullptr, &state.stagingMemory) != VK_SUCCESS)
+    {
+        DestroyStagingBuffer(state);
+        return false;
+    }
+    if (state.bindBufferMemory(state.context.device, state.stagingBuffer, state.stagingMemory, 0) != VK_SUCCESS)
+    {
+        DestroyStagingBuffer(state);
+        return false;
+    }
+
+    state.stagingSize = size;
+    return true;
+}
+
+bool InitializeVulkanState(VulkanEncoderState& state)
+{
+    if (state.context.device == VK_NULL_HANDLE ||
+        state.context.physicalDevice == VK_NULL_HANDLE ||
+        state.context.queue == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+    if (!LoadVulkanEncoderFunctions(state))
+    {
+        return false;
+    }
+
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = state.context.queueFamilyIndex;
+    if (state.createCommandPool(state.context.device, &poolInfo, nullptr, &state.commandPool) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo commandInfo = {};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandInfo.commandPool = state.commandPool;
+    commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandInfo.commandBufferCount = 1;
+    if (state.allocateCommandBuffers(state.context.device, &commandInfo, &state.commandBuffer) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (state.createFence(state.context.device, &fenceInfo, nullptr, &state.fence) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void DestroyVulkanState(VulkanEncoderState* state)
+{
+    if (state == nullptr)
     {
         return;
     }
 
-    for (int y = 0; y < frame->height; ++y)
+#if defined(_WIN32)
+    ReleaseD3D11StagingTexture(*state);
+    ReleaseD3D12ReadbackBuffer(*state);
+    if (state->d3d12FenceEvent != nullptr)
     {
-        std::memset(frame->data[0] + y * frame->linesize[0], 16, static_cast<size_t>(frame->width));
+        CloseHandle(state->d3d12FenceEvent);
+        state->d3d12FenceEvent = nullptr;
     }
-    for (int y = 0; y < frame->height / 2; ++y)
+    if (state->d3d12Fence != nullptr)
     {
-        std::memset(frame->data[1] + y * frame->linesize[1], 128, static_cast<size_t>(frame->width / 2));
-        std::memset(frame->data[2] + y * frame->linesize[2], 128, static_cast<size_t>(frame->width / 2));
+        state->d3d12Fence->Release();
+        state->d3d12Fence = nullptr;
     }
+    if (state->d3d12CommandList != nullptr)
+    {
+        state->d3d12CommandList->Release();
+        state->d3d12CommandList = nullptr;
+    }
+    if (state->d3d12CommandAllocator != nullptr)
+    {
+        state->d3d12CommandAllocator->Release();
+        state->d3d12CommandAllocator = nullptr;
+    }
+#endif
+
+    DestroyStagingBuffer(*state);
+    if (state->eyeScaleContext != nullptr)
+    {
+        sws_freeContext(state->eyeScaleContext);
+    }
+    if (state->rgbaToYuvContext != nullptr)
+    {
+        sws_freeContext(state->rgbaToYuvContext);
+    }
+    if (state->fence != VK_NULL_HANDLE && state->destroyFence != nullptr)
+    {
+        state->destroyFence(state->context.device, state->fence, nullptr);
+    }
+    if (state->commandPool != VK_NULL_HANDLE && state->destroyCommandPool != nullptr)
+    {
+        state->destroyCommandPool(state->context.device, state->commandPool, nullptr);
+    }
+    delete state;
+}
+
+bool ReadVulkanFrameSource(VulkanEncoderState& state,
+                           const Swapchain::VulkanFrameSource& source,
+                           std::vector<uint8_t>& output)
+{
+    const auto format = AvPixelFormatForVulkanFormat(source.format);
+    if (!format.has_value() || source.image == VK_NULL_HANDLE ||
+        source.width == 0 || source.height == 0)
+    {
+        return false;
+    }
+
+    const size_t bytesPerPixel = 4;
+    const size_t readbackSize = static_cast<size_t>(source.width) * source.height * bytesPerPixel;
+    if (!EnsureStagingBuffer(state, readbackSize))
+    {
+        return false;
+    }
+
+    state.resetFences(state.context.device, 1, &state.fence);
+    state.resetCommandPool(state.context.device, state.commandPool, 0);
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (state.beginCommandBuffer(state.commandBuffer, &beginInfo) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkImageMemoryBarrier toTransfer = {};
+    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = source.image;
+    toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toTransfer.subresourceRange.baseMipLevel = 0;
+    toTransfer.subresourceRange.levelCount = 1;
+    toTransfer.subresourceRange.baseArrayLayer = source.arrayLayer;
+    toTransfer.subresourceRange.layerCount = 1;
+
+    state.cmdPipelineBarrier(
+        state.commandBuffer,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+
+    VkBufferImageCopy region = {};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = source.arrayLayer;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {source.width, source.height, 1};
+    state.cmdCopyImageToBuffer(state.commandBuffer, source.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               state.stagingBuffer, 1, &region);
+
+    VkImageMemoryBarrier backToColor = toTransfer;
+    backToColor.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    backToColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    backToColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    backToColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    state.cmdPipelineBarrier(
+        state.commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &backToColor);
+
+    if (state.endCommandBuffer(state.commandBuffer) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &state.commandBuffer;
+    if (state.queueSubmit(state.context.queue, 1, &submitInfo, state.fence) != VK_SUCCESS)
+    {
+        return false;
+    }
+    if (state.waitForFences(state.context.device, 1, &state.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    if (state.mapMemory(state.context.device, state.stagingMemory, 0, readbackSize, 0, &mapped) != VK_SUCCESS)
+    {
+        return false;
+    }
+    output.resize(readbackSize);
+    std::memcpy(output.data(), mapped, readbackSize);
+    state.unmapMemory(state.context.device, state.stagingMemory);
+    return true;
+}
+
+#if defined(_WIN32)
+bool ReadD3D11FrameSource(VulkanEncoderState& state,
+                          const Swapchain::D3D11FrameSource& source,
+                          std::vector<uint8_t>& output)
+{
+    const auto format = AvPixelFormatForDxgiFormat(source.format);
+    if (!format.has_value() || source.texture == nullptr ||
+        state.d3d11Context.immediateContext == nullptr ||
+        source.width == 0 || source.height == 0)
+    {
+        return false;
+    }
+    if (!EnsureD3D11StagingTexture(state, source))
+    {
+        return false;
+    }
+
+    const UINT sourceSubresource = D3D11CalcSubresource(
+        0, source.arrayLayer, 1);
+    state.d3d11Context.immediateContext->CopySubresourceRegion(
+        state.d3d11StagingTexture,
+        0,
+        0,
+        0,
+        0,
+        source.texture,
+        sourceSubresource,
+        nullptr);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    HRESULT result = state.d3d11Context.immediateContext->Map(
+        state.d3d11StagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(result))
+    {
+        return false;
+    }
+
+    const size_t rowBytes = static_cast<size_t>(source.width) * 4;
+    output.resize(rowBytes * source.height);
+    const auto* src = static_cast<const uint8_t*>(mapped.pData);
+    for (uint32_t y = 0; y < source.height; ++y)
+    {
+        std::memcpy(output.data() + rowBytes * y,
+                    src + static_cast<size_t>(mapped.RowPitch) * y,
+                    rowBytes);
+    }
+    state.d3d11Context.immediateContext->Unmap(state.d3d11StagingTexture, 0);
+    return true;
+}
+
+bool ReadD3D12FrameSource(VulkanEncoderState& state,
+                          const Swapchain::D3D12FrameSource& source,
+                          std::vector<uint8_t>& output)
+{
+    const auto format = AvPixelFormatForDxgiFormat(source.format);
+    if (!format.has_value() || source.texture == nullptr ||
+        state.d3d12Context.device == nullptr || state.d3d12Context.queue == nullptr ||
+        state.d3d12CommandAllocator == nullptr || state.d3d12CommandList == nullptr ||
+        state.d3d12Fence == nullptr || source.width == 0 || source.height == 0)
+    {
+        return false;
+    }
+
+    D3D12_RESOURCE_DESC textureDesc = source.texture->GetDesc();
+    if (source.arrayLayer >= textureDesc.DepthOrArraySize)
+    {
+        return false;
+    }
+    const UINT sourceSubresource = source.arrayLayer * textureDesc.MipLevels;
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    UINT64 totalBytes = 0;
+    state.d3d12Context.device->GetCopyableFootprints(
+        &textureDesc,
+        sourceSubresource,
+        1,
+        0,
+        &footprint,
+        &numRows,
+        &rowSizeInBytes,
+        &totalBytes);
+    if (totalBytes == 0 || rowSizeInBytes < static_cast<UINT64>(source.width) * 4)
+    {
+        return false;
+    }
+    if (!EnsureD3D12ReadbackBuffer(state, static_cast<size_t>(totalBytes)))
+    {
+        return false;
+    }
+
+    if (FAILED(state.d3d12CommandAllocator->Reset()))
+    {
+        return false;
+    }
+    if (FAILED(state.d3d12CommandList->Reset(state.d3d12CommandAllocator, nullptr)))
+    {
+        return false;
+    }
+
+    D3D12_RESOURCE_BARRIER toCopy = {};
+    toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toCopy.Transition.pResource = source.texture;
+    toCopy.Transition.Subresource = sourceSubresource;
+    toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    state.d3d12CommandList->ResourceBarrier(1, &toCopy);
+
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = state.d3d12ReadbackBuffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = footprint;
+
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = source.texture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = sourceSubresource;
+    state.d3d12CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER backToRender = toCopy;
+    backToRender.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    backToRender.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    state.d3d12CommandList->ResourceBarrier(1, &backToRender);
+
+    if (FAILED(state.d3d12CommandList->Close()))
+    {
+        return false;
+    }
+    ID3D12CommandList* lists[] = {state.d3d12CommandList};
+    state.d3d12Context.queue->ExecuteCommandLists(1, lists);
+
+    const uint64_t fenceValue = ++state.d3d12FenceValue;
+    if (FAILED(state.d3d12Context.queue->Signal(state.d3d12Fence, fenceValue)))
+    {
+        return false;
+    }
+    if (state.d3d12Fence->GetCompletedValue() < fenceValue)
+    {
+        if (FAILED(state.d3d12Fence->SetEventOnCompletion(fenceValue, state.d3d12FenceEvent)))
+        {
+            return false;
+        }
+        WaitForSingleObject(state.d3d12FenceEvent, INFINITE);
+    }
+
+    D3D12_RANGE readRange = {
+        static_cast<SIZE_T>(footprint.Offset),
+        static_cast<SIZE_T>(footprint.Offset + totalBytes),
+    };
+    void* mapped = nullptr;
+    if (FAILED(state.d3d12ReadbackBuffer->Map(0, &readRange, &mapped)))
+    {
+        return false;
+    }
+
+    const size_t rowBytes = static_cast<size_t>(source.width) * 4;
+    output.resize(rowBytes * source.height);
+    const auto* mappedBytes = static_cast<const uint8_t*>(mapped);
+    const auto* srcRows = mappedBytes + footprint.Offset;
+    for (uint32_t y = 0; y < source.height; ++y)
+    {
+        std::memcpy(output.data() + rowBytes * y,
+                    srcRows + static_cast<size_t>(footprint.Footprint.RowPitch) * y,
+                    rowBytes);
+    }
+    D3D12_RANGE writtenRange = {0, 0};
+    state.d3d12ReadbackBuffer->Unmap(0, &writtenRange);
+    return true;
+}
+#endif
+
+bool ScaleEyeToStereoRgba(VulkanEncoderState& state,
+                          AVPixelFormat sourceFormat,
+                          uint32_t sourceWidth,
+                          uint32_t sourceHeight,
+                          const std::vector<uint8_t>& readback,
+                          uint32_t outputX,
+                          uint32_t outputEyeWidth,
+                          uint32_t outputHeight,
+                          uint32_t outputStereoWidth)
+{
+    state.stereoRgba.resize(static_cast<size_t>(outputStereoWidth) * outputHeight * 4);
+    uint8_t* dstData[4] = {
+        state.stereoRgba.data() + static_cast<size_t>(outputX) * 4,
+        nullptr, nullptr, nullptr,
+    };
+    int dstLinesize[4] = {
+        static_cast<int>(outputStereoWidth * 4),
+        0, 0, 0,
+    };
+    const uint8_t* srcData[4] = {readback.data(), nullptr, nullptr, nullptr};
+    int srcLinesize[4] = {static_cast<int>(sourceWidth * 4), 0, 0, 0};
+
+    state.eyeScaleContext = sws_getCachedContext(
+        state.eyeScaleContext,
+        static_cast<int>(sourceWidth),
+        static_cast<int>(sourceHeight),
+        sourceFormat,
+        static_cast<int>(outputEyeWidth),
+        static_cast<int>(outputHeight),
+        AV_PIX_FMT_RGBA,
+        SWS_FAST_BILINEAR,
+        nullptr,
+        nullptr,
+        nullptr);
+    if (state.eyeScaleContext == nullptr)
+    {
+        return false;
+    }
+
+    return sws_scale(state.eyeScaleContext,
+                     srcData,
+                     srcLinesize,
+                     0,
+                     static_cast<int>(sourceHeight),
+                     dstData,
+                     dstLinesize) > 0;
+}
+
+bool ConvertStereoRgbaToYuv(VulkanEncoderState& state,
+                            AVFrame* frame,
+                            uint32_t width,
+                            uint32_t height)
+{
+    state.rgbaToYuvContext = sws_getCachedContext(
+        state.rgbaToYuvContext,
+        static_cast<int>(width),
+        static_cast<int>(height),
+        AV_PIX_FMT_RGBA,
+        frame->width,
+        frame->height,
+        static_cast<AVPixelFormat>(frame->format),
+        SWS_FAST_BILINEAR,
+        nullptr,
+        nullptr,
+        nullptr);
+    if (state.rgbaToYuvContext == nullptr)
+    {
+        return false;
+    }
+
+    const uint8_t* srcData[4] = {state.stereoRgba.data(), nullptr, nullptr, nullptr};
+    int srcLinesize[4] = {static_cast<int>(width * 4), 0, 0, 0};
+    return sws_scale(state.rgbaToYuvContext,
+                     srcData,
+                     srcLinesize,
+                     0,
+                     static_cast<int>(height),
+                     frame->data,
+                     frame->linesize) > 0;
 }
 
 } // namespace
@@ -70,7 +881,8 @@ VideoEncoder::~VideoEncoder()
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                              uint32_t bitrateMbps, void* /*graphicsDevice*/)
+                              uint32_t bitrateMbps, GraphicsApi graphicsApi,
+                              void* graphicsDevice)
 {
     Shutdown();
 
@@ -79,12 +891,68 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     eyeWidth_ = width / 2;
     fps_ = std::max(fps, 1u);
     bitrateMbps_ = bitrateMbps;
+    graphicsApi_ = graphicsApi;
     frameCount_ = 0;
     forceKeyframe_.store(false);
     shuttingDown_.store(false);
     droppedFrameCount_.store(0);
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
+
+    std::unique_ptr<VulkanEncoderState, decltype(&DestroyVulkanState)> vkState(
+        new VulkanEncoderState(), DestroyVulkanState);
+    vkState->graphicsApi = graphicsApi;
+    if (graphicsApi == GraphicsApi::Vulkan)
+    {
+        auto* graphicsContext = static_cast<VulkanGraphicsContext*>(graphicsDevice);
+        if (graphicsContext == nullptr)
+        {
+            spdlog::error("FFmpegVideoEncoder: missing Vulkan graphics context");
+            return false;
+        }
+        vkState->context = *graphicsContext;
+        if (!InitializeVulkanState(*vkState))
+        {
+            spdlog::error("FFmpegVideoEncoder: failed to initialize Vulkan readback state");
+            return false;
+        }
+    }
+#if defined(_WIN32)
+    else if (graphicsApi == GraphicsApi::D3D11)
+    {
+        auto* graphicsContext = static_cast<D3D11GraphicsContext*>(graphicsDevice);
+        if (graphicsContext == nullptr ||
+            graphicsContext->device == nullptr ||
+            graphicsContext->immediateContext == nullptr)
+        {
+            spdlog::error("FFmpegVideoEncoder: missing D3D11 graphics context");
+            return false;
+        }
+        vkState->d3d11Context = *graphicsContext;
+    }
+    else if (graphicsApi == GraphicsApi::D3D12)
+    {
+        auto* graphicsContext = static_cast<D3D12GraphicsContext*>(graphicsDevice);
+        if (graphicsContext == nullptr ||
+            graphicsContext->device == nullptr ||
+            graphicsContext->queue == nullptr)
+        {
+            spdlog::error("FFmpegVideoEncoder: missing D3D12 graphics context");
+            return false;
+        }
+        vkState->d3d12Context = *graphicsContext;
+        if (!InitializeD3D12State(*vkState))
+        {
+            spdlog::error("FFmpegVideoEncoder: failed to initialize D3D12 readback state");
+            return false;
+        }
+    }
+#endif
+    else
+    {
+        spdlog::error("FFmpegVideoEncoder: unsupported graphics backend for FFmpeg encoder");
+        return false;
+    }
 
     const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
     if (codec == nullptr)
@@ -145,9 +1013,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     session_ = context;
     pixelBufferPool_ = frame;
     textureCache_ = packet;
+    vulkanState_ = vkState.release();
 
-    spdlog::info("FFmpegVideoEncoder: initialized HEVC encoder {}x{} @ {}Hz {}Mbps",
-                 width_, height_, fps_, bitrateMbps_);
+    const char* backendName =
+        graphicsApi == GraphicsApi::Vulkan ? "Vulkan" :
+        graphicsApi == GraphicsApi::D3D11 ? "D3D11" :
+        graphicsApi == GraphicsApi::D3D12 ? "D3D12" : "unknown";
+    spdlog::info("FFmpegVideoEncoder: initialized {} HEVC encoder {}x{} @ {}Hz {}Mbps",
+                 backendName, width_, height_, fps_, bitrateMbps_);
     return true;
 }
 
@@ -158,6 +1031,7 @@ void VideoEncoder::Shutdown()
     AVCodecContext* context = CodecContext(session_);
     AVFrame* frame = Frame(pixelBufferPool_);
     AVPacket* packet = Packet(textureCache_);
+    VulkanEncoderState* vkState = State(vulkanState_);
 
     if (context != nullptr)
     {
@@ -171,10 +1045,12 @@ void VideoEncoder::Shutdown()
     {
         av_packet_free(&packet);
     }
+    DestroyVulkanState(vkState);
 
     session_ = nullptr;
     pixelBufferPool_ = nullptr;
     textureCache_ = nullptr;
+    vulkanState_ = nullptr;
     inFlightFrameCount_.store(0);
 }
 
@@ -191,14 +1067,15 @@ bool VideoEncoder::EncodeStereo(void* leftTexture, void* rightTexture,
     return EncodeInternal(leftTexture, rightTexture, true, timestampNs, std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeInternal(void* /*leftTexture*/, void* /*rightTexture*/, bool /*stereo*/,
+bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool stereo,
                                   int64_t timestampNs, OnNalUnitCallback callback,
                                   OnFrameEncodedCallback frameCallback)
 {
     AVCodecContext* context = CodecContext(session_);
     AVFrame* frame = Frame(pixelBufferPool_);
     AVPacket* packet = Packet(textureCache_);
-    if (context == nullptr || frame == nullptr || packet == nullptr)
+    VulkanEncoderState* vkState = State(vulkanState_);
+    if (context == nullptr || frame == nullptr || packet == nullptr || vkState == nullptr)
     {
         return false;
     }
@@ -210,21 +1087,122 @@ bool VideoEncoder::EncodeInternal(void* /*leftTexture*/, void* /*rightTexture*/,
     metrics.frameNumber = frameNumberCounter_.fetch_add(1) + 1;
     metrics.timestampNs = timestampNs;
 
-    if (av_frame_make_writable(frame) < 0)
-    {
+    auto dropFrame = [&]() {
         droppedFrameCount_.fetch_add(1);
         inFlightFrameCount_.fetch_sub(1);
         metrics.frameDropped = true;
+        metrics.totalLatencyMs = ToMilliseconds(Clock::now() - encodeStart);
         if (frameCallback)
         {
             frameCallback(metrics);
         }
         return false;
+    };
+
+    if (av_frame_make_writable(frame) < 0)
+    {
+        return dropFrame();
     }
 
-    // TODO: replace this with a Vulkan readback path. The current Linux backend
-    // proves the FFmpeg encode pipeline without blocking xrEndFrame().
-    FillBlackYuv420Frame(frame);
+    auto copyStart = Clock::now();
+    std::vector<uint8_t> leftReadback;
+    std::vector<uint8_t> rightReadback;
+
+    if (graphicsApi_ == GraphicsApi::Vulkan)
+    {
+        auto* leftSource = static_cast<Swapchain::VulkanFrameSource*>(leftTexture);
+        auto* rightSource = static_cast<Swapchain::VulkanFrameSource*>(stereo ? rightTexture : leftTexture);
+        if (leftSource == nullptr || rightSource == nullptr)
+        {
+            spdlog::warn("FFmpegVideoEncoder: missing Vulkan frame source");
+            return dropFrame();
+        }
+
+        const auto leftFormat = AvPixelFormatForVulkanFormat(leftSource->format);
+        const auto rightFormat = AvPixelFormatForVulkanFormat(rightSource->format);
+        if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !ReadVulkanFrameSource(*vkState, *leftSource, leftReadback) ||
+            !ReadVulkanFrameSource(*vkState, *rightSource, rightReadback))
+        {
+            spdlog::warn("FFmpegVideoEncoder: Vulkan readback failed or unsupported format");
+            return dropFrame();
+        }
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
+                                  leftReadback, 0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
+                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+            !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
+        {
+            spdlog::warn("FFmpegVideoEncoder: Vulkan frame conversion failed");
+            return dropFrame();
+        }
+    }
+#if defined(_WIN32)
+    else if (graphicsApi_ == GraphicsApi::D3D11)
+    {
+        auto* leftSource = static_cast<Swapchain::D3D11FrameSource*>(leftTexture);
+        auto* rightSource = static_cast<Swapchain::D3D11FrameSource*>(stereo ? rightTexture : leftTexture);
+        if (leftSource == nullptr || rightSource == nullptr)
+        {
+            spdlog::warn("FFmpegVideoEncoder: missing D3D11 frame source");
+            return dropFrame();
+        }
+
+        const auto leftFormat = AvPixelFormatForDxgiFormat(leftSource->format);
+        const auto rightFormat = AvPixelFormatForDxgiFormat(rightSource->format);
+        if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !ReadD3D11FrameSource(*vkState, *leftSource, leftReadback) ||
+            !ReadD3D11FrameSource(*vkState, *rightSource, rightReadback))
+        {
+            spdlog::warn("FFmpegVideoEncoder: D3D11 readback failed or unsupported format");
+            return dropFrame();
+        }
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
+                                  leftReadback, 0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
+                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+            !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
+        {
+            spdlog::warn("FFmpegVideoEncoder: D3D11 frame conversion failed");
+            return dropFrame();
+        }
+    }
+    else if (graphicsApi_ == GraphicsApi::D3D12)
+    {
+        auto* leftSource = static_cast<Swapchain::D3D12FrameSource*>(leftTexture);
+        auto* rightSource = static_cast<Swapchain::D3D12FrameSource*>(stereo ? rightTexture : leftTexture);
+        if (leftSource == nullptr || rightSource == nullptr)
+        {
+            spdlog::warn("FFmpegVideoEncoder: missing D3D12 frame source");
+            return dropFrame();
+        }
+
+        const auto leftFormat = AvPixelFormatForDxgiFormat(leftSource->format);
+        const auto rightFormat = AvPixelFormatForDxgiFormat(rightSource->format);
+        if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !ReadD3D12FrameSource(*vkState, *leftSource, leftReadback) ||
+            !ReadD3D12FrameSource(*vkState, *rightSource, rightReadback))
+        {
+            spdlog::warn("FFmpegVideoEncoder: D3D12 readback failed or unsupported format");
+            return dropFrame();
+        }
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
+                                  leftReadback, 0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
+                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+            !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
+        {
+            spdlog::warn("FFmpegVideoEncoder: D3D12 frame conversion failed");
+            return dropFrame();
+        }
+    }
+#endif
+    else
+    {
+        return dropFrame();
+    }
+    metrics.gpuCopyMs = ToMilliseconds(Clock::now() - copyStart);
+
     frame->pts = static_cast<int64_t>(frameCount_);
     if (forceKeyframe_.exchange(false))
     {
@@ -241,14 +1219,7 @@ bool VideoEncoder::EncodeInternal(void* /*leftTexture*/, void* /*rightTexture*/,
     metrics.encodeSubmitMs = ToMilliseconds(Clock::now() - submitStart);
     if (sendResult < 0)
     {
-        droppedFrameCount_.fetch_add(1);
-        inFlightFrameCount_.fetch_sub(1);
-        metrics.frameDropped = true;
-        if (frameCallback)
-        {
-            frameCallback(metrics);
-        }
-        return false;
+        return dropFrame();
     }
 
     bool emittedPacket = false;

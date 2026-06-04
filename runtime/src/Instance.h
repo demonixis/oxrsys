@@ -69,6 +69,10 @@ public:
     bool HasQueriedMetalGraphicsRequirements() const;
     void MarkVulkanGraphicsRequirementsQueried();
     bool HasQueriedVulkanGraphicsRequirements() const;
+    void MarkD3D11GraphicsRequirementsQueried();
+    bool HasQueriedD3D11GraphicsRequirements() const;
+    void MarkD3D12GraphicsRequirementsQueried();
+    bool HasQueriedD3D12GraphicsRequirements() const;
     bool IsViewConfigurationTypeSupported(XrViewConfigurationType viewConfigurationType) const;
 
     void SetDebugUtilsObjectName(XrObjectType objectType, uint64_t objectHandle, const char* objectName);
@@ -111,4 +115,6 @@ private:
     std::unordered_map<DebugUtilsObjectKey, std::string, DebugUtilsObjectKeyHash> debugUtilsObjectNames_;
     bool metalGraphicsRequirementsQueried_ = false;
     bool vulkanGraphicsRequirementsQueried_ = false;
+    bool d3d11GraphicsRequirementsQueried_ = false;
+    bool d3d12GraphicsRequirementsQueried_ = false;
 };

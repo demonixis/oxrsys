@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "Config.h"
+#include "RuntimePlatform.h"
 
-#include <dlfcn.h>
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -12,65 +12,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <thread>
-
-namespace
-{
-
-std::string HomeDirectory()
-{
-    const char* home = std::getenv("HOME");
-    if (home != nullptr && home[0] != '\0')
-    {
-        return home;
-    }
-    return {};
-}
-
-std::string ConfigRoot()
-{
-    const std::string home = HomeDirectory();
-#if defined(__APPLE__)
-    if (!home.empty())
-    {
-        return home + "/Library/Application Support/OXRSys";
-    }
-#else
-    const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-    if (xdgConfigHome != nullptr && xdgConfigHome[0] != '\0')
-    {
-        return std::string(xdgConfigHome) + "/oxrsys";
-    }
-    if (!home.empty())
-    {
-        return home + "/.config/oxrsys";
-    }
-#endif
-    return {};
-}
-
-std::string StateRoot()
-{
-    const std::string home = HomeDirectory();
-#if defined(__APPLE__)
-    if (!home.empty())
-    {
-        return home + "/Library/Application Support/OXRSys";
-    }
-#else
-    const char* xdgStateHome = std::getenv("XDG_STATE_HOME");
-    if (xdgStateHome != nullptr && xdgStateHome[0] != '\0')
-    {
-        return std::string(xdgStateHome) + "/oxrsys";
-    }
-    if (!home.empty())
-    {
-        return home + "/.local/state/oxrsys";
-    }
-#endif
-    return {};
-}
-
-} // namespace
 
 Config& Config::Get()
 {
@@ -104,28 +45,10 @@ void Config::Shutdown()
 
 void Config::DetectDylibDir()
 {
-    Dl_info info;
-    // Use the address of this function (inside the dylib) to find its path
-    if (dladdr((void*)&Config::Get, &info) && info.dli_fname != nullptr)
-    {
-        std::string path(info.dli_fname);
-        auto lastSlash = path.rfind('/');
-        if (lastSlash != std::string::npos)
-        {
-            dylibDir = path.substr(0, lastSlash);
-        }
-        else
-        {
-            dylibDir = ".";
-        }
-    }
-    else
-    {
-        dylibDir = ".";
-    }
+    dylibDir = oxrsys::runtime_platform::ModuleDirectory();
 
-    appSupportDir = ConfigRoot();
-    std::string stateDir = StateRoot();
+    appSupportDir = oxrsys::runtime_platform::ConfigRoot();
+    std::string stateDir = oxrsys::runtime_platform::StateRoot();
     if (appSupportDir.empty())
     {
         appSupportDir = dylibDir;

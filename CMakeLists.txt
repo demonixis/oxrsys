@@ -101,10 +101,13 @@ add_custom_target(oxrsys_runtime_sync_compile_commands ALL
 add_executable(oxrsys_runtime_tests
     tests/TestConfig.cpp
     tests/TestInputManager.cpp
+    tests/TestRuntimePlatform.cpp
     tests/TestProtocolLayout.cpp
     runtime/src/InputManager.cpp
     runtime/src/TrackingReceiver.cpp
     runtime/src/Config.cpp
+    runtime/src/RuntimePlatform.cpp
+    runtime/src/RuntimeSockets.cpp
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
@@ -115,7 +118,11 @@ target_link_libraries(oxrsys_runtime_tests PRIVATE
     Catch2::Catch2WithMain
     glm::glm
     spdlog::spdlog
+    ${CMAKE_DL_LIBS}
 )
+if(WIN32)
+    target_link_libraries(oxrsys_runtime_tests PRIVATE ws2_32)
+endif()
 if(APPLE)
     target_compile_definitions(oxrsys_runtime_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL
@@ -127,6 +134,7 @@ add_executable(oxrsys_runtime_status_tests
     tests/TestRuntimeStatus.cpp
     runtime/src/RuntimeStatus.cpp
     runtime/src/Config.cpp
+    runtime/src/RuntimePlatform.cpp
 )
 target_include_directories(oxrsys_runtime_status_tests PRIVATE
     runtime/src
@@ -134,6 +142,7 @@ target_include_directories(oxrsys_runtime_status_tests PRIVATE
 target_link_libraries(oxrsys_runtime_status_tests PRIVATE
     Catch2::Catch2WithMain
     spdlog::spdlog
+    ${CMAKE_DL_LIBS}
 )
 add_test(NAME oxrsys_runtime_status_tests COMMAND oxrsys_runtime_status_tests)
 
@@ -167,6 +176,38 @@ if(APPLE)
         ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
     )
     list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
+endif()
+
+if(WIN32)
+    add_executable(oxrsys_runtime_d3d_tests
+        tests/TestWindowsD3D.cpp
+    )
+    target_include_directories(oxrsys_runtime_d3d_tests PRIVATE
+        runtime/src
+        ${openxr_SOURCE_DIR}/include
+    )
+    target_link_libraries(oxrsys_runtime_d3d_tests PRIVATE
+        Catch2::Catch2WithMain
+        OpenXR::openxr_loader
+        d3d11
+        d3d12
+        dxgi
+    )
+    target_compile_definitions(oxrsys_runtime_d3d_tests PRIVATE
+        XR_USE_GRAPHICS_API_D3D11
+        XR_USE_GRAPHICS_API_D3D12
+    )
+    add_dependencies(oxrsys_runtime_d3d_tests oxrsys_runtime)
+    add_test(NAME oxrsys_runtime_d3d_tests COMMAND oxrsys_runtime_d3d_tests)
+    set_tests_properties(oxrsys_runtime_d3d_tests PROPERTIES
+        ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+    )
+    if(FFMPEG_ROOT AND EXISTS "${FFMPEG_ROOT}/bin")
+        set_tests_properties(oxrsys_runtime_d3d_tests PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${FFMPEG_ROOT}/bin"
+        )
+    endif()
+    list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_d3d_tests)
 endif()
 
 add_dependencies(oxrsys_runtime_sync_compile_commands

@@ -4,6 +4,16 @@
 #include <openxr/openxr_loader_negotiation.h>
 #include <openxr/openxr_reflection.h>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <d3d11.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+#endif
+
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
 #if defined(__APPLE__)
@@ -24,12 +34,18 @@
 #include "Config.h"
 #include "RuntimeStatus.h"
 #include "VulkanDispatch.h"
+#include "VulkanGraphicsContext.h"
+#if defined(_WIN32)
+#include "D3DGraphicsContext.h"
+#endif
 
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <cstring>
+#ifdef XR_USE_GRAPHICS_API_METAL
 #include <dlfcn.h>
+#endif
 #include <memory>
 #include <vector>
 #include <string>
@@ -37,6 +53,13 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
+
+#if defined(_WIN32) && defined(XR_USE_GRAPHICS_API_D3D11)
+#define OXRSYS_USE_D3D11 1
+#endif
+#if defined(_WIN32) && defined(XR_USE_GRAPHICS_API_D3D12)
+#define OXRSYS_USE_D3D12 1
+#endif
 
 // We need to keep ownership of created objects
 static std::unique_ptr<Instance> gInstance;
@@ -99,6 +122,75 @@ static GraphicsApi gGraphicsApi = GraphicsApi::Vulkan;
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 // Global Vulkan dispatch — definition (declared extern in VulkanDispatch.h)
 VulkanDispatch gVulkanDispatch;
+#endif
+
+#if defined(_WIN32)
+static LUID GetDefaultAdapterLuid()
+{
+    Microsoft::WRL::ComPtr<IDXGIFactory6> factory6;
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(&factory6));
+    if (SUCCEEDED(result))
+    {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        for (UINT adapterIndex = 0;
+             factory6->EnumAdapterByGpuPreference(
+                 adapterIndex,
+                 DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                 IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
+             ++adapterIndex)
+        {
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
+                (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0)
+            {
+                return desc.AdapterLuid;
+            }
+            adapter.Reset();
+        }
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory1;
+    result = CreateDXGIFactory1(IID_PPV_ARGS(&factory1));
+    if (SUCCEEDED(result))
+    {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (SUCCEEDED(factory1->EnumAdapters1(0, &adapter)))
+        {
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(adapter->GetDesc1(&desc)))
+            {
+                return desc.AdapterLuid;
+            }
+        }
+    }
+
+    return {};
+}
+
+static LUID GetAdapterLuidForD3D11Device(ID3D11Device* device)
+{
+    if (device == nullptr)
+    {
+        return {};
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))))
+    {
+        return {};
+    }
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetAdapter(&adapter)))
+    {
+        return {};
+    }
+    DXGI_ADAPTER_DESC desc = {};
+    if (FAILED(adapter->GetDesc(&desc)))
+    {
+        return {};
+    }
+    return desc.AdapterLuid;
+}
 #endif
 
 static bool IsAttachedActionSetHandle(uint64_t actionSetHandle);
@@ -204,6 +296,12 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
     extensions.push_back({XR_KHR_VULKAN_ENABLE_EXTENSION_NAME, XR_KHR_vulkan_enable_SPEC_VERSION});
     extensions.push_back({XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_KHR_vulkan_enable2_SPEC_VERSION});
 #endif
+#ifdef OXRSYS_USE_D3D11
+    extensions.push_back({XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_D3D11_enable_SPEC_VERSION});
+#endif
+#ifdef OXRSYS_USE_D3D12
+    extensions.push_back({XR_KHR_D3D12_ENABLE_EXTENSION_NAME, XR_KHR_D3D12_enable_SPEC_VERSION});
+#endif
     return extensions;
 }
 
@@ -285,6 +383,18 @@ static const char* ExtensionForFunctionName(const char* functionName)
         std::strcmp(functionName, "xrGetVulkanGraphicsRequirements2KHR") == 0)
     {
         return XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME;
+    }
+#endif
+#ifdef OXRSYS_USE_D3D11
+    if (std::strcmp(functionName, "xrGetD3D11GraphicsRequirementsKHR") == 0)
+    {
+        return XR_KHR_D3D11_ENABLE_EXTENSION_NAME;
+    }
+#endif
+#ifdef OXRSYS_USE_D3D12
+    if (std::strcmp(functionName, "xrGetD3D12GraphicsRequirementsKHR") == 0)
+    {
+        return XR_KHR_D3D12_ENABLE_EXTENSION_NAME;
     }
 #endif
     return nullptr;
@@ -811,6 +921,12 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     const XrGraphicsBindingVulkanKHR* vulkanBinding = nullptr;
 #endif
+#ifdef OXRSYS_USE_D3D11
+    const XrGraphicsBindingD3D11KHR* d3d11Binding = nullptr;
+#endif
+#ifdef OXRSYS_USE_D3D12
+    const XrGraphicsBindingD3D12KHR* d3d12Binding = nullptr;
+#endif
     const XrBaseInStructure* next = reinterpret_cast<const XrBaseInStructure*>(createInfo->next);
     while (next)
     {
@@ -847,6 +963,42 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
             }
         }
 #endif
+#ifdef OXRSYS_USE_D3D11
+        if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D11_KHR)
+        {
+            if (!inst->IsExtensionEnabled(XR_KHR_D3D11_ENABLE_EXTENSION_NAME))
+            {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+            d3d11Binding = reinterpret_cast<const XrGraphicsBindingD3D11KHR*>(next);
+            if (d3d11Binding->device == nullptr)
+            {
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
+            if (!inst->HasQueriedD3D11GraphicsRequirements())
+            {
+                return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+            }
+        }
+#endif
+#ifdef OXRSYS_USE_D3D12
+        if (next->type == XR_TYPE_GRAPHICS_BINDING_D3D12_KHR)
+        {
+            if (!inst->IsExtensionEnabled(XR_KHR_D3D12_ENABLE_EXTENSION_NAME))
+            {
+                return XR_ERROR_VALIDATION_FAILURE;
+            }
+            d3d12Binding = reinterpret_cast<const XrGraphicsBindingD3D12KHR*>(next);
+            if (d3d12Binding->device == nullptr || d3d12Binding->queue == nullptr)
+            {
+                return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+            }
+            if (!inst->HasQueriedD3D12GraphicsRequirements())
+            {
+                return XR_ERROR_GRAPHICS_REQUIREMENTS_CALL_MISSING;
+            }
+        }
+#endif
         next = next->next;
     }
 
@@ -876,12 +1028,80 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (vulkanBinding)
     {
+        VulkanGraphicsContext vulkanContext = {};
+        vulkanContext.instance = vulkanBinding->instance;
+        vulkanContext.physicalDevice = vulkanBinding->physicalDevice;
+        vulkanContext.device = vulkanBinding->device;
+        vulkanContext.queueFamilyIndex = vulkanBinding->queueFamilyIndex;
+        vulkanContext.queueIndex = vulkanBinding->queueIndex;
+
+        PFN_vkGetDeviceQueue getDeviceQueue = nullptr;
+        if (gVulkanDispatch.getDeviceProcAddr != nullptr)
+        {
+            getDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(
+                gVulkanDispatch.getDeviceProcAddr(vulkanContext.device, "vkGetDeviceQueue"));
+        }
+        if (getDeviceQueue == nullptr)
+        {
+            getDeviceQueue = gVulkanDispatch.getDeviceQueue;
+        }
+        if (getDeviceQueue != nullptr)
+        {
+            getDeviceQueue(vulkanContext.device,
+                           vulkanContext.queueFamilyIndex,
+                           vulkanContext.queueIndex,
+                           &vulkanContext.queue);
+        }
+        if (vulkanContext.queue == VK_NULL_HANDLE)
+        {
+            spdlog::error("OXRSys: Vulkan graphics binding did not provide a resolvable queue");
+            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        }
+
         gGraphicsApi = GraphicsApi::Vulkan;
         gSession = std::make_unique<Session>(inst, gMetalDevice,
-                                              reinterpret_cast<void*>(vulkanBinding->device),
-                                              reinterpret_cast<void*>(vulkanBinding->physicalDevice));
+                                              vulkanContext);
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
         spdlog::info("OXRSys: Session created with Vulkan binding");
+        return XR_SUCCESS;
+    }
+#endif
+
+#ifdef OXRSYS_USE_D3D11
+    if (d3d11Binding)
+    {
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediateContext;
+        d3d11Binding->device->GetImmediateContext(&immediateContext);
+        if (immediateContext == nullptr)
+        {
+            return XR_ERROR_GRAPHICS_DEVICE_INVALID;
+        }
+
+        D3D11GraphicsContext d3d11Context = {};
+        d3d11Context.device = d3d11Binding->device;
+        d3d11Context.immediateContext = immediateContext.Get();
+        d3d11Context.adapterLuid = GetAdapterLuidForD3D11Device(d3d11Binding->device);
+
+        gGraphicsApi = GraphicsApi::D3D11;
+        gSession = std::make_unique<Session>(inst, d3d11Context);
+        *session = reinterpret_cast<XrSession>(gSession->GetHandle());
+        spdlog::info("OXRSys: Session created with D3D11 binding");
+        return XR_SUCCESS;
+    }
+#endif
+
+#ifdef OXRSYS_USE_D3D12
+    if (d3d12Binding)
+    {
+        D3D12GraphicsContext d3d12Context = {};
+        d3d12Context.device = d3d12Binding->device;
+        d3d12Context.queue = d3d12Binding->queue;
+        d3d12Context.adapterLuid = d3d12Binding->device->GetAdapterLuid();
+
+        gGraphicsApi = GraphicsApi::D3D12;
+        gSession = std::make_unique<Session>(inst, d3d12Context);
+        *session = reinterpret_cast<XrSession>(gSession->GetHandle());
+        spdlog::info("OXRSys: Session created with D3D12 binding");
         return XR_SUCCESS;
     }
 #endif
@@ -1028,6 +1248,18 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrEnumerateSwapchainFormats(
         130, // VK_FORMAT_D32_SFLOAT_S8_UINT
     };
 #endif
+#if defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12)
+    static const int64_t d3dFormats[] = {
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT_D16_UNORM,
+        DXGI_FORMAT_D24_UNORM_S8_UINT,
+        DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+    };
+#endif
 
     const int64_t* supportedFormats = metalFormats;
     uint32_t formatCount = sizeof(metalFormats) / sizeof(metalFormats[0]);
@@ -1037,6 +1269,13 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrEnumerateSwapchainFormats(
     {
         supportedFormats = vulkanFormats;
         formatCount = sizeof(vulkanFormats) / sizeof(vulkanFormats[0]);
+    }
+#endif
+#if defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12)
+    if (gGraphicsApi == GraphicsApi::D3D11 || gGraphicsApi == GraphicsApi::D3D12)
+    {
+        supportedFormats = d3dFormats;
+        formatCount = sizeof(d3dFormats) / sizeof(d3dFormats[0]);
     }
 #endif
 
@@ -3424,6 +3663,76 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateVulkanDeviceKHR(
 #endif // XR_USE_GRAPHICS_API_VULKAN
 
 // ============================================================================
+// Direct3D extensions (XR_KHR_D3D11_enable + XR_KHR_D3D12_enable)
+// ============================================================================
+
+#ifdef OXRSYS_USE_D3D11
+static XRAPI_ATTR XrResult XRAPI_CALL OxrGetD3D11GraphicsRequirementsKHR(
+    XrInstance instance, XrSystemId systemId,
+    XrGraphicsRequirementsD3D11KHR* graphicsRequirements)
+{
+    auto* inst = GetInstance(instance);
+    if (!inst)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (systemId != 1)
+    {
+        return XR_ERROR_SYSTEM_INVALID;
+    }
+    if (graphicsRequirements == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (!inst->IsExtensionEnabled(XR_KHR_D3D11_ENABLE_EXTENSION_NAME))
+    {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+
+    graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
+    graphicsRequirements->adapterLuid = GetDefaultAdapterLuid();
+    graphicsRequirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
+    inst->MarkD3D11GraphicsRequirementsQueried();
+
+    spdlog::info("OXRSys: D3D11 graphics requirements provided");
+    return XR_SUCCESS;
+}
+#endif
+
+#ifdef OXRSYS_USE_D3D12
+static XRAPI_ATTR XrResult XRAPI_CALL OxrGetD3D12GraphicsRequirementsKHR(
+    XrInstance instance, XrSystemId systemId,
+    XrGraphicsRequirementsD3D12KHR* graphicsRequirements)
+{
+    auto* inst = GetInstance(instance);
+    if (!inst)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (systemId != 1)
+    {
+        return XR_ERROR_SYSTEM_INVALID;
+    }
+    if (graphicsRequirements == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (!inst->IsExtensionEnabled(XR_KHR_D3D12_ENABLE_EXTENSION_NAME))
+    {
+        return XR_ERROR_FUNCTION_UNSUPPORTED;
+    }
+
+    graphicsRequirements->type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D12_KHR;
+    graphicsRequirements->adapterLuid = GetDefaultAdapterLuid();
+    graphicsRequirements->minFeatureLevel = D3D_FEATURE_LEVEL_11_0;
+    inst->MarkD3D12GraphicsRequirementsQueried();
+
+    spdlog::info("OXRSys: D3D12 graphics requirements provided");
+    return XR_SUCCESS;
+}
+#endif
+
+// ============================================================================
 // Metal extension
 // ============================================================================
 
@@ -3637,6 +3946,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     DISPATCH(xrGetVulkanGraphicsRequirements2KHR, OxrGetVulkanGraphicsRequirements2KHR)
 #endif
 
+#ifdef OXRSYS_USE_D3D11
+    DISPATCH(xrGetD3D11GraphicsRequirementsKHR, OxrGetD3D11GraphicsRequirementsKHR)
+#endif
+
+#ifdef OXRSYS_USE_D3D12
+    DISPATCH(xrGetD3D12GraphicsRequirementsKHR, OxrGetD3D12GraphicsRequirementsKHR)
+#endif
+
     spdlog::warn("OXRSys: Unsupported function requested: {}", name);
     return XR_ERROR_FUNCTION_UNSUPPORTED;
 }
@@ -3649,13 +3966,30 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
 
 extern "C"
 {
+#if defined(_WIN32)
+    BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
+    {
+        (void)module;
+        (void)reserved;
+        if (reason == DLL_PROCESS_DETACH)
+        {
+            CleanupRuntimeState();
+        }
+        return TRUE;
+    }
+#else
     __attribute__((destructor))
     static void CleanupRuntimeOnUnload()
     {
         CleanupRuntimeState();
     }
+#endif
 
+#if defined(_WIN32)
+    __declspec(dllexport)
+#else
     __attribute__((visibility("default")))
+#endif
     XRAPI_ATTR XrResult XRAPI_CALL xrNegotiateLoaderRuntimeInterface(
         const XrNegotiateLoaderInfo* loaderInfo,
         XrNegotiateRuntimeRequest* runtimeRequest)

@@ -21,6 +21,7 @@ struct VulkanDispatch
     PFN_vkGetPhysicalDeviceMemoryProperties getPhysicalDeviceMemoryProperties = nullptr;
     PFN_vkGetDeviceProcAddr getDeviceProcAddr = nullptr;
     PFN_vkCreateDevice createDevice = nullptr;
+    PFN_vkGetDeviceQueue getDeviceQueue = nullptr;
 
     // Pre-instance functions (resolved from pfnGetInstanceProcAddr with VK_NULL_HANDLE)
     PFN_vkCreateInstance createInstance = nullptr;
@@ -60,6 +61,8 @@ struct VulkanDispatch
             getInstanceProcAddr(inst, "vkGetDeviceProcAddr");
         createDevice = (PFN_vkCreateDevice)
             getInstanceProcAddr(inst, "vkCreateDevice");
+        getDeviceQueue = (PFN_vkGetDeviceQueue)
+            getInstanceProcAddr(inst, "vkGetDeviceQueue");
     }
 };
 

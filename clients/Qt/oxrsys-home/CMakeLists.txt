@@ -50,6 +50,14 @@ target_link_libraries(oxrsys-home PRIVATE
     Qt6::Widgets
     oxrsys-simulator-shared
 )
+if(WIN32)
+    target_link_libraries(oxrsys-home PRIVATE
+        advapi32
+        ole32
+        shell32
+        uuid
+    )
+endif()
 
 add_executable(oxrsys-home-tests
     ${OXRSYS_HOME_CORE_SOURCES}
@@ -63,5 +71,13 @@ target_include_directories(oxrsys-home-tests PRIVATE
 target_link_libraries(oxrsys-home-tests PRIVATE
     Qt6::Widgets
 )
+if(WIN32)
+    target_link_libraries(oxrsys-home-tests PRIVATE
+        advapi32
+        ole32
+        shell32
+        uuid
+    )
+endif()
 
 add_test(NAME oxrsys-home-tests COMMAND oxrsys-home-tests)

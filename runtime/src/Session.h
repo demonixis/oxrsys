@@ -3,7 +3,12 @@
 #pragma once
 
 #include <openxr/openxr.h>
-#include "Swapchain.h" // for GraphicsApi enum
+#include "GraphicsTypes.h"
+#include "Swapchain.h"
+#include "VulkanGraphicsContext.h"
+#if defined(_WIN32)
+#include "D3DGraphicsContext.h"
+#endif
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -26,7 +31,11 @@ public:
 
     // Vulkan session (metalDevice for Renderer, Vulkan handles for swapchains)
     Session(Instance* instance, void* metalDevice,
-            void* vkDevice, void* vkPhysicalDevice);
+            const VulkanGraphicsContext& vulkanContext);
+#if defined(_WIN32)
+    Session(Instance* instance, const D3D11GraphicsContext& d3d11Context);
+    Session(Instance* instance, const D3D12GraphicsContext& d3d12Context);
+#endif
     ~Session();
 
     uint64_t GetHandle() const
@@ -118,8 +127,11 @@ private:
     Instance* instance_;
     void* metalDevice_;
     GraphicsApi graphicsApi_ = GraphicsApi::Metal;
-    void* vkDevice_ = nullptr;
-    void* vkPhysicalDevice_ = nullptr;
+    VulkanGraphicsContext vulkanContext_;
+#if defined(_WIN32)
+    D3D11GraphicsContext d3d11Context_;
+    D3D12GraphicsContext d3d12Context_;
+#endif
 
     XrSessionState state_ = XR_SESSION_STATE_IDLE;
     bool running_ = false;

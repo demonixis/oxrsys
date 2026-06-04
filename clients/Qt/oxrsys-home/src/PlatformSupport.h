@@ -36,4 +36,6 @@ HomePaths homePaths();
 QStringList runtimeBuildDirectoryCandidates();
 QString defaultRuntimeManifestPath();
 QString defaultRuntimeDirectoryPath();
+bool supportsRuntimeInstall();
+bool supportsRuntimeGlobalRegistration();
 bool supportsRuntimeInstallAndRegistration();

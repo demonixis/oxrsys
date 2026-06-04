@@ -10,8 +10,217 @@
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 
+#include <string>
 #include <utility>
+
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <shellapi.h>
+#include <windows.h>
+#endif
+
+namespace
+{
+
+constexpr const char* WindowsPreviousRuntimeKey = "windowsPreviousActiveRuntime";
+constexpr const char* WindowsRegisteredRuntimeKey = "windowsRegisteredRuntimeManifest";
+
+bool sameRuntimePath(const QString& lhs, const QString& rhs)
+{
+    return normalizedPath(lhs).compare(normalizedPath(rhs), Qt::CaseInsensitive) == 0;
+}
+
+#if defined(Q_OS_WIN)
+constexpr const wchar_t* OpenXrRegistryKey = L"SOFTWARE\\Khronos\\OpenXR\\1";
+constexpr const wchar_t* ActiveRuntimeValueName = L"ActiveRuntime";
+
+QString fromWideString(const wchar_t* value, DWORD byteCount)
+{
+    if (value == nullptr || byteCount < sizeof(wchar_t))
+    {
+        return {};
+    }
+    qsizetype charCount = static_cast<qsizetype>(byteCount / sizeof(wchar_t));
+    if (charCount > 0 && value[charCount - 1] == L'\0')
+    {
+        charCount--;
+    }
+    return QString::fromWCharArray(value, charCount);
+}
+
+QString readWindowsActiveRuntime()
+{
+    HKEY key = nullptr;
+    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                                OpenXrRegistryKey,
+                                0,
+                                KEY_READ | KEY_WOW64_64KEY,
+                                &key);
+    if (result != ERROR_SUCCESS)
+    {
+        return {};
+    }
+
+    DWORD type = 0;
+    DWORD byteCount = 0;
+    result = RegQueryValueExW(key, ActiveRuntimeValueName, nullptr, &type, nullptr, &byteCount);
+    if (result != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) || byteCount == 0)
+    {
+        RegCloseKey(key);
+        return {};
+    }
+
+    std::wstring buffer(byteCount / sizeof(wchar_t) + 1, L'\0');
+    result = RegQueryValueExW(key, ActiveRuntimeValueName, nullptr, &type,
+                              reinterpret_cast<LPBYTE>(buffer.data()), &byteCount);
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS)
+    {
+        return {};
+    }
+    return fromWideString(buffer.data(), byteCount);
+}
+
+bool writeWindowsActiveRuntime(const QString& manifestPath, QString* errorMessage)
+{
+    HKEY key = nullptr;
+    LONG result = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                                  OpenXrRegistryKey,
+                                  0,
+                                  nullptr,
+                                  REG_OPTION_NON_VOLATILE,
+                                  KEY_SET_VALUE | KEY_WOW64_64KEY,
+                                  nullptr,
+                                  &key,
+                                  nullptr);
+    if (result != ERROR_SUCCESS)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = QString("Failed to open HKLM OpenXR runtime registry key: 0x%1")
+                                .arg(result, 0, 16);
+        }
+        return false;
+    }
+
+    const std::wstring value = QDir::toNativeSeparators(manifestPath).toStdWString();
+    result = RegSetValueExW(key,
+                            ActiveRuntimeValueName,
+                            0,
+                            REG_SZ,
+                            reinterpret_cast<const BYTE*>(value.c_str()),
+                            static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = QString("Failed to write HKLM OpenXR ActiveRuntime: 0x%1")
+                                .arg(result, 0, 16);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool clearWindowsActiveRuntime(QString* errorMessage)
+{
+    HKEY key = nullptr;
+    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                                OpenXrRegistryKey,
+                                0,
+                                KEY_SET_VALUE | KEY_WOW64_64KEY,
+                                &key);
+    if (result != ERROR_SUCCESS)
+    {
+        return true;
+    }
+
+    result = RegDeleteValueW(key, ActiveRuntimeValueName);
+    RegCloseKey(key);
+    if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = QString("Failed to clear HKLM OpenXR ActiveRuntime: 0x%1")
+                                .arg(result, 0, 16);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool isWindowsProcessElevated()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+    {
+        return false;
+    }
+    TOKEN_ELEVATION elevation = {};
+    DWORD size = 0;
+    const BOOL ok = GetTokenInformation(token,
+                                        TokenElevation,
+                                        &elevation,
+                                        sizeof(elevation),
+                                        &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+QString quoteWindowsArgument(QString value)
+{
+    value.replace("\"", "\\\"");
+    return QString("\"%1\"").arg(value);
+}
+
+bool runElevatedWindowsCommand(const QStringList& arguments, QString* errorMessage)
+{
+    QStringList quoted;
+    for (const QString& argument : arguments)
+    {
+        quoted.append(quoteWindowsArgument(argument));
+    }
+    const std::wstring executable = QCoreApplication::applicationFilePath().toStdWString();
+    const std::wstring parameters = quoted.join(' ').toStdWString();
+
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"runas";
+    info.lpFile = executable.c_str();
+    info.lpParameters = parameters.c_str();
+    info.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&info))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Windows UAC registration command was cancelled or failed.";
+        }
+        return false;
+    }
+    WaitForSingleObject(info.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(info.hProcess, &exitCode);
+    CloseHandle(info.hProcess);
+    if (exitCode != 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = QString("Elevated Windows registration command exited with code %1.")
+                                .arg(exitCode);
+        }
+        return false;
+    }
+    return true;
+}
+#endif
+
+} // namespace
 
 RuntimeManager::RuntimeManager(HomePaths paths)
     : paths_(std::move(paths))
@@ -26,6 +235,10 @@ const HomePaths& RuntimeManager::paths() const
 RuntimeRegistrationStatus RuntimeManager::registrationStatus() const
 {
     RuntimeRegistrationStatus status;
+#if defined(Q_OS_WIN)
+    status.activeRuntimeTarget = readWindowsActiveRuntime();
+    status.activeRuntimeExists = !status.activeRuntimeTarget.isEmpty();
+#else
     const QFileInfo active(paths_.activeRuntimePath);
     status.activeRuntimeExists = active.exists() || !active.symLinkTarget().isEmpty();
     if (status.activeRuntimeExists)
@@ -36,6 +249,7 @@ RuntimeRegistrationStatus RuntimeManager::registrationStatus() const
             status.activeRuntimeTarget = active.absoluteFilePath();
         }
     }
+#endif
     return status;
 }
 
@@ -87,7 +301,7 @@ QString RuntimeManager::activeLaunchRuntimeManifestPath(const QString& selectedM
 
 bool RuntimeManager::registerRuntimeManifest(const QString& manifestPath, QString* errorMessage) const
 {
-    if (!supportsRuntimeInstallAndRegistration())
+    if (!supportsRuntimeGlobalRegistration())
     {
         if (errorMessage != nullptr)
         {
@@ -107,6 +321,34 @@ bool RuntimeManager::registerRuntimeManifest(const QString& manifestPath, QStrin
         return false;
     }
 
+#if defined(Q_OS_WIN)
+    const QString manifestTarget = manifest.absoluteFilePath();
+    const QString currentTarget = readWindowsActiveRuntime();
+    QSettings settings("OXRSys", "HomeQt");
+    const QString registeredTarget = settings.value(WindowsRegisteredRuntimeKey).toString();
+    if (!currentTarget.isEmpty() && !sameRuntimePath(currentTarget, manifestTarget))
+    {
+        if (registeredTarget.isEmpty() || !sameRuntimePath(currentTarget, registeredTarget))
+        {
+            settings.setValue(WindowsPreviousRuntimeKey, currentTarget);
+        }
+    }
+    else if (currentTarget.isEmpty())
+    {
+        settings.remove(WindowsPreviousRuntimeKey);
+    }
+    settings.sync();
+
+    const bool registered = isWindowsProcessElevated()
+        ? writeWindowsActiveRuntime(manifestTarget, errorMessage)
+        : runElevatedWindowsCommand({"--oxrsys-register-runtime", manifestTarget}, errorMessage);
+    if (registered)
+    {
+        settings.setValue(WindowsRegisteredRuntimeKey, manifestTarget);
+        settings.sync();
+    }
+    return registered;
+#else
     if (!QDir().mkpath(paths_.activeRuntimeDirectory))
     {
         if (errorMessage != nullptr)
@@ -137,11 +379,12 @@ bool RuntimeManager::registerRuntimeManifest(const QString& manifestPath, QStrin
         return false;
     }
     return true;
+#endif
 }
 
 bool RuntimeManager::unregisterRuntime(QString* errorMessage) const
 {
-    if (!supportsRuntimeInstallAndRegistration())
+    if (!supportsRuntimeGlobalRegistration())
     {
         if (errorMessage != nullptr)
         {
@@ -151,6 +394,37 @@ bool RuntimeManager::unregisterRuntime(QString* errorMessage) const
         return false;
     }
 
+#if defined(Q_OS_WIN)
+    QSettings settings("OXRSys", "HomeQt");
+    const QString expectedTarget =
+        settings.value(WindowsRegisteredRuntimeKey, paths_.installedRuntimeManifestPath).toString();
+    const QString previousTarget = settings.value(WindowsPreviousRuntimeKey).toString();
+    const QString currentTarget = readWindowsActiveRuntime();
+    if (currentTarget.isEmpty())
+    {
+        settings.remove(WindowsRegisteredRuntimeKey);
+        settings.remove(WindowsPreviousRuntimeKey);
+        return true;
+    }
+    if (!expectedTarget.isEmpty() && !sameRuntimePath(currentTarget, expectedTarget))
+    {
+        return true;
+    }
+
+    const bool unregistered = isWindowsProcessElevated()
+        ? (previousTarget.isEmpty()
+               ? clearWindowsActiveRuntime(errorMessage)
+               : writeWindowsActiveRuntime(previousTarget, errorMessage))
+        : runElevatedWindowsCommand(
+              {"--oxrsys-unregister-runtime", expectedTarget, previousTarget}, errorMessage);
+    if (unregistered)
+    {
+        settings.remove(WindowsRegisteredRuntimeKey);
+        settings.remove(WindowsPreviousRuntimeKey);
+        settings.sync();
+    }
+    return unregistered;
+#else
     if (!QFile::exists(paths_.activeRuntimePath))
     {
         return true;
@@ -164,11 +438,12 @@ bool RuntimeManager::unregisterRuntime(QString* errorMessage) const
         return false;
     }
     return true;
+#endif
 }
 
 bool RuntimeManager::installBundledRuntime(QString* installedManifestPath, QString* errorMessage) const
 {
-    if (!supportsRuntimeInstallAndRegistration())
+    if (!supportsRuntimeInstall())
     {
         if (errorMessage != nullptr)
         {
@@ -250,6 +525,57 @@ QString RuntimeManager::runtimeManifestJson(const QString& libraryPath)
         }},
     });
     return QString::fromUtf8(document.toJson(QJsonDocument::Indented));
+}
+
+int RuntimeManager::handleElevatedWindowsCommand(const QStringList& arguments, QString* errorMessage)
+{
+#if defined(Q_OS_WIN)
+    if (arguments.size() < 2)
+    {
+        return -1;
+    }
+    const QString command = arguments.at(1);
+    if (command == "--oxrsys-register-runtime")
+    {
+        if (arguments.size() < 3)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Missing runtime manifest path for elevated registration.";
+            }
+            return 1;
+        }
+        return writeWindowsActiveRuntime(arguments.at(2), errorMessage) ? 0 : 1;
+    }
+    if (command == "--oxrsys-unregister-runtime")
+    {
+        if (arguments.size() < 3)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "Missing expected runtime manifest path for elevated unregistration.";
+            }
+            return 1;
+        }
+        const QString expectedTarget = arguments.at(2);
+        const QString previousTarget = arguments.value(3);
+        const QString currentTarget = readWindowsActiveRuntime();
+        if (!currentTarget.isEmpty() && !expectedTarget.isEmpty() &&
+            !sameRuntimePath(currentTarget, expectedTarget))
+        {
+            return 0;
+        }
+        if (previousTarget.isEmpty())
+        {
+            return clearWindowsActiveRuntime(errorMessage) ? 0 : 1;
+        }
+        return writeWindowsActiveRuntime(previousTarget, errorMessage) ? 0 : 1;
+    }
+#else
+    Q_UNUSED(arguments);
+    Q_UNUSED(errorMessage);
+#endif
+    return -1;
 }
 
 QString RuntimeManager::bundledRuntimeDirectory() const

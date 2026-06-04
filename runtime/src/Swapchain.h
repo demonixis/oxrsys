@@ -3,6 +3,11 @@
 #pragma once
 
 #include <openxr/openxr.h>
+#include "GraphicsTypes.h"
+#include "VulkanGraphicsContext.h"
+#if defined(_WIN32)
+#include "D3DGraphicsContext.h"
+#endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
 #endif
@@ -12,12 +17,6 @@
 #include <deque>
 #include <mutex>
 
-enum class GraphicsApi
-{
-    Metal,
-    Vulkan,
-};
-
 class Swapchain
 {
 public:
@@ -26,8 +25,14 @@ public:
 
     // Vulkan constructor (also takes metalDevice for debug renderer MTLTexture extraction)
     Swapchain(GraphicsApi api, void* metalDevice,
-              void* vkDevice, void* vkPhysicalDevice,
+              const VulkanGraphicsContext* vulkanContext,
               const XrSwapchainCreateInfo* createInfo);
+#if defined(_WIN32)
+    Swapchain(GraphicsApi api, const D3D11GraphicsContext* d3d11Context,
+              const XrSwapchainCreateInfo* createInfo);
+    Swapchain(GraphicsApi api, const D3D12GraphicsContext* d3d12Context,
+              const XrSwapchainCreateInfo* createInfo);
+#endif
 
     ~Swapchain();
 
@@ -84,6 +89,45 @@ public:
 
     static constexpr uint32_t SwapchainImageCount = 3;
 
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    struct VulkanFrameSource
+    {
+        Swapchain* owner = nullptr;
+        const VulkanGraphicsContext* context = nullptr;
+        VkImage image = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t arrayLayer = 0;
+        uint32_t imageIndex = 0;
+    };
+#endif
+#if defined(_WIN32)
+    struct D3D11FrameSource
+    {
+        Swapchain* owner = nullptr;
+        const D3D11GraphicsContext* context = nullptr;
+        ID3D11Texture2D* texture = nullptr;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t arrayLayer = 0;
+        uint32_t imageIndex = 0;
+    };
+
+    struct D3D12FrameSource
+    {
+        Swapchain* owner = nullptr;
+        const D3D12GraphicsContext* context = nullptr;
+        ID3D12Resource* texture = nullptr;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t arrayLayer = 0;
+        uint32_t imageIndex = 0;
+    };
+#endif
+
 private:
     enum class ImageState
     {
@@ -93,8 +137,23 @@ private:
     };
 
     void InitMetal(void* metalDevice, const XrSwapchainCreateInfo* createInfo);
-    void InitVulkan(void* metalDevice, void* vkDevice, void* vkPhysicalDevice,
+    void InitVulkan(void* metalDevice, const VulkanGraphicsContext* vulkanContext,
                      const XrSwapchainCreateInfo* createInfo);
+#if defined(_WIN32)
+    void InitD3D11(const D3D11GraphicsContext* d3d11Context,
+                   const XrSwapchainCreateInfo* createInfo);
+    void InitD3D12(const D3D12GraphicsContext* d3d12Context,
+                   const XrSwapchainCreateInfo* createInfo);
+#endif
+    void RetainImage(uint32_t imageIndex);
+    void ReleaseImageRetention(uint32_t imageIndex);
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    static bool TryReleaseVulkanFrameSource(void* textureSlice);
+#endif
+#if defined(_WIN32)
+    static bool TryReleaseD3D11FrameSource(void* textureSlice);
+    static bool TryReleaseD3D12FrameSource(void* textureSlice);
+#endif
 
     uint64_t handle_ = 0;
     GraphicsApi graphicsApi_ = GraphicsApi::Metal;
@@ -108,9 +167,18 @@ private:
     std::vector<void*> textures_; // MTL::Texture* (always Metal textures, for debug rendering)
 
     // Vulkan resources (only used when graphicsApi_ == Vulkan)
-    void* vkDevice_ = nullptr;
+    const VulkanGraphicsContext* vulkanContext_ = nullptr;
     std::vector<uint64_t> vkImages_;   // VkImage handles
     std::vector<uint64_t> vkMemories_; // VkDeviceMemory handles
+
+#if defined(_WIN32)
+    const D3D11GraphicsContext* d3d11Context_ = nullptr;
+    const D3D12GraphicsContext* d3d12Context_ = nullptr;
+    std::vector<void*> d3d11Textures_; // ID3D11Texture2D*
+    std::vector<void*> d3d12Resources_; // ID3D12Resource*
+#endif
+
+    std::vector<uint32_t> imageRetainCounts_;
 
     uint32_t nextAcquireIndex_ = 0;
     uint32_t lastReleasedIndex_ = 0;

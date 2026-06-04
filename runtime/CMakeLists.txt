@@ -5,6 +5,8 @@ set(OXRSYS_RUNTIME_SOURCES
     src/EntryPoint.cpp
     src/Runtime.cpp
     src/RuntimeStatus.cpp
+    src/RuntimePlatform.cpp
+    src/RuntimeSockets.cpp
     src/Instance.cpp
     src/Session.cpp
     src/Space.cpp
@@ -20,7 +22,7 @@ if(APPLE)
         src/Swapchain.mm
         src/VideoEncoder.mm
     )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
     list(APPEND OXRSYS_RUNTIME_SOURCES
         src/SwapchainVulkan.cpp
         src/FfmpegVideoEncoder.cpp
@@ -54,6 +56,48 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND OXRSYS_RUNTIME_LINK_LIBRARIES
         PkgConfig::FFMPEG
     )
+elseif(WIN32)
+    set(FFMPEG_ROOT "" CACHE PATH "Root directory for FFmpeg headers and import libraries on Windows")
+    find_path(FFMPEG_INCLUDE_DIR
+        NAMES libavcodec/avcodec.h
+        HINTS
+            "${FFMPEG_ROOT}/include"
+            "$ENV{FFMPEG_ROOT}/include"
+    )
+    find_library(FFMPEG_AVCODEC_LIBRARY
+        NAMES avcodec
+        HINTS
+            "${FFMPEG_ROOT}/lib"
+            "$ENV{FFMPEG_ROOT}/lib"
+    )
+    find_library(FFMPEG_AVUTIL_LIBRARY
+        NAMES avutil
+        HINTS
+            "${FFMPEG_ROOT}/lib"
+            "$ENV{FFMPEG_ROOT}/lib"
+    )
+    find_library(FFMPEG_SWSCALE_LIBRARY
+        NAMES swscale
+        HINTS
+            "${FFMPEG_ROOT}/lib"
+            "$ENV{FFMPEG_ROOT}/lib"
+    )
+    if(NOT FFMPEG_INCLUDE_DIR OR NOT FFMPEG_AVCODEC_LIBRARY OR
+       NOT FFMPEG_AVUTIL_LIBRARY OR NOT FFMPEG_SWSCALE_LIBRARY)
+        message(FATAL_ERROR
+            "FFmpeg development files were not found. Set -DFFMPEG_ROOT=<path> "
+            "with include/ and lib/ containing avcodec, avutil, and swscale."
+        )
+    endif()
+    list(APPEND OXRSYS_RUNTIME_LINK_LIBRARIES
+        ${FFMPEG_AVCODEC_LIBRARY}
+        ${FFMPEG_AVUTIL_LIBRARY}
+        ${FFMPEG_SWSCALE_LIBRARY}
+        d3d11
+        d3d12
+        dxgi
+        ws2_32
+    )
 endif()
 
 target_include_directories(oxrsys_runtime PRIVATE
@@ -64,6 +108,12 @@ target_include_directories(oxrsys_runtime PRIVATE
     ${Vulkan_INCLUDE_DIRS}
 )
 
+if(WIN32)
+    target_include_directories(oxrsys_runtime PRIVATE
+        ${FFMPEG_INCLUDE_DIR}
+    )
+endif()
+
 target_compile_definitions(oxrsys_runtime PRIVATE
     XR_USE_GRAPHICS_API_VULKAN
     OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
@@ -71,9 +121,24 @@ target_compile_definitions(oxrsys_runtime PRIVATE
     OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
 )
 
+if(WIN32)
+    target_compile_definitions(oxrsys_runtime PRIVATE
+        XR_USE_GRAPHICS_API_D3D11
+        XR_USE_GRAPHICS_API_D3D12
+    )
+endif()
+
 if(APPLE)
     target_compile_definitions(oxrsys_runtime PRIVATE
         XR_USE_GRAPHICS_API_METAL
+    )
+endif()
+
+if(WIN32)
+    target_compile_definitions(oxrsys_runtime PRIVATE
+        XR_USE_PLATFORM_WIN32
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
     )
 endif()
 
@@ -103,8 +168,17 @@ set_target_properties(oxrsys_runtime PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
     OUTPUT_NAME oxrsys-runtime
-    PREFIX "lib"
 )
+
+if(WIN32)
+    set_target_properties(oxrsys_runtime PROPERTIES
+        PREFIX ""
+    )
+else()
+    set_target_properties(oxrsys_runtime PROPERTIES
+        PREFIX "lib"
+    )
+endif()
 
 if(APPLE)
     set_target_properties(oxrsys_runtime PROPERTIES

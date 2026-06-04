@@ -9,14 +9,15 @@
 #include <mutex>
 #include <vector>
 
+#include "GraphicsTypes.h"
+
 /**
- * H.265 hardware video encoder using Apple VideoToolbox.
+ * H.265 video encoder.
  *
- * Takes Metal textures from the OpenXR swapchain and encodes them
- * to H.265 NAL units for streaming to the headset client.
- *
- * Uses the dedicated Media Engine on Apple Silicon for encoding,
- * leaving the GPU free for rendering.
+ * Takes platform textures from the OpenXR swapchain and encodes them
+ * to H.265 NAL units for streaming to the headset client. Apple builds use
+ * VideoToolbox. Non-Apple Vulkan builds read back released swapchain images
+ * on the encode thread and feed FFmpeg.
  */
 class VideoEncoder
 {
@@ -46,7 +47,7 @@ public:
     VideoEncoder& operator=(const VideoEncoder&) = delete;
 
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                    uint32_t bitrateMbps, void* metalDevice);
+                    uint32_t bitrateMbps, GraphicsApi graphicsApi, void* graphicsDevice);
     void Shutdown();
 
     // Encode a Metal texture (id<MTLTexture>)
@@ -97,6 +98,8 @@ private:
     void* metalDevice_ = nullptr;       // id<MTLDevice>
     void* commandQueue_ = nullptr;      // id<MTLCommandQueue>
     void* scaler_ = nullptr;            // MPSImageBilinearScale*
+    void* vulkanState_ = nullptr;       // VulkanEncoderState*
+    GraphicsApi graphicsApi_ = GraphicsApi::Metal;
 
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
     uint32_t height_ = 0;

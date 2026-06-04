@@ -194,13 +194,15 @@ VideoEncoder::~VideoEncoder()
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                               uint32_t bitrateMbps, void* metalDevice)
+                               uint32_t bitrateMbps, GraphicsApi graphicsApi,
+                               void* metalDevice)
 {
     width_ = width;
     height_ = height;
     eyeWidth_ = width / 2;
     fps_ = fps;
     bitrateMbps_ = bitrateMbps;
+    graphicsApi_ = graphicsApi;
     metalDevice_ = metalDevice;
     shuttingDown_.store(false);
     droppedFrameCount_.store(0);

@@ -9,10 +9,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <netinet/in.h>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "RuntimeSockets.h"
+#include "GraphicsTypes.h"
 
 // Shared protocol definitions
 #include <oxrsys/protocol/Protocol.h>
@@ -57,8 +59,12 @@ public:
     void SendFrame(void* leftTexture, void* rightTexture);
 
     // Set the platform graphics device for VideoEncoder initialization.
-    void SetGraphicsDevice(void* graphicsDevice) { graphicsDevice_ = graphicsDevice; }
-    void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(metalDevice); }
+    void SetGraphicsDevice(GraphicsApi graphicsApi, void* graphicsDevice)
+    {
+        graphicsApi_ = graphicsApi;
+        graphicsDevice_ = graphicsDevice;
+    }
+    void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(GraphicsApi::Metal, metalDevice); }
 
     // Check if a client is connected
     bool IsClientConnected() const { return state_.load() == State::Connected; }
@@ -88,7 +94,7 @@ private:
         std::mutex mutex;
         std::mutex sendMutex;
         std::string clientIp;
-        int videoSocket = -1;
+        oxrsys::runtime_socket::SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
         bool videoUsesTcp = false;
         bool acceptingPackets = false;
 
@@ -156,15 +162,15 @@ private:
     uint32_t lastKeyframeRequestCountForAbr_ = 0;
 
     // Sockets
-    int broadcastSocket_ = -1;
-    int controlSocket_ = -1;
-    int videoSocket_ = -1;
-    int tcpControlListenSocket_ = -1;
-    int tcpVideoListenSocket_ = -1;
-    int tcpTrackingListenSocket_ = -1;
-    int tcpControlClientSocket_ = -1;
-    int tcpVideoClientSocket_ = -1;
-    int tcpTrackingClientSocket_ = -1;
+    oxrsys::runtime_socket::SocketHandle broadcastSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle controlSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle videoSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpControlListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpVideoListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpTrackingListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpControlClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpVideoClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    oxrsys::runtime_socket::SocketHandle tcpTrackingClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
     std::mutex tcpSocketMutex_;
     std::mutex disconnectMutex_;
     bool wifiEnabled_ = true;
@@ -197,12 +203,14 @@ private:
     static void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                             uint32_t frameIndex, const uint8_t* data, size_t size,
                             bool isKeyframe, int64_t timestampNs);
-    static bool SendTcpRecord(int socket, oxr::protocol::TcpRecordType type,
+    static bool SendTcpRecord(oxrsys::runtime_socket::SocketHandle socket,
+                              oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
 
     // Sub-components
     std::shared_ptr<VideoEncoder> encoder_;
     std::unique_ptr<TrackingReceiver> trackingReceiver_;
+    GraphicsApi graphicsApi_ = GraphicsApi::Metal;
     void* graphicsDevice_ = nullptr;
 
     // Frame sending state
