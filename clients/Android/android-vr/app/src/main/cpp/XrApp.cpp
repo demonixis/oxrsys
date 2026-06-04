@@ -861,7 +861,23 @@ bool XrApp::InitializeHandTracking()
     if (!handTrackingExtensionAvailable_ || !handTrackingSupported_ ||
         !xrCreateHandTrackerEXT_ || !xrDestroyHandTrackerEXT_ || !xrLocateHandJointsEXT_)
     {
+        LOGW("Hand tracking unavailable: extension=%d runtime=%d create=%d destroy=%d locate=%d",
+             handTrackingExtensionAvailable_ ? 1 : 0,
+             handTrackingSupported_ ? 1 : 0,
+             xrCreateHandTrackerEXT_ != nullptr ? 1 : 0,
+             xrDestroyHandTrackerEXT_ != nullptr ? 1 : 0,
+             xrLocateHandJointsEXT_ != nullptr ? 1 : 0);
         return false;
+    }
+
+    if (handTrackers_[0] != XR_NULL_HANDLE && handTrackers_[1] != XR_NULL_HANDLE)
+    {
+        return true;
+    }
+
+    if (handTrackers_[0] != XR_NULL_HANDLE || handTrackers_[1] != XR_NULL_HANDLE)
+    {
+        ShutdownHandTracking();
     }
 
     for (int hand = 0; hand < 2; ++hand)
@@ -2788,6 +2804,11 @@ void XrApp::HandleSessionStateChange(XrSessionState newState)
                 {
                     LOGI("Action set attached to session");
                 }
+            }
+
+            if (!InitializeHandTracking())
+            {
+                LOGW("Hand tracking unavailable for this session, continuing without it");
             }
 
             if (!CreateSwapchains())

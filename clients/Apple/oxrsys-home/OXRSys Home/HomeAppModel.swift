@@ -16,9 +16,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     @Published var runtimeManifestPath: String
     @Published var serverConfig = OXRSysServerConfig()
     @Published var runtimeStatus = RuntimeRegistrationStatus()
-    @Published var runtimeInstallStatus = RuntimeInstallStatus(
-        installedManifestPath: HomePaths.installedRuntimeManifestPath
-    )
     @Published var launcherApps: [LauncherApp] = []
     @Published var selectedLogAppID: String?
     @Published var isLogPanelVisible = false
@@ -43,11 +40,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private let runtimeManifestPathKey = "runtimeManifestPath"
     private let customAdbPathKey = "customAdbPath"
     private let launcherScanner = LauncherAppScanner()
-    private let runtimeInstaller = HomeRuntimeInstaller()
     private let maxLogCharacters = 30_000
     private var launcherStore = LauncherAppsStore()
     private var launchedProcesses: [String: Process] = [:]
     private var launchPipes: [String: [Pipe]] = [:]
+    private var configAutosaveTask: Task<Void, Never>?
     private var currentConfigText = OXRSysServerConfig.defaultText
     private var lastKnownConfigModificationDate: Date?
     private var lastTransportHealthRefreshDate = Date.distantPast
@@ -60,16 +57,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         runtimeManifestPath = defaults.string(forKey: runtimeManifestPathKey) ?? SourceDefaults.defaultRuntimeManifestPath()
         customAdbPath = defaults.string(forKey: customAdbPathKey) ?? ""
         loadAll()
-        if defaults.string(forKey: runtimeManifestPathKey) == nil,
-           runtimeInstallStatus.installedRuntimeExists,
-           runtimeInstallStatus.installedManifestExists {
-            runtimeManifestPath = runtimeInstallStatus.installedManifestPath
-            defaults.set(runtimeManifestPath, forKey: runtimeManifestPathKey)
-        }
         startPolling()
     }
 
     deinit {
+        configAutosaveTask?.cancel()
         pollTask?.cancel()
         for process in launchedProcesses.values where process.isRunning {
             process.terminate()
@@ -85,14 +77,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     }
 
     var activeLaunchRuntimeManifestPath: String {
-        if runtimeInstallStatus.installedRuntimeExists,
-           runtimeInstallStatus.installedManifestExists {
-            return runtimeInstallStatus.installedManifestPath
-        }
-        if fileManager.fileExists(atPath: runtimeManifestPath) {
-            return runtimeManifestPath
-        }
-        return SourceDefaults.defaultRuntimeManifestPath()
+        normalizedPath(runtimeManifestPath)
     }
 
     var isRuntimeRegistered: Bool {
@@ -114,23 +99,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             return "Update OpenXR Registration"
         }
         return "Enable OpenXR Registration"
-    }
-
-    var runtimeInstallButtonTitle: String {
-        if !runtimeInstallStatus.bundledRuntimeExists {
-            return "No Bundled Runtime"
-        }
-        if !runtimeInstallStatus.installedRuntimeExists {
-            return "Install and Register Runtime"
-        }
-        if runtimeInstallStatus.installedRuntimeNeedsUpdate {
-            return "Update and Register Runtime"
-        }
-        return "Reinstall and Register Runtime"
-    }
-
-    var canInstallBundledRuntime: Bool {
-        runtimeInstallStatus.bundledRuntimeExists
     }
 
     var currentProfileAppDisplayName: String {
@@ -223,7 +191,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     func loadAll() {
         loadConfigFromDisk()
         refreshRuntimeStatus()
-        refreshRuntimeInstallStatus()
         refreshRuntimeActivity()
         reloadLauncherApps()
         refreshTransportHealth(force: true)
@@ -244,7 +211,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    func saveStructuredConfig() {
+    func saveStructuredConfig(statusMessage message: String = "Saved runtime configuration.") {
         do {
             let directory = (configFilePath as NSString).deletingLastPathComponent
             try fileManager.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: nil)
@@ -252,9 +219,42 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             try text.write(toFile: configFilePath, atomically: true, encoding: .utf8)
             currentConfigText = text
             lastKnownConfigModificationDate = configModificationDate()
-            statusMessage = "Saved runtime configuration."
+            statusMessage = message
         } catch {
             errorMessage = "Failed to save config: \(error.localizedDescription)"
+        }
+    }
+
+    func updateStreamingConfig(_ update: (inout OXRSysServerConfig) -> Void) {
+        update(&serverConfig)
+        scheduleStructuredConfigAutosave()
+    }
+
+    func scheduleStructuredConfigAutosave() {
+        configAutosaveTask?.cancel()
+        configAutosaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            self?.saveStructuredConfig()
+        }
+    }
+
+    func resetStreamingConfigToDefaults() {
+        configAutosaveTask?.cancel()
+        serverConfig = OXRSysServerConfig()
+        saveStructuredConfig(statusMessage: "Restored default streaming configuration.")
+    }
+
+    func revealRuntimeLogsDirectory() {
+        do {
+            try fileManager.createDirectory(
+                atPath: HomePaths.runtimeLogsDirectory,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            openFolderInFinder(HomePaths.runtimeLogsDirectory)
+        } catch {
+            errorMessage = "Failed to reveal runtime logs: \(error.localizedDescription)"
         }
     }
 
@@ -425,12 +425,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         }
     }
 
-    func useInstalledRuntimeManifest() {
-        runtimeManifestPath = runtimeInstallStatus.installedManifestPath
-        defaults.set(runtimeManifestPath, forKey: runtimeManifestPathKey)
-        statusMessage = "Selected the installed runtime manifest."
-    }
-
     func refreshRuntimeStatus() {
         var status = RuntimeRegistrationStatus()
         status.activeRuntimeExists = activeRuntimeItemExists()
@@ -438,10 +432,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             status.activeRuntimeTarget = destinationOfSymbolicLink(atPath: activeRuntimePath) ?? activeRuntimePath
         }
         runtimeStatus = status
-    }
-
-    func refreshRuntimeInstallStatus() {
-        runtimeInstallStatus = runtimeInstaller.status()
     }
 
     func refreshRuntimeActivity() {
@@ -485,21 +475,6 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private func resetRuntimeStatsHistory() {
         runtimeStatsStreamIdentity = nil
         runtimeStatsHistory.removeAll(keepingCapacity: true)
-    }
-
-    func installBundledRuntimeAndRegister() {
-        do {
-            let manifestPath = try runtimeInstaller.installBundledRuntime()
-            runtimeManifestPath = manifestPath
-            defaults.set(manifestPath, forKey: runtimeManifestPathKey)
-            loadConfigFromDisk()
-            refreshRuntimeInstallStatus()
-            try registerRuntimeManifest(manifestPath)
-            refreshRuntimeStatus()
-            statusMessage = "Installed and registered the bundled OXRSys runtime."
-        } catch {
-            errorMessage = "Failed to install runtime: \(error.localizedDescription)"
-        }
     }
 
     func toggleRuntimeRegistration() {

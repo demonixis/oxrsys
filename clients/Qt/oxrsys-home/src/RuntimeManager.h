@@ -12,16 +12,6 @@ struct RuntimeRegistrationStatus
     QString activeRuntimeTarget;
 };
 
-struct RuntimeInstallStatus
-{
-    bool bundledRuntimeExists = false;
-    bool installedRuntimeExists = false;
-    bool installedManifestExists = false;
-    bool installedRuntimeNeedsUpdate = false;
-    QString bundledRuntimePath;
-    QString installedManifestPath;
-};
-
 class RuntimeManager
 {
 public:
@@ -29,21 +19,12 @@ public:
 
     const HomePaths& paths() const;
     RuntimeRegistrationStatus registrationStatus() const;
-    RuntimeInstallStatus installStatus() const;
     QString activeRuntimeTarget() const;
-    QString activeLaunchRuntimeManifestPath(const QString& selectedManifestPath,
-                                            bool preferInstalledRuntime) const;
+    QString activeLaunchRuntimeManifestPath(const QString& selectedManifestPath) const;
 
     bool registerRuntimeManifest(const QString& manifestPath, QString* errorMessage) const;
     bool unregisterRuntime(QString* errorMessage) const;
-    bool installBundledRuntime(QString* installedManifestPath, QString* errorMessage) const;
-
-    static QString runtimeManifestJson(const QString& libraryPath);
 
 private:
-    QString bundledRuntimeDirectory() const;
-    bool replaceFile(const QString& source, const QString& destination, QString* errorMessage) const;
-    bool filesHaveSameContents(const QString& lhs, const QString& rhs) const;
-
     HomePaths paths_;
 };

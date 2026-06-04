@@ -5,7 +5,7 @@ runtime shape. The project currently combines the shared runtime, a unified macO
 `Simulator` and `StereoView` modes, a first-pass visionOS viewer, a Quest/Pico-oriented Android VR
 client, and Linux-first Qt frontends.
 The repository also includes a native SwiftUI macOS Home app and a Qt Home app for compatible app
-launching, runtime installation, runtime configuration, and runtime registration workflows.
+launching, runtime selection, runtime configuration, and runtime registration workflows.
 
 **Current state:** Metal/core runtime, Vulkan interop, Linux Vulkan/FFmpeg scaffolding,
 typed internal graphics/frame plumbing, portable platform/socket helpers,
@@ -20,8 +20,8 @@ and can request a build-configured display refresh rate. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
 while the immersive space is open. The macOS SwiftUI Home app now targets direct notarized
-distribution so it can scan known apps, install the bundled runtime, launch compatible apps with
-`XR_RUNTIME_JSON`, and capture app logs.
+distribution so it can scan known apps, launch compatible apps with the user-selected
+`XR_RUNTIME_JSON`, register that selected runtime, and capture app logs.
 The Home app shows a main-window runtime activity summary from
 `~/Library/Application Support/OXRSys/runtime_status.json`, including idle/streaming state,
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
@@ -40,6 +40,7 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 
 - **Always build and verify before declaring success** — run the macOS build + tests and/or Android build as appropriate before saying everything works
 - **Always update `README.md`, `AGENTS.md`, and the relevant files in `docs/` when making significant project changes**
+- Keep SwiftUI Home and Qt Home companion behavior in sync when changing shared Home workflows; only diverge for frontend-specific changes or when the user explicitly asks for a feature to be limited to one frontend.
 - Core C++ dependencies are fetched via CMake FetchContent; Qt, FFmpeg, Vulkan SDKs, and platform SDKs are system/toolchain dependencies.
 - Product versions are centralized in `config/OXRSysVersion.xcconfig`; do not hardcode
   marketing versions or build numbers in CMake, Xcode, Gradle, or native client code.

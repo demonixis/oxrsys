@@ -9,8 +9,7 @@ This document is the entry point for build workflows. Installation steps live in
 - Install the required tools first: [install.md](install.md)
 - The checked-in Xcode projects intentionally do not contain a personal Apple development team.
   The macOS Home Debug build disables Xcode signing so the standard build command is
-  non-interactive. Use `scripts/package_home.sh` with `CODE_SIGN_IDENTITY` when preparing a
-  direct-distribution app.
+  non-interactive. Sign direct-distribution app bundles outside the checked-in build workflow.
 - For Xcode UI work on multiple Swift clients, open `clients/Apple/OXRSys Clients.xcworkspace`
   instead of opening the individual `.xcodeproj` files in separate windows. The simulator and
   visionOS targets share local Swift packages, and one workspace avoids Xcode loading them from
@@ -105,9 +104,9 @@ The helper creates `~/.config/openxr/1/active_runtime.json` and installs a per-u
 
 ### Native macOS Home App
 
-The SwiftUI Home app provides a launcher for compatible apps, a runtime installer, the server
-TOML editor, the per-user runtime registration workflow, and an optional Developer tab that opens
-the integrated simulator:
+The SwiftUI Home app provides a launcher for compatible apps, user-selected runtime manifest
+registration, an autosaved server TOML editor, and an optional Developer tab that opens the
+integrated simulator:
 
 ```bash
 xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
@@ -116,19 +115,9 @@ xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
   build
 ```
 
-The default Debug build does not embed the runtime. It falls back to `build/runtime/oxrsys-runtime.json`
-when no installed runtime is available.
-
-To build a direct-distribution Home bundle with the runtime copied into
-`Contents/Resources/OXRSysRuntime`:
-
-```bash
-scripts/package_home.sh
-```
-
-Set `CODE_SIGN_IDENTITY="Developer ID Application: ..."` to sign the packaged app with Hardened
-Runtime options. See [macos-home.md](platforms/macos-home.md) for the launcher,
-installation, and signing workflow.
+The default Debug build pre-fills the runtime manifest field with
+`build/runtime/oxrsys-runtime.json` for local development. Home-launched apps use the manifest path
+shown in that field; Home does not embed, install, or silently prefer another runtime.
 
 ### Unified Viewer App
 
@@ -224,8 +213,7 @@ selection through `XR_RUNTIME_JSON`, OXRSys Home, or `scripts/oxrsys_runtime_def
 
 - If a GUI app does not pick up the runtime, use `scripts/oxrsys_runtime_default.sh` instead of relying on shell startup files.
 - If a Home-launched app does not pick up the runtime, check the Apps tab logs and the Runtime
-  tab launch target. The launcher prefers the installed manifest, then a selected manifest, then
-  `build/runtime/oxrsys-runtime.json`.
+  Registration launch target. The launcher uses the selected manifest path shown by Home.
 - If Android tooling is not found, verify `clients/Android/android-vr/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
 - If the runtime is not discovered, check that `XR_RUNTIME_JSON` or `~/.config/openxr/1/active_runtime.json` points to `build/runtime/oxrsys-runtime.json`.
 - If an exported macOS Unity Player logs `Failed to load openxr runtime loader.`, install

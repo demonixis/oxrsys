@@ -25,7 +25,7 @@ The default test layers are:
 ## Home Tests
 
 The macOS Home has a small Swift test runner for bundle inspection, launcher persistence
-merging, installed runtime manifest generation, preference persistence, and Terminal command
+merging, server config serialization, preference persistence, and Terminal command
 quoting:
 
 ```bash
@@ -68,7 +68,7 @@ Before considering a change ready:
 
 - run the macOS build and tests
 - run the Linux/Qt build on a Linux host when touching Linux runtime or Qt frontend code
-- run the Home Swift test runner when changing the Home launcher, preferences, or runtime installer
+- run the Home Swift test runner when changing the Home launcher, preferences, or server config helpers
 - run the Android build if Android code changed
 - run the CTS lane when runtime API, extension behavior, swapchain handling, action handling, or conformance-sensitive behavior changed
 

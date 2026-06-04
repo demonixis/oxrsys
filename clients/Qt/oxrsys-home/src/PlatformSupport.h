@@ -14,8 +14,6 @@ struct HomePaths
     QString activeRuntimePath;
     QString configFilePath;
     QString launcherAppsPath;
-    QString installedRuntimeDirectory;
-    QString installedRuntimeManifestPath;
     QString runtimeStatusPath;
 };
 
@@ -35,5 +33,4 @@ bool revealInFileManager(const QString& path);
 HomePaths homePaths();
 QStringList runtimeBuildDirectoryCandidates();
 QString defaultRuntimeManifestPath();
-QString defaultRuntimeDirectoryPath();
-bool supportsRuntimeInstallAndRegistration();
+bool supportsRuntimeRegistration();

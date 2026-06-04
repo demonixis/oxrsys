@@ -171,18 +171,22 @@ WifiReadiness wifiReadinessStatus()
 
 HomeModel::HomeModel(QObject* parent,
                      const QString& settingsOrganization,
-                     const QString& settingsApplication)
+                     const QString& settingsApplication,
+                     HomePaths paths)
     : QObject(parent)
-    , paths_(homePaths())
+    , paths_(paths)
     , runtimeManager_(paths_)
     , settings_(settingsOrganization, settingsApplication)
 {
     runtimeManifestPath_ =
         settings_.value("runtimeManifestPath", defaultRuntimeManifestPath()).toString();
-    preferInstalledRuntimeForLaunches_ =
-        settings_.value("preferInstalledRuntimeForLaunches", false).toBool();
     customAdbPath_ = cleanedPath(settings_.value("customAdbPath").toString());
     loadAll();
+
+    configSaveTimer_.setSingleShot(true);
+    configSaveTimer_.setInterval(600);
+    connect(&configSaveTimer_, &QTimer::timeout,
+            this, &HomeModel::saveStructuredConfig);
 
     pollTimer_.setInterval(1000);
     connect(&pollTimer_, &QTimer::timeout, this, [this]() {
@@ -197,6 +201,7 @@ HomeModel::HomeModel(QObject* parent,
 HomeModel::~HomeModel()
 {
     pollTimer_.stop();
+    configSaveTimer_.stop();
     const QList<QProcess*> processes = launchedProcesses_.values();
     for (QProcess* process : processes)
     {
@@ -227,11 +232,6 @@ ServerConfig& HomeModel::mutableServerConfig()
 const RuntimeRegistrationStatus& HomeModel::runtimeRegistrationStatus() const
 {
     return runtimeRegistrationStatus_;
-}
-
-const RuntimeInstallStatus& HomeModel::runtimeInstallStatus() const
-{
-    return runtimeInstallStatus_;
 }
 
 const RuntimeActivity& HomeModel::runtimeActivity() const
@@ -271,8 +271,7 @@ QString HomeModel::runtimeManifestPath() const
 
 QString HomeModel::activeLaunchRuntimeManifestPath() const
 {
-    return runtimeManager_.activeLaunchRuntimeManifestPath(runtimeManifestPath_,
-                                                           preferInstalledRuntimeForLaunches_);
+    return runtimeManager_.activeLaunchRuntimeManifestPath(runtimeManifestPath_);
 }
 
 QString HomeModel::statusMessage() const
@@ -392,11 +391,6 @@ bool HomeModel::developerModeEnabled() const
     return settings_.value("developerModeEnabled", false).toBool();
 }
 
-bool HomeModel::preferInstalledRuntimeForLaunches() const
-{
-    return preferInstalledRuntimeForLaunches_;
-}
-
 bool HomeModel::isAppRunning(const LauncherApp& app) const
 {
     QProcess* process = launchedProcesses_.value(app.id(), nullptr);
@@ -407,7 +401,6 @@ void HomeModel::loadAll()
 {
     loadConfigFromDisk();
     refreshRuntimeStatus();
-    refreshRuntimeInstallStatus();
     refreshRuntimeActivity();
     reloadLauncherApps();
     refreshTransportHealth(true);
@@ -417,19 +410,8 @@ void HomeModel::loadAll()
 void HomeModel::setRuntimeManifestPath(const QString& path)
 {
     runtimeManifestPath_ = cleanedPath(path);
-    preferInstalledRuntimeForLaunches_ = false;
     settings_.setValue("runtimeManifestPath", runtimeManifestPath_);
-    settings_.setValue("preferInstalledRuntimeForLaunches", preferInstalledRuntimeForLaunches_);
     setStatusMessage("Updated runtime manifest path.");
-    emit changed();
-}
-
-void HomeModel::setPreferInstalledRuntimeForLaunches(bool enabled)
-{
-    preferInstalledRuntimeForLaunches_ = enabled;
-    settings_.setValue("preferInstalledRuntimeForLaunches", preferInstalledRuntimeForLaunches_);
-    setStatusMessage(enabled ? "Launches will use the installed runtime manifest."
-                             : "Launches will use the selected runtime manifest.");
     emit changed();
 }
 
@@ -521,57 +503,31 @@ void HomeModel::saveStructuredConfig()
     emit changed();
 }
 
+void HomeModel::scheduleStructuredConfigSave()
+{
+    configSaveTimer_.start();
+}
+
 void HomeModel::resetConfigFromDisk()
 {
+    configSaveTimer_.stop();
     loadConfigFromDisk();
     setStatusMessage("Reloaded configuration from disk.");
     emit changed();
 }
 
-void HomeModel::installBundledRuntimeAndRegister()
+void HomeModel::resetStreamingConfigToDefaults()
 {
-    QString installedManifestPath;
-    QString error;
-    if (!runtimeManager_.installBundledRuntime(&installedManifestPath, &error))
-    {
-        setErrorMessage("Failed to install runtime: " + error);
-        return;
-    }
-    runtimeManifestPath_ = installedManifestPath;
-    preferInstalledRuntimeForLaunches_ = true;
-    settings_.setValue("runtimeManifestPath", runtimeManifestPath_);
-    settings_.setValue("preferInstalledRuntimeForLaunches", preferInstalledRuntimeForLaunches_);
-    loadConfigFromDisk();
-    refreshRuntimeInstallStatus();
-    if (!runtimeManager_.registerRuntimeManifest(runtimeManifestPath_, &error))
-    {
-        setErrorMessage("Runtime installed but registration failed: " + error);
-        return;
-    }
-    refreshRuntimeStatus();
-    setStatusMessage("Installed and registered the bundled OXRSys runtime.");
-    emit changed();
-}
-
-void HomeModel::useInstalledRuntimeManifest()
-{
-    runtimeManifestPath_ = runtimeInstallStatus_.installedManifestPath;
-    preferInstalledRuntimeForLaunches_ = true;
-    settings_.setValue("runtimeManifestPath", runtimeManifestPath_);
-    settings_.setValue("preferInstalledRuntimeForLaunches", preferInstalledRuntimeForLaunches_);
-    setStatusMessage("Selected the installed runtime manifest.");
+    configSaveTimer_.stop();
+    serverConfig_ = ServerConfig();
+    saveStructuredConfig();
+    setStatusMessage("Restored default streaming configuration.");
     emit changed();
 }
 
 void HomeModel::refreshRuntimeStatus()
 {
     runtimeRegistrationStatus_ = runtimeManager_.registrationStatus();
-    emit changed();
-}
-
-void HomeModel::refreshRuntimeInstallStatus()
-{
-    runtimeInstallStatus_ = runtimeManager_.installStatus();
     emit changed();
 }
 

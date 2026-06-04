@@ -24,6 +24,86 @@
 namespace
 {
 
+std::string ResolveAdbExecutable()
+{
+    auto executableFile = [](const std::string& path) {
+        return !path.empty() && access(path.c_str(), X_OK) == 0;
+    };
+
+    if (const char* overridePath = std::getenv("OXRSYS_ADB_PATH");
+        overridePath != nullptr && executableFile(overridePath))
+    {
+        return overridePath;
+    }
+
+    for (const char* envName : {"ANDROID_HOME", "ANDROID_SDK_ROOT"})
+    {
+        const char* sdkRoot = std::getenv(envName);
+        if (sdkRoot == nullptr || *sdkRoot == '\0')
+        {
+            continue;
+        }
+        std::filesystem::path adbPath = std::filesystem::path(sdkRoot) / "platform-tools" / "adb";
+        if (executableFile(adbPath.string()))
+        {
+            return adbPath.string();
+        }
+    }
+
+    for (const char* adbPath : {
+             "/opt/homebrew/bin/adb",
+             "/usr/local/bin/adb",
+             "/Applications/Android Studio.app/Contents/platform-tools/adb",
+         })
+    {
+        if (executableFile(adbPath))
+        {
+            return adbPath;
+        }
+    }
+
+    if (const char* pathEnv = std::getenv("PATH"))
+    {
+        std::string pathList = pathEnv;
+        size_t start = 0;
+        while (start <= pathList.size())
+        {
+            size_t end = pathList.find(':', start);
+            if (end == std::string::npos)
+            {
+                end = pathList.size();
+            }
+            std::filesystem::path adbPath =
+                std::filesystem::path(pathList.substr(start, end - start)) / "adb";
+            if (executableFile(adbPath.string()))
+            {
+                return adbPath.string();
+            }
+            start = end + 1;
+        }
+    }
+
+    return "";
+}
+
+std::string ShellQuote(const std::string& value)
+{
+    std::string quoted = "'";
+    for (char ch : value)
+    {
+        if (ch == '\'')
+        {
+            quoted += "'\\''";
+        }
+        else
+        {
+            quoted += ch;
+        }
+    }
+    quoted += "'";
+    return quoted;
+}
+
 void WaitForLogcatProcessExit(int pid)
 {
     if (pid <= 0)
@@ -406,8 +486,16 @@ void Config::StartLogcatCapture()
         return;
     }
 
+    const std::string adbPath = ResolveAdbExecutable();
+    if (adbPath.empty())
+    {
+        spdlog::warn("Quest logcat capture requested but adb was not found");
+        return;
+    }
+
     // Clear logcat first, then start capturing
-    const int clearResult = system("adb logcat -c 2>/dev/null");
+    const std::string clearCommand = ShellQuote(adbPath) + " logcat -c 2>/dev/null";
+    const int clearResult = system(clearCommand.c_str());
     (void)clearResult;
 
     int pipeFds[2] = {-1, -1};
@@ -439,14 +527,14 @@ void Config::StartLogcatCapture()
             close(nullFd);
         }
 
-        execlp("adb",
-               "adb",
-               "logcat",
-               "-s",
-               "OXRSys-Android:*",
-               "OXRSys-Network:*",
-               "OXRSys-Decoder:*",
-               static_cast<char*>(nullptr));
+        execl(adbPath.c_str(),
+              adbPath.c_str(),
+              "logcat",
+              "-s",
+              "OXRSys-Android:*",
+              "OXRSys-Network:*",
+              "OXRSys-Decoder:*",
+              static_cast<char*>(nullptr));
         _exit(127);
     }
 
@@ -497,7 +585,7 @@ void Config::StartLogcatCapture()
         }
     });
 
-    spdlog::info("Quest logcat capture started → {}", questLogFilePath);
+    spdlog::info("Quest logcat capture started via {} → {}", adbPath, questLogFilePath);
 #endif
 }
 

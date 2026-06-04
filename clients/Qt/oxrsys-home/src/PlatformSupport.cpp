@@ -381,9 +381,6 @@ HomePaths homePaths()
     paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
     paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
     paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
-    paths.installedRuntimeDirectory = QDir(paths.dataRoot).filePath("runtime/current");
-    paths.installedRuntimeManifestPath =
-        QDir(paths.installedRuntimeDirectory).filePath(runtimeManifestFileName());
     paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
     return paths;
 }
@@ -421,19 +418,7 @@ QString defaultRuntimeManifestPath()
     return QDir(fallbackDirectory).filePath(runtimeManifestFileName());
 }
 
-QString defaultRuntimeDirectoryPath()
-{
-    for (const QString& directory : runtimeBuildDirectoryCandidates())
-    {
-        if (QFileInfo(QDir(directory).filePath(runtimeLibraryFileName())).isFile())
-        {
-            return QFileInfo(directory).absoluteFilePath();
-        }
-    }
-    return runtimeBuildDirectoryCandidates().value(0);
-}
-
-bool supportsRuntimeInstallAndRegistration()
+bool supportsRuntimeRegistration()
 {
 #if defined(Q_OS_LINUX)
     return true;

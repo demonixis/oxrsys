@@ -1,16 +1,5 @@
 # Scripts
 
-## Home Packaging
-
-`scripts/package_home.sh` builds the runtime, builds the macOS Home without Xcode signing,
-copies the runtime files into `OXRSys Home.app/Contents/Resources/OXRSysRuntime`, and
-optionally signs the app when `CODE_SIGN_IDENTITY` is set.
-
-```bash
-scripts/package_home.sh
-CODE_SIGN_IDENTITY="Developer ID Application: Example Team" scripts/package_home.sh
-```
-
 ## Unity
 
 `scripts/unity/Editor/` contains Unity Editor helpers for projects that target OXRSys:

@@ -31,14 +31,14 @@ class HomeModel final : public QObject
 public:
     explicit HomeModel(QObject* parent = nullptr,
                        const QString& settingsOrganization = "OXRSys",
-                       const QString& settingsApplication = "HomeQt");
+                       const QString& settingsApplication = "HomeQt",
+                       HomePaths paths = homePaths());
     ~HomeModel() override;
 
     const HomePaths& paths() const;
     const ServerConfig& serverConfig() const;
     ServerConfig& mutableServerConfig();
     const RuntimeRegistrationStatus& runtimeRegistrationStatus() const;
-    const RuntimeInstallStatus& runtimeInstallStatus() const;
     const RuntimeActivity& runtimeActivity() const;
     const QList<RuntimeStreamingStats>& runtimeStatsHistory() const;
     const QList<LauncherApp>& launcherApps() const;
@@ -58,13 +58,11 @@ public:
     QString mainTransportSelection() const;
     TransportReadiness mainTransportReadiness() const;
     bool developerModeEnabled() const;
-    bool preferInstalledRuntimeForLaunches() const;
     bool isAppRunning(const LauncherApp& app) const;
 
 public slots:
     void loadAll();
     void setRuntimeManifestPath(const QString& path);
-    void setPreferInstalledRuntimeForLaunches(bool enabled);
     void setDeveloperModeEnabled(bool enabled);
     void setSelectedQuestUsbSerial(const QString& serial);
     void setCustomAdbPath(const QString& path);
@@ -72,11 +70,10 @@ public slots:
     void setSelectedLogAppId(const QString& appId);
     void setMainTransportSelection(const QString& transport);
     void saveStructuredConfig();
+    void scheduleStructuredConfigSave();
     void resetConfigFromDisk();
-    void installBundledRuntimeAndRegister();
-    void useInstalledRuntimeManifest();
+    void resetStreamingConfigToDefaults();
     void refreshRuntimeStatus();
-    void refreshRuntimeInstallStatus();
     void registerRuntime();
     void unregisterRuntime();
     void reloadLauncherApps();
@@ -111,13 +108,12 @@ private:
     RuntimeManager runtimeManager_;
     QSettings settings_;
     QTimer pollTimer_;
+    QTimer configSaveTimer_;
     QString runtimeManifestPath_;
-    bool preferInstalledRuntimeForLaunches_ = false;
     ServerConfig serverConfig_;
     QString currentConfigText_;
     QDateTime lastKnownConfigModificationDate_;
     RuntimeRegistrationStatus runtimeRegistrationStatus_;
-    RuntimeInstallStatus runtimeInstallStatus_;
     RuntimeActivity runtimeActivity_;
     QList<RuntimeStreamingStats> runtimeStatsHistory_;
     QString runtimeStatsIdentity_;

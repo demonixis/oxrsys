@@ -78,15 +78,6 @@ private:
     QPlainTextEdit* logTextEdit_ = nullptr;
 
     QCheckBox* developerModeCheckBox_ = nullptr;
-    QLabel* bundledRuntimePillLabel_ = nullptr;
-    QLabel* installedRuntimePillLabel_ = nullptr;
-    QLabel* updateRuntimePillLabel_ = nullptr;
-    QLabel* installedRuntimePathLabel_ = nullptr;
-    QLabel* bundledRuntimePathLabel_ = nullptr;
-    QPushButton* installRuntimeButton_ = nullptr;
-    QPushButton* useInstalledManifestButton_ = nullptr;
-    QPushButton* revealInstalledRuntimeButton_ = nullptr;
-    QCheckBox* preferInstalledRuntimeCheckBox_ = nullptr;
     QLineEdit* runtimeManifestLineEdit_ = nullptr;
     QLabel* registrationFileLabel_ = nullptr;
     QLabel* currentRuntimeTargetLabel_ = nullptr;

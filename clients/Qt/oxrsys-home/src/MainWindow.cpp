@@ -353,23 +353,6 @@ QString registrationButtonTitle(const HomeModel& model)
     return "Enable Registration";
 }
 
-QString runtimeInstallButtonTitle(const RuntimeInstallStatus& status)
-{
-    if (!status.bundledRuntimeExists)
-    {
-        return "No Bundled Runtime";
-    }
-    if (!status.installedRuntimeExists)
-    {
-        return "Install and Register Runtime";
-    }
-    if (status.installedRuntimeNeedsUpdate)
-    {
-        return "Update and Register Runtime";
-    }
-    return "Reinstall and Register Runtime";
-}
-
 } // namespace
 
 class RuntimeStatsChart final : public QFrame
@@ -555,7 +538,7 @@ QWidget* MainWindow::buildHeader()
     auto* titleLayout = new QVBoxLayout();
     auto* title = new QLabel("OXRSys Home", box);
     title->setStyleSheet("font-size: 22px; font-weight: 600;");
-    auto* subtitle = secondaryLabel("Launch compatible apps, install the runtime, and tune headset streaming.");
+    auto* subtitle = secondaryLabel("Launch compatible apps, select a runtime, and tune headset streaming.");
     titleLayout->addWidget(title);
     titleLayout->addWidget(subtitle);
     layout->addLayout(titleLayout, 2);
@@ -711,46 +694,6 @@ QWidget* MainWindow::buildSettingsTab()
     developerLayout->addWidget(developerModeCheckBox_);
     layout->addWidget(developerBox);
 
-    auto* installBox = new QGroupBox("Runtime Installation", content);
-    auto* installLayout = new QVBoxLayout(installBox);
-    auto* installTop = new QHBoxLayout();
-    auto* installForm = new QFormLayout();
-    bundledRuntimePillLabel_ = new QLabel(installBox);
-    installedRuntimePillLabel_ = new QLabel(installBox);
-    updateRuntimePillLabel_ = new QLabel(installBox);
-    installForm->addRow("Bundled runtime", bundledRuntimePillLabel_);
-    installForm->addRow("Installed runtime", installedRuntimePillLabel_);
-    installForm->addRow("Update state", updateRuntimePillLabel_);
-    installTop->addLayout(installForm, 2);
-    auto* installButtons = new QVBoxLayout();
-    installRuntimeButton_ = iconButton(installBox, QStyle::SP_ArrowDown, "Install and Register Runtime");
-    useInstalledManifestButton_ = iconButton(installBox, QStyle::SP_DialogApplyButton, "Use Installed Manifest");
-    revealInstalledRuntimeButton_ =
-        iconButton(installBox, QStyle::SP_DirOpenIcon, "Reveal Installed Runtime");
-    connect(installRuntimeButton_, &QPushButton::clicked,
-            model_, &HomeModel::installBundledRuntimeAndRegister);
-    connect(useInstalledManifestButton_, &QPushButton::clicked,
-            model_, &HomeModel::useInstalledRuntimeManifest);
-    connect(revealInstalledRuntimeButton_, &QPushButton::clicked, this, [this]() {
-        revealPath(model_->runtimeInstallStatus().installedManifestPath, "installed runtime");
-    });
-    installButtons->addWidget(installRuntimeButton_);
-    installButtons->addWidget(useInstalledManifestButton_);
-    installButtons->addWidget(revealInstalledRuntimeButton_);
-    installButtons->addStretch();
-    installTop->addLayout(installButtons);
-    installLayout->addLayout(installTop);
-    installedRuntimePathLabel_ = elidedSecondaryLabel(installBox);
-    bundledRuntimePathLabel_ = elidedSecondaryLabel(installBox);
-    installLayout->addWidget(installedRuntimePathLabel_);
-    installLayout->addWidget(bundledRuntimePathLabel_);
-    preferInstalledRuntimeCheckBox_ =
-        new QCheckBox("Use installed runtime for launches", installBox);
-    connect(preferInstalledRuntimeCheckBox_, &QCheckBox::toggled,
-            model_, &HomeModel::setPreferInstalledRuntimeForLaunches);
-    installLayout->addWidget(preferInstalledRuntimeCheckBox_);
-    layout->addWidget(installBox);
-
     auto* registrationBox = new QGroupBox("Runtime Registration", content);
     auto* registrationLayout = new QVBoxLayout(registrationBox);
     auto* manifestRow = new QHBoxLayout();
@@ -786,7 +729,6 @@ QWidget* MainWindow::buildSettingsTab()
     unregisterRuntimeButton_ = iconButton(registrationBox, QStyle::SP_DialogCancelButton, "Disable Registration");
     connect(refreshButton, &QPushButton::clicked, this, [this]() {
         model_->refreshRuntimeStatus();
-        model_->refreshRuntimeInstallStatus();
     });
     connect(registerRuntimeButton_, &QPushButton::clicked, this, [this]() {
         model_->setRuntimeManifestPath(runtimeManifestLineEdit_->text());
@@ -877,10 +819,13 @@ QWidget* MainWindow::buildStreamingTab()
     connect(configTransportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
 
     auto* configButtons = new QHBoxLayout();
-    auto* saveButton = iconButton(configBox, QStyle::SP_DialogSaveButton, "Save Configuration");
+    auto* defaultButton = iconButton(configBox, QStyle::SP_BrowserReload, "Default");
     auto* reloadButton = iconButton(configBox, QStyle::SP_BrowserReload, "Reload From Disk");
     auto* revealConfigButton = iconButton(configBox, QStyle::SP_DirOpenIcon, "Reveal Config");
-    connect(saveButton, &QPushButton::clicked, model_, &HomeModel::saveStructuredConfig);
+    auto* revealRuntimeLogsButton =
+        iconButton(configBox, QStyle::SP_DirOpenIcon, "Reveal Runtime Logs");
+    connect(defaultButton, &QPushButton::clicked,
+            model_, &HomeModel::resetStreamingConfigToDefaults);
     connect(reloadButton, &QPushButton::clicked, model_, &HomeModel::resetConfigFromDisk);
     connect(revealConfigButton, &QPushButton::clicked, this, [this]() {
         if (!QFileInfo(model_->paths().configFilePath).exists())
@@ -889,10 +834,15 @@ QWidget* MainWindow::buildStreamingTab()
         }
         revealPath(model_->paths().configFilePath, "runtime configuration");
     });
-    configButtons->addWidget(saveButton);
+    connect(revealRuntimeLogsButton, &QPushButton::clicked, this, [this]() {
+        QDir().mkpath(model_->paths().stateRoot);
+        revealPath(model_->paths().stateRoot, "runtime logs");
+    });
+    configButtons->addWidget(defaultButton);
     configButtons->addWidget(reloadButton);
     configButtons->addStretch();
     configButtons->addWidget(revealConfigButton);
+    configButtons->addWidget(revealRuntimeLogsButton);
     configLayout->addLayout(configButtons);
     layout->addWidget(configBox);
 
@@ -1155,26 +1105,6 @@ void MainWindow::refreshSettings()
     developerModeCheckBox_->setChecked(model_->developerModeEnabled());
     developerModeCheckBox_->blockSignals(false);
 
-    const RuntimeInstallStatus& install = model_->runtimeInstallStatus();
-    setPill(bundledRuntimePillLabel_, install.bundledRuntimeExists ? "Available" : "Not embedded",
-            install.bundledRuntimeExists ? QColor(42, 145, 72) : QColor(120, 120, 120));
-    setPill(installedRuntimePillLabel_, install.installedRuntimeExists ? "Installed" : "Not installed",
-            install.installedRuntimeExists ? QColor(42, 145, 72) : QColor(120, 120, 120));
-    setPill(updateRuntimePillLabel_, install.installedRuntimeNeedsUpdate ? "Update available" : "Current",
-            install.installedRuntimeNeedsUpdate ? QColor(186, 119, 28) : QColor(120, 120, 120));
-    setElidedText(installedRuntimePathLabel_, install.installedManifestPath);
-    setElidedText(bundledRuntimePathLabel_, install.bundledRuntimePath);
-    installRuntimeButton_->setText(runtimeInstallButtonTitle(install));
-    installRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() && install.bundledRuntimeExists);
-    useInstalledManifestButton_->setEnabled(install.installedManifestExists);
-    revealInstalledRuntimeButton_->setEnabled(install.installedRuntimeExists ||
-                                              install.installedManifestExists);
-    preferInstalledRuntimeCheckBox_->blockSignals(true);
-    preferInstalledRuntimeCheckBox_->setChecked(model_->preferInstalledRuntimeForLaunches());
-    preferInstalledRuntimeCheckBox_->blockSignals(false);
-    preferInstalledRuntimeCheckBox_->setEnabled(install.installedRuntimeExists &&
-                                                install.installedManifestExists);
-
     runtimeManifestLineEdit_->blockSignals(true);
     runtimeManifestLineEdit_->setText(model_->runtimeManifestPath());
     runtimeManifestLineEdit_->blockSignals(false);
@@ -1190,8 +1120,8 @@ void MainWindow::refreshSettings()
     selectedRuntimeActiveLabel_->setText(selectedActive ? "Yes" : "No");
     setElidedText(launchTargetLabel_, model_->activeLaunchRuntimeManifestPath());
     registerRuntimeButton_->setText(registrationButtonTitle(*model_));
-    registerRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration());
-    unregisterRuntimeButton_->setEnabled(supportsRuntimeInstallAndRegistration() &&
+    registerRuntimeButton_->setEnabled(supportsRuntimeRegistration());
+    unregisterRuntimeButton_->setEnabled(supportsRuntimeRegistration() &&
                                          model_->runtimeRegistrationStatus().activeRuntimeExists);
 }
 
@@ -1399,4 +1329,5 @@ void MainWindow::updateConfigFromControls()
     fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
+    model_->scheduleStructuredConfigSave();
 }
