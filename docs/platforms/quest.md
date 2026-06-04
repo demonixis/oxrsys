@@ -80,19 +80,29 @@ When announced by the headset runtime, the Android client also enables `XR_META_
 
 Expected Quest profile paths are `/interaction_profiles/oculus/touch_controller` or `/interaction_profiles/meta/touch_controller_quest_1_rift_s` for Quest 1, `/interaction_profiles/meta/touch_controller_quest_2` for Quest 2, and `/interaction_profiles/meta/touch_plus_controller` or `/interaction_profiles/meta/touch_controller_plus` for Quest 3-class Touch Plus controllers.
 
-Controller poses are valid only when the client sets `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. When a controller flag is missing, the runtime leaves that hand's controller actions inactive and keeps the last valid pose internally instead of consuming zeroed packet fields. Hand tracking uses separate hand-active flags and can keep hand-interaction actions active while controller tracking is inactive.
+Controller poses are valid only when the client sets `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. The Android client now requires both an active grip-pose action and a valid `xrLocateSpace` result before setting those flags. Trigger, squeeze, thumbstick, and button values are also consumed only when their action state reports `isActive`.
+
+Hand tracking uses separate hand-active flags and remains available while controller tracking is active. The runtime keeps the current interaction profile controller-first for each hand, then falls back to `ext/hand_interaction_ext` when the controller becomes inactive. `xrSyncActions` still evaluates hand-interaction bindings while a controller is active, so hand-only apps can run, but if the same action is bound to both controller and hand-interaction profiles the controller source wins while it is active. When a controller flag is missing, the runtime leaves that hand's controller actions inactive and keeps the last valid controller pose internally instead of consuming zeroed packet fields.
 
 ## Log Validation Matrix
 
-For Quest 1, Quest 2, Quest 3, PICO Neo3/PICO 3, and PICO 4, collect `adb logcat` while streaming and confirm:
+For Quest 1, Quest 2, Quest 3, PICO Neo3/PICO 3, and PICO 4, collect `adb logcat` while streaming and confirm. When `logging.quest_logcat` is enabled from Home, the runtime writes the filtered headset log to the platform state directory (`~/Library/Application Support/OXRSys/oxrsys-headset.log` on macOS). The equivalent manual capture is:
+
+```bash
+adb logcat -c
+adb logcat -v time -s 'OXRSys-Android:*' 'OXRSys-Network:*' 'OXRSys-Decoder:*' | tee "$HOME/Desktop/oxrsys-quest-logcat.txt"
+```
+
+Confirm:
 
 - `OpenXR system: name=...` identifies the headset model family
 - controller bindings are accepted for at least one expected profile
 - `xrSyncActions` succeeds and logs non-null profiles for active controllers
-- controller locate logs transition to active and tracking packets include controller-active flags while controllers are visible
+- controller locate logs transition to active with `poseActive=1`, a non-null profile, valid locate flags, and controller-active packet flags while controllers are visible
 - runtime logs show nonzero controller poses and the expected canonical profile
-- hand tracking logs transition active and set hand-active flags when the headset reports usable joints
+- hand tracking logs include `locateResult`, `isActive`, `validJoints`, `usable`, and `missing`; they transition active and set hand-active flags when the headset reports usable joints
 - trigger values change independently from squeeze/grab values
+- releasing controllers clears controller-active packet flags while hand-active flags can remain set
 
 ## USB ADB Transport
 
@@ -111,7 +121,7 @@ USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NAC
 ## Current Status
 
 - Real `XR_EXT_hand_tracking` joints are fed from the Android client into the runtime.
-- Quest and PICO controller profiles are suggested on the Android client, and the runtime gates controller poses with explicit active flags.
+- Quest and PICO controller profiles are suggested on the Android client, and the runtime gates controller poses and controller actions with explicit active flags while keeping hand tracking available through separate hand-interaction bindings.
 - USB ADB reverse TCP streaming is available alongside WiFi UDP streaming.
 - Refresh rate is negotiated from the client.
 - Latency reporting and keyframe requests are wired into the control path.

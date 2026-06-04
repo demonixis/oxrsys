@@ -70,6 +70,12 @@ public:
     float GetFloatComponent(Hand hand, const std::string& componentPath) const;
     XrVector2f GetVector2fComponent(Hand hand, const std::string& componentPath) const;
     XrPosef GetPoseComponent(Hand hand, const std::string& componentPath) const;
+    bool GetBooleanComponentForProfile(Hand hand, const std::string& componentPath,
+                                       const std::string& profilePath) const;
+    float GetFloatComponentForProfile(Hand hand, const std::string& componentPath,
+                                      const std::string& profilePath) const;
+    XrVector2f GetVector2fComponentForProfile(Hand hand, const std::string& componentPath,
+                                              const std::string& profilePath) const;
     XrPosef GetPoseComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
     void SetStreamingClientName(const std::string& clientName);

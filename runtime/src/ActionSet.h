@@ -18,6 +18,7 @@ struct AggregatedActionState
     XrPath poseSourcePath = XR_NULL_PATH;
     std::string poseSourceProfile;
     std::vector<XrPath> boundSources;
+    int sourcePriority = -1;
 };
 
 class ActionSetState

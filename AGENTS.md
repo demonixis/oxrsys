@@ -13,6 +13,7 @@ controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
 are in place. Windows is scaffolded in layout/docs only for this pass. The Android VR client now feeds
 real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with explicit active flags,
+keeps hand-interaction bindings available alongside active controllers with controller-first priority,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
 and can request a build-configured display refresh rate. The visionOS

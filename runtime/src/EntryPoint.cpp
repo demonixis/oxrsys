@@ -2140,6 +2140,15 @@ static bool IsActionSetActive(const XrActionsSyncInfo* syncInfo, ActionState* ac
     return false;
 }
 
+static int BindingSourcePriority(const std::string& profilePath)
+{
+    if (profilePath == "/interaction_profiles/ext/hand_interaction_ext")
+    {
+        return 1;
+    }
+    return 2;
+}
+
 static void AccumulateBindingState(const InputManager& inputManager, const SuggestedBinding& binding,
                                     ActionState* action, XrPath subactionPath,
                                     AggregatedActionState& aggregate)
@@ -2162,6 +2171,17 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
         return;
     }
 
+    const int sourcePriority = BindingSourcePriority(binding.profilePathString);
+    if (aggregate.sourcePriority > sourcePriority)
+    {
+        return;
+    }
+    if (aggregate.sourcePriority < sourcePriority)
+    {
+        aggregate = {};
+        aggregate.sourcePriority = sourcePriority;
+    }
+
     aggregate.isActive = true;
     aggregate.boundSources.push_back(binding.bindingPath);
 
@@ -2169,17 +2189,20 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
     {
         case XR_ACTION_TYPE_BOOLEAN_INPUT:
             aggregate.boolValue = aggregate.boolValue ||
-                                  inputManager.GetBooleanComponent(hand, binding.componentPath);
+                                  inputManager.GetBooleanComponentForProfile(
+                                      hand, binding.componentPath, binding.profilePathString);
             break;
 
         case XR_ACTION_TYPE_FLOAT_INPUT:
             aggregate.floatValue = std::max(aggregate.floatValue,
-                                            inputManager.GetFloatComponent(hand, binding.componentPath));
+                                            inputManager.GetFloatComponentForProfile(
+                                                hand, binding.componentPath, binding.profilePathString));
             break;
 
         case XR_ACTION_TYPE_VECTOR2F_INPUT:
         {
-            XrVector2f vec = inputManager.GetVector2fComponent(hand, binding.componentPath);
+            XrVector2f vec = inputManager.GetVector2fComponentForProfile(
+                hand, binding.componentPath, binding.profilePathString);
             if (std::fabs(vec.x) > std::fabs(aggregate.vector2fValue.x) ||
                 std::fabs(vec.y) > std::fabs(aggregate.vector2fValue.y))
             {

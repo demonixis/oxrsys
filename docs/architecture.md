@@ -66,6 +66,8 @@ The input system is profile-aware. The runtime currently supports:
 
 - `KHR simple_controller`
 - `oculus/touch_controller`
+- Meta Quest Touch and Touch Plus controller profiles
+- PICO Neo3 and PICO 4 controller profiles
 - `ext/hand_interaction_ext`
 
 The runtime also supports:

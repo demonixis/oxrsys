@@ -13,6 +13,43 @@
 #include <filesystem>
 #include <thread>
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#if !defined(_WIN32)
+namespace
+{
+
+void WaitForLogcatProcessExit(int pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+
+    for (int attempt = 0; attempt < 20; ++attempt)
+    {
+        int status = 0;
+        const pid_t result = waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (result == static_cast<pid_t>(pid) || result == -1)
+        {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
+    kill(static_cast<pid_t>(pid), SIGKILL);
+    int status = 0;
+    waitpid(static_cast<pid_t>(pid), &status, 0);
+}
+
+} // namespace
+#endif
+
 Config& Config::Get()
 {
     static Config instance;
@@ -364,24 +401,63 @@ void Config::StartLogcatCapture()
     spdlog::warn("Quest logcat capture is disabled on Windows in this runtime build");
     return;
 #else
-    if (logcatRunning_ || logcatProcess_ != nullptr)
+    if (logcatRunning_.load() || logcatPipe_ != nullptr || logcatPid_ > 0)
     {
         return;
     }
 
     // Clear logcat first, then start capturing
-    system("adb logcat -c 2>/dev/null");
+    const int clearResult = system("adb logcat -c 2>/dev/null");
+    (void)clearResult;
 
-    std::string cmd = "adb logcat -s "
-                      "'OXRSys-Android:*' "
-                      "'OXRSys-Network:*' "
-                      "'OXRSys-Decoder:*' "
-                      "2>/dev/null";
-
-    logcatProcess_ = popen(cmd.c_str(), "r");
-    if (logcatProcess_ == nullptr)
+    int pipeFds[2] = {-1, -1};
+    if (pipe(pipeFds) != 0)
     {
-        spdlog::warn("Failed to start adb logcat capture");
+        spdlog::warn("Failed to create pipe for adb logcat capture");
+        return;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        spdlog::warn("Failed to fork adb logcat capture");
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+        return;
+    }
+
+    if (pid == 0)
+    {
+        close(pipeFds[0]);
+        dup2(pipeFds[1], STDOUT_FILENO);
+        close(pipeFds[1]);
+
+        const int nullFd = open("/dev/null", O_WRONLY);
+        if (nullFd >= 0)
+        {
+            dup2(nullFd, STDERR_FILENO);
+            close(nullFd);
+        }
+
+        execlp("adb",
+               "adb",
+               "logcat",
+               "-s",
+               "OXRSys-Android:*",
+               "OXRSys-Network:*",
+               "OXRSys-Decoder:*",
+               static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipeFds[1]);
+    logcatPipe_ = fdopen(pipeFds[0], "r");
+    if (logcatPipe_ == nullptr)
+    {
+        spdlog::warn("Failed to open adb logcat capture pipe");
+        close(pipeFds[0]);
+        kill(pid, SIGTERM);
+        WaitForLogcatProcessExit(static_cast<int>(pid));
         return;
     }
 
@@ -390,20 +466,23 @@ void Config::StartLogcatCapture()
     if (logcatFile_ == nullptr)
     {
         spdlog::warn("Failed to open {} for writing", questLogFilePath);
-        pclose(logcatProcess_);
-        logcatProcess_ = nullptr;
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
+        kill(pid, SIGTERM);
+        WaitForLogcatProcessExit(static_cast<int>(pid));
         return;
     }
 
-    logcatRunning_ = true;
+    logcatPid_ = static_cast<int>(pid);
+    logcatRunning_.store(true);
 
     // Background thread to pipe logcat → file
-    std::thread([this]()
+    logcatThread_ = std::thread([this]()
     {
         char buf[4096];
-        while (logcatRunning_ && logcatProcess_ != nullptr)
+        while (logcatRunning_.load() && logcatPipe_ != nullptr)
         {
-            if (fgets(buf, sizeof(buf), logcatProcess_) != nullptr)
+            if (fgets(buf, sizeof(buf), logcatPipe_) != nullptr)
             {
                 if (logcatFile_ != nullptr)
                 {
@@ -416,7 +495,7 @@ void Config::StartLogcatCapture()
                 break;  // EOF or error
             }
         }
-    }).detach();
+    });
 
     spdlog::info("Quest logcat capture started → {}", questLogFilePath);
 #endif
@@ -424,16 +503,32 @@ void Config::StartLogcatCapture()
 
 void Config::StopLogcatCapture()
 {
-    logcatRunning_ = false;
+    logcatRunning_.store(false);
 
-    if (logcatProcess_ != nullptr)
-    {
 #if defined(_WIN32)
-        fclose(logcatProcess_);
+    if (logcatPipe_ != nullptr)
+    {
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
+    }
 #else
-        pclose(logcatProcess_);
+    if (logcatPid_ > 0)
+    {
+        kill(static_cast<pid_t>(logcatPid_), SIGTERM);
+        WaitForLogcatProcessExit(logcatPid_);
+        logcatPid_ = -1;
+    }
 #endif
-        logcatProcess_ = nullptr;
+
+    if (logcatThread_.joinable())
+    {
+        logcatThread_.join();
+    }
+
+    if (logcatPipe_ != nullptr)
+    {
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
     }
 
     if (logcatFile_ != nullptr)

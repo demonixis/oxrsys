@@ -7,6 +7,7 @@
 #include <android_native_app_glue.h>
 #include <arpa/inet.h>
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -125,6 +126,59 @@ bool HasValidCriticalHandJoints(const XrHandJointLocationEXT* joints)
            HasValidJointPosition(joints[XR_HAND_JOINT_WRIST_EXT]) &&
            HasValidJointPosition(joints[XR_HAND_JOINT_THUMB_TIP_EXT]) &&
            HasValidJointPosition(joints[XR_HAND_JOINT_INDEX_TIP_EXT]);
+}
+
+uint32_t CountValidHandJoints(const XrHandJointLocationEXT* joints)
+{
+    uint32_t validCount = 0;
+    for (uint32_t i = 0; i < XR_HAND_JOINT_COUNT_EXT; ++i)
+    {
+        if (HasValidJointPosition(joints[i]))
+        {
+            ++validCount;
+        }
+    }
+    return validCount;
+}
+
+bool HasUsableHandJoints(const XrHandJointLocationEXT* joints)
+{
+    return CountValidHandJoints(joints) >= 8 &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_PALM_EXT]) &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_THUMB_TIP_EXT]) &&
+           HasValidJointPosition(joints[XR_HAND_JOINT_INDEX_TIP_EXT]);
+}
+
+std::string MissingCriticalHandJoints(const XrHandJointLocationEXT* joints)
+{
+    struct JointName
+    {
+        XrHandJointEXT joint;
+        const char* name;
+    };
+    constexpr std::array<JointName, 6> criticalJoints = {{
+        {XR_HAND_JOINT_PALM_EXT, "palm"},
+        {XR_HAND_JOINT_WRIST_EXT, "wrist"},
+        {XR_HAND_JOINT_THUMB_TIP_EXT, "thumb_tip"},
+        {XR_HAND_JOINT_INDEX_TIP_EXT, "index_tip"},
+        {XR_HAND_JOINT_INDEX_METACARPAL_EXT, "index_metacarpal"},
+        {XR_HAND_JOINT_LITTLE_METACARPAL_EXT, "little_metacarpal"},
+    }};
+
+    std::string missing;
+    for (const JointName& criticalJoint : criticalJoints)
+    {
+        if (HasValidJointPosition(joints[criticalJoint.joint]))
+        {
+            continue;
+        }
+        if (!missing.empty())
+        {
+            missing += ",";
+        }
+        missing += criticalJoint.name;
+    }
+    return missing.empty() ? "none" : missing;
 }
 
 } // namespace
@@ -2401,6 +2455,8 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     if (xrLocateHandJointsEXT_ != nullptr)
     {
         static bool lastHandActive[2] = {false, false};
+        static uint32_t handLocateLogCounter[2] = {0, 0};
+        static bool loggedInactiveWithUsableJoints[2] = {false, false};
         for (int hand = 0; hand < 2; ++hand)
         {
             if (handTrackers_[hand] == XR_NULL_HANDLE)
@@ -2424,15 +2480,33 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
 
             XrResult locateResult =
                 xrLocateHandJointsEXT_(handTrackers_[hand], &locateInfo, &locations);
-            const bool handActive = XR_SUCCEEDED(locateResult) &&
-                                    locations.isActive == XR_TRUE &&
-                                    HasValidCriticalHandJoints(jointLocations);
-            if (handActive != lastHandActive[hand])
+            const uint32_t validJointCount = CountValidHandJoints(jointLocations);
+            const bool hasUsableJoints = HasUsableHandJoints(jointLocations);
+            const bool runtimeActive = locations.isActive == XR_TRUE;
+            const bool handActive = XR_SUCCEEDED(locateResult) && hasUsableJoints &&
+                                    (runtimeActive || validJointCount >= 20);
+            if (handActive && !runtimeActive && !loggedInactiveWithUsableJoints[hand])
             {
-                LOGI("Hand tracking %s %s locateResult=%d isActive=%d",
+                LOGW("Hand tracking %s usable joints while runtime isActive=0 "
+                     "(valid=%u missing=%s); sending joints as active",
+                     hand == 0 ? "left" : "right",
+                     validJointCount,
+                     MissingCriticalHandJoints(jointLocations).c_str());
+                loggedInactiveWithUsableJoints[hand] = true;
+            }
+            if (handActive != lastHandActive[hand] ||
+                ++handLocateLogCounter[hand] % 270 == 1)
+            {
+                LOGI("Hand tracking %s %s locateResult=%d isActive=%d "
+                     "validJoints=%u criticalOk=%d usable=%d missing=%s",
                      hand == 0 ? "left" : "right",
                      handActive ? "active" : "inactive",
-                     locateResult, locations.isActive == XR_TRUE ? 1 : 0);
+                     locateResult,
+                     runtimeActive ? 1 : 0,
+                     validJointCount,
+                     HasValidCriticalHandJoints(jointLocations) ? 1 : 0,
+                     hasUsableJoints ? 1 : 0,
+                     MissingCriticalHandJoints(jointLocations).c_str());
                 lastHandActive[hand] = handActive;
             }
             if (!handActive)
@@ -2455,17 +2529,109 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
         }
     }
 
+    auto currentInteractionProfileName = [&](int hand) {
+        XrInteractionProfileState profileState = {XR_TYPE_INTERACTION_PROFILE_STATE};
+        XrResult profileResult =
+            xrGetCurrentInteractionProfile(session_, handPaths_[hand], &profileState);
+        if (XR_FAILED(profileResult))
+        {
+            return std::string("<profile-error:") + std::to_string(profileResult) + ">";
+        }
+        return PathToString(instance_, profileState.interactionProfile);
+    };
+
+    auto readPoseActionActive = [&](int hand, XrResult* resultOut) {
+        if (gripPoseAction_ == XR_NULL_HANDLE)
+        {
+            if (resultOut != nullptr)
+            {
+                *resultOut = XR_ERROR_HANDLE_INVALID;
+            }
+            return false;
+        }
+
+        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+        getInfo.action = gripPoseAction_;
+        getInfo.subactionPath = handPaths_[hand];
+        XrActionStatePose poseState = {XR_TYPE_ACTION_STATE_POSE};
+        XrResult result = xrGetActionStatePose(session_, &getInfo, &poseState);
+        if (resultOut != nullptr)
+        {
+            *resultOut = result;
+        }
+        return XR_SUCCEEDED(result) && poseState.isActive == XR_TRUE;
+    };
+
+    auto readFloatAction = [&](XrAction action, XrPath subactionPath, float* valueOut) {
+        if (action == XR_NULL_HANDLE)
+        {
+            return false;
+        }
+
+        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+        getInfo.action = action;
+        getInfo.subactionPath = subactionPath;
+        XrActionStateFloat floatState = {XR_TYPE_ACTION_STATE_FLOAT};
+        XrResult result = xrGetActionStateFloat(session_, &getInfo, &floatState);
+        if (XR_SUCCEEDED(result) && floatState.isActive == XR_TRUE)
+        {
+            *valueOut = floatState.currentState;
+            return true;
+        }
+        return false;
+    };
+
+    auto readVector2Action = [&](XrAction action, XrPath subactionPath, float* xOut, float* yOut) {
+        if (action == XR_NULL_HANDLE)
+        {
+            return false;
+        }
+
+        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+        getInfo.action = action;
+        getInfo.subactionPath = subactionPath;
+        XrActionStateVector2f vec2State = {XR_TYPE_ACTION_STATE_VECTOR2F};
+        XrResult result = xrGetActionStateVector2f(session_, &getInfo, &vec2State);
+        if (XR_SUCCEEDED(result) && vec2State.isActive == XR_TRUE)
+        {
+            *xOut = vec2State.currentState.x;
+            *yOut = vec2State.currentState.y;
+            return true;
+        }
+        return false;
+    };
+
+    auto readBooleanAction = [&](XrAction action, XrPath subactionPath) {
+        if (action == XR_NULL_HANDLE)
+        {
+            return false;
+        }
+
+        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+        getInfo.action = action;
+        getInfo.subactionPath = subactionPath;
+        XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+        XrResult result = xrGetActionStateBoolean(session_, &getInfo, &boolState);
+        return XR_SUCCEEDED(result) &&
+               boolState.isActive == XR_TRUE &&
+               boolState.currentState == XR_TRUE;
+    };
+
     // Controller poses
     if (gripSpaces_[0] != XR_NULL_HANDLE && gripSpaces_[1] != XR_NULL_HANDLE)
     {
         static bool lastControllerActive[2] = {false, false};
+        static bool lastPoseActionActive[2] = {false, false};
         for (int hand = 0; hand < 2; hand++)
         {
+            XrResult poseStateResult = XR_ERROR_HANDLE_INVALID;
+            const bool poseActionActive = readPoseActionActive(hand, &poseStateResult);
             XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
             XrResult locResult = xrLocateSpace(gripSpaces_[hand], appSpace_,
                                                 predictedDisplayTime, &loc);
 
             const bool controllerActive =
+                poseActionActive &&
                 XR_SUCCEEDED(locResult) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
@@ -2475,20 +2641,33 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
                     ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE
                     : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
             }
-            if (controllerActive != lastControllerActive[hand])
+            if (controllerActive != lastControllerActive[hand] ||
+                poseActionActive != lastPoseActionActive[hand])
             {
-                LOGI("Controller %s %s locateResult=%d flags=0x%lx",
+                const std::string profileName = currentInteractionProfileName(hand);
+                LOGI("Controller %s %s profile=%s poseActive=%d poseResult=%d "
+                     "locateResult=%d flags=0x%lx packetFlags=0x%x",
                      hand == 0 ? "left" : "right",
                      controllerActive ? "active" : "inactive",
-                     locResult, (unsigned long)loc.locationFlags);
+                     profileName.c_str(),
+                     poseActionActive ? 1 : 0,
+                     poseStateResult,
+                     locResult, (unsigned long)loc.locationFlags,
+                     packet.trackingFlags);
                 lastControllerActive[hand] = controllerActive;
+                lastPoseActionActive[hand] = poseActionActive;
             }
 
             // Debug: log controller locate results periodically
             static uint32_t ctrlLogCounter = 0;
             if (hand == 0 && ++ctrlLogCounter % 270 == 1) // First time + every ~3s
             {
-                LOGI("Controller locate: result=%d flags=0x%lx (L) / checking R next",
+                const std::string profileName = currentInteractionProfileName(hand);
+                LOGI("Controller locate L: profile=%s poseActive=%d poseResult=%d "
+                     "locateResult=%d flags=0x%lx",
+                     profileName.c_str(),
+                     poseActionActive ? 1 : 0,
+                     poseStateResult,
                      locResult, (unsigned long)loc.locationFlags);
             }
 
@@ -2518,110 +2697,38 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     }
 
     // Trigger/grip values
-    if (triggerAction_ != XR_NULL_HANDLE)
-    {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = triggerAction_;
-        XrActionStateFloat floatState = {XR_TYPE_ACTION_STATE_FLOAT};
-
-        getInfo.subactionPath = handPaths_[0];
-        if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &getInfo, &floatState)))
-        {
-            packet.leftTrigger = floatState.currentState;
-        }
-        getInfo.subactionPath = handPaths_[1];
-        if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &getInfo, &floatState)))
-        {
-            packet.rightTrigger = floatState.currentState;
-        }
-    }
-
-    if (gripAction_ != XR_NULL_HANDLE)
-    {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = gripAction_;
-        XrActionStateFloat floatState = {XR_TYPE_ACTION_STATE_FLOAT};
-
-        getInfo.subactionPath = handPaths_[0];
-        if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &getInfo, &floatState)))
-        {
-            packet.leftGrip = floatState.currentState;
-        }
-        getInfo.subactionPath = handPaths_[1];
-        if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &getInfo, &floatState)))
-        {
-            packet.rightGrip = floatState.currentState;
-        }
-    }
+    readFloatAction(triggerAction_, handPaths_[0], &packet.leftTrigger);
+    readFloatAction(triggerAction_, handPaths_[1], &packet.rightTrigger);
+    readFloatAction(gripAction_, handPaths_[0], &packet.leftGrip);
+    readFloatAction(gripAction_, handPaths_[1], &packet.rightGrip);
 
     // Thumbsticks
-    if (thumbstickAction_ != XR_NULL_HANDLE)
-    {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = thumbstickAction_;
-        XrActionStateVector2f vec2State = {XR_TYPE_ACTION_STATE_VECTOR2F};
-
-        getInfo.subactionPath = handPaths_[0];
-        if (XR_SUCCEEDED(xrGetActionStateVector2f(session_, &getInfo, &vec2State)))
-        {
-            packet.leftThumbstick[0] = vec2State.currentState.x;
-            packet.leftThumbstick[1] = vec2State.currentState.y;
-        }
-        getInfo.subactionPath = handPaths_[1];
-        if (XR_SUCCEEDED(xrGetActionStateVector2f(session_, &getInfo, &vec2State)))
-        {
-            packet.rightThumbstick[0] = vec2State.currentState.x;
-            packet.rightThumbstick[1] = vec2State.currentState.y;
-        }
-    }
+    readVector2Action(thumbstickAction_, handPaths_[0],
+                      &packet.leftThumbstick[0], &packet.leftThumbstick[1]);
+    readVector2Action(thumbstickAction_, handPaths_[1],
+                      &packet.rightThumbstick[0], &packet.rightThumbstick[1]);
 
     // Buttons
     uint32_t buttons = 0;
-    if (aButtonAction_ != XR_NULL_HANDLE)
+    if (readBooleanAction(aButtonAction_, handPaths_[0]))
     {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = aButtonAction_;
-        XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
-
-        getInfo.subactionPath = handPaths_[0];
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &getInfo, &boolState)) && boolState.currentState)
-        {
-            buttons |= protocol::BUTTON_X;
-        }
-        getInfo.subactionPath = handPaths_[1];
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &getInfo, &boolState)) && boolState.currentState)
-        {
-            buttons |= protocol::BUTTON_A;
-        }
+        buttons |= protocol::BUTTON_X;
     }
-    if (bButtonAction_ != XR_NULL_HANDLE)
+    if (readBooleanAction(aButtonAction_, handPaths_[1]))
     {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = bButtonAction_;
-        XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
-
-        getInfo.subactionPath = handPaths_[0];
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &getInfo, &boolState)) && boolState.currentState)
-        {
-            buttons |= protocol::BUTTON_Y;
-        }
-        getInfo.subactionPath = handPaths_[1];
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &getInfo, &boolState)) && boolState.currentState)
-        {
-            buttons |= protocol::BUTTON_B;
-        }
+        buttons |= protocol::BUTTON_A;
     }
-    if (menuAction_ != XR_NULL_HANDLE)
+    if (readBooleanAction(bButtonAction_, handPaths_[0]))
     {
-        XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = menuAction_;
-        getInfo.subactionPath = handPaths_[0];
-        XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
-
-        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &getInfo, &boolState)) && boolState.currentState)
-        {
-            buttons |= protocol::BUTTON_MENU;
-        }
+        buttons |= protocol::BUTTON_Y;
+    }
+    if (readBooleanAction(bButtonAction_, handPaths_[1]))
+    {
+        buttons |= protocol::BUTTON_B;
+    }
+    if (readBooleanAction(menuAction_, handPaths_[0]))
+    {
+        buttons |= protocol::BUTTON_MENU;
     }
     packet.buttonState = buttons;
 
@@ -2630,13 +2737,18 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     if (++trackingLogCounter % 270 == 0) // ~3 seconds at 90fps
     {
         LOGI("Tracking: pos=(%.3f, %.3f, %.3f) rot=(%.3f, %.3f, %.3f, %.3f) "
-             "L=(%.3f,%.3f,%.3f) R=(%.3f,%.3f,%.3f) trig=%.2f/%.2f btn=0x%x hands=0x%x",
+             "L=(%.3f,%.3f,%.3f) R=(%.3f,%.3f,%.3f) "
+             "trig=%.2f/%.2f grip=%.2f/%.2f stickL=(%.2f,%.2f) "
+             "btn=0x%x flags=0x%x",
              packet.headPosition[0], packet.headPosition[1], packet.headPosition[2],
              packet.headOrientation[0], packet.headOrientation[1],
              packet.headOrientation[2], packet.headOrientation[3],
              packet.leftControllerPos[0], packet.leftControllerPos[1], packet.leftControllerPos[2],
              packet.rightControllerPos[0], packet.rightControllerPos[1], packet.rightControllerPos[2],
-             packet.leftTrigger, packet.rightTrigger, packet.buttonState, packet.trackingFlags);
+             packet.leftTrigger, packet.rightTrigger,
+             packet.leftGrip, packet.rightGrip,
+             packet.leftThumbstick[0], packet.leftThumbstick[1],
+             packet.buttonState, packet.trackingFlags);
     }
 
     trackingSender_->Send(packet);
