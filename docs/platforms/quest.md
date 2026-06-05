@@ -86,7 +86,7 @@ Hand tracking uses separate hand-active flags and remains available while contro
 
 ## Log Validation Matrix
 
-For Quest 1, Quest 2, Quest 3, PICO Neo3/PICO 3, and PICO 4, collect `adb logcat` while streaming and confirm. When `logging.quest_logcat` is enabled from Home, the runtime writes the filtered headset log to the platform state directory (`~/Library/Application Support/OXRSys/oxrsys-headset.log` on macOS). The equivalent manual capture is:
+For Quest 1, Quest 2, Quest 3, PICO Neo3/PICO 3, and PICO 4, collect `adb logcat` while streaming and confirm. When `logging.quest_logcat` is enabled from Home, the runtime writes the filtered headset log to the platform state directory (`~/Library/Application Support/OXRSys/oxrsys-headset.log` on macOS). Before starting capture, the runtime clears headset logcat best-effort with a timeout and continues even if that clear fails. The equivalent manual capture is:
 
 ```bash
 adb logcat -c

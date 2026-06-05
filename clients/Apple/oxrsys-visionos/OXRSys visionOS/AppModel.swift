@@ -262,7 +262,11 @@ final class AppModel {
         Thread.sleep(forTimeInterval: 0.05)
 
         let connectionServer = DiscoveredServer(announce: server.announce, address: serverAddress)
-        discovery.sendConnect(to: connectionServer, deviceName: "OXRSys visionOS")
+        discovery.sendConnect(
+            to: connectionServer,
+            deviceName: "OXRSys visionOS",
+            refreshRateHz: UInt32(refreshRateHz)
+        )
         trackingSender.connect(serverIP: serverAddress)
         controlChannel.connect(serverIP: serverAddress)
 

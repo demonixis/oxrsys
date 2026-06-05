@@ -3,6 +3,8 @@
 #include "Config.h"
 #include "RuntimePlatform.h"
 
+#include <oxrsys/protocol/Protocol.h>
+
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -86,24 +88,6 @@ std::string ResolveAdbExecutable()
     return "";
 }
 
-std::string ShellQuote(const std::string& value)
-{
-    std::string quoted = "'";
-    for (char ch : value)
-    {
-        if (ch == '\'')
-        {
-            quoted += "'\\''";
-        }
-        else
-        {
-            quoted += ch;
-        }
-    }
-    quoted += "'";
-    return quoted;
-}
-
 void WaitForLogcatProcessExit(int pid)
 {
     if (pid <= 0)
@@ -125,6 +109,82 @@ void WaitForLogcatProcessExit(int pid)
     kill(static_cast<pid_t>(pid), SIGKILL);
     int status = 0;
     waitpid(static_cast<pid_t>(pid), &status, 0);
+}
+
+bool WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout, int* status)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        const pid_t result = waitpid(pid, status, WNOHANG);
+        if (result == pid)
+        {
+            return true;
+        }
+        if (result == -1)
+        {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+}
+
+void TerminateProcessGroup(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    kill(-pid, SIGTERM);
+    kill(pid, SIGTERM);
+    int status = 0;
+    if (!WaitForProcessExit(pid, std::chrono::milliseconds(500), &status))
+    {
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+}
+
+bool RunAdbLogcatClear(const std::string& adbPath, std::chrono::milliseconds timeout)
+{
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        return false;
+    }
+
+    if (pid == 0)
+    {
+        setpgid(0, 0);
+
+        const int nullFd = open("/dev/null", O_RDWR);
+        if (nullFd >= 0)
+        {
+            dup2(nullFd, STDIN_FILENO);
+            dup2(nullFd, STDOUT_FILENO);
+            dup2(nullFd, STDERR_FILENO);
+            close(nullFd);
+        }
+
+        execl(adbPath.c_str(),
+              adbPath.c_str(),
+              "logcat",
+              "-c",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    setpgid(pid, pid);
+    int status = 0;
+    if (!WaitForProcessExit(pid, timeout, &status))
+    {
+        TerminateProcessGroup(pid);
+        return false;
+    }
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 } // namespace
@@ -251,7 +311,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             else if (key == "bitrate_mbps")
             {
                 int val = std::stoi(value);
-                if (val > 0 && val <= 200)
+                if (val >= static_cast<int>(oxr::protocol::STREAMING_MIN_BITRATE_MBPS) &&
+                    val <= static_cast<int>(oxr::protocol::STREAMING_MAX_BITRATE_MBPS))
                 {
                     values.bitrateMbps = val;
                 }
@@ -493,10 +554,10 @@ void Config::StartLogcatCapture()
         return;
     }
 
-    // Clear logcat first, then start capturing
-    const std::string clearCommand = ShellQuote(adbPath) + " logcat -c 2>/dev/null";
-    const int clearResult = system(clearCommand.c_str());
-    (void)clearResult;
+    if (!RunAdbLogcatClear(adbPath, std::chrono::milliseconds(750)))
+    {
+        spdlog::warn("Quest logcat clear timed out or failed; continuing capture without clearing");
+    }
 
     int pipeFds[2] = {-1, -1};
     if (pipe(pipeFds) != 0)

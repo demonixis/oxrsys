@@ -4,6 +4,7 @@
 
 #include "Config.h"
 
+#include <chrono>
 #include <sstream>
 
 TEST_CASE("Config parser accepts quoted presets and keeps defaults for invalid values", "[config]")
@@ -85,4 +86,16 @@ quest_logcat = true
     const ConfigValues values = ParseConfigToml(input);
 
     CHECK(values.questLogcat == true);
+}
+
+TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[config][logcat]")
+{
+    const auto start = std::chrono::steady_clock::now();
+    ConfigValues values = Config::Get().GetValues();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(elapsed < std::chrono::seconds(5));
+    CHECK(values.bitrateMbps >= 1);
+
+    Config::Get().Shutdown();
 }

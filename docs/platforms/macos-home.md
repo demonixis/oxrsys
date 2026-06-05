@@ -171,6 +171,11 @@ The structured editor covers the current runtime keys:
 - `logging.file_logging`
 - `logging.quest_logcat`
 
+The bitrate control accepts the shared runtime range, `1` to `200` Mbps. Apple
+and Qt simulator clients do not add their own bitrate ceiling, so the runtime
+status `max_bitrate_mbps` should reflect the configured value when those
+clients connect.
+
 Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
 discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,
 general runtime-enabled, and logging keys to their built-in defaults and writes the file
@@ -183,7 +188,8 @@ The runtime reloads config file changes opportunistically:
 - `runtime_enabled` is applied to subsequent `xrCreateInstance` calls
 - `fov_degrees` is picked up on subsequent view location work
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
-- `quest_logcat` can start or stop adb capture after the autosaved config is written
+- `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
+  clears headset logcat best-effort with a timeout before capture and continues if that clear fails
 - `bitrate_mbps`, `resolution_scale`, `encoder_preset`, and `transport` apply when streaming or the encoder is recreated
 - file logger sink setup still requires a restart
 

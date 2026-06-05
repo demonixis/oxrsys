@@ -53,6 +53,11 @@ The handshake exposes:
   `ClientConnect.deviceName`
 - preferred codec and bitrate limits
 
+`ClientConnect.maxBitrateMbps` is a client-side ceiling. A value of `0`
+(`CLIENT_MAX_BITRATE_USE_SERVER_CONFIG`) means the client does not impose a
+bitrate cap, so the runtime uses `streaming.bitrate_mbps` from its config. The
+runtime accepts configured bitrates from `1` to `200` Mbps.
+
 ## Video Stream
 
 UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:

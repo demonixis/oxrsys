@@ -1038,7 +1038,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         if (IsGraphicsContextValid(graphicsContext_))
         {
             const ConfigValues config = Config::Get().GetValues();
-            uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
+            uint32_t bitrateMbps =
+                (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
                 ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
                 : config.bitrateMbps;
             configMaxBitrateMbps_.store(bitrateMbps);
@@ -1119,7 +1120,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         if (IsGraphicsContextValid(graphicsContext_))
         {
             const ConfigValues config = Config::Get().GetValues();
-            uint32_t bitrateMbps = (clientConnect.maxBitrateMbps > 0)
+            uint32_t bitrateMbps =
+                (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
                 ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
                 : config.bitrateMbps;
             configMaxBitrateMbps_.store(bitrateMbps);

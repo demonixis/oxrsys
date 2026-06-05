@@ -44,6 +44,7 @@ add_executable(oxrsys-home
 
 target_include_directories(oxrsys-home PRIVATE
     src
+    ${OXRSYS_PROTOCOL_INCLUDE_DIR}
 )
 
 target_link_libraries(oxrsys-home PRIVATE
@@ -58,6 +59,7 @@ add_executable(oxrsys-home-tests
 
 target_include_directories(oxrsys-home-tests PRIVATE
     src
+    ${OXRSYS_PROTOCOL_INCLUDE_DIR}
 )
 
 target_link_libraries(oxrsys-home-tests PRIVATE

@@ -2,10 +2,17 @@
 
 #pragma once
 
+#include <oxrsys/protocol/Protocol.h>
+
 #include <QString>
 
 struct ServerConfig
 {
+    static constexpr int MinBitrateMbps =
+        static_cast<int>(oxr::protocol::STREAMING_MIN_BITRATE_MBPS);
+    static constexpr int MaxBitrateMbps =
+        static_cast<int>(oxr::protocol::STREAMING_MAX_BITRATE_MBPS);
+
     bool runtimeEnabled = true;
     int bitrateMbps = 50;
     int fovDegrees = 100;

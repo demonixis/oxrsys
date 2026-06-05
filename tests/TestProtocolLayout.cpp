@@ -17,6 +17,9 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
     STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);
     STATIC_REQUIRE(TCP_RECORD_MAGIC == 0x4f585255);
+    STATIC_REQUIRE(STREAMING_MIN_BITRATE_MBPS == 1);
+    STATIC_REQUIRE(STREAMING_MAX_BITRATE_MBPS == 200);
+    STATIC_REQUIRE(CLIENT_MAX_BITRATE_USE_SERVER_CONFIG == 0);
 
     STATIC_REQUIRE(sizeof(LatencyReport) == 20);
     STATIC_REQUIRE(sizeof(RequestKeyframe) == 12);

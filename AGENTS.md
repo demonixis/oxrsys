@@ -25,7 +25,9 @@ distribution so it can scan known apps, launch compatible apps with the user-sel
 The Home app shows a main-window runtime activity summary from
 `~/Library/Application Support/OXRSys/runtime_status.json`, including idle/streaming state,
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
-per-app custom ADB path selection for USB setup.
+per-app custom ADB path selection for USB setup. Home streaming bitrate controls use the shared
+runtime 1-200 Mbps bounds, and clients can send `ClientConnect.maxBitrateMbps = 0` to use the
+server-configured bitrate without adding a client-side cap.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
 same-process window backed by the shared `OXRSysSimulator` Swift package, and show live runtime
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
@@ -70,6 +72,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - `Session::EndFrame()` must stay non-blocking.
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
 - Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming.
+- Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
 - Headset refresh rate is negotiated from the client.
 - The Quest Android client requests its preferred display refresh rate from the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value.
 - Latency reports feed bounded pose prediction.

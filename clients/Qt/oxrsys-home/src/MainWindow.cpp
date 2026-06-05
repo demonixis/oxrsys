@@ -787,7 +787,11 @@ QWidget* MainWindow::buildStreamingTab()
         configLayout->addLayout(row);
     };
 
-    addSlider("Bitrate", &bitrateSlider_, &bitrateValueLabel_, 1, 200);
+    addSlider("Bitrate",
+              &bitrateSlider_,
+              &bitrateValueLabel_,
+              ServerConfig::MinBitrateMbps,
+              ServerConfig::MaxBitrateMbps);
     addSlider("Vertical FOV", &fovSlider_, &fovValueLabel_, 60, 150);
     addSlider("Resolution Scale", &resolutionSlider_, &resolutionValueLabel_, 25, 100);
     addSlider("Keyframe Interval", &keyframeSlider_, &keyframeValueLabel_, 1, 10);

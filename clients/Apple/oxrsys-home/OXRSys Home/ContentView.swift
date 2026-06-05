@@ -393,7 +393,7 @@ struct ContentView: View {
                                 }
                             }
                         ),
-                        range: 1...200,
+                        range: Double(OXRSysServerConfig.minBitrateMbps)...Double(OXRSysServerConfig.maxBitrateMbps),
                         displayValue: "\(model.serverConfig.bitrateMbps) Mbps"
                     )
 

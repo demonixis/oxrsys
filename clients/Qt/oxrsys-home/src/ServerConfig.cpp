@@ -190,7 +190,8 @@ ServerConfig ServerConfig::parse(const QString& text)
     }
 
     const int bitrate = rawValue("bitrate_mbps", text).toInt(&ok);
-    if (ok && bitrate >= 1 && bitrate <= 200)
+    if (ok && bitrate >= ServerConfig::MinBitrateMbps &&
+        bitrate <= ServerConfig::MaxBitrateMbps)
     {
         config.bitrateMbps = bitrate;
     }

@@ -112,7 +112,12 @@ public final class DiscoveryClient: Sendable {
     }
 
     /// Send ClientConnect and stop discovery. Does NOT block — sends immediately.
-    public func sendConnect(to server: DiscoveredServer, deviceName: String = "OXRSys Client") {
+    public func sendConnect(
+        to server: DiscoveredServer,
+        deviceName: String = "OXRSys Client",
+        maxBitrateMbps: UInt32 = OXRProtocol.clientMaxBitrateUseServerConfig,
+        refreshRateHz: UInt32 = 0
+    ) {
         // Send on a separate socket — no dependency on the discovery thread.
         let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else {
@@ -121,6 +126,8 @@ public final class DiscoveryClient: Sendable {
         }
 
         var connect = ClientConnect()
+        connect.maxBitrateMbps = maxBitrateMbps
+        connect.refreshRateHz = refreshRateHz
         connect.setDeviceName(deviceName)
 
         var addr = sockaddr_in()

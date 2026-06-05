@@ -43,6 +43,9 @@ The Streaming tab autosaves TOML edits after a short debounce. `Default` restore
 streaming, general runtime-enabled, and logging keys to their built-in defaults and writes the file
 immediately. `Reveal Runtime Logs` opens the platform state directory that contains
 `oxrsys-runtime.log`, `oxrsys-headset.log`, and `runtime_status.json` when those files exist.
+The bitrate slider uses the shared runtime range, `1` to `200` Mbps. The Qt simulator sends
+`ClientConnect.maxBitrateMbps = 0`, so it does not add a client-side bitrate cap and the runtime
+status `max_bitrate_mbps` follows the server config when the simulator connects.
 
 Platform behavior:
 

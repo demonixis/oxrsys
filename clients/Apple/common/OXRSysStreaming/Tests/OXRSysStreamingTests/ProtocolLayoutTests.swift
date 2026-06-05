@@ -7,6 +7,10 @@ final class ProtocolLayoutTests: XCTestCase {
     func testDiscoveryLayoutsMatchCppWireFormat() {
         XCTAssertEqual(MemoryLayout<ServerAnnounce>.size, 92)
         XCTAssertEqual(MemoryLayout<ClientConnect>.size, 80)
+        XCTAssertEqual(OXRProtocol.streamingMinBitrateMbps, 1)
+        XCTAssertEqual(OXRProtocol.streamingMaxBitrateMbps, 200)
+        XCTAssertEqual(OXRProtocol.clientMaxBitrateUseServerConfig, 0)
+        XCTAssertEqual(ClientConnect().maxBitrateMbps, OXRProtocol.clientMaxBitrateUseServerConfig)
     }
 
     func testVideoAndControlLayoutsMatchCppWireFormat() {
