@@ -353,6 +353,8 @@ void NetworkReceiver::ReassembleFrame(const protocol::VideoPacketHeader& header,
                 size_t fecOffset = groupIdx * protocol::MAX_PACKET_PAYLOAD;
                 memcpy(pendingFrame_.fecData.data() + fecOffset, payload,
                        std::min(payloadSize, protocol::MAX_PACKET_PAYLOAD));
+                pendingFrame_.fecGroupLastPacketSizes[groupIdx] =
+                    header.fecGroupLastPacketPayloadSize;
                 pendingFrame_.fecReceived[groupIdx] = true;
 
                 // Try FEC recovery if frame is almost complete
@@ -412,6 +414,8 @@ void NetworkReceiver::ReassembleFrame(const protocol::VideoPacketHeader& header,
         pendingFrame_.fecReceived.resize(pendingFrame_.fecGroupCount, false);
         pendingFrame_.fecData.clear();
         pendingFrame_.fecData.resize(pendingFrame_.fecGroupCount * protocol::MAX_PACKET_PAYLOAD, 0);
+        pendingFrame_.fecGroupLastPacketSizes.clear();
+        pendingFrame_.fecGroupLastPacketSizes.resize(pendingFrame_.fecGroupCount, 0);
     }
 
     // Store this packet's data
@@ -540,17 +544,14 @@ bool NetworkReceiver::TryFecRecovery()
         uint8_t* recoveredSlot = pendingFrame_.data.data() + missingIdx * protocol::MAX_PACKET_PAYLOAD;
         fec::Decode(presentPtrs.data(), presentSizes.data(), presentCount, fecPayload, recoveredSlot);
 
-        // For the recovered packet, we don't know the exact size — use MAX_PACKET_PAYLOAD
-        // unless it's the last packet (which is typically smaller). For non-last packets,
-        // MAX_PACKET_PAYLOAD is correct since the server pads to full size.
         uint16_t recoveredSize = static_cast<uint16_t>(protocol::MAX_PACKET_PAYLOAD);
-        if (missingIdx == totalPackets - 1 && totalPackets > 1)
+        if (missingIdx == groupEnd - 1)
         {
-            // Last packet might be smaller — we can't know the exact size from FEC alone.
-            // Use MAX_PACKET_PAYLOAD; the compaction step handles variable-sized last packets.
-            // This may include some trailing zeros, but H.265 decoders tolerate this (RBSP
-            // trailing zeros are valid).
-            recoveredSize = static_cast<uint16_t>(protocol::MAX_PACKET_PAYLOAD);
+            const uint16_t groupLastPacketSize = pendingFrame_.fecGroupLastPacketSizes[g];
+            if (groupLastPacketSize > 0 && groupLastPacketSize <= protocol::MAX_PACKET_PAYLOAD)
+            {
+                recoveredSize = groupLastPacketSize;
+            }
         }
 
         pendingFrame_.packetReceived[missingIdx] = true;

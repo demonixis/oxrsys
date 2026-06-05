@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <thread>
 
 #if !defined(_WIN32)
 #include <ifaddrs.h>
@@ -34,6 +35,9 @@ constexpr int kBestEffortSendFlags = MSG_DONTWAIT;
 #else
 constexpr int kBestEffortSendFlags = 0;
 #endif
+
+constexpr auto kTcpSendDeadline = std::chrono::milliseconds(100);
+constexpr auto kTcpSendRetrySleep = std::chrono::milliseconds(1);
 
 int64_t SteadyClockNowNs()
 {
@@ -69,6 +73,7 @@ bool SendAll(SocketHandle socket, const void* data, size_t size)
 {
     const auto* bytes = static_cast<const uint8_t*>(data);
     size_t sentTotal = 0;
+    auto sendDeadline = Clock::now() + kTcpSendDeadline;
     while (sentTotal < size)
     {
         int sent = oxrsys::runtime_socket::Send(socket, bytes + sentTotal, size - sentTotal, 0);
@@ -76,6 +81,11 @@ bool SendAll(SocketHandle socket, const void* data, size_t size)
         {
             if (oxrsys::runtime_socket::IsInterruptedOrWouldBlock())
             {
+                if (Clock::now() >= sendDeadline)
+                {
+                    return false;
+                }
+                std::this_thread::sleep_for(kTcpSendRetrySleep);
                 continue;
             }
             return false;
@@ -85,6 +95,7 @@ bool SendAll(SocketHandle socket, const void* data, size_t size)
             return false;
         }
         sentTotal += static_cast<size_t>(sent);
+        sendDeadline = Clock::now() + kTcpSendDeadline;
     }
     return true;
 }
@@ -141,6 +152,7 @@ void ConfigureTcpSocket(SocketHandle socket)
 {
     oxrsys::runtime_socket::SetTcpNoDelay(socket);
     oxrsys::runtime_socket::SetNoSigpipe(socket);
+    oxrsys::runtime_socket::SetSendTimeout(socket, 0, 100000);
 }
 
 void CloseTcpSocket(SocketHandle& socket)
@@ -416,7 +428,7 @@ void StreamingServer::Stop()
         clientIp_.clear();
         clientName_.clear();
         clientPort_ = 0;
-        clientUsesUsbAdb_ = false;
+        clientUsesUsbAdb_.store(false);
     }
 
     oxrsys::runtime_socket::Close(broadcastSocket_);
@@ -680,7 +692,7 @@ void StreamingServer::TcpControlThread()
         {
             CloseTcpSocket(clientSocket);
         }
-        if (clientUsesUsbAdb_)
+        if (clientUsesUsbAdb_.load())
         {
             HandleClientDisconnect();
         }
@@ -709,7 +721,7 @@ void StreamingServer::TcpVideoThread()
         }
         {
             std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
-            if (clientUsesUsbAdb_)
+            if (clientUsesUsbAdb_.load())
             {
                 packetDispatchState_->videoSocket = clientSocket;
                 packetDispatchState_->videoUsesTcp = true;
@@ -853,8 +865,11 @@ void StreamingServer::EncodeThread()
                 memcpy(pose.orientation, frame.headOrientation, sizeof(float) * 4);
 
                 std::lock_guard<std::mutex> sendLock(packetDispatchState_->sendMutex);
-                SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::RenderPose,
-                              &pose, sizeof(pose));
+                if (!SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::RenderPose,
+                                   &pose, sizeof(pose)))
+                {
+                    MarkTcpVideoSendFailed(packetDispatchState_, videoSocket);
+                }
             }
             else if (!clientIp.empty() && oxrsys::runtime_socket::IsValid(videoSocket))
             {
@@ -1010,7 +1025,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         clientIp_ = ipStr;
         clientPort_ = ntohs(clientAddr.sin_port);
         clientName_ = clientName;
-        clientUsesUsbAdb_ = false;
+        clientUsesUsbAdb_.store(false);
     }
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
@@ -1091,7 +1106,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         clientIp_ = "127.0.0.1";
         clientPort_ = oxr::protocol::CONTROL_PORT;
         clientName_ = clientName;
-        clientUsesUsbAdb_ = true;
+        clientUsesUsbAdb_.store(true);
     }
     {
         std::lock_guard<std::mutex> tcpLock(tcpSocketMutex_);
@@ -1155,7 +1170,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     if (!encoderReady)
     {
         RuntimeStatus::SetIdle();
-        clientUsesUsbAdb_ = false;
+        clientUsesUsbAdb_.store(false);
         state_.store(State::Broadcasting);
         if (wifiEnabled_ && running_.load())
         {
@@ -1177,13 +1192,14 @@ void StreamingServer::HandleClientDisconnect()
     bool wasUsbClient = false;
     {
         std::lock_guard<std::mutex> lock(clientMutex_);
-        hadClient = clientUsesUsbAdb_ || !clientIp_.empty() ||
+        const bool usbClient = clientUsesUsbAdb_.load();
+        hadClient = usbClient || !clientIp_.empty() ||
                     !clientName_.empty() || clientPort_ != 0;
-        wasUsbClient = clientUsesUsbAdb_;
+        wasUsbClient = usbClient;
         clientIp_.clear();
         clientName_.clear();
         clientPort_ = 0;
-        clientUsesUsbAdb_ = false;
+        clientUsesUsbAdb_.store(false);
     }
     if (previousState != State::Connected && !hadClient)
     {
@@ -1333,7 +1349,7 @@ void StreamingServer::HandleControlPayload(const uint8_t* data, size_t size)
     else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::NackRequest) &&
              size >= sizeof(oxr::protocol::NackRequest))
     {
-        if (!clientUsesUsbAdb_)
+        if (!clientUsesUsbAdb_.load())
         {
             HandleNackRequest(*reinterpret_cast<const oxr::protocol::NackRequest*>(data));
         }
@@ -1459,8 +1475,11 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         memcpy(payload.data() + sizeof(nalHeader), data, size);
 
         std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
-        SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::VideoNal,
-                      payload.data(), payload.size());
+        if (!SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::VideoNal,
+                           payload.data(), payload.size()))
+        {
+            MarkTcpVideoSendFailed(dispatchState, videoSocket);
+        }
         return;
     }
 
@@ -1549,6 +1568,8 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             fecHeader.totalPackets = totalPackets;
             fecHeader.payloadSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
             fecHeader.flags = oxr::protocol::VIDEO_FLAG_FEC | oxr::protocol::VIDEO_FLAG_STEREO;
+            fecHeader.fecGroupLastPacketPayloadSize =
+                payloadSizes[groupStart + groupCount - 1];
             if (isKeyframe)
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
@@ -1590,6 +1611,34 @@ bool StreamingServer::SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecor
         return true;
     }
     return SendAll(socket, payload, payloadSize);
+}
+
+void StreamingServer::MarkTcpVideoSendFailed(
+    const std::shared_ptr<PacketDispatchState>& dispatchState,
+    SocketHandle socket)
+{
+    if (!dispatchState || !oxrsys::runtime_socket::IsValid(socket))
+    {
+        return;
+    }
+
+    bool clearedDispatch = false;
+    {
+        std::lock_guard<std::mutex> lock(dispatchState->mutex);
+        if (dispatchState->videoUsesTcp && dispatchState->videoSocket == socket)
+        {
+            dispatchState->videoSocket = oxrsys::runtime_socket::InvalidSocket;
+            dispatchState->videoUsesTcp = false;
+            dispatchState->acceptingPackets = false;
+            clearedDispatch = true;
+        }
+    }
+
+    if (clearedDispatch)
+    {
+        oxrsys::runtime_socket::Shutdown(socket);
+        spdlog::warn("StreamingServer: USB TCP video send failed; disabled stale video dispatch");
+    }
 }
 
 void StreamingServer::HandleNackRequest(const oxr::protocol::NackRequest& request)

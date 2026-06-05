@@ -119,7 +119,7 @@ void Close(SocketHandle& socket)
     socket = InvalidSocket;
 }
 
-void ShutdownAndClose(SocketHandle& socket)
+void Shutdown(SocketHandle socket)
 {
     if (!IsValid(socket))
     {
@@ -130,6 +130,15 @@ void ShutdownAndClose(SocketHandle& socket)
 #else
     shutdown(socket, SHUT_RDWR);
 #endif
+}
+
+void ShutdownAndClose(SocketHandle& socket)
+{
+    if (!IsValid(socket))
+    {
+        return;
+    }
+    Shutdown(socket);
     Close(socket);
 }
 
@@ -166,6 +175,27 @@ bool SetReceiveTimeout(SocketHandle socket, long seconds, long microseconds)
     timeout.tv_sec = seconds;
     timeout.tv_usec = microseconds;
     return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
+#endif
+}
+
+bool SetSendTimeout(SocketHandle socket, long seconds, long microseconds)
+{
+    if (!IsValid(socket))
+    {
+        return false;
+    }
+#if defined(_WIN32)
+    DWORD timeoutMs = static_cast<DWORD>(seconds * 1000 + microseconds / 1000);
+    return setsockopt(socket,
+                      SOL_SOCKET,
+                      SO_SNDTIMEO,
+                      reinterpret_cast<const char*>(&timeoutMs),
+                      sizeof(timeoutMs)) == 0;
+#else
+    timeval timeout = {};
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = microseconds;
+    return setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
 #endif
 }
 
@@ -235,6 +265,9 @@ int Send(SocketHandle socket, const void* data, size_t size, int flags)
 #if defined(_WIN32)
     return send(socket, static_cast<const char*>(data), chunkSize, flags);
 #else
+#if defined(MSG_NOSIGNAL)
+    flags |= MSG_NOSIGNAL;
+#endif
     return static_cast<int>(send(socket, data, static_cast<size_t>(chunkSize), flags));
 #endif
 }

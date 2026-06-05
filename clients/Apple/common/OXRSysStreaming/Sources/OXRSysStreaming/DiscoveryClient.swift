@@ -4,6 +4,7 @@
 // sends ClientConnect back to the server.
 
 import Foundation
+import os
 
 public struct DiscoveredServer: Sendable {
     public let announce: ServerAnnounce
@@ -19,21 +20,30 @@ public struct DiscoveredServer: Sendable {
     }
 }
 
-public final class DiscoveryClient: Sendable {
-    private nonisolated(unsafe) var socket: Int32 = -1
-    // Accessed from both the discovery thread and the main thread — nonisolated(unsafe)
-    // is fine here since it's a simple boolean flag (atomic on ARM64).
-    private nonisolated(unsafe) var running = false
-    private nonisolated(unsafe) var discoveryThread: Thread?
+public final class DiscoveryClient: @unchecked Sendable {
+    private struct State {
+        var socket: Int32 = -1
+        var running = false
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     public init() {}
 
     public func start(onServerFound: @escaping @Sendable (DiscoveredServer) -> Void) {
-        guard !running else { return }
+        let shouldStart = state.withLock { state in
+            if state.running {
+                return false
+            }
+            state.running = true
+            return true
+        }
+        guard shouldStart else { return }
 
         let thread = Thread { [self] in
             let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
             guard fd >= 0 else {
+                state.withLock { $0.running = false }
                 print("[Discovery] Failed to create socket: \(errno)")
                 return
             }
@@ -56,21 +66,29 @@ public final class DiscoveryClient: Sendable {
             guard bindResult == 0 else {
                 print("[Discovery] Bind failed: \(errno)")
                 close(fd)
+                state.withLock { $0.running = false }
                 return
             }
 
             var tv = timeval(tv_sec: 1, tv_usec: 0)
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-            socket = fd
-            running = true
+            let shouldContinue = state.withLock { state in
+                guard state.running else { return false }
+                state.socket = fd
+                return true
+            }
+            guard shouldContinue else {
+                close(fd)
+                return
+            }
             print("[Discovery] Listening on port \(OXRProtocol.discoveryPort)")
 
             var buf = [UInt8](repeating: 0, count: 2048)
             var senderAddr = sockaddr_in()
             var senderLen = socklen_t(MemoryLayout<sockaddr_in>.size)
 
-            while running {
+            while isRunning() {
                 senderLen = socklen_t(MemoryLayout<sockaddr_in>.size)
                 let n = withUnsafeMutablePointer(to: &senderAddr) { ptr in
                     ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
@@ -83,7 +101,7 @@ public final class DiscoveryClient: Sendable {
                 guard n >= MemoryLayout<ServerAnnounce>.size else { continue }
 
                 let announce = buf.withUnsafeBytes { raw in
-                    raw.load(as: ServerAnnounce.self)
+                    raw.loadUnaligned(as: ServerAnnounce.self)
                 }
 
                 let ip = withUnsafePointer(to: senderAddr.sin_addr) { ptr in
@@ -97,18 +115,34 @@ public final class DiscoveryClient: Sendable {
                 onServerFound(server)
             }
 
-            close(fd)
-            socket = -1
+            let shouldClose = state.withLock { state in
+                state.running = false
+                if state.socket == fd {
+                    state.socket = -1
+                    return true
+                }
+                return false
+            }
+            if shouldClose {
+                close(fd)
+            }
             print("[Discovery] Stopped")
         }
         thread.qualityOfService = .userInitiated
         thread.name = "oxr.discovery"
-        discoveryThread = thread
         thread.start()
     }
 
     public func stop() {
-        running = false
+        let socketToClose = state.withLock { state in
+            state.running = false
+            let socket = state.socket
+            state.socket = -1
+            return socket
+        }
+        if socketToClose >= 0 {
+            close(socketToClose)
+        }
     }
 
     /// Send ClientConnect and stop discovery. Does NOT block — sends immediately.
@@ -153,7 +187,10 @@ public final class DiscoveryClient: Sendable {
             print("[Discovery] Failed to send ClientConnect: \(errno)")
         }
 
-        // Now stop discovery
-        running = false
+        stop()
+    }
+
+    private func isRunning() -> Bool {
+        state.withLock { $0.running }
     }
 }

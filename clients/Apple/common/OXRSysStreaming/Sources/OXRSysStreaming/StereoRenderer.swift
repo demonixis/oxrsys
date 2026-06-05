@@ -4,6 +4,7 @@
 // Renders a full-screen textured quad with the stereo side-by-side video.
 
 import CoreVideo
+import Foundation
 import Metal
 import MetalKit
 
@@ -25,14 +26,21 @@ public final class StereoRenderer: NSObject, @unchecked Sendable {
     private var textureCache: CVMetalTextureCache?
 
     // Latest decoded frame (written by decoder thread, read by render thread)
-    private var unfairLock = os_unfair_lock()
+    private let stateLock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
     private var frameCount: UInt64 = 0
 
     // IPD offset in UV space: written infrequently by main thread, read by render thread.
-    // Float reads/writes are atomic on ARM64 so no lock needed.
-    public nonisolated(unsafe) var ipdOffset: Float = 0
-    public nonisolated(unsafe) var displayMode: StereoDisplayMode = .stereoView
+    private var _ipdOffset: Float = 0
+    private var _displayMode: StereoDisplayMode = .stereoView
+    public var ipdOffset: Float {
+        get { locked { _ipdOffset } }
+        set { locked { _ipdOffset = newValue } }
+    }
+    public var displayMode: StereoDisplayMode {
+        get { locked { _displayMode } }
+        set { locked { _displayMode = newValue } }
+    }
 
     public init?(device: MTLDevice) {
         self.device = device
@@ -46,10 +54,16 @@ public final class StereoRenderer: NSObject, @unchecked Sendable {
 
     /// Called from the H265Decoder callback (background thread).
     public func submitFrame(_ pixelBuffer: CVPixelBuffer) {
-        os_unfair_lock_lock(&unfairLock)
-        latestPixelBuffer = pixelBuffer
-        frameCount += 1
-        os_unfair_lock_unlock(&unfairLock)
+        locked {
+            latestPixelBuffer = pixelBuffer
+            frameCount += 1
+        }
+    }
+
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
     }
 
     // MARK: - Setup
@@ -107,16 +121,20 @@ public final class StereoRenderer: NSObject, @unchecked Sendable {
 }
 
 extension StereoRenderer: MTKViewDelegate {
-    public nonisolated func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+    public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         // No-op for now
     }
 
-    public nonisolated func draw(in view: MTKView) {
-        os_unfair_lock_lock(&unfairLock)
-        let pixelBuffer = latestPixelBuffer
-        os_unfair_lock_unlock(&unfairLock)
+    public func draw(in view: MTKView) {
+        let stateSnapshot = locked {
+            (
+                pixelBuffer: latestPixelBuffer,
+                ipdOffset: _ipdOffset,
+                displayMode: _displayMode
+            )
+        }
 
-        guard let pixelBuffer,
+        guard let pixelBuffer = stateSnapshot.pixelBuffer,
               let pipeline = pipelineYCbCr,
               let drawable = view.currentDrawable,
               let passDesc = view.currentRenderPassDescriptor else { return }
@@ -136,8 +154,8 @@ extension StereoRenderer: MTKViewDelegate {
         encoder.setFragmentTexture(texY, index: 0)
         encoder.setFragmentTexture(texCbCr, index: 1)
         var uniforms = FragmentUniforms(
-            ipdOffset: ipdOffset,
-            displayMode: displayMode.rawValue
+            ipdOffset: stateSnapshot.ipdOffset,
+            displayMode: stateSnapshot.displayMode.rawValue
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FragmentUniforms>.size, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)

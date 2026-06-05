@@ -27,7 +27,8 @@ oxr::protocol::VideoPacketHeader videoHeader(uint32_t frameIndex,
                                              uint16_t packetIndex,
                                              uint16_t totalPackets,
                                              uint16_t payloadSize,
-                                             uint8_t flags = oxr::protocol::VIDEO_FLAG_STEREO)
+                                             uint8_t flags = oxr::protocol::VIDEO_FLAG_STEREO,
+                                             uint16_t fecGroupLastPacketPayloadSize = 0)
 {
     oxr::protocol::VideoPacketHeader header = {};
     header.frameIndex = frameIndex;
@@ -36,6 +37,7 @@ oxr::protocol::VideoPacketHeader videoHeader(uint32_t frameIndex,
     header.payloadSize = payloadSize;
     header.flags = flags;
     header.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+    header.fecGroupLastPacketPayloadSize = fecGroupLastPacketPayloadSize;
     header.presentationTimeNs = 1234 + frameIndex;
     return header;
 }
@@ -132,6 +134,49 @@ void testFecRecovery()
            "Expected recovered packet bytes at the missing packet offset");
 }
 
+void testFecRecoveryUsesFinalShortPacketSize()
+{
+    VideoFrameAssembler assembler;
+    QByteArray first(static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD), 'a');
+    QByteArray missing("tail", 4);
+    const uint8_t* payloads[] = {
+        reinterpret_cast<const uint8_t*>(first.constData()),
+        reinterpret_cast<const uint8_t*>(missing.constData()),
+    };
+    const uint16_t payloadSizes[] = {
+        static_cast<uint16_t>(first.size()),
+        static_cast<uint16_t>(missing.size()),
+    };
+    QByteArray fec;
+    fec.resize(static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD));
+    oxr::fec::Encode(payloads, payloadSizes, 2, reinterpret_cast<uint8_t*>(fec.data()));
+
+    assembler.addPacket(videoHeader(8,
+                                    0,
+                                    2,
+                                    static_cast<uint16_t>(first.size())),
+                        first.constData(),
+                        first.size(),
+                        10);
+    const QList<AssembledVideoFrame> frames =
+        assembler.addPacket(videoHeader(8,
+                                        0,
+                                        2,
+                                        static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD),
+                                        oxr::protocol::VIDEO_FLAG_FEC |
+                                            oxr::protocol::VIDEO_FLAG_STEREO,
+                                        static_cast<uint16_t>(missing.size())),
+                            fec.constData(),
+                            fec.size(),
+                            11);
+
+    expect(frames.size() == 1, "Expected FEC to recover final short packet");
+    expect(frames.first().nalUnit.size() == first.size() + missing.size(),
+           "Expected recovered frame to use final packet size metadata");
+    expect(frames.first().nalUnit.mid(first.size()) == missing,
+           "Expected recovered final packet bytes without padding");
+}
+
 void testTrackingFlagsAndMovementTargets()
 {
     using namespace oxrsys::qt_simulator;
@@ -184,6 +229,7 @@ int main()
         testIncompleteFrameDrop();
         testRenderPoseIgnored();
         testFecRecovery();
+        testFecRecoveryUsesFinalShortPacketSize();
         testTrackingFlagsAndMovementTargets();
     }
     catch (const std::exception& error)

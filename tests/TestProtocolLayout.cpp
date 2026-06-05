@@ -13,6 +13,9 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(ServerAnnounce) == 92);
     STATIC_REQUIRE(sizeof(ClientConnect) == 80);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
+    STATIC_REQUIRE(offsetof(VideoPacketHeader, fecGroupLastPacketPayloadSize) == 12);
+    STATIC_REQUIRE(offsetof(VideoPacketHeader, reserved) == 14);
+    STATIC_REQUIRE(offsetof(VideoPacketHeader, presentationTimeNs) == 16);
     STATIC_REQUIRE(sizeof(TcpRecordHeader) == 12);
     STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
     STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);

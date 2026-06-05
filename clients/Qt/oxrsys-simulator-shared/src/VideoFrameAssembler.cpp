@@ -82,6 +82,8 @@ QList<AssembledVideoFrame> VideoFrameAssembler::addPacket(
                         static_cast<size_t>(payloadSize));
         }
         pendingFecReceived_[static_cast<int>(groupIndex)] = 1;
+        pendingFecGroupLastPacketSizes_[static_cast<int>(groupIndex)] =
+            header.fecGroupLastPacketPayloadSize;
 
         if (tryFecRecovery() && isComplete())
         {
@@ -149,6 +151,7 @@ void VideoFrameAssembler::reset()
     pendingPacketReceived_.clear();
     pendingFecData_.clear();
     pendingFecReceived_.clear();
+    pendingFecGroupLastPacketSizes_.clear();
     pendingRecoveredWithFec_ = false;
 }
 
@@ -180,6 +183,7 @@ void VideoFrameAssembler::startFrame(const oxr::protocol::VideoPacketHeader& hea
     pendingFecData_.fill(0, static_cast<qsizetype>(fecGroups) *
                                 static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD));
     pendingFecReceived_.fill(0, static_cast<int>(fecGroups));
+    pendingFecGroupLastPacketSizes_.fill(0, static_cast<int>(fecGroups));
 }
 
 QList<AssembledVideoFrame> VideoFrameAssembler::finishPendingFrame(bool countDropIfIncomplete,
@@ -262,8 +266,18 @@ bool VideoFrameAssembler::tryFecRecovery()
         }
 
         pendingPacketReceived_[missingIndex] = 1;
-        pendingPacketSizes_[missingIndex] =
-            static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
+        uint16_t recoveredSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
+        if (missingIndex == static_cast<int>(groupEnd - 1))
+        {
+            const uint16_t groupLastPacketSize =
+                pendingFecGroupLastPacketSizes_[groupIndex];
+            if (groupLastPacketSize > 0 &&
+                groupLastPacketSize <= oxr::protocol::MAX_PACKET_PAYLOAD)
+            {
+                recoveredSize = groupLastPacketSize;
+            }
+        }
+        pendingPacketSizes_[missingIndex] = recoveredSize;
         ++pendingReceivedPackets_;
         ++fecRecoveries_;
         pendingRecoveredWithFec_ = true;

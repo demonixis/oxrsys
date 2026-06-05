@@ -10,6 +10,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
@@ -304,6 +305,57 @@ void testCustomAdbPreferencePersistence()
     settings.clear();
 }
 
+void testHomeModelTransportRefreshIsAsyncWithSlowAdb()
+{
+#if !defined(Q_OS_WIN)
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    const QString slowAdbPath = QDir(temporaryDir.path()).filePath("adb");
+    writeFile(slowAdbPath,
+              "#!/bin/sh\n"
+              "sleep 1\n"
+              "if [ \"$1\" = \"version\" ]; then\n"
+              "  echo \"Android Debug Bridge version 1.0.41\"\n"
+              "  exit 0\n"
+              "fi\n"
+              "if [ \"$1\" = \"devices\" ]; then\n"
+              "  echo \"List of devices attached\"\n"
+              "  exit 0\n"
+              "fi\n"
+              "exit 0\n");
+    makeExecutable(slowAdbPath);
+
+    HomePaths paths;
+    paths.configRoot = QDir(temporaryDir.path()).filePath("config");
+    paths.dataRoot = QDir(temporaryDir.path()).filePath("data");
+    paths.stateRoot = QDir(temporaryDir.path()).filePath("state");
+    paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
+    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
+    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
+    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
+    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+
+    const QString organization = "OXRSysHomeTests";
+    const QString application =
+        "HomeQt-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings settings(organization, application);
+    settings.clear();
+    settings.setValue("customAdbPath", slowAdbPath);
+
+    QElapsedTimer timer;
+    timer.start();
+    HomeModel model(nullptr, organization, application, paths);
+    expect(timer.elapsed() < 250, "Expected HomeModel construction to avoid slow adb blocking");
+
+    timer.restart();
+    model.refreshQuestUsbDevices();
+    expect(timer.elapsed() < 100, "Expected USB refresh to return before slow adb completes");
+
+    settings.clear();
+#endif
+}
+
 void testRuntimeActivityParsing()
 {
     const RuntimeActivity activity = RuntimeActivity::parse(R"({
@@ -458,6 +510,7 @@ int main(int argc, char** argv)
         testAdbParsing();
         testAdbCustomPathSelection();
         testCustomAdbPreferencePersistence();
+        testHomeModelTransportRefreshIsAsyncWithSlowAdb();
         testRuntimeActivityParsing();
         testDesktopInspection();
         testMacAppInspection();

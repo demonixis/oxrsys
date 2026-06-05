@@ -5,36 +5,38 @@
 
 import CoreMedia
 import CoreVideo
+import Foundation
 import VideoToolbox
 
-public final class H265Decoder: Sendable {
+public final class H265Decoder: @unchecked Sendable {
     public typealias OnFrame = @Sendable (CVPixelBuffer, CMTime) -> Void
 
-    fileprivate nonisolated(unsafe) var session: VTDecompressionSession?
-    fileprivate nonisolated(unsafe) var formatDesc: CMFormatDescription?
-    fileprivate nonisolated(unsafe) var onFrame: OnFrame?
-    fileprivate nonisolated(unsafe) var onDecodeErrorCallback: (@Sendable () -> Void)?
+    private let lock = NSLock()
+    fileprivate var session: VTDecompressionSession?
+    fileprivate var formatDesc: CMFormatDescription?
+    fileprivate var onFrame: OnFrame?
+    fileprivate var onDecodeErrorCallback: (@Sendable () -> Void)?
 
     /// Called on decode errors (from VT callback thread) for keyframe recovery.
     public var onDecodeError: (@Sendable () -> Void)? {
-        get { onDecodeErrorCallback }
-        set { onDecodeErrorCallback = newValue }
+        get { locked { onDecodeErrorCallback } }
+        set { locked { onDecodeErrorCallback = newValue } }
     }
 
     // Cached parameter sets for HEVC: VPS, SPS, PPS
-    private nonisolated(unsafe) var vps: Data?
-    private nonisolated(unsafe) var sps: Data?
-    private nonisolated(unsafe) var pps: Data?
-    private nonisolated(unsafe) var paramSetsReady = false
+    private var vps: Data?
+    private var sps: Data?
+    private var pps: Data?
+    private var paramSetsReady = false
 
-    private nonisolated(unsafe) var sliceCount: Int = 0
-    private nonisolated(unsafe) var decodeErrorCount: Int = 0
-    public var totalDecodeErrors: Int { decodeErrorCount }
+    private var sliceCount: Int = 0
+    private var decodeErrorCount: Int = 0
+    public var totalDecodeErrors: Int { locked { decodeErrorCount } }
 
     public init() {}
 
     public func configure(callback: @escaping OnFrame) {
-        onFrame = callback
+        locked { onFrame = callback }
     }
 
     /// Feed a raw H.265 byte stream (may contain multiple NAL units with start codes).
@@ -49,25 +51,39 @@ public final class H265Decoder: Sendable {
 
             switch nalType {
             case 32: // VPS
-                if vps != nal {
+                let changed = locked { () -> Bool in
+                    guard vps != nal else { return false }
                     vps = nal
                     paramSetsReady = false
+                    return true
+                }
+                if changed {
                     print("[H265] Got VPS (\(nal.count) bytes)")
                 }
             case 33: // SPS
-                if sps != nal {
+                let changed = locked { () -> Bool in
+                    guard sps != nal else { return false }
                     sps = nal
                     paramSetsReady = false
+                    return true
+                }
+                if changed {
                     print("[H265] Got SPS (\(nal.count) bytes)")
                 }
             case 34: // PPS
-                if pps != nal {
-                    pps = nal
-                    paramSetsReady = false
+                let shouldCreateSession = locked { () -> Bool in
+                    if pps != nal {
+                        pps = nal
+                        paramSetsReady = false
+                        return true
+                    }
+                    return !paramSetsReady
+                }
+                if shouldCreateSession {
                     print("[H265] Got PPS (\(nal.count) bytes)")
                 }
                 // Only try to create session after PPS (last of the three)
-                if !paramSetsReady {
+                if shouldCreateSession {
                     tryCreateFormatDescription()
                 }
             case 0...31: // VCL NAL units — actual video slices
@@ -81,21 +97,32 @@ public final class H265Decoder: Sendable {
     }
 
     public func invalidate() {
-        if let session {
-            VTDecompressionSessionInvalidate(session)
+        let oldSession = locked { () -> VTDecompressionSession? in
+            let oldSession = session
+            session = nil
+            formatDesc = nil
+            vps = nil
+            sps = nil
+            pps = nil
+            paramSetsReady = false
+            return oldSession
         }
-        session = nil
-        formatDesc = nil
-        vps = nil
-        sps = nil
-        pps = nil
-        paramSetsReady = false
+        if let oldSession {
+            VTDecompressionSessionInvalidate(oldSession)
+        }
     }
 
     // MARK: - Private
 
     private func tryCreateFormatDescription() {
-        guard let vps, let sps, let pps else { return }
+        let parameterSets = locked { () -> (Data, Data, Data)? in
+            guard let currentVps = self.vps,
+                  let currentSps = self.sps,
+                  let currentPps = self.pps else { return nil }
+            return (currentVps, currentSps, currentPps)
+        }
+        guard let parameterSets else { return }
+        let (vps, sps, pps) = parameterSets
 
         // Build new format description to see if it matches the current one
         var fmt: CMFormatDescription?
@@ -128,18 +155,17 @@ public final class H265Decoder: Sendable {
         }
 
         // If we already have a session with the same format, keep it
-        if let existingFmt = formatDesc, session != nil,
-           CMFormatDescriptionEqual(existingFmt, otherFormatDescription: fmt) {
-            paramSetsReady = true
+        let canKeepExistingSession = locked { () -> Bool in
+            if let existingFmt = formatDesc, session != nil,
+               CMFormatDescriptionEqual(existingFmt, otherFormatDescription: fmt) {
+                paramSetsReady = true
+                return true
+            }
+            return false
+        }
+        if canKeepExistingSession {
             return
         }
-
-        // Destroy old session before creating new one
-        if let oldSession = session {
-            VTDecompressionSessionInvalidate(oldSession)
-            session = nil
-        }
-        formatDesc = fmt
 
         let decoderAttrs: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true,
@@ -165,25 +191,39 @@ public final class H265Decoder: Sendable {
             print("[H265] Failed to create decompression session: \(sessionStatus)")
             return
         }
-        session = newSession
-        paramSetsReady = true
-        sliceCount = 0
-        decodeErrorCount = 0
+        let oldSession = locked { () -> VTDecompressionSession? in
+            let oldSession = session
+            session = newSession
+            formatDesc = fmt
+            paramSetsReady = true
+            sliceCount = 0
+            decodeErrorCount = 0
+            return oldSession
+        }
+        if let oldSession {
+            VTDecompressionSessionInvalidate(oldSession)
+        }
 
         let dim = CMVideoFormatDescriptionGetDimensions(fmt)
         print("[H265] Decoder session created — \(dim.width)x\(dim.height)")
     }
 
     private func decodeSlice(_ nalUnit: Data, presentationTimeNs: Int64) {
-        guard let session, let formatDesc else {
+        let snapshot = locked { () -> (VTDecompressionSession, CMFormatDescription, Int)? in
+            guard let session, let formatDesc else {
+                return nil
+            }
+            sliceCount += 1
+            return (session, formatDesc, sliceCount)
+        }
+        guard let (session, formatDesc, sliceNumber) = snapshot else {
             let nalType = (nalUnit[0] >> 1) & 0x3F
-            if sliceCount == 0 {
+            let hasSeenSlices = locked { sliceCount > 0 }
+            if !hasSeenSlices {
                 print("[H265] Dropping slice — no session yet (NAL type \(nalType))")
             }
             return
         }
-
-        sliceCount += 1
 
         // Build AVCC-format buffer: 4-byte big-endian length + NAL body.
         // The buffer must outlive the async decode, so we allocate with malloc
@@ -253,14 +293,17 @@ public final class H265Decoder: Sendable {
         )
 
         if decStatus != noErr {
-            decodeErrorCount += 1
-            if decodeErrorCount <= 5 || decodeErrorCount % 100 == 0 {
-                let nalType = (nalUnit[0] >> 1) & 0x3F
-                print("[H265] DecodeFrame error: \(decStatus) (slice #\(sliceCount), NAL type \(nalType), \(nalUnit.count) bytes)")
+            let errorCount = locked { () -> Int in
+                decodeErrorCount += 1
+                return decodeErrorCount
             }
-        } else if sliceCount <= 3 || sliceCount % 200 == 0 {
+            if errorCount <= 5 || errorCount % 100 == 0 {
+                let nalType = (nalUnit[0] >> 1) & 0x3F
+                print("[H265] DecodeFrame error: \(decStatus) (slice #\(sliceNumber), NAL type \(nalType), \(nalUnit.count) bytes)")
+            }
+        } else if sliceNumber <= 3 || sliceNumber % 200 == 0 {
             let nalType = (nalUnit[0] >> 1) & 0x3F
-            print("[H265] Decoded slice #\(sliceCount) — NAL type \(nalType), \(nalUnit.count) bytes")
+            print("[H265] Decoded slice #\(sliceNumber) — NAL type \(nalType), \(nalUnit.count) bytes")
         }
     }
 
@@ -300,6 +343,23 @@ public final class H265Decoder: Sendable {
 
         return units
     }
+
+    fileprivate func invokeDecodeErrorCallback() {
+        let callback = locked { onDecodeErrorCallback }
+        callback?()
+    }
+
+    fileprivate func invokeFrameCallback(pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
+        let callback = locked { onFrame }
+        callback?(pixelBuffer, presentationTime)
+    }
+
+    @discardableResult
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
 }
 
 // VideoToolbox callback — called on an internal VT thread
@@ -317,10 +377,10 @@ private func decompressionCallback(
 
     guard status == noErr, let pixelBuffer = imageBuffer else {
         if status != noErr {
-            decoder.onDecodeErrorCallback?()
+            decoder.invokeDecodeErrorCallback()
         }
         return
     }
 
-    decoder.onFrame?(pixelBuffer, presentationTimeStamp)
+    decoder.invokeFrameCallback(pixelBuffer: pixelBuffer, presentationTime: presentationTimeStamp)
 }

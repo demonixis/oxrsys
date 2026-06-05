@@ -16,6 +16,7 @@
 #include <QTimer>
 
 class QProcess;
+class QThread;
 
 struct TransportReadiness
 {
@@ -99,6 +100,8 @@ private:
     void finishLaunchedApp(const QString& appId, int exitCode);
     void cleanupLaunchState(const QString& appId);
     void refreshTransportHealth(bool force = false);
+    void requestTransportRefresh(bool force, bool validateUsbSelection = false);
+    void requestUsbReverseConfigure();
     void pollConfigChangesIfNeeded();
     void updateRuntimeStatsHistory(const RuntimeActivity& activity);
     void setStatusMessage(const QString& message);
@@ -109,6 +112,8 @@ private:
     QSettings settings_;
     QTimer pollTimer_;
     QTimer configSaveTimer_;
+    QThread* transportWorkerThread_ = nullptr;
+    QObject* transportWorker_ = nullptr;
     QString runtimeManifestPath_;
     ServerConfig serverConfig_;
     QString currentConfigText_;
@@ -133,5 +138,11 @@ private:
     QString wifiStatus_ = "WiFi transport readiness has not been checked.";
     QString mainTransportOverride_;
     QDateTime lastTransportHealthRefreshDate_;
+    int nextTransportRequestId_ = 0;
+    int latestTransportRefreshRequestId_ = 0;
+    int latestUsbConfigureRequestId_ = 0;
+    bool transportRefreshPending_ = false;
+    bool usbConfigurePending_ = false;
+    QString pendingMainTransportSelection_;
     QString statusMessage_;
 };

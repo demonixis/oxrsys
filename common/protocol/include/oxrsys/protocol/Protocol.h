@@ -128,6 +128,8 @@ struct VideoPacketHeader
     uint16_t payloadSize;
     uint8_t flags;             // See VideoFlags
     uint8_t codec;             // VideoCodec cast to u8
+    uint16_t fecGroupLastPacketPayloadSize; // FEC packets: payload size of this group's last data packet
+    uint16_t reserved = 0;
     int64_t presentationTimeNs; // Server-side timestamp
 };
 

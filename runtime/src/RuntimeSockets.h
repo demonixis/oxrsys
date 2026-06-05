@@ -40,12 +40,14 @@ std::string LastErrorText();
 
 SocketHandle Create(int domain, int type, int protocol);
 void Close(SocketHandle& socket);
+void Shutdown(SocketHandle socket);
 void ShutdownAndClose(SocketHandle& socket);
 
 bool SetReuseAddress(SocketHandle socket);
 bool SetBroadcast(SocketHandle socket);
 bool SetSendBuffer(SocketHandle socket, int bytes);
 bool SetReceiveTimeout(SocketHandle socket, long seconds, long microseconds);
+bool SetSendTimeout(SocketHandle socket, long seconds, long microseconds);
 bool SetTcpNoDelay(SocketHandle socket);
 bool SetNoSigpipe(SocketHandle socket);
 bool SetNonBlocking(SocketHandle socket, bool enabled);

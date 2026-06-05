@@ -160,7 +160,7 @@ private:
     std::mutex disconnectMutex_;
     bool wifiEnabled_ = true;
     bool usbAdbEnabled_ = true;
-    bool clientUsesUsbAdb_ = false;
+    std::atomic_bool clientUsesUsbAdb_{false};
 
     // Client info
     std::string clientIp_;
@@ -188,6 +188,8 @@ private:
                             bool isKeyframe, int64_t timestampNs);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
+    static void MarkTcpVideoSendFailed(const std::shared_ptr<PacketDispatchState>& dispatchState,
+                                       SocketHandle socket);
 
     // Sub-components
     std::shared_ptr<VideoEncoder> encoder_;

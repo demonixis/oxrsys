@@ -168,6 +168,8 @@ public struct VideoPacketHeader: Sendable {
     public var payloadSize: UInt16 = 0
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
+    public var fecGroupLastPacketPayloadSize: UInt16 = 0
+    public var reserved: UInt16 = 0
     public var presentationTimeNs: Int64 = 0
 
     public init() {}
