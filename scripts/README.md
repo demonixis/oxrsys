@@ -32,7 +32,9 @@ archive through `xcrun notarytool`. After acceptance, the script staples the tic
 
 ## Unity
 
-`scripts/unity/Editor/` contains Unity Editor helpers for projects that target OXRSys:
+`scripts/unity/` is a Unity Package Manager package named `net.demonixis.oxrsys-unity` for
+projects that target OXRSys. Prefer installing it through Unity Package Manager instead of copying
+files into `Assets/Editor`.
 
 - `OXRSysRuntimeAutoSelector.cs` forces the OpenXR runtime JSON for the current Unity editor process.
 - `OXRSysMacOpenXRLoaderPostprocessor.cs` fixes macOS Player exports by copying Unity's
@@ -58,9 +60,22 @@ work in the editor but fail in the exported app with `Failed to load openxr runt
 `Contents/PlugIns/openxr_loader.dylib`, and ad-hoc signs the app again because adding a file after
 Unity signs the bundle invalidates the seal.
 
-### How To Use Them
+### Installation
 
-1. Copy the needed files from `scripts/unity/Editor/` into the `Assets/Editor/` folder of your Unity project.
+Add the package from Unity Package Manager with this Git URL:
+
+```text
+https://github.com/demonixis/OpenXR-OSX.git?path=/scripts/unity
+```
+
+For local development from this checkout, use Package Manager's "Add package from disk..." flow and
+select `scripts/unity/package.json`.
+
+See [`unity/README.md`](unity/README.md) for manifest examples and release pinning.
+
+### How To Use It
+
+1. Add `net.demonixis.oxrsys-unity` to the Unity project.
 2. Build the runtime so `build/runtime/oxrsys-runtime.json` exists.
 3. Open the Unity editor.
 4. Use one of the menu entries under `Tools/OpenXR`:
@@ -68,8 +83,7 @@ Unity signs the bundle invalidates the seal.
    - `Choose Custom Runtime Json...`
    - `Clear Forced Runtime`
    - `Log Active Runtime`
-5. For macOS Player exports, keep `OXRSysMacOpenXRLoaderPostprocessor.cs` in `Assets/Editor/`
-   before building the `.app`.
+5. For macOS Player exports, keep the package installed before building the `.app`.
 
 `Use OXRSys Runtime` applies `XR_RUNTIME_JSON` when it points to an existing manifest. If it is not set, the helper asks you to choose the generated `oxrsys-runtime.json`.
 

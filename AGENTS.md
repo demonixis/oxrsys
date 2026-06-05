@@ -34,8 +34,9 @@ tracking, explicit FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe
 The macOS package helper builds the runtime dylib and Home app into one local folder with a complete
 `runtime/` directory; the distribution helper signs that package, creates a combined archive, and can
 submit that archive for notarization with Apple Developer account credentials.
-Unity project helper scripts under `scripts/unity/Editor/` cover editor runtime selection and the
-macOS Player OpenXR loader bundle-name workaround needed by exported Unity apps.
+The `net.demonixis.oxrsys-unity` Unity Package Manager package under `scripts/unity/` covers editor
+runtime selection and the macOS Player OpenXR loader bundle-name workaround needed by exported Unity
+apps.
 As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully green locally:
 63 passed, 36 skipped, 0 failed.
 
@@ -111,6 +112,7 @@ oxrsys_runtime/
 │   ├── macos_build_package.sh
 │   ├── macos_sign_notarize.sh
 │   └── unity/
+│       ├── package.json
 │       └── Editor/
 ├── tests/
 │   ├── TestConfig.cpp

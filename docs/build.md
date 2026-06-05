@@ -245,13 +245,20 @@ otherwise it stays in tracking-only preview mode with an explicit status message
 
 ### Unity Editor And macOS Player Helpers
 
-If you want to force the runtime only inside a Unity project, use the editor helper documented in
-[scripts/README.md](../scripts/README.md). It provides `Tools/OpenXR` menu entries to select and
-apply a runtime JSON for the current Unity editor session.
+If you want to force the runtime only inside a Unity project, add the Unity Package Manager package
+documented in [scripts/README.md](../scripts/README.md):
 
-For exported macOS Unity Players, also install
-`scripts/unity/Editor/OXRSysMacOpenXRLoaderPostprocessor.cs` into the Unity project's
-`Assets/Editor/` folder. Unity's OpenXR package can place the macOS loader at
+```text
+https://github.com/demonixis/OpenXR-OSX.git?path=/scripts/unity
+```
+
+The package name is `net.demonixis.oxrsys-unity`. It provides `Tools/OpenXR` menu entries to select
+and apply a runtime JSON for the current Unity editor session. For local package development from a
+checkout, use Package Manager's "Add package from disk..." flow and select
+`scripts/unity/package.json`.
+
+For exported macOS Unity Players, keep the package installed before building the `.app`. Unity's
+OpenXR package can place the macOS loader at
 `Contents/PlugIns/ARM64/libopenxr_loader.dylib`, while `UnityOpenXR.dylib` loads
 `Contents/PlugIns/openxr_loader.dylib`. Without the top-level loader, the editor can work while the
 exported Player logs `Failed to load openxr runtime loader.` and never starts XR.
@@ -277,7 +284,6 @@ selection through `XR_RUNTIME_JSON`, OXRSys Home, or `scripts/oxrsys_runtime_def
 - If Android tooling is not found, verify `clients/Android/android-vr/local.properties`, Java 17, and the installed SDK/NDK versions described in [install.md](install.md).
 - If the runtime is not discovered, check that `XR_RUNTIME_JSON` or `~/.config/openxr/1/active_runtime.json` points to `build/runtime/oxrsys-runtime.json`.
 - If an exported macOS Unity Player logs `Failed to load openxr runtime loader.`, install
-  `scripts/unity/Editor/OXRSysMacOpenXRLoaderPostprocessor.cs` in the Unity project and rebuild the
-  `.app`.
+  `net.demonixis.oxrsys-unity` in the Unity project and rebuild the `.app`.
 - If Xcode cannot execute the `metal` tool, install the Metal Toolchain component as described in [install.md](install.md).
 - If simulator builds fail with a `CoreSimulator` version mismatch, update Xcode and the simulator runtime components together.

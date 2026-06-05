@@ -23,7 +23,7 @@ The macOS package helper builds the runtime and Home app into one local folder; 
 
 ### Technical Limitations
 
-- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging. Unity macOS Player exports should include the helper scripts under `scripts/unity/Editor/`.
+- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging. Unity projects should use the `net.demonixis.oxrsys-unity` Package Manager package under `scripts/unity/`.
 - Meta Quest Integration: The interface is currently minimal; the app displays a blue screen during standby and a green screen during loading.
 
 ### Stability & Contributions
