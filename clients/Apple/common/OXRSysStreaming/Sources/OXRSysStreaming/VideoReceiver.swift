@@ -7,36 +7,47 @@
 // which was causing the recv loop to be too slow → kernel UDP buffer overflow → packet loss.
 
 import Foundation
+import os
 
-public final class VideoReceiver: Sendable {
+public final class VideoReceiver: @unchecked Sendable {
     public typealias OnNalUnit = @Sendable (Data, Int64, Int64) -> Void
 
-    private nonisolated(unsafe) var socket: Int32 = -1
-    private nonisolated(unsafe) var running = false
+    private struct State {
+        var socket: Int32 = -1
+        var running = false
+        var packetsReceived: UInt32 = 0
+        var nalUnitsDelivered: UInt32 = 0
+        var groupsDropped: UInt32 = 0
+        var totalFramesSeen: UInt32 = 0
+        var lastFrameDeliveryTimeNs: Int64 = 0
+        var lastPacketReceivedTimeNs: Int64 = 0
+    }
 
-    // Stats
-    private nonisolated(unsafe) var _packetsReceived: UInt32 = 0
-    private nonisolated(unsafe) var _nalUnitsDelivered: UInt32 = 0
-    private nonisolated(unsafe) var _groupsDropped: UInt32 = 0
-    private nonisolated(unsafe) var _totalFramesSeen: UInt32 = 0
-    private nonisolated(unsafe) var _lastFrameDeliveryTimeNs: Int64 = 0
-    private nonisolated(unsafe) var _lastPacketReceivedTimeNs: Int64 = 0
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
-    public var packetsReceived: UInt32 { _packetsReceived }
-    public var framesDelivered: UInt32 { _nalUnitsDelivered }
-    public var framesDropped: UInt32 { _groupsDropped }
-    public var totalFramesSeen: UInt32 { _totalFramesSeen }
-    public var lastFrameDeliveryTimeNs: Int64 { _lastFrameDeliveryTimeNs }
-    public var lastPacketReceivedTimeNs: Int64 { _lastPacketReceivedTimeNs }
+    public var packetsReceived: UInt32 { state.withLock { $0.packetsReceived } }
+    public var framesDelivered: UInt32 { state.withLock { $0.nalUnitsDelivered } }
+    public var framesDropped: UInt32 { state.withLock { $0.groupsDropped } }
+    public var totalFramesSeen: UInt32 { state.withLock { $0.totalFramesSeen } }
+    public var lastFrameDeliveryTimeNs: Int64 { state.withLock { $0.lastFrameDeliveryTimeNs } }
+    public var lastPacketReceivedTimeNs: Int64 { state.withLock { $0.lastPacketReceivedTimeNs } }
 
     public init() {}
 
     public func start(onNalUnit: @escaping OnNalUnit) {
-        guard !running else { return }
+        let shouldStart = state.withLock { state in
+            if state.running {
+                return false
+            }
+            state.running = true
+            return true
+        }
+        guard shouldStart else { return }
 
         let thread = Thread { [self] in
             let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
             guard fd >= 0 else {
+                state.withLock { $0.running = false }
                 print("[VideoRecv] Failed to create socket: \(errno)")
                 return
             }
@@ -68,20 +79,37 @@ public final class VideoReceiver: Sendable {
             guard bindResult == 0 else {
                 print("[VideoRecv] Bind failed: \(errno)")
                 close(fd)
+                state.withLock { $0.running = false }
                 return
             }
 
             var tv = timeval(tv_sec: 0, tv_usec: 10_000) // 10ms timeout for responsive stop() and frame timeout
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
-            socket = fd
-            running = true
+            let shouldContinue = state.withLock { state in
+                guard state.running else { return false }
+                state.socket = fd
+                return true
+            }
+            guard shouldContinue else {
+                close(fd)
+                return
+            }
             print("[VideoRecv] Listening on port \(OXRProtocol.videoPort)")
 
             self.receiveLoop(fd: fd, onNalUnit: onNalUnit)
 
-            close(fd)
-            socket = -1
+            let shouldClose = state.withLock { state in
+                state.running = false
+                if state.socket == fd {
+                    state.socket = -1
+                    return true
+                }
+                return false
+            }
+            if shouldClose {
+                close(fd)
+            }
             print("[VideoRecv] Stopped")
         }
         thread.qualityOfService = .userInteractive
@@ -90,7 +118,19 @@ public final class VideoReceiver: Sendable {
     }
 
     public func stop() {
-        running = false
+        let socketToClose = state.withLock { state in
+            state.running = false
+            let socket = state.socket
+            state.socket = -1
+            return socket
+        }
+        if socketToClose >= 0 {
+            close(socketToClose)
+        }
+    }
+
+    private func isRunning() -> Bool {
+        state.withLock { $0.running }
     }
 
     // MARK: - Receive loop (raw memory, zero-copy hot path)
@@ -118,7 +158,12 @@ public final class VideoReceiver: Sendable {
         let maxFecGroups = (maxPacketsPerGroup + FEC.groupSize - 1) / FEC.groupSize
         let fecReceived = UnsafeMutablePointer<Bool>.allocate(capacity: maxFecGroups)
         let fecData = UnsafeMutablePointer<UInt8>.allocate(capacity: maxFecGroups * OXRProtocol.maxPacketPayload)
-        defer { fecReceived.deallocate(); fecData.deallocate() }
+        let fecGroupLastPacketSizes = UnsafeMutablePointer<UInt16>.allocate(capacity: maxFecGroups)
+        defer {
+            fecReceived.deallocate()
+            fecData.deallocate()
+            fecGroupLastPacketSizes.deallocate()
+        }
         var fecGroupCount: Int = 0
         var _fecRecoveries: UInt32 = 0
 
@@ -157,7 +202,14 @@ public final class VideoReceiver: Sendable {
                     }
                 }
                 packetReceived[missingIdx] = true
-                packetSizes[missingIdx] = UInt16(OXRProtocol.maxPacketPayload)
+                var recoveredSize = UInt16(OXRProtocol.maxPacketPayload)
+                if missingIdx == groupEnd - 1 {
+                    let groupLastPacketSize = fecGroupLastPacketSizes[g]
+                    if groupLastPacketSize > 0 && Int(groupLastPacketSize) <= OXRProtocol.maxPacketPayload {
+                        recoveredSize = groupLastPacketSize
+                    }
+                }
+                packetSizes[missingIdx] = recoveredSize
                 receivedCount &+= 1
                 recovered = true
                 _fecRecoveries &+= 1
@@ -171,16 +223,20 @@ public final class VideoReceiver: Sendable {
         // Closure: deliver the completed frame
         func deliverFrame() {
             let finalSize = computeFinalSize(packetSizes, Int(totalExpected))
-            _nalUnitsDelivered &+= 1
-            _lastFrameDeliveryTimeNs = Self.monotonicNs()
-            if _nalUnitsDelivered <= 10 || _nalUnitsDelivered % 200 == 0 {
-                print("[VideoRecv] NAL #\(_nalUnitsDelivered) (\(finalSize) bytes, frame \(currentFrameIndex))")
+            let deliveryTimeNs = Self.monotonicNs()
+            let deliveredCount = state.withLock { state in
+                state.nalUnitsDelivered &+= 1
+                state.lastFrameDeliveryTimeNs = deliveryTimeNs
+                return state.nalUnitsDelivered
+            }
+            if deliveredCount <= 10 || deliveredCount % 200 == 0 {
+                print("[VideoRecv] NAL #\(deliveredCount) (\(finalSize) bytes, frame \(currentFrameIndex))")
             }
             deliverNalUnit(frameBuf, finalSize, frameTimestamp, onNalUnit)
             totalExpected = 0
         }
 
-        while running {
+        while isRunning() {
             let n = recv(fd, recvBuf, maxPacketSize, 0)
 
             // Idle timeout: drop a partial frame only when no packet has arrived for >500ms.
@@ -191,7 +247,7 @@ public final class VideoReceiver: Sendable {
                     if tryFecRecovery() {
                         deliverFrame()
                     } else {
-                        _groupsDropped &+= 1
+                        state.withLock { $0.groupsDropped &+= 1 }
                         totalExpected = 0
                         receivedCount = 0
                     }
@@ -200,10 +256,10 @@ public final class VideoReceiver: Sendable {
 
             guard n > headerSize else { continue }
 
-            _packetsReceived &+= 1
+            state.withLock { $0.packetsReceived &+= 1 }
 
             // Parse header directly from raw memory (no Data, no copies)
-            let header = UnsafeRawPointer(recvBuf).load(as: VideoPacketHeader.self)
+            let header = UnsafeRawPointer(recvBuf).loadUnaligned(as: VideoPacketHeader.self)
             let payloadSize = min(Int(header.payloadSize), n - headerSize)
 
             // Render pose packet — skip (handled separately if needed)
@@ -219,6 +275,7 @@ public final class VideoReceiver: Sendable {
                         let fecOffset = groupIdx * OXRProtocol.maxPacketPayload
                         memcpy(fecData + fecOffset, recvBuf + headerSize,
                                min(payloadSize, OXRProtocol.maxPacketPayload))
+                        fecGroupLastPacketSizes[groupIdx] = header.fecGroupLastPacketPayloadSize
                         fecReceived[groupIdx] = true
                         // Try recovery if frame is almost complete
                         if receivedCount + 1 >= totalExpected && tryFecRecovery() {
@@ -256,8 +313,11 @@ public final class VideoReceiver: Sendable {
                                 }
                                 deliverFrame()
                             } else {
-                                _groupsDropped &+= 1
-                                if _groupsDropped <= 20 || _groupsDropped % 100 == 0 {
+                                let droppedCount = state.withLock { state in
+                                    state.groupsDropped &+= 1
+                                    return state.groupsDropped
+                                }
+                                if droppedCount <= 20 || droppedCount % 100 == 0 {
                                     print("[VideoRecv] Dropped: got \(receivedCount)/\(totalExpected) pkts for frame \(currentFrameIndex)")
                                 }
                             }
@@ -266,7 +326,7 @@ public final class VideoReceiver: Sendable {
                 }
 
                 currentFrameIndex = header.frameIndex
-                _totalFramesSeen &+= 1
+                state.withLock { $0.totalFramesSeen &+= 1 }
                 totalExpected = header.totalPackets
                 receivedCount = 0
                 frameTimestamp = header.presentationTimeNs
@@ -280,6 +340,7 @@ public final class VideoReceiver: Sendable {
                 // Initialize FEC tracking
                 fecGroupCount = (count + FEC.groupSize - 1) / FEC.groupSize
                 fecReceived.initialize(repeating: false, count: fecGroupCount)
+                fecGroupLastPacketSizes.initialize(repeating: 0, count: fecGroupCount)
             }
 
             let idx = Int(header.packetIndex)
@@ -295,7 +356,7 @@ public final class VideoReceiver: Sendable {
             receivedCount &+= 1
             let nowNs = Self.monotonicNs()
             lastGroupPacketTimeNs = nowNs
-            _lastPacketReceivedTimeNs = nowNs
+            state.withLock { $0.lastPacketReceivedTimeNs = nowNs }
 
             // Frame complete — deliver
             if receivedCount == totalExpected {

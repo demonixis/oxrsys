@@ -463,3 +463,8 @@ bool supportsRuntimeGlobalRegistration()
     return false;
 #endif
 }
+
+bool supportsRuntimeRegistration()
+{
+    return supportsRuntimeGlobalRegistration();
+}

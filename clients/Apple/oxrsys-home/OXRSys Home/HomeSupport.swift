@@ -36,18 +36,13 @@ struct HomePaths {
     static let appSupportDirectory = NSString(string: "~/Library/Application Support/OXRSys").expandingTildeInPath
     static let configFilePath = (appSupportDirectory as NSString).appendingPathComponent("oxrsys-runtime.toml")
     static let launcherAppsPath = (appSupportDirectory as NSString).appendingPathComponent("launcher_apps.json")
-    static let installedRuntimeDirectory = (appSupportDirectory as NSString).appendingPathComponent("Runtime/current")
-    static let installedRuntimeManifestPath = (installedRuntimeDirectory as NSString).appendingPathComponent("oxrsys-runtime.json")
     static let terminalScriptsDirectory = (appSupportDirectory as NSString).appendingPathComponent("TerminalLaunchers")
     static let activeRuntimeDirectory = NSString(string: "~/.config/openxr/1").expandingTildeInPath
     static let activeRuntimePath = (activeRuntimeDirectory as NSString).appendingPathComponent("active_runtime.json")
     static let runtimeStatusPath = (appSupportDirectory as NSString).appendingPathComponent("runtime_status.json")
+    static let runtimeLogsDirectory = appSupportDirectory
     static let launchAgentsDirectory = NSString(string: "~/Library/LaunchAgents").expandingTildeInPath
     static let launchAgentPath = (launchAgentsDirectory as NSString).appendingPathComponent("net.demonixis.oxrsys.runtime-env.plist")
-
-    static var bundledRuntimeDirectoryURL: URL? {
-        Bundle.main.resourceURL?.appendingPathComponent("OXRSysRuntime", isDirectory: true)
-    }
 }
 
 struct RuntimeRegistrationStatus {
@@ -738,6 +733,10 @@ enum SourceDefaults {
 
 func revealInFinder(_ path: String) {
     NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+}
+
+func openFolderInFinder(_ path: String) {
+    NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
 }
 
 func chooseJsonFile(startingAt path: String?) -> String? {

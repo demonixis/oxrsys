@@ -367,7 +367,7 @@ QString runtimeInstallButtonTitle(const RuntimeInstallStatus& status)
     {
         return "Update and Register Runtime";
     }
-    return "Reinstall and Register Runtime";
+    return "Register Installed Runtime";
 }
 
 } // namespace
@@ -555,7 +555,7 @@ QWidget* MainWindow::buildHeader()
     auto* titleLayout = new QVBoxLayout();
     auto* title = new QLabel("OXRSys Home", box);
     title->setStyleSheet("font-size: 22px; font-weight: 600;");
-    auto* subtitle = secondaryLabel("Launch compatible apps, install the runtime, and tune headset streaming.");
+    auto* subtitle = secondaryLabel("Launch compatible apps, select a runtime, and tune headset streaming.");
     titleLayout->addWidget(title);
     titleLayout->addWidget(subtitle);
     layout->addLayout(titleLayout, 2);
@@ -786,7 +786,6 @@ QWidget* MainWindow::buildSettingsTab()
     unregisterRuntimeButton_ = iconButton(registrationBox, QStyle::SP_DialogCancelButton, "Disable Registration");
     connect(refreshButton, &QPushButton::clicked, this, [this]() {
         model_->refreshRuntimeStatus();
-        model_->refreshRuntimeInstallStatus();
     });
     connect(registerRuntimeButton_, &QPushButton::clicked, this, [this]() {
         model_->setRuntimeManifestPath(runtimeManifestLineEdit_->text());
@@ -845,7 +844,11 @@ QWidget* MainWindow::buildStreamingTab()
         configLayout->addLayout(row);
     };
 
-    addSlider("Bitrate", &bitrateSlider_, &bitrateValueLabel_, 1, 200);
+    addSlider("Bitrate",
+              &bitrateSlider_,
+              &bitrateValueLabel_,
+              ServerConfig::MinBitrateMbps,
+              ServerConfig::MaxBitrateMbps);
     addSlider("Vertical FOV", &fovSlider_, &fovValueLabel_, 60, 150);
     addSlider("Resolution Scale", &resolutionSlider_, &resolutionValueLabel_, 25, 100);
     addSlider("Keyframe Interval", &keyframeSlider_, &keyframeValueLabel_, 1, 10);
@@ -877,10 +880,13 @@ QWidget* MainWindow::buildStreamingTab()
     connect(configTransportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
 
     auto* configButtons = new QHBoxLayout();
-    auto* saveButton = iconButton(configBox, QStyle::SP_DialogSaveButton, "Save Configuration");
+    auto* defaultButton = iconButton(configBox, QStyle::SP_BrowserReload, "Default");
     auto* reloadButton = iconButton(configBox, QStyle::SP_BrowserReload, "Reload From Disk");
     auto* revealConfigButton = iconButton(configBox, QStyle::SP_DirOpenIcon, "Reveal Config");
-    connect(saveButton, &QPushButton::clicked, model_, &HomeModel::saveStructuredConfig);
+    auto* revealRuntimeLogsButton =
+        iconButton(configBox, QStyle::SP_DirOpenIcon, "Reveal Runtime Logs");
+    connect(defaultButton, &QPushButton::clicked,
+            model_, &HomeModel::resetStreamingConfigToDefaults);
     connect(reloadButton, &QPushButton::clicked, model_, &HomeModel::resetConfigFromDisk);
     connect(revealConfigButton, &QPushButton::clicked, this, [this]() {
         if (!QFileInfo(model_->paths().configFilePath).exists())
@@ -889,10 +895,15 @@ QWidget* MainWindow::buildStreamingTab()
         }
         revealPath(model_->paths().configFilePath, "runtime configuration");
     });
-    configButtons->addWidget(saveButton);
+    connect(revealRuntimeLogsButton, &QPushButton::clicked, this, [this]() {
+        QDir().mkpath(model_->paths().stateRoot);
+        revealPath(model_->paths().stateRoot, "runtime logs");
+    });
+    configButtons->addWidget(defaultButton);
     configButtons->addWidget(reloadButton);
     configButtons->addStretch();
     configButtons->addWidget(revealConfigButton);
+    configButtons->addWidget(revealRuntimeLogsButton);
     configLayout->addLayout(configButtons);
     layout->addWidget(configBox);
 
@@ -1399,4 +1410,5 @@ void MainWindow::updateConfigFromControls()
     fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
+    model_->scheduleStructuredConfigSave();
 }

@@ -2,40 +2,53 @@
 
 #include "RuntimeSockets.h"
 
-#include <atomic>
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 #if defined(_WIN32)
-#include <cstdio>
+#include <windows.h>
 #else
 #include <cerrno>
-#include <netinet/tcp.h>
-#include <unistd.h>
-#if defined(SO_NOSIGPIPE)
-#include <sys/socket.h>
-#endif
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 
 namespace oxrsys::runtime_socket
 {
 
+namespace
+{
+
+int ClampSocketSize(size_t size)
+{
+    return static_cast<int>(
+        std::min(size, static_cast<size_t>(std::numeric_limits<int>::max())));
+}
+
+bool SetIntOption(SocketHandle socket, int level, int option, int value)
+{
+#if defined(_WIN32)
+    const char* optionValue = reinterpret_cast<const char*>(&value);
+#else
+    const void* optionValue = &value;
+#endif
+    return setsockopt(socket, level, option, optionValue, sizeof(value)) == 0;
+}
+
+} // namespace
+
 bool EnsureInitialized()
 {
 #if defined(_WIN32)
-    static std::atomic<bool> initialized{false};
-    bool expected = false;
-    if (initialized.compare_exchange_strong(expected, true))
-    {
+    static bool initialized = [] {
         WSADATA data = {};
-        if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
-        {
-            initialized.store(false);
-            return false;
-        }
-    }
-#endif
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }();
+    return initialized;
+#else
     return true;
+#endif
 }
 
 bool IsValid(SocketHandle socket)
@@ -53,6 +66,45 @@ bool IsInterruptedOrWouldBlock()
 #endif
 }
 
+std::string LastErrorText()
+{
+#if defined(_WIN32)
+    const int error = WSAGetLastError();
+    char* message = nullptr;
+    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                        FORMAT_MESSAGE_IGNORE_INSERTS;
+    const DWORD length = FormatMessageA(flags,
+                                        nullptr,
+                                        static_cast<DWORD>(error),
+                                        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                                        reinterpret_cast<LPSTR>(&message),
+                                        0,
+                                        nullptr);
+    if (length == 0 || message == nullptr)
+    {
+        return "Winsock error " + std::to_string(error);
+    }
+    std::string result(message, length);
+    LocalFree(message);
+    while (!result.empty() && (result.back() == '\r' || result.back() == '\n'))
+    {
+        result.pop_back();
+    }
+    return result;
+#else
+    return std::strerror(errno);
+#endif
+}
+
+SocketHandle Create(int domain, int type, int protocol)
+{
+    if (!EnsureInitialized())
+    {
+        return InvalidSocket;
+    }
+    return socket(domain, type, protocol);
+}
+
 void Close(SocketHandle& socket)
 {
     if (!IsValid(socket))
@@ -67,7 +119,7 @@ void Close(SocketHandle& socket)
     socket = InvalidSocket;
 }
 
-void ShutdownAndClose(SocketHandle& socket)
+void Shutdown(SocketHandle socket)
 {
     if (!IsValid(socket))
     {
@@ -78,62 +130,84 @@ void ShutdownAndClose(SocketHandle& socket)
 #else
     shutdown(socket, SHUT_RDWR);
 #endif
-    Close(socket);
 }
 
-SocketHandle Create(int addressFamily, int type, int protocol)
+void ShutdownAndClose(SocketHandle& socket)
 {
-    if (!EnsureInitialized())
+    if (!IsValid(socket))
     {
-        return InvalidSocket;
+        return;
     }
-    return ::socket(addressFamily, type, protocol);
+    Shutdown(socket);
+    Close(socket);
 }
 
 bool SetReuseAddress(SocketHandle socket)
 {
-    int yes = 1;
-    return setsockopt(socket, SOL_SOCKET, SO_REUSEADDR,
-                      reinterpret_cast<const char*>(&yes), sizeof(yes)) == 0;
+    return IsValid(socket) && SetIntOption(socket, SOL_SOCKET, SO_REUSEADDR, 1);
 }
 
 bool SetBroadcast(SocketHandle socket)
 {
-    int yes = 1;
-    return setsockopt(socket, SOL_SOCKET, SO_BROADCAST,
-                      reinterpret_cast<const char*>(&yes), sizeof(yes)) == 0;
+    return IsValid(socket) && SetIntOption(socket, SOL_SOCKET, SO_BROADCAST, 1);
 }
 
 bool SetSendBuffer(SocketHandle socket, int bytes)
 {
-    return setsockopt(socket, SOL_SOCKET, SO_SNDBUF,
-                      reinterpret_cast<const char*>(&bytes), sizeof(bytes)) == 0;
+    return IsValid(socket) && SetIntOption(socket, SOL_SOCKET, SO_SNDBUF, bytes);
 }
 
-bool SetReceiveTimeout(SocketHandle socket, int seconds, int microseconds)
+bool SetReceiveTimeout(SocketHandle socket, long seconds, long microseconds)
 {
+    if (!IsValid(socket))
+    {
+        return false;
+    }
 #if defined(_WIN32)
     DWORD timeoutMs = static_cast<DWORD>(seconds * 1000 + microseconds / 1000);
-    return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO,
-                      reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs)) == 0;
+    return setsockopt(socket,
+                      SOL_SOCKET,
+                      SO_RCVTIMEO,
+                      reinterpret_cast<const char*>(&timeoutMs),
+                      sizeof(timeoutMs)) == 0;
 #else
-    timeval timeout = {seconds, microseconds};
+    timeval timeout = {};
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = microseconds;
     return setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
+#endif
+}
+
+bool SetSendTimeout(SocketHandle socket, long seconds, long microseconds)
+{
+    if (!IsValid(socket))
+    {
+        return false;
+    }
+#if defined(_WIN32)
+    DWORD timeoutMs = static_cast<DWORD>(seconds * 1000 + microseconds / 1000);
+    return setsockopt(socket,
+                      SOL_SOCKET,
+                      SO_SNDTIMEO,
+                      reinterpret_cast<const char*>(&timeoutMs),
+                      sizeof(timeoutMs)) == 0;
+#else
+    timeval timeout = {};
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = microseconds;
+    return setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0;
 #endif
 }
 
 bool SetTcpNoDelay(SocketHandle socket)
 {
-    int yes = 1;
-    return setsockopt(socket, IPPROTO_TCP, TCP_NODELAY,
-                      reinterpret_cast<const char*>(&yes), sizeof(yes)) == 0;
+    return IsValid(socket) && SetIntOption(socket, IPPROTO_TCP, TCP_NODELAY, 1);
 }
 
 bool SetNoSigpipe(SocketHandle socket)
 {
-#if !defined(_WIN32) && defined(SO_NOSIGPIPE)
-    int yes = 1;
-    return setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0;
+#if defined(SO_NOSIGPIPE)
+    return IsValid(socket) && SetIntOption(socket, SOL_SOCKET, SO_NOSIGPIPE, 1);
 #else
     (void)socket;
     return true;
@@ -142,33 +216,38 @@ bool SetNoSigpipe(SocketHandle socket)
 
 bool SetNonBlocking(SocketHandle socket, bool enabled)
 {
+    if (!IsValid(socket))
+    {
+        return false;
+    }
 #if defined(_WIN32)
-    u_long value = enabled ? 1 : 0;
-    return ioctlsocket(socket, FIONBIO, &value) == 0;
+    u_long mode = enabled ? 1u : 0u;
+    return ioctlsocket(socket, FIONBIO, &mode) == 0;
 #else
-    int flags = fcntl(socket, F_GETFL, 0);
+    const int flags = fcntl(socket, F_GETFL, 0);
     if (flags < 0)
     {
         return false;
     }
-    if (enabled)
-    {
-        flags |= O_NONBLOCK;
-    }
-    else
-    {
-        flags &= ~O_NONBLOCK;
-    }
-    return fcntl(socket, F_SETFL, flags) == 0;
+    const int nextFlags = enabled ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    return fcntl(socket, F_SETFL, nextFlags) == 0;
 #endif
 }
 
-int SelectOneReadable(SocketHandle socket, int timeoutSeconds, int timeoutMicroseconds)
+int SelectOneReadable(SocketHandle socket, long seconds, long microseconds)
 {
+    if (!IsValid(socket))
+    {
+        return -1;
+    }
+
     fd_set readSet;
     FD_ZERO(&readSet);
     FD_SET(socket, &readSet);
-    timeval timeout = {timeoutSeconds, timeoutMicroseconds};
+    timeval timeout = {};
+    timeout.tv_sec = seconds;
+    timeout.tv_usec = microseconds;
+
 #if defined(_WIN32)
     return select(0, &readSet, nullptr, nullptr, &timeout);
 #else
@@ -176,56 +255,79 @@ int SelectOneReadable(SocketHandle socket, int timeoutSeconds, int timeoutMicros
 #endif
 }
 
-int64_t Send(SocketHandle socket, const void* data, size_t size, int flags)
+int Send(SocketHandle socket, const void* data, size_t size, int flags)
 {
+    if (!IsValid(socket))
+    {
+        return -1;
+    }
+    const int chunkSize = ClampSocketSize(size);
 #if defined(_WIN32)
-    return static_cast<int64_t>(send(socket, static_cast<const char*>(data),
-                                     static_cast<int>(size), flags));
+    return send(socket, static_cast<const char*>(data), chunkSize, flags);
 #else
-    return static_cast<int64_t>(send(socket, data, size, flags));
+#if defined(MSG_NOSIGNAL)
+    flags |= MSG_NOSIGNAL;
+#endif
+    return static_cast<int>(send(socket, data, static_cast<size_t>(chunkSize), flags));
 #endif
 }
 
-int64_t Receive(SocketHandle socket, void* data, size_t size, int flags)
+int Receive(SocketHandle socket, void* data, size_t size, int flags)
 {
+    if (!IsValid(socket))
+    {
+        return -1;
+    }
+    const int chunkSize = ClampSocketSize(size);
 #if defined(_WIN32)
-    return static_cast<int64_t>(recv(socket, static_cast<char*>(data),
-                                     static_cast<int>(size), flags));
+    return recv(socket, static_cast<char*>(data), chunkSize, flags);
 #else
-    return static_cast<int64_t>(recv(socket, data, size, flags));
+    return static_cast<int>(recv(socket, data, static_cast<size_t>(chunkSize), flags));
 #endif
 }
 
-int64_t SendTo(SocketHandle socket, const void* data, size_t size, int flags,
-               const sockaddr* address, SockLen addressLength)
+int SendTo(SocketHandle socket, const void* data, size_t size, int flags,
+           const sockaddr* address, SocketLength addressLength)
 {
+    if (!IsValid(socket))
+    {
+        return -1;
+    }
+    const int chunkSize = ClampSocketSize(size);
 #if defined(_WIN32)
-    return static_cast<int64_t>(sendto(socket, static_cast<const char*>(data),
-                                       static_cast<int>(size), flags, address, addressLength));
+    return sendto(socket,
+                  static_cast<const char*>(data),
+                  chunkSize,
+                  flags,
+                  address,
+                  addressLength);
 #else
-    return static_cast<int64_t>(sendto(socket, data, size, flags, address, addressLength));
+    return static_cast<int>(sendto(socket,
+                                   data,
+                                   static_cast<size_t>(chunkSize),
+                                   flags,
+                                   address,
+                                   addressLength));
 #endif
 }
 
-int64_t ReceiveFrom(SocketHandle socket, void* data, size_t size, int flags,
-                    sockaddr* address, SockLen* addressLength)
+int ReceiveFrom(SocketHandle socket, void* data, size_t size, int flags,
+                sockaddr* address, SocketLength* addressLength)
 {
+    if (!IsValid(socket))
+    {
+        return -1;
+    }
+    const int chunkSize = ClampSocketSize(size);
 #if defined(_WIN32)
-    return static_cast<int64_t>(recvfrom(socket, static_cast<char*>(data),
-                                         static_cast<int>(size), flags, address, addressLength));
+    return recvfrom(socket, static_cast<char*>(data), chunkSize, flags, address, addressLength);
 #else
-    return static_cast<int64_t>(recvfrom(socket, data, size, flags, address, addressLength));
-#endif
-}
-
-const char* LastErrorText()
-{
-#if defined(_WIN32)
-    static thread_local char buffer[64];
-    std::snprintf(buffer, sizeof(buffer), "WSA error %d", WSAGetLastError());
-    return buffer;
-#else
-    return std::strerror(errno);
+    return static_cast<int>(recvfrom(socket,
+                                     data,
+                                     static_cast<size_t>(chunkSize),
+                                     flags,
+                                     address,
+                                     addressLength));
 #endif
 }
 

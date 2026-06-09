@@ -99,6 +99,11 @@ XrResult Instance::EnumerateViewConfigurations(XrSystemId systemId,
     {
         return XR_ERROR_SYSTEM_INVALID;
     }
+    if (viewConfigurationTypeCountOutput == nullptr ||
+        (viewConfigurationTypeCapacityInput > 0 && viewConfigurationTypes == nullptr))
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
 
     *viewConfigurationTypeCountOutput = 1;
     if (viewConfigurationTypeCapacityInput == 0)
@@ -126,6 +131,10 @@ XrResult Instance::GetViewConfigurationProperties(XrSystemId systemId,
     {
         return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
     }
+    if (configurationProperties == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
 
     configurationProperties->type = XR_TYPE_VIEW_CONFIGURATION_PROPERTIES;
     configurationProperties->viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -146,6 +155,10 @@ XrResult Instance::EnumerateViewConfigurationViews(XrSystemId systemId,
     if (!IsViewConfigurationTypeSupported(viewConfigurationType))
     {
         return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
+    }
+    if (viewCountOutput == nullptr || (viewCapacityInput > 0 && views == nullptr))
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
     }
 
     *viewCountOutput = 2;
@@ -185,6 +198,11 @@ XrResult Instance::EnumerateEnvironmentBlendModes(XrSystemId systemId,
     if (!IsViewConfigurationTypeSupported(viewConfigurationType))
     {
         return XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED;
+    }
+    if (environmentBlendModeCountOutput == nullptr ||
+        (environmentBlendModeCapacityInput > 0 && environmentBlendModes == nullptr))
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
     }
 
     *environmentBlendModeCountOutput = 1;

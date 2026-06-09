@@ -6,6 +6,93 @@
 #include <spdlog/spdlog.h>
 
 #import <Metal/Metal.h>
+#include <atomic>
+
+namespace
+{
+
+constexpr uint32_t kMetalStagingImageCount = Swapchain::SwapchainImageCount + 1;
+static std::atomic<uint64_t> gMetalSnapshotValue{0};
+
+void ReleaseMetalObject(void* object)
+{
+    if (object != nullptr)
+    {
+        [(id)object release];
+    }
+}
+
+std::shared_ptr<void> RetainMetalObject(id object)
+{
+    if (object == nil)
+    {
+        return {};
+    }
+    return std::shared_ptr<void>((void*)[object retain], ReleaseMetalObject);
+}
+
+std::shared_ptr<void> AdoptMetalObject(id object)
+{
+    if (object == nil)
+    {
+        return {};
+    }
+    return std::shared_ptr<void>((void*)object, ReleaseMetalObject);
+}
+
+std::shared_ptr<void> MakeStagingLease(const std::shared_ptr<SwapchainStagingSlotState>& state)
+{
+    if (!state)
+    {
+        return {};
+    }
+
+    state->inUse.store(true, std::memory_order_release);
+    return std::shared_ptr<void>(state.get(), [state](void*) {
+        state->inUse.store(false, std::memory_order_release);
+    });
+}
+
+FrameImageSource MakeMetalFrameImageSource(id<MTLTexture> texture,
+                                           uint32_t arraySize,
+                                           uint32_t arrayIndex,
+                                           const std::shared_ptr<void>& lifetime,
+                                           const std::shared_ptr<void>& waitEvent,
+                                           uint64_t waitValue)
+{
+    FrameImageSource source = {};
+    source.api = GraphicsApi::Metal;
+    source.lifetime = lifetime;
+    source.sync.api = GraphicsApi::Metal;
+    source.sync.waitObject = waitEvent;
+    source.sync.waitValue = waitValue;
+
+    if (texture == nil)
+    {
+        return {};
+    }
+
+    if (arraySize <= 1 || texture.textureType != MTLTextureType2DArray)
+    {
+        source.image = RetainMetalObject(texture);
+        return source;
+    }
+
+    if (arrayIndex >= texture.arrayLength)
+    {
+        spdlog::warn("OXRSys: arrayIndex {} >= arrayLength {}", arrayIndex, (uint32_t)texture.arrayLength);
+        return {};
+    }
+
+    id<MTLTexture> sliceView = [texture newTextureViewWithPixelFormat:texture.pixelFormat
+                                                          textureType:MTLTextureType2D
+                                                               levels:NSMakeRange(0, 1)
+                                                               slices:NSMakeRange(arrayIndex, 1)];
+    source.image = AdoptMetalObject(sliceView);
+    return source;
+}
+
+} // namespace
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
@@ -94,19 +181,25 @@ static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
 }
 #endif // XR_USE_GRAPHICS_API_VULKAN
 
-// ============================================================================
-// Metal constructor (original path)
-// ============================================================================
-
 Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
-    : device_(metalDevice), graphicsApi_(GraphicsApi::Metal)
+    : Swapchain(GraphicsContext::Metal(metalDevice), createInfo)
 {
-    InitMetal(metalDevice, createInfo);
 }
 
-// ============================================================================
-// Dual-API constructor
-// ============================================================================
+Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCreateInfo* createInfo)
+    : device_(graphicsContext.metalDevice),
+      metalCommandQueue_(graphicsContext.metalCommandQueue),
+      graphicsApi_(graphicsContext.api)
+{
+    if (graphicsContext.api == GraphicsApi::Vulkan)
+    {
+        InitVulkan(graphicsContext.metalDevice, &graphicsContext.vulkan, createInfo);
+    }
+    else
+    {
+        InitMetal(graphicsContext.metalDevice, createInfo);
+    }
+}
 
 Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
                      const VulkanGraphicsContext* vulkanContext,
@@ -155,12 +248,57 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
     for (uint32_t i = 0; i < imageCount_; i++)
     {
         id<MTLTexture> tex = [device newTextureWithDescriptor:desc];
-        textures_[i] = (void*)[tex retain];
+        textures_[i] = (void*)tex;
     }
+
+    InitMetalStaging(metalDevice);
 
     Runtime::Get().RegisterHandle(handle_, this);
     spdlog::info("OXRSys: Metal swapchain created {}x{} format={} arraySize={} images={}",
                   width_, height_, format_, arraySize_, imageCount_);
+}
+
+void Swapchain::InitMetalStaging(void* metalDevice)
+{
+    if (imageCount_ <= 1 || metalCommandQueue_ == nullptr)
+    {
+        return;
+    }
+
+    id<MTLDevice> device = (__bridge id<MTLDevice>)metalDevice;
+    if (device == nil)
+    {
+        return;
+    }
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)format_
+                                                                                    width:width_
+                                                                                   height:height_
+                                                                                mipmapped:NO];
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModePrivate;
+    if (arraySize_ > 1)
+    {
+        desc.textureType = MTLTextureType2DArray;
+        desc.arrayLength = arraySize_;
+    }
+
+    snapshotEvent_ = (void*)[device newSharedEvent];
+    if (snapshotEvent_ == nullptr)
+    {
+        spdlog::warn("OXRSys: Metal swapchain staging disabled because MTLSharedEvent creation failed");
+        return;
+    }
+
+    stagingSlots_.resize(kMetalStagingImageCount);
+    for (uint32_t i = 0; i < kMetalStagingImageCount; ++i)
+    {
+        id<MTLTexture> tex = [device newTextureWithDescriptor:desc];
+        stagingSlots_[i].texture = (void*)tex;
+        stagingSlots_[i].state = std::make_shared<SwapchainStagingSlotState>();
+    }
+
+    spdlog::info("OXRSys: Metal swapchain staging enabled slots={}", kMetalStagingImageCount);
 }
 
 // ============================================================================
@@ -311,6 +449,23 @@ Swapchain::~Swapchain()
         }
     }
 #endif
+
+    lastSnapshotLease_.reset();
+
+    for (const auto& slot : stagingSlots_)
+    {
+        if (slot.texture)
+        {
+            [(id<MTLTexture>)slot.texture release];
+        }
+    }
+    stagingSlots_.clear();
+
+    if (snapshotEvent_ != nullptr)
+    {
+        [(id<MTLSharedEvent>)snapshotEvent_ release];
+        snapshotEvent_ = nullptr;
+    }
 
     for (auto* tex : textures_)
     {
@@ -468,6 +623,57 @@ XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
     imageStates_[releaseIndex] = ImageState::Available;
     hasReleasedImage_ = true;
     acquiredImageOrder_.pop_front();
+
+    hasSnapshot_ = false;
+    lastSnapshotValue_ = 0;
+    lastSnapshotLease_.reset();
+
+    if (graphicsApi_ == GraphicsApi::Metal && imageCount_ > 1 &&
+        !stagingSlots_.empty() && snapshotEvent_ != nullptr && metalCommandQueue_ != nullptr)
+    {
+        uint32_t stagingIndex = static_cast<uint32_t>(stagingSlots_.size());
+        for (uint32_t i = 0; i < stagingSlots_.size(); ++i)
+        {
+            uint32_t candidate = (nextStagingIndex_ + i) % static_cast<uint32_t>(stagingSlots_.size());
+            const auto& slot = stagingSlots_[candidate];
+            if (slot.state && !slot.state->inUse.load(std::memory_order_acquire))
+            {
+                stagingIndex = candidate;
+                break;
+            }
+        }
+
+        if (stagingIndex < stagingSlots_.size())
+        {
+            StagingSlot& stagingSlot = stagingSlots_[stagingIndex];
+            std::shared_ptr<void> lease = MakeStagingLease(stagingSlot.state);
+            id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)metalCommandQueue_;
+            id<MTLTexture> src = (__bridge id<MTLTexture>)textures_[lastReleasedIndex_];
+            id<MTLTexture> dst = (__bridge id<MTLTexture>)stagingSlot.texture;
+            id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)snapshotEvent_;
+            id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = commandBuffer != nil ? [commandBuffer blitCommandEncoder] : nil;
+            if (lease && commandBuffer != nil && blit != nil && src != nil && dst != nil && event != nil)
+            {
+                const uint64_t signalValue = gMetalSnapshotValue.fetch_add(1, std::memory_order_relaxed) + 1;
+                [blit copyFromTexture:src toTexture:dst];
+                [blit endEncoding];
+                [commandBuffer encodeSignalEvent:event value:signalValue];
+                [commandBuffer commit];
+
+                lastSnapshotIndex_ = stagingIndex;
+                lastSnapshotValue_ = signalValue;
+                lastSnapshotLease_ = std::move(lease);
+                hasSnapshot_ = true;
+                nextStagingIndex_ = (stagingIndex + 1) % static_cast<uint32_t>(stagingSlots_.size());
+            }
+        }
+        else
+        {
+            spdlog::debug("OXRSys: Metal swapchain staging pool is full; streaming snapshot unavailable");
+        }
+    }
+
     return XR_SUCCESS;
 }
 
@@ -515,6 +721,39 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
                                                            levels:NSMakeRange(0, 1)
                                                            slices:NSMakeRange(arrayIndex, 1)];
     return (void*)sliceView; // caller owns this reference
+}
+
+FrameImageSource Swapchain::GetLastReleasedFrameImageSource(uint32_t arrayIndex) const
+{
+    std::scoped_lock lock(stateMutex_);
+
+    if (!hasReleasedImage_ || textures_.empty())
+    {
+        return {};
+    }
+
+    if (arrayIndex >= arraySize_)
+    {
+        spdlog::warn("OXRSys: arrayIndex {} >= arraySize {}", arrayIndex, arraySize_);
+        return {};
+    }
+
+    if (graphicsApi_ == GraphicsApi::Metal && imageCount_ > 1 && !stagingSlots_.empty())
+    {
+        if (!hasSnapshot_ || lastSnapshotIndex_ >= stagingSlots_.size() ||
+            stagingSlots_[lastSnapshotIndex_].texture == nullptr)
+        {
+            return {};
+        }
+
+        std::shared_ptr<void> waitEvent = RetainMetalObject((id)snapshotEvent_);
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)stagingSlots_[lastSnapshotIndex_].texture;
+        return MakeMetalFrameImageSource(
+            texture, arraySize_, arrayIndex, lastSnapshotLease_, waitEvent, lastSnapshotValue_);
+    }
+
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)textures_[lastReleasedIndex_];
+    return MakeMetalFrameImageSource(texture, arraySize_, arrayIndex, {}, {}, 0);
 }
 
 void Swapchain::ReleaseTextureSlice(void* textureSlice)

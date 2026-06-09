@@ -2,12 +2,68 @@
 
 import CoreMedia
 import CoreVideo
+import Foundation
 import Observation
 import OXRSysStreaming
 import os
 import QuartzCore
 import SwiftUI
 import simd
+
+private final class PixelBufferState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pixelBuffer: CVPixelBuffer?
+
+    func set(_ newValue: CVPixelBuffer?) {
+        lock.lock()
+        pixelBuffer = newValue
+        lock.unlock()
+    }
+
+    func get() -> CVPixelBuffer? {
+        lock.lock()
+        let value = pixelBuffer
+        lock.unlock()
+        return value
+    }
+}
+
+private final class KeyframeRecoveryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var consecutiveDecodeErrors = 0
+    private var lastKeyframeRequestTime: UInt64 = 0
+
+    func reset() {
+        lock.lock()
+        consecutiveDecodeErrors = 0
+        lastKeyframeRequestTime = 0
+        lock.unlock()
+    }
+
+    func noteDecodedFrame() {
+        lock.lock()
+        consecutiveDecodeErrors = 0
+        lock.unlock()
+    }
+
+    func shouldRequestKeyframe(now: UInt64, threshold: Int, cooldownNs: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        consecutiveDecodeErrors += 1
+        guard consecutiveDecodeErrors >= threshold else {
+            return false
+        }
+
+        guard now - lastKeyframeRequestTime > cooldownNs else {
+            return false
+        }
+
+        lastKeyframeRequestTime = now
+        consecutiveDecodeErrors = 0
+        return true
+    }
+}
 
 @MainActor
 @Observable
@@ -53,14 +109,12 @@ final class AppModel {
     private let decoder = H265Decoder()
     private let latencyReporter = LatencyReporter()
     private let trackingManager = VisionTrackingManager()
-    private nonisolated(unsafe) var pixelBufferLock = os_unfair_lock()
-    private nonisolated(unsafe) var latestPixelBuffer: CVPixelBuffer?
+    private nonisolated let pixelBufferState = PixelBufferState()
+    private nonisolated let keyframeRecoveryState = KeyframeRecoveryState()
 
     private var statsTimer: Timer?
     private var lastStatsTimeNs: Int64 = 0
     private var lastDeliveredFrames: UInt32 = 0
-    private nonisolated(unsafe) var consecutiveDecodeErrors = 0
-    private nonisolated(unsafe) var lastKeyframeRequestTime: UInt64 = 0
     private let keyframeErrorThreshold = 3
     private let keyframeRequestCooldownNs: UInt64 = 1_000_000_000
 
@@ -213,13 +267,12 @@ final class AppModel {
         connectionState = .connecting
         statusText = "Connecting to \(server.name)..."
 
+        let keyframeErrorThreshold = keyframeErrorThreshold
+        let keyframeRequestCooldownNs = keyframeRequestCooldownNs
         decoder.configure { [weak self] pixelBuffer, presentationTime in
             guard let self else { return }
-            self.consecutiveDecodeErrors = 0
-
-            os_unfair_lock_lock(&self.pixelBufferLock)
-            self.latestPixelBuffer = pixelBuffer
-            os_unfair_lock_unlock(&self.pixelBufferLock)
+            self.keyframeRecoveryState.noteDecodedFrame()
+            self.pixelBufferState.set(pixelBuffer)
 
             self.latencyReporter.noteFrameDecoded(
                 presentationTimeNs: Self.nanoseconds(from: presentationTime),
@@ -236,18 +289,14 @@ final class AppModel {
 
         decoder.onDecodeError = { [weak self] in
             guard let self else { return }
-            self.consecutiveDecodeErrors += 1
-            if self.consecutiveDecodeErrors < self.keyframeErrorThreshold {
-                return
-            }
-
             let now = UInt64(VideoReceiver.monotonicNs())
-            let elapsed = now - self.lastKeyframeRequestTime
-            guard elapsed > self.keyframeRequestCooldownNs else { return }
-
-            self.lastKeyframeRequestTime = now
-            self.consecutiveDecodeErrors = 0
-            self.controlChannel.requestKeyframe(reason: KeyframeReason.decodeStall.rawValue)
+            if self.keyframeRecoveryState.shouldRequestKeyframe(
+                now: now,
+                threshold: keyframeErrorThreshold,
+                cooldownNs: keyframeRequestCooldownNs
+            ) {
+                self.controlChannel.requestKeyframe(reason: KeyframeReason.decodeStall.rawValue)
+            }
         }
 
         videoReceiver.start { [weak self] nalData, presentationTimeNs, receiveTimeNs in
@@ -262,7 +311,11 @@ final class AppModel {
         Thread.sleep(forTimeInterval: 0.05)
 
         let connectionServer = DiscoveredServer(announce: server.announce, address: serverAddress)
-        discovery.sendConnect(to: connectionServer, deviceName: "OXRSys visionOS")
+        discovery.sendConnect(
+            to: connectionServer,
+            deviceName: "OXRSys visionOS",
+            refreshRateHz: UInt32(refreshRateHz)
+        )
         trackingSender.connect(serverIP: serverAddress)
         controlChannel.connect(serverIP: serverAddress)
 
@@ -289,9 +342,8 @@ final class AppModel {
         isTrackingActive = false
         stats = StreamStats()
         statusText = "Tap Search to find the runtime"
-        os_unfair_lock_lock(&pixelBufferLock)
-        latestPixelBuffer = nil
-        os_unfair_lock_unlock(&pixelBufferLock)
+        pixelBufferState.set(nil)
+        keyframeRecoveryState.reset()
     }
 
     func requestKeyframe() {
@@ -357,10 +409,7 @@ final class AppModel {
     }
 
     nonisolated func currentPixelBuffer() -> CVPixelBuffer? {
-        os_unfair_lock_lock(&pixelBufferLock)
-        let pixelBuffer = latestPixelBuffer
-        os_unfair_lock_unlock(&pixelBufferLock)
-        return pixelBuffer
+        pixelBufferState.get()
     }
 
     private func resolvedServerAddress(for server: DiscoveredServer) -> String {

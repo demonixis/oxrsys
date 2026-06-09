@@ -114,6 +114,7 @@ private:
         uint32_t fecGroupCount = 0;
         std::vector<bool> fecReceived;
         std::vector<uint8_t> fecData;  // fecGroupCount * MAX_PACKET_PAYLOAD
+        std::vector<uint16_t> fecGroupLastPacketSizes;
     };
     PendingFrame pendingFrame_;
     OnNalUnitCallback nalCallback_;

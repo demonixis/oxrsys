@@ -12,6 +12,44 @@
 
 using Catch::Matchers::WithinAbs;
 
+namespace
+{
+
+void SetLeftHandJoint(oxr::protocol::TrackingPacket& packet, uint32_t joint,
+                      float x, float y, float z, float radius = 0.01f)
+{
+    packet.leftHandJoints[joint][0] = x;
+    packet.leftHandJoints[joint][1] = y;
+    packet.leftHandJoints[joint][2] = z;
+    packet.leftHandJoints[joint][3] = radius;
+}
+
+void PopulateLeftPinchingHand(oxr::protocol::TrackingPacket& packet,
+                              float palmX, float palmY, float palmZ)
+{
+    SetLeftHandJoint(packet, XR_HAND_JOINT_PALM_EXT, palmX, palmY, palmZ, 0.025f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_WRIST_EXT, palmX, palmY - 0.08f, palmZ + 0.02f, 0.020f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_INDEX_METACARPAL_EXT,
+                     palmX - 0.03f, palmY + 0.01f, palmZ - 0.02f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_LITTLE_METACARPAL_EXT,
+                     palmX + 0.03f, palmY + 0.01f, palmZ - 0.02f);
+
+    SetLeftHandJoint(packet, XR_HAND_JOINT_THUMB_TIP_EXT,
+                     palmX - 0.008f, palmY + 0.01f, palmZ - 0.04f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_INDEX_TIP_EXT,
+                     palmX + 0.007f, palmY + 0.01f, palmZ - 0.04f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_MIDDLE_TIP_EXT,
+                     palmX, palmY + 0.01f, palmZ - 0.034f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_RING_TIP_EXT,
+                     palmX + 0.010f, palmY + 0.01f, palmZ - 0.034f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_LITTLE_TIP_EXT,
+                     palmX + 0.020f, palmY + 0.01f, palmZ - 0.034f);
+    SetLeftHandJoint(packet, XR_HAND_JOINT_INDEX_PROXIMAL_EXT,
+                     palmX - 0.015f, palmY + 0.01f, palmZ - 0.025f);
+}
+
+} // namespace
+
 TEST_CASE("InputManager — initial state", "[input]")
 {
     InputManager im;
@@ -229,35 +267,6 @@ TEST_CASE("InputManager — streaming controller activity gates pose updates", "
     CHECK_THAT(left.position.z, WithinAbs(-0.55f, 0.001f));
 }
 
-TEST_CASE("InputManager — hand tracking keeps the hand active without controller flags", "[input]")
-{
-    InputManager im;
-    TrackingReceiver receiver;
-    im.SetTrackingReceiver(&receiver);
-    im.SetStreamingClientName("PICO 4");
-
-    oxr::protocol::TrackingPacket packet = {};
-    packet.timestampNs = 1'000'000'000;
-    packet.headOrientation[3] = 1.0f;
-    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
-    for (uint32_t i = 0; i < oxr::protocol::HAND_JOINT_COUNT; ++i)
-    {
-        packet.leftHandJoints[i][0] = 0.01f * static_cast<float>(i);
-        packet.leftHandJoints[i][1] = 1.0f;
-        packet.leftHandJoints[i][2] = -0.2f;
-        packet.leftHandJoints[i][3] = 0.01f;
-    }
-
-    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
-    im.Update(0.0f);
-
-    CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
-    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
-    CHECK(im.IsInputDeviceActive(InputManager::Hand::Left));
-    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
-          "/interaction_profiles/ext/hand_interaction_ext");
-}
-
 TEST_CASE("InputManager — streaming client names map to controller profiles and aliases", "[input]")
 {
     struct Case
@@ -268,8 +277,11 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
 
     const Case cases[] = {
         {"Oculus Quest", "/interaction_profiles/oculus/touch_controller"},
+        {"Meta Quest 1", "/interaction_profiles/meta/touch_controller_quest_1_rift_s"},
         {"Meta Quest 2", "/interaction_profiles/meta/touch_controller_quest_2"},
         {"Meta Quest 3", "/interaction_profiles/meta/touch_plus_controller"},
+        {"Quest 3", "/interaction_profiles/meta/touch_plus_controller"},
+        {"Unknown headset", "/interaction_profiles/oculus/touch_controller"},
         {"PICO Neo3", "/interaction_profiles/bytedance/pico_neo3_controller"},
         {"PICO 4", "/interaction_profiles/bytedance/pico4_controller"},
     };
@@ -301,6 +313,124 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
                             "/interaction_profiles/oculus/touch_controller") != profiles.end());
         }
     }
+}
+
+TEST_CASE("InputManager — streaming hands and controllers stay profile separated", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Meta Quest 3");
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
+    packet.leftControllerPos[0] = -0.40f;
+    packet.leftControllerPos[1] = 1.10f;
+    packet.leftControllerPos[2] = -0.60f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.leftTrigger = 0.20f;
+    packet.leftGrip = 0.10f;
+    packet.leftThumbstick[0] = 0.25f;
+    packet.leftThumbstick[1] = -0.50f;
+    PopulateLeftPinchingHand(packet, 0.10f, 1.30f, -0.20f);
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    constexpr const char* TouchPlusProfile = "/interaction_profiles/meta/touch_plus_controller";
+    constexpr const char* HandProfile = "/interaction_profiles/ext/hand_interaction_ext";
+
+    CHECK(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) == TouchPlusProfile);
+
+    std::vector<std::string> activeProfiles = im.GetActiveInteractionProfiles(InputManager::Hand::Left);
+    CHECK(std::find(activeProfiles.begin(), activeProfiles.end(), TouchPlusProfile) !=
+          activeProfiles.end());
+    CHECK(std::find(activeProfiles.begin(), activeProfiles.end(), HandProfile) !=
+          activeProfiles.end());
+    CHECK(std::find(activeProfiles.begin(), activeProfiles.end(),
+                    "/interaction_profiles/khr/simple_controller") != activeProfiles.end());
+
+    CHECK_THAT(im.GetFloatComponentForProfile(InputManager::Hand::Left,
+                                              "trigger/value", TouchPlusProfile),
+               WithinAbs(0.20f, 0.001f));
+    CHECK_THAT(im.GetFloatComponentForProfile(InputManager::Hand::Left,
+                                              "squeeze/value", TouchPlusProfile),
+               WithinAbs(0.10f, 0.001f));
+    XrVector2f stick = im.GetVector2fComponentForProfile(InputManager::Hand::Left,
+                                                         "thumbstick", TouchPlusProfile);
+    CHECK_THAT(stick.x, WithinAbs(0.25f, 0.001f));
+    CHECK_THAT(stick.y, WithinAbs(-0.50f, 0.001f));
+
+    XrPosef controllerPose = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                           "grip/pose", TouchPlusProfile);
+    CHECK_THAT(controllerPose.position.x, WithinAbs(-0.40f, 0.001f));
+    CHECK_THAT(controllerPose.position.y, WithinAbs(1.10f, 0.001f));
+    CHECK_THAT(controllerPose.position.z, WithinAbs(-0.60f, 0.001f));
+
+    CHECK(im.GetFloatComponentForProfile(InputManager::Hand::Left,
+                                         "pinch_ext/value", HandProfile) > 0.95f);
+    CHECK(im.GetFloatComponentForProfile(InputManager::Hand::Left,
+                                         "grasp_ext/value", HandProfile) > 0.75f);
+    XrPosef handPose = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                     "grip/pose", HandProfile);
+    CHECK_THAT(handPose.position.x, WithinAbs(0.10f, 0.001f));
+    CHECK_THAT(handPose.position.y, WithinAbs(1.30f, 0.001f));
+    CHECK_THAT(handPose.position.z, WithinAbs(-0.20f, 0.001f));
+
+    oxr::protocol::TrackingPacket handOnly = {};
+    handOnly.timestampNs = 1'011'111'111;
+    handOnly.headOrientation[3] = 1.0f;
+    handOnly.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
+    PopulateLeftPinchingHand(handOnly, 0.20f, 1.35f, -0.25f);
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&handOnly), sizeof(handOnly));
+    im.Update(0.0f);
+
+    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) == HandProfile);
+
+    XrPosef lastControllerPose = im.GetControllerPose(InputManager::Hand::Left);
+    CHECK_THAT(lastControllerPose.position.x, WithinAbs(-0.40f, 0.001f));
+    CHECK_THAT(lastControllerPose.position.y, WithinAbs(1.10f, 0.001f));
+    CHECK_THAT(lastControllerPose.position.z, WithinAbs(-0.60f, 0.001f));
+
+    handPose = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                             "grip/pose", HandProfile);
+    CHECK_THAT(handPose.position.x, WithinAbs(0.20f, 0.001f));
+    CHECK_THAT(handPose.position.y, WithinAbs(1.35f, 0.001f));
+    CHECK_THAT(handPose.position.z, WithinAbs(-0.25f, 0.001f));
+}
+
+TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Oculus Quest");
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.leftTrigger = 0.75f;
+    packet.leftGrip = 0.20f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "select/value"),
+               WithinAbs(0.75f, 0.001f));
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "trigger/value"),
+               WithinAbs(0.75f, 0.001f));
+    CHECK_THAT(im.GetFloatComponent(InputManager::Hand::Left, "squeeze/value"),
+               WithinAbs(0.20f, 0.001f));
+    CHECK(im.GetButtonClick(InputManager::Hand::Left, "select/click"));
+    CHECK_FALSE(im.GetButtonClick(InputManager::Hand::Left, "squeeze/click"));
 }
 
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")

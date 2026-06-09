@@ -4,10 +4,10 @@
 
 #include "ServerConfig.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>

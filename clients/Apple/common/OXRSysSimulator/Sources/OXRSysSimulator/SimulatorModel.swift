@@ -218,7 +218,11 @@ final class SimulatorModel {
 
         Thread.sleep(forTimeInterval: 0.05)
 
-        discovery.sendConnect(to: server, deviceName: "OXRSys Simulator")
+        discovery.sendConnect(
+            to: server,
+            deviceName: "OXRSys Simulator",
+            refreshRateHz: UInt32(refreshRate)
+        )
         trackingSender.connect(serverIP: server.address)
         controlChannel.connect(serverIP: server.address)
 

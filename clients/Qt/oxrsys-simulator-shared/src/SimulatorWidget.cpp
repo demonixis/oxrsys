@@ -472,7 +472,7 @@ void SimulatorWidget::connectToDiscoveredRuntime()
     connectPacket.versionMajor = 1;
     connectPacket.versionMinor = 0;
     connectPacket.preferredCodec = static_cast<uint32_t>(oxr::protocol::VideoCodec::H265);
-    connectPacket.maxBitrateMbps = 50;
+    connectPacket.maxBitrateMbps = oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG;
     connectPacket.refreshRateHz = std::max<uint32_t>(discoveredServer_.refreshRateHz, 60);
     const QByteArray deviceName = platformSimulatorDeviceName().toUtf8();
     std::strncpy(connectPacket.deviceName, deviceName.constData(), sizeof(connectPacket.deviceName) - 1);

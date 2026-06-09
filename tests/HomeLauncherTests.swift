@@ -11,7 +11,6 @@ struct HomeLauncherTests {
     static func main() throws {
         try testBundleInspection()
         try testLauncherMergeDeduplicatesManualApps()
-        try testRuntimeManifestGeneration()
         try testTerminalScriptQuoting()
         try testQuestUsbDeviceParsing()
         try testQuestUsbReverseParsing()
@@ -21,6 +20,7 @@ struct HomeLauncherTests {
         try testQuestUsbAdbInvalidCustomStatus()
         try testQuestUsbAdbClearRestoresAutoDetection()
         try testServerConfigTransportRoundTrip()
+        try testServerConfigDefaultSerialization()
         try testRuntimeActivityParsing()
         try testMacWifiParsing()
         try testAdbStatusDisplay()
@@ -83,15 +83,6 @@ struct HomeLauncherTests {
         try expect(merged.count == 1, "Expected hidden auto app to be removed and duplicate to collapse")
         try expect(merged.first?.name == "Godot Custom", "Expected manual app to win over detected app")
         try expect(merged.first?.source == .manual, "Expected merged app to stay manual")
-    }
-
-    private static func testRuntimeManifestGeneration() throws {
-        let json = HomeRuntimeInstaller.runtimeManifestJSON(libraryPath: "/tmp/OXRSys Runtime/liboxrsys-runtime.dylib")
-        let data = Data(json.utf8)
-        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let runtime = object?["runtime"] as? [String: Any]
-        try expect(runtime?["library_path"] as? String == "/tmp/OXRSys Runtime/liboxrsys-runtime.dylib", "Expected absolute library path")
-        try expect(object?["file_format_version"] as? String == "1.0.0", "Expected OpenXR manifest format version")
     }
 
     private static func testTerminalScriptQuoting() throws {
@@ -246,6 +237,27 @@ struct HomeLauncherTests {
 
         let merged = parsed.merged(into: OXRSysServerConfig.defaultText)
         try expect(merged.contains("transport = \"usb_adb\""), "Expected USB ADB transport serialization")
+    }
+
+    private static func testServerConfigDefaultSerialization() throws {
+        let merged = OXRSysServerConfig().merged(into: """
+        [general]
+        runtime_enabled = false
+
+        [streaming]
+        bitrate_mbps = 85
+        transport = "usb_adb"
+
+        [logging]
+        file_logging = false
+        quest_logcat = true
+        """)
+
+        try expect(merged.contains("runtime_enabled = true"), "Expected default runtime serialization")
+        try expect(merged.contains("bitrate_mbps = 50"), "Expected default bitrate serialization")
+        try expect(merged.contains("transport = \"auto\""), "Expected default transport serialization")
+        try expect(merged.contains("file_logging = true"), "Expected default file logging serialization")
+        try expect(merged.contains("quest_logcat = false"), "Expected default quest logcat serialization")
     }
 
     private static func testRuntimeActivityParsing() throws {

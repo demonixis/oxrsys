@@ -16,6 +16,7 @@
 #include <QTimer>
 
 class QProcess;
+class QThread;
 
 struct TransportReadiness
 {
@@ -31,7 +32,8 @@ class HomeModel final : public QObject
 public:
     explicit HomeModel(QObject* parent = nullptr,
                        const QString& settingsOrganization = "OXRSys",
-                       const QString& settingsApplication = "HomeQt");
+                       const QString& settingsApplication = "HomeQt",
+                       HomePaths paths = homePaths());
     ~HomeModel() override;
 
     const HomePaths& paths() const;
@@ -64,7 +66,6 @@ public:
 public slots:
     void loadAll();
     void setRuntimeManifestPath(const QString& path);
-    void setPreferInstalledRuntimeForLaunches(bool enabled);
     void setDeveloperModeEnabled(bool enabled);
     void setSelectedQuestUsbSerial(const QString& serial);
     void setCustomAdbPath(const QString& path);
@@ -72,7 +73,10 @@ public slots:
     void setSelectedLogAppId(const QString& appId);
     void setMainTransportSelection(const QString& transport);
     void saveStructuredConfig();
+    void scheduleStructuredConfigSave();
     void resetConfigFromDisk();
+    void resetStreamingConfigToDefaults();
+    void setPreferInstalledRuntimeForLaunches(bool enabled);
     void installBundledRuntimeAndRegister();
     void useInstalledRuntimeManifest();
     void refreshRuntimeStatus();
@@ -102,6 +106,8 @@ private:
     void finishLaunchedApp(const QString& appId, int exitCode);
     void cleanupLaunchState(const QString& appId);
     void refreshTransportHealth(bool force = false);
+    void requestTransportRefresh(bool force, bool validateUsbSelection = false);
+    void requestUsbReverseConfigure();
     void pollConfigChangesIfNeeded();
     void updateRuntimeStatsHistory(const RuntimeActivity& activity);
     void setStatusMessage(const QString& message);
@@ -111,6 +117,9 @@ private:
     RuntimeManager runtimeManager_;
     QSettings settings_;
     QTimer pollTimer_;
+    QTimer configSaveTimer_;
+    QThread* transportWorkerThread_ = nullptr;
+    QObject* transportWorker_ = nullptr;
     QString runtimeManifestPath_;
     bool preferInstalledRuntimeForLaunches_ = false;
     ServerConfig serverConfig_;
@@ -137,5 +146,11 @@ private:
     QString wifiStatus_ = "WiFi transport readiness has not been checked.";
     QString mainTransportOverride_;
     QDateTime lastTransportHealthRefreshDate_;
+    int nextTransportRequestId_ = 0;
+    int latestTransportRefreshRequestId_ = 0;
+    int latestUsbConfigureRequestId_ = 0;
+    bool transportRefreshPending_ = false;
+    bool usbConfigurePending_ = false;
+    QString pendingMainTransportSelection_;
     QString statusMessage_;
 };

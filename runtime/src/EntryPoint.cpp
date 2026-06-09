@@ -43,7 +43,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <cstring>
-#ifdef XR_USE_GRAPHICS_API_METAL
+#if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
 #include <memory>
@@ -101,6 +101,7 @@ struct SuggestedBinding
     uint64_t actionHandle;
     XrPath bindingPath = XR_NULL_PATH;
     XrPath topLevelPath = XR_NULL_PATH;
+    std::string profilePathString;
     std::string bindingPathString; // e.g. "/user/hand/left/input/grip/pose"
     std::string componentPath;
 };
@@ -122,6 +123,41 @@ static GraphicsApi gGraphicsApi = GraphicsApi::Vulkan;
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 // Global Vulkan dispatch — definition (declared extern in VulkanDispatch.h)
 VulkanDispatch gVulkanDispatch;
+
+static bool EnsureVulkanInstanceDispatch(VkInstance vkInstance, const char* context)
+{
+    if (vkInstance == VK_NULL_HANDLE)
+    {
+        spdlog::error("OXRSys: {} requires a non-null Vulkan instance", context);
+        return false;
+    }
+
+    if (gVulkanDispatch.enumeratePhysicalDevices && gVulkanDispatch.getDeviceProcAddr)
+    {
+        return true;
+    }
+
+    PFN_vkGetInstanceProcAddr getInstanceProcAddr =
+        ResolveVulkanGetInstanceProcAddrFromProcess(gVulkanDispatch);
+    if (getInstanceProcAddr == nullptr)
+    {
+        spdlog::error(
+            "OXRSys: {} could not resolve vkGetInstanceProcAddr from the app-provided "
+            "dispatch or from an already-loaded Vulkan loader",
+            context);
+        return false;
+    }
+
+    gVulkanDispatch.getInstanceProcAddr = getInstanceProcAddr;
+    gVulkanDispatch.LoadInstanceFunctions(vkInstance);
+    if (!gVulkanDispatch.enumeratePhysicalDevices || !gVulkanDispatch.getDeviceProcAddr)
+    {
+        spdlog::error("OXRSys: {} failed to resolve required Vulkan instance functions", context);
+        return false;
+    }
+
+    return true;
+}
 #endif
 
 #if defined(_WIN32)
@@ -291,6 +327,9 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
         {XR_EXT_DEBUG_UTILS_EXTENSION_NAME, XR_EXT_debug_utils_SPEC_VERSION},
+#ifdef XR_META_touch_controller_plus
+        {XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME, XR_META_touch_controller_plus_SPEC_VERSION},
+#endif
     };
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     extensions.push_back({XR_KHR_VULKAN_ENABLE_EXTENSION_NAME, XR_KHR_vulkan_enable_SPEC_VERSION});
@@ -1028,6 +1067,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (vulkanBinding)
     {
+        if (!EnsureVulkanInstanceDispatch(vulkanBinding->instance, "xrCreateSession Vulkan binding"))
+        {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+
         VulkanGraphicsContext vulkanContext = {};
         vulkanContext.instance = vulkanBinding->instance;
         vulkanContext.physicalDevice = vulkanBinding->physicalDevice;
@@ -1059,8 +1103,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
         }
 
         gGraphicsApi = GraphicsApi::Vulkan;
-        gSession = std::make_unique<Session>(inst, gMetalDevice,
-                                              vulkanContext);
+        gSession = std::make_unique<Session>(
+            inst, GraphicsContext::Vulkan(vulkanContext, gMetalDevice));
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
         spdlog::info("OXRSys: Session created with Vulkan binding");
         return XR_SUCCESS;
@@ -1110,7 +1154,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
     if (metalBinding)
     {
         gGraphicsApi = GraphicsApi::Metal;
-        gSession = std::make_unique<Session>(inst, gMetalDevice);
+        gSession = std::make_unique<Session>(inst, gMetalDevice, metalBinding->commandQueue);
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
         spdlog::info("OXRSys: Session created with Metal binding");
         return XR_SUCCESS;
@@ -1650,6 +1694,12 @@ static bool IsKnownInteractionProfilePath(const Instance* instance, const std::s
     {
         return instance->IsExtensionEnabled(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
     }
+#ifdef XR_META_touch_controller_plus
+    if (profilePath == "/interaction_profiles/meta/touch_controller_plus")
+    {
+        return instance->IsExtensionEnabled(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
+    }
+#endif
 
     return instance->GetApiVersion() >= XR_MAKE_VERSION(1, 1, 0) && profiles11.contains(profilePath);
 }
@@ -1992,6 +2042,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSuggestInteractionProfileBindings(
         binding.actionHandle = actionHandle;
         binding.bindingPath = b.binding;
         binding.topLevelPath = topLevelPath;
+        binding.profilePathString = profilePathString;
         binding.bindingPathString = pathStr;
         binding.componentPath = ComponentFromBindingPath(pathStr);
         bindings.push_back(std::move(binding));
@@ -2150,16 +2201,19 @@ static XrPosef ResolveSpaceWorldPose(Space* space)
         auto* action = Runtime::Get().FromHandle<ActionState>(
             reinterpret_cast<uint64_t>(space->GetAction()));
         std::string poseBindingPath;
+        std::string poseProfilePath;
         if (action != nullptr)
         {
             const auto& data = action->GetSubactionData(space->GetSubactionPath());
             poseBindingPath = Runtime::Get().GetPathString(data.poseSourcePath);
+            poseProfilePath = data.poseSourceProfile;
         }
 
         if (!poseBindingPath.empty())
         {
             InputManager::Hand hand = HandFromBindingPath(poseBindingPath);
-            worldPose = inputManager.GetPoseComponent(hand, ComponentFromBindingPath(poseBindingPath));
+            worldPose = inputManager.GetPoseComponentForProfile(
+                hand, ComponentFromBindingPath(poseBindingPath), poseProfilePath);
         }
         else
         {
@@ -2244,6 +2298,7 @@ static ActionState::SubactionData GetQueriedActionState(const ActionState* actio
         if (aggregate.poseSourcePath == XR_NULL_PATH && data.poseSourcePath != XR_NULL_PATH)
         {
             aggregate.poseSourcePath = data.poseSourcePath;
+            aggregate.poseSourceProfile = data.poseSourceProfile;
         }
         aggregate.lastChangeTime = std::max(aggregate.lastChangeTime, data.lastChangeTime);
         aggregate.boundSources.insert(aggregate.boundSources.end(),
@@ -2313,6 +2368,15 @@ static bool IsActionSetActive(const XrActionsSyncInfo* syncInfo, ActionState* ac
     return false;
 }
 
+static int BindingSourcePriority(const std::string& profilePath)
+{
+    if (profilePath == "/interaction_profiles/ext/hand_interaction_ext")
+    {
+        return 1;
+    }
+    return 2;
+}
+
 static void AccumulateBindingState(const InputManager& inputManager, const SuggestedBinding& binding,
                                     ActionState* action, XrPath subactionPath,
                                     AggregatedActionState& aggregate)
@@ -2324,9 +2388,26 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
 
     InputManager::Hand hand = HandFromBindingPath(binding.bindingPathString);
     bool deviceActive = inputManager.IsInputDeviceActive(hand);
+    if (inputManager.IsStreaming())
+    {
+        deviceActive = binding.profilePathString == "/interaction_profiles/ext/hand_interaction_ext"
+                           ? inputManager.IsHandTrackingActive(hand)
+                           : inputManager.IsControllerTrackingActive(hand);
+    }
     if (!deviceActive)
     {
         return;
+    }
+
+    const int sourcePriority = BindingSourcePriority(binding.profilePathString);
+    if (aggregate.sourcePriority > sourcePriority)
+    {
+        return;
+    }
+    if (aggregate.sourcePriority < sourcePriority)
+    {
+        aggregate = {};
+        aggregate.sourcePriority = sourcePriority;
     }
 
     aggregate.isActive = true;
@@ -2336,17 +2417,20 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
     {
         case XR_ACTION_TYPE_BOOLEAN_INPUT:
             aggregate.boolValue = aggregate.boolValue ||
-                                  inputManager.GetBooleanComponent(hand, binding.componentPath);
+                                  inputManager.GetBooleanComponentForProfile(
+                                      hand, binding.componentPath, binding.profilePathString);
             break;
 
         case XR_ACTION_TYPE_FLOAT_INPUT:
             aggregate.floatValue = std::max(aggregate.floatValue,
-                                            inputManager.GetFloatComponent(hand, binding.componentPath));
+                                            inputManager.GetFloatComponentForProfile(
+                                                hand, binding.componentPath, binding.profilePathString));
             break;
 
         case XR_ACTION_TYPE_VECTOR2F_INPUT:
         {
-            XrVector2f vec = inputManager.GetVector2fComponent(hand, binding.componentPath);
+            XrVector2f vec = inputManager.GetVector2fComponentForProfile(
+                hand, binding.componentPath, binding.profilePathString);
             if (std::fabs(vec.x) > std::fabs(aggregate.vector2fValue.x) ||
                 std::fabs(vec.y) > std::fabs(aggregate.vector2fValue.y))
             {
@@ -2360,6 +2444,7 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
             if (aggregate.poseSourcePath == XR_NULL_PATH)
             {
                 aggregate.poseSourcePath = binding.bindingPath;
+                aggregate.poseSourceProfile = binding.profilePathString;
             }
             break;
 
@@ -2368,6 +2453,26 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
     }
 
     (void)subactionPath;
+}
+
+static std::string SelectCurrentInteractionProfileForInstance(
+    const Instance* instance, const InputManager& inputManager, InputManager::Hand hand)
+{
+    for (const std::string& profilePath : inputManager.GetCurrentInteractionProfileCandidates(hand))
+    {
+        if (!profilePath.empty() && IsKnownInteractionProfilePath(instance, profilePath))
+        {
+            return profilePath;
+        }
+    }
+
+    if (inputManager.IsControllerTrackingActive(hand) &&
+        IsKnownInteractionProfilePath(instance, "/interaction_profiles/oculus/touch_controller"))
+    {
+        return "/interaction_profiles/oculus/touch_controller";
+    }
+
+    return "";
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL OxrGetCurrentInteractionProfile(
@@ -2400,7 +2505,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetCurrentInteractionProfile(
         InputManager::Hand hand = (pathStr == "/user/hand/right")
                                       ? InputManager::Hand::Right
                                       : InputManager::Hand::Left;
-        std::string profilePath = sess->GetInputManager().GetCurrentInteractionProfile(hand);
+        std::string profilePath = SelectCurrentInteractionProfileForInstance(
+            sess->GetInstance(), sess->GetInputManager(), hand);
         if (profilePath.empty())
         {
             interactionProfile->interactionProfile = XR_NULL_PATH;
@@ -2745,6 +2851,10 @@ static std::string LocalizedInteractionProfileName(Session* session, XrPath sour
         return "Meta Quest 2 Touch Controller";
     }
     if (profilePath == "/interaction_profiles/meta/touch_plus_controller")
+    {
+        return "Meta Touch Plus Controller";
+    }
+    if (profilePath == "/interaction_profiles/meta/touch_controller_plus")
     {
         return "Meta Touch Plus Controller";
     }
@@ -3402,28 +3512,13 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetVulkanGraphicsDeviceKHR(
     VkInstance vkInstance, VkPhysicalDevice* vkPhysicalDevice)
 {
     auto* inst = GetInstance(instance);
-    if (!inst || vkPhysicalDevice == nullptr)
+    if (!inst || vkInstance == VK_NULL_HANDLE || vkPhysicalDevice == nullptr)
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    // If dispatch not yet set up (v1 path — app created VkInstance itself),
-    // resolve functions from the provided VkInstance via its dispatch table
-    if (!gVulkanDispatch.enumeratePhysicalDevices)
+    if (!EnsureVulkanInstanceDispatch(vkInstance, "xrGetVulkanGraphicsDeviceKHR"))
     {
-        if (!gVulkanDispatch.getInstanceProcAddr)
-        {
-            // No app proc addr available — try to get one from the VkInstance's dispatch table
-            // The first pointer in a VkInstance is the loader dispatch table
-            spdlog::error("OXRSys: No Vulkan dispatch available for physical device enumeration");
-            return XR_ERROR_RUNTIME_FAILURE;
-        }
-        gVulkanDispatch.LoadInstanceFunctions(vkInstance);
-    }
-
-    if (!gVulkanDispatch.enumeratePhysicalDevices)
-    {
-        spdlog::error("OXRSys: Failed to resolve vkEnumeratePhysicalDevices");
         return XR_ERROR_RUNTIME_FAILURE;
     }
 

@@ -5,39 +5,66 @@
 #include "RuntimePlatform.h"
 #include "RuntimeSockets.h"
 
-using oxrsys::runtime_platform::ConfigRootForPlatform;
-using oxrsys::runtime_platform::EnvironmentPaths;
-using oxrsys::runtime_platform::PlatformKind;
-using oxrsys::runtime_platform::StateRootForPlatform;
-
-TEST_CASE("Runtime platform resolves Windows config and state roots")
+TEST_CASE("RuntimePlatform resolves config and state roots per platform", "[runtime-platform]")
 {
-    EnvironmentPaths environment;
-    environment.home = "C:/Users/Ada";
-    environment.appData = "C:/Users/Ada/AppData/Roaming";
-    environment.localAppData = "C:/Users/Ada/AppData/Local";
+    oxrsys::runtime_platform::EnvironmentPaths environment = {};
+    environment.home = "/home/tester";
+    environment.xdgConfigHome = "/tmp/xdg-config";
+    environment.xdgStateHome = "/tmp/xdg-state";
+    environment.appData = "C:/Users/tester/AppData/Roaming";
+    environment.localAppData = "C:/Users/tester/AppData/Local";
 
-    REQUIRE(ConfigRootForPlatform(PlatformKind::Windows, environment) ==
-            "C:/Users/Ada/AppData/Roaming/OXRSys");
-    REQUIRE(StateRootForPlatform(PlatformKind::Windows, environment) ==
-            "C:/Users/Ada/AppData/Local/OXRSys");
+    CHECK(oxrsys::runtime_platform::ConfigRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::MacOS,
+              environment) == "/home/tester/Library/Application Support/OXRSys");
+    CHECK(oxrsys::runtime_platform::StateRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::MacOS,
+              environment) == "/home/tester/Library/Application Support/OXRSys");
+
+    CHECK(oxrsys::runtime_platform::ConfigRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Linux,
+              environment) == "/tmp/xdg-config/oxrsys");
+    CHECK(oxrsys::runtime_platform::StateRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Linux,
+              environment) == "/tmp/xdg-state/oxrsys");
+
+    CHECK(oxrsys::runtime_platform::ConfigRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Windows,
+              environment) == "C:/Users/tester/AppData/Roaming/OXRSys");
+    CHECK(oxrsys::runtime_platform::StateRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Windows,
+              environment) == "C:/Users/tester/AppData/Local/OXRSys");
 }
 
-TEST_CASE("Runtime platform falls back to Windows profile paths")
+TEST_CASE("RuntimePlatform falls back to home for Linux and Windows roots", "[runtime-platform]")
 {
-    EnvironmentPaths environment;
-    environment.home = "C:/Users/Ada";
+    oxrsys::runtime_platform::EnvironmentPaths environment = {};
+    environment.home = "/home/tester";
 
-    REQUIRE(ConfigRootForPlatform(PlatformKind::Windows, environment) ==
-            "C:/Users/Ada/AppData/Roaming/OXRSys");
-    REQUIRE(StateRootForPlatform(PlatformKind::Windows, environment) ==
-            "C:/Users/Ada/AppData/Local/OXRSys");
+    CHECK(oxrsys::runtime_platform::ConfigRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Linux,
+              environment) == "/home/tester/.config/oxrsys");
+    CHECK(oxrsys::runtime_platform::StateRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Linux,
+              environment) == "/home/tester/.local/state/oxrsys");
+    CHECK(oxrsys::runtime_platform::ConfigRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Windows,
+              environment) == "/home/tester/AppData/Roaming/OXRSys");
+    CHECK(oxrsys::runtime_platform::StateRootForPlatform(
+              oxrsys::runtime_platform::PlatformKind::Windows,
+              environment) == "/home/tester/AppData/Local/OXRSys");
 }
 
-TEST_CASE("Runtime socket invalid handle helpers are stable")
+TEST_CASE("RuntimePlatform exposes a non-zero process id", "[runtime-platform]")
+{
+    CHECK(oxrsys::runtime_platform::ProcessId() > 0);
+}
+
+TEST_CASE("RuntimeSockets invalid handle stays invalid after close", "[runtime-sockets]")
 {
     auto socket = oxrsys::runtime_socket::InvalidSocket;
-    REQUIRE_FALSE(oxrsys::runtime_socket::IsValid(socket));
+    CHECK(!oxrsys::runtime_socket::IsValid(socket));
+
     oxrsys::runtime_socket::Close(socket);
-    REQUIRE_FALSE(oxrsys::runtime_socket::IsValid(socket));
+    CHECK(!oxrsys::runtime_socket::IsValid(socket));
 }

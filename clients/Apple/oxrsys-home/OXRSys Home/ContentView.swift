@@ -90,7 +90,7 @@ struct ContentView: View {
                 Text("OXRSys Home")
                     .font(.title)
                     .fontWeight(.semibold)
-                Text("Launch compatible apps, install the runtime, and tune headset streaming.")
+                Text("Launch compatible apps, select a runtime, and tune headset streaming.")
                     .foregroundStyle(.secondary)
             }
 
@@ -326,7 +326,6 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 developerSettingsSection
-                runtimeInstallSection
                 runtimeRegistrationSection
             }
             .padding(.top, 14)
@@ -337,77 +336,6 @@ struct ContentView: View {
         GroupBox("Developer") {
             Toggle("Developer Mode", isOn: $preferences.developerModeEnabled)
                 .padding(.top, 8)
-        }
-    }
-
-    private var runtimeInstallSection: some View {
-        GroupBox("Runtime Installation") {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        LabeledContent("Bundled runtime") {
-                            StatusPill(
-                                title: model.runtimeInstallStatus.bundledRuntimeExists ? "Available" : "Not embedded",
-                                color: model.runtimeInstallStatus.bundledRuntimeExists ? .green : .secondary
-                            )
-                        }
-                        LabeledContent("Installed runtime") {
-                            StatusPill(
-                                title: model.runtimeInstallStatus.installedRuntimeExists ? "Installed" : "Not installed",
-                                color: model.runtimeInstallStatus.installedRuntimeExists ? .green : .secondary
-                            )
-                        }
-                        LabeledContent("Update state") {
-                            StatusPill(
-                                title: model.runtimeInstallStatus.installedRuntimeNeedsUpdate ? "Update available" : "Current",
-                                color: model.runtimeInstallStatus.installedRuntimeNeedsUpdate ? .orange : .secondary
-                            )
-                        }
-                    }
-
-                    Spacer()
-
-                    VStack(alignment: .trailing, spacing: 8) {
-                        Button {
-                            model.installBundledRuntimeAndRegister()
-                        } label: {
-                            Label(model.runtimeInstallButtonTitle, systemImage: "square.and.arrow.down")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!model.canInstallBundledRuntime)
-
-                        Button {
-                            model.useInstalledRuntimeManifest()
-                        } label: {
-                            Label("Use Installed Manifest", systemImage: "checkmark.circle")
-                        }
-                        .disabled(!model.runtimeInstallStatus.installedManifestExists)
-
-                        Button {
-                            revealInFinder(model.runtimeInstallStatus.installedManifestPath)
-                        } label: {
-                            Label("Reveal Installed Runtime", systemImage: "finder")
-                        }
-                        .disabled(!model.runtimeInstallStatus.installedRuntimeExists)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(model.runtimeInstallStatus.installedManifestPath)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if let bundledPath = model.runtimeInstallStatus.bundledRuntimePath {
-                        Text(bundledPath)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-            }
-            .padding(.top, 8)
         }
     }
 
@@ -435,7 +363,6 @@ struct ContentView: View {
                 HStack {
                     Button("Refresh") {
                         model.refreshRuntimeStatus()
-                        model.refreshRuntimeInstallStatus()
                     }
                     Spacer()
                     Button(model.registrationButtonTitle) {
@@ -452,17 +379,21 @@ struct ContentView: View {
         ScrollView {
             GroupBox("Streaming Configuration") {
                 VStack(alignment: .leading, spacing: 16) {
-                    Toggle("Runtime enabled", isOn: $model.serverConfig.runtimeEnabled)
-                    Toggle("Write server log file", isOn: $model.serverConfig.fileLogging)
-                    Toggle("Capture Quest logcat", isOn: $model.serverConfig.questLogcat)
+                    Toggle("Runtime enabled", isOn: streamingBinding(\.runtimeEnabled))
+                    Toggle("Write server log file", isOn: streamingBinding(\.fileLogging))
+                    Toggle("Capture Quest logcat", isOn: streamingBinding(\.questLogcat))
 
                     LabeledSlider(
                         title: "Bitrate",
                         value: Binding(
                             get: { Double(model.serverConfig.bitrateMbps) },
-                            set: { model.serverConfig.bitrateMbps = Int($0.rounded()) }
+                            set: { value in
+                                model.updateStreamingConfig {
+                                    $0.bitrateMbps = Int(value.rounded())
+                                }
+                            }
                         ),
-                        range: 1...200,
+                        range: Double(OXRSysServerConfig.minBitrateMbps)...Double(OXRSysServerConfig.maxBitrateMbps),
                         displayValue: "\(model.serverConfig.bitrateMbps) Mbps"
                     )
 
@@ -470,7 +401,11 @@ struct ContentView: View {
                         title: "Vertical FOV",
                         value: Binding(
                             get: { Double(model.serverConfig.fovDegrees) },
-                            set: { model.serverConfig.fovDegrees = Int($0.rounded()) }
+                            set: { value in
+                                model.updateStreamingConfig {
+                                    $0.fovDegrees = Int(value.rounded())
+                                }
+                            }
                         ),
                         range: 60...150,
                         displayValue: "\(model.serverConfig.fovDegrees) degrees"
@@ -478,7 +413,7 @@ struct ContentView: View {
 
                     LabeledSlider(
                         title: "Resolution Scale",
-                        value: $model.serverConfig.resolutionScale,
+                        value: streamingBinding(\.resolutionScale),
                         range: 0.25...1.0,
                         displayValue: String(format: "%.2f", model.serverConfig.resolutionScale)
                     )
@@ -487,27 +422,31 @@ struct ContentView: View {
                         title: "Keyframe Interval",
                         value: Binding(
                             get: { Double(model.serverConfig.keyframeIntervalSec) },
-                            set: { model.serverConfig.keyframeIntervalSec = Int($0.rounded()) }
+                            set: { value in
+                                model.updateStreamingConfig {
+                                    $0.keyframeIntervalSec = Int(value.rounded())
+                                }
+                            }
                         ),
                         range: 1...10,
                         displayValue: "\(model.serverConfig.keyframeIntervalSec) s"
                     )
 
-                    Picker("Encoder preset", selection: $model.serverConfig.encoderPreset) {
+                    Picker("Encoder preset", selection: streamingBinding(\.encoderPreset)) {
                         ForEach(EncoderPreset.allCases) { preset in
                             Text(preset.rawValue.capitalized).tag(preset)
                         }
                     }
 
-                    Picker("Transport", selection: $model.serverConfig.transport) {
+                    Picker("Transport", selection: streamingBinding(\.transport)) {
                         ForEach(StreamingTransportSetting.allCases) { transport in
                             Text(transport.displayName).tag(transport)
                         }
                     }
 
                     HStack {
-                        Button("Save Configuration") {
-                            model.saveStructuredConfig()
+                        Button("Default") {
+                            model.resetStreamingConfigToDefaults()
                         }
                         Button("Reload From Disk") {
                             model.resetToDisk()
@@ -515,6 +454,9 @@ struct ContentView: View {
                         Spacer()
                         Button("Reveal Config") {
                             model.revealConfigFile()
+                        }
+                        Button("Reveal Runtime Logs") {
+                            model.revealRuntimeLogsDirectory()
                         }
                     }
                 }
@@ -742,6 +684,17 @@ struct ContentView: View {
             return String(format: "%.0f ms", value)
         }
         return String(format: "%.1f ms", value)
+    }
+
+    private func streamingBinding<Value>(_ keyPath: WritableKeyPath<OXRSysServerConfig, Value>) -> Binding<Value> {
+        Binding(
+            get: { model.serverConfig[keyPath: keyPath] },
+            set: { value in
+                model.updateStreamingConfig {
+                    $0[keyPath: keyPath] = value
+                }
+            }
+        )
     }
 }
 

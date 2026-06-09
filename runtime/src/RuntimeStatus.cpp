@@ -205,7 +205,8 @@ void WriteStatusLocked(const std::string& state,
         file << "  \"device_type\": \"" << JsonEscape(deviceType) << "\",\n";
         file << "  \"client_name\": \"" << JsonEscape(clientName) << "\",\n";
         file << "  \"application_name\": \"" << JsonEscape(ApplicationName()) << "\",\n";
-        file << "  \"process_id\": " << static_cast<long long>(oxrsys::runtime_platform::ProcessId()) << ",\n";
+        file << "  \"process_id\": "
+             << static_cast<long long>(oxrsys::runtime_platform::ProcessId()) << ",\n";
         file << "  \"updated_at_unix_ms\": " << UnixTimeMilliseconds();
         if (state == "streaming" && HasStreamingStats())
         {

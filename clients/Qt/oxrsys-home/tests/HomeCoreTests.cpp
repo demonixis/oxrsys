@@ -10,10 +10,9 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QSettings>
 #include <QTimeZone>
 #include <QTemporaryDir>
@@ -86,16 +85,62 @@ void testServerConfigRoundTrip()
     expect(merged.contains("bitrate_mbps = 85"), "Expected bitrate serialization");
 }
 
-void testRuntimeManifestGeneration()
+void testHomeModelResetsStreamingConfigToDefaults()
 {
-    const QString libraryPath = QDir("/tmp/OXRSys Runtime").filePath(runtimeLibraryFileName());
-    const QString json = RuntimeManager::runtimeManifestJson(libraryPath);
-    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
-    const QJsonObject runtime = document.object().value("runtime").toObject();
-    expect(document.object().value("file_format_version").toString() == "1.0.0",
-           "Expected manifest format version");
-    expect(runtime.value("library_path").toString().endsWith(runtimeLibraryFileName()),
-           "Expected runtime library path");
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    HomePaths paths;
+    paths.configRoot = QDir(temporaryDir.path()).filePath("config");
+    paths.dataRoot = QDir(temporaryDir.path()).filePath("data");
+    paths.stateRoot = QDir(temporaryDir.path()).filePath("state");
+    paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
+    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
+    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
+    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
+    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+
+    writeFile(paths.configFilePath, R"(
+[general]
+runtime_enabled = false
+
+[streaming]
+bitrate_mbps = 85
+transport = "usb_adb"
+encoder_preset = "speed"
+
+[logging]
+file_logging = false
+quest_logcat = true
+)");
+
+    const QString organization = "OXRSysHomeTests";
+    const QString application =
+        "HomeQt-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings settings(organization, application);
+    settings.clear();
+
+    HomeModel model(nullptr, organization, application, paths);
+    expect(model.serverConfig().bitrateMbps == 85,
+           "Expected custom bitrate before default reset");
+    expect(model.serverConfig().transport == "usb_adb",
+           "Expected custom transport before default reset");
+
+    model.resetStreamingConfigToDefaults();
+    expect(model.serverConfig().runtimeEnabled, "Expected default runtime enabled");
+    expect(model.serverConfig().bitrateMbps == 50, "Expected default bitrate");
+    expect(model.serverConfig().transport == "auto", "Expected default transport");
+    expect(model.serverConfig().fileLogging, "Expected default file logging");
+    expect(!model.serverConfig().questLogcat, "Expected default quest logcat off");
+
+    QFile file(paths.configFilePath);
+    expect(file.open(QIODevice::ReadOnly | QIODevice::Text),
+           "Expected default reset to write config");
+    const QString text = QString::fromUtf8(file.readAll());
+    expect(text.contains("bitrate_mbps = 50"), "Expected default bitrate serialization");
+    expect(text.contains("transport = \"auto\""), "Expected default transport serialization");
+
+    settings.clear();
 }
 
 void testRuntimeRegistration()
@@ -107,14 +152,11 @@ void testRuntimeRegistration()
     const QString runtimeLibraryPath = QDir(temporaryDir.path()).filePath("liboxrsys-runtime.so");
     const QString manifestPath = QDir(temporaryDir.path()).filePath("oxrsys-runtime.json");
     writeFile(runtimeLibraryPath, "runtime");
-    writeFile(manifestPath, RuntimeManager::runtimeManifestJson(runtimeLibraryPath).toUtf8());
+    writeFile(manifestPath, "{}");
 
     HomePaths paths;
     paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
     paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
-    paths.installedRuntimeDirectory = QDir(temporaryDir.path()).filePath("runtime/current");
-    paths.installedRuntimeManifestPath =
-        QDir(paths.installedRuntimeDirectory).filePath(runtimeManifestFileName());
 
     RuntimeManager manager(paths);
     QString error;
@@ -271,6 +313,57 @@ void testCustomAdbPreferencePersistence()
     settings.clear();
 }
 
+void testHomeModelTransportRefreshIsAsyncWithSlowAdb()
+{
+#if !defined(Q_OS_WIN)
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    const QString slowAdbPath = QDir(temporaryDir.path()).filePath("adb");
+    writeFile(slowAdbPath,
+              "#!/bin/sh\n"
+              "sleep 1\n"
+              "if [ \"$1\" = \"version\" ]; then\n"
+              "  echo \"Android Debug Bridge version 1.0.41\"\n"
+              "  exit 0\n"
+              "fi\n"
+              "if [ \"$1\" = \"devices\" ]; then\n"
+              "  echo \"List of devices attached\"\n"
+              "  exit 0\n"
+              "fi\n"
+              "exit 0\n");
+    makeExecutable(slowAdbPath);
+
+    HomePaths paths;
+    paths.configRoot = QDir(temporaryDir.path()).filePath("config");
+    paths.dataRoot = QDir(temporaryDir.path()).filePath("data");
+    paths.stateRoot = QDir(temporaryDir.path()).filePath("state");
+    paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
+    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
+    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
+    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
+    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+
+    const QString organization = "OXRSysHomeTests";
+    const QString application =
+        "HomeQt-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSettings settings(organization, application);
+    settings.clear();
+    settings.setValue("customAdbPath", slowAdbPath);
+
+    QElapsedTimer timer;
+    timer.start();
+    HomeModel model(nullptr, organization, application, paths);
+    expect(timer.elapsed() < 250, "Expected HomeModel construction to avoid slow adb blocking");
+
+    timer.restart();
+    model.refreshQuestUsbDevices();
+    expect(timer.elapsed() < 100, "Expected USB refresh to return before slow adb completes");
+
+    settings.clear();
+#endif
+}
+
 void testRuntimeActivityParsing()
 {
     const RuntimeActivity activity = RuntimeActivity::parse(R"({
@@ -418,13 +511,14 @@ int main(int argc, char** argv)
     try
     {
         testServerConfigRoundTrip();
-        testRuntimeManifestGeneration();
+        testHomeModelResetsStreamingConfigToDefaults();
         testRuntimeRegistration();
         testRuntimeLaunchManifestPreference();
         testRuntimeBuildDirectoryCandidates();
         testAdbParsing();
         testAdbCustomPathSelection();
         testCustomAdbPreferencePersistence();
+        testHomeModelTransportRefreshIsAsyncWithSlowAdb();
         testRuntimeActivityParsing();
         testDesktopInspection();
         testMacAppInspection();

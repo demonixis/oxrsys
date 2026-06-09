@@ -16,6 +16,11 @@
 namespace
 {
 
+constexpr const char* kOculusTouchProfile = "/interaction_profiles/oculus/touch_controller";
+constexpr const char* kTouchPlusPromotedProfile = "/interaction_profiles/meta/touch_plus_controller";
+constexpr const char* kSimpleControllerProfile = "/interaction_profiles/khr/simple_controller";
+constexpr const char* kHandInteractionProfile = "/interaction_profiles/ext/hand_interaction_ext";
+
 size_t HandIndex(InputManager::Hand hand)
 {
     return (hand == InputManager::Hand::Left) ? 0u : 1u;
@@ -59,7 +64,7 @@ std::string DetectStreamingControllerProfile(const std::string& clientName)
 
     if (ContainsAny(lowerName, {"quest 3", "quest3", "touch plus"}))
     {
-        return "/interaction_profiles/meta/touch_plus_controller";
+        return kTouchPlusPromotedProfile;
     }
     if (ContainsAny(lowerName, {"quest 2", "quest2"}))
     {
@@ -71,10 +76,10 @@ std::string DetectStreamingControllerProfile(const std::string& clientName)
     }
     if (ContainsAny(lowerName, {"quest", "oculus", "meta"}))
     {
-        return "/interaction_profiles/oculus/touch_controller";
+        return kOculusTouchProfile;
     }
 
-    return "/interaction_profiles/oculus/touch_controller";
+    return kOculusTouchProfile;
 }
 
 void AddProfileIfMissing(std::vector<std::string>& profiles, const std::string& profile)
@@ -87,6 +92,24 @@ void AddProfileIfMissing(std::vector<std::string>& profiles, const std::string& 
     {
         profiles.push_back(profile);
     }
+}
+
+bool IsHandInteractionProfile(const std::string& profilePath)
+{
+    return profilePath == kHandInteractionProfile;
+}
+
+bool IsHandInteractionComponent(const std::string& componentPath)
+{
+    return componentPath == "pinch_ext/pose" ||
+           componentPath == "pinch_ext/value" ||
+           componentPath == "pinch_ext/ready_ext" ||
+           componentPath == "poke_ext/pose" ||
+           componentPath == "grasp_ext/ready_ext" ||
+           componentPath == "grasp_ext/value" ||
+           componentPath == "aim_activate_ext/ready_ext" ||
+           componentPath == "aim_activate_ext/value" ||
+           componentPath == "grip_surface/pose";
 }
 
 glm::vec3 JointVec3(const InputManager::StreamingHandState& handState, size_t index)
@@ -205,8 +228,22 @@ void InputManager::UpdateFromStreaming()
         (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
     const bool rightControllerActive =
         (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0;
+    const bool previousLeftControllerActive = streamingControllerActive_[HandIndex(Hand::Left)];
+    const bool previousRightControllerActive = streamingControllerActive_[HandIndex(Hand::Right)];
     streamingControllerActive_[HandIndex(Hand::Left)] = leftControllerActive;
     streamingControllerActive_[HandIndex(Hand::Right)] = rightControllerActive;
+    if (leftControllerActive != previousLeftControllerActive)
+    {
+        spdlog::info("InputManager: left controller {} flags=0x{:x}",
+                     leftControllerActive ? "active" : "inactive",
+                     packet.trackingFlags);
+    }
+    if (rightControllerActive != previousRightControllerActive)
+    {
+        spdlog::info("InputManager: right controller {} flags=0x{:x}",
+                     rightControllerActive ? "active" : "inactive",
+                     packet.trackingFlags);
+    }
 
     if (leftControllerActive)
     {
@@ -248,11 +285,19 @@ void InputManager::UpdateFromStreaming()
 
     for (size_t handIndex = 0; handIndex < 2; ++handIndex)
     {
-        const bool isActive =
+        const bool streamedHandActive =
             (packet.trackingFlags &
              (handIndex == 0 ? oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE
                              : oxr::protocol::TRACKING_FLAG_RIGHT_HAND_ACTIVE)) != 0;
-        streamingHands_[handIndex].active = isActive;
+        const bool previousHandActive = streamingHands_[handIndex].active;
+        streamingHands_[handIndex].active = streamedHandActive;
+        if (streamedHandActive != previousHandActive)
+        {
+            spdlog::info("InputManager: {} hand {} flags=0x{:x}",
+                         handIndex == 0 ? "left" : "right",
+                         streamedHandActive ? "active" : "inactive",
+                         packet.trackingFlags);
+        }
 
         const auto& sourceJoints = handIndex == 0 ? packet.leftHandJoints : packet.rightHandJoints;
         for (size_t jointIndex = 0; jointIndex < oxr::protocol::HAND_JOINT_COUNT; ++jointIndex)
@@ -404,11 +449,6 @@ XrPosef InputManager::GetControllerPose(Hand hand) const
 
 float InputManager::GetGrabValue(Hand hand) const
 {
-    if (IsHandTrackingActive(hand))
-    {
-        return GetTrackedGraspValue(hand);
-    }
-
     return (hand == Hand::Left) ? leftGripValue_ : rightGripValue_;
 }
 
@@ -419,11 +459,6 @@ bool InputManager::GetMenuClick() const
 
 float InputManager::GetTriggerValue(Hand hand) const
 {
-    if (IsHandTrackingActive(hand))
-    {
-        return GetTrackedPinchValue(hand);
-    }
-
     return (hand == Hand::Left) ? leftTrigger_ : rightTrigger_;
 }
 
@@ -503,37 +538,42 @@ bool InputManager::IsHandTrackingActive(Hand hand) const
 
 std::string InputManager::GetCurrentInteractionProfile(Hand hand) const
 {
+    const std::vector<std::string> candidates = GetCurrentInteractionProfileCandidates(hand);
+    return candidates.empty() ? "" : candidates.front();
+}
+
+std::vector<std::string> InputManager::GetCurrentInteractionProfileCandidates(Hand hand) const
+{
     const auto& automation = GetAutomationState(hand);
     if (automation.hasExplicitActivity)
     {
         if (!automation.isActive)
         {
-            return "";
+            return {};
         }
         if (!automation.interactionProfile.empty())
         {
-            return automation.interactionProfile;
+            return {automation.interactionProfile};
         }
-    }
-
-    if (IsHandTrackingActive(hand))
-    {
-        return "/interaction_profiles/ext/hand_interaction_ext";
     }
 
     if (IsControllerTrackingActive(hand))
     {
-        return streamingControllerProfile_.empty()
-            ? "/interaction_profiles/oculus/touch_controller"
-            : streamingControllerProfile_;
+        return {streamingControllerProfile_.empty() ? kOculusTouchProfile
+                                                    : streamingControllerProfile_};
+    }
+
+    if (IsHandTrackingActive(hand))
+    {
+        return {kHandInteractionProfile};
     }
 
     if (IsStreaming())
     {
-        return "";
+        return {};
     }
 
-    return "/interaction_profiles/khr/simple_controller";
+    return {kSimpleControllerProfile};
 }
 
 std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) const
@@ -543,7 +583,7 @@ std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) c
     AddProfileIfMissing(profiles, currentProfile);
 
     const auto& automation = GetAutomationState(hand);
-    if (automation.hasExplicitActivity || currentProfile == "/interaction_profiles/ext/hand_interaction_ext")
+    if (automation.hasExplicitActivity)
     {
         return profiles;
     }
@@ -551,11 +591,15 @@ std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) c
     if (IsControllerTrackingActive(hand))
     {
         if (currentProfile.find("/interaction_profiles/meta/") == 0 ||
-            currentProfile == "/interaction_profiles/oculus/touch_controller")
+            currentProfile == kOculusTouchProfile)
         {
-            AddProfileIfMissing(profiles, "/interaction_profiles/oculus/touch_controller");
+            AddProfileIfMissing(profiles, kOculusTouchProfile);
         }
-        AddProfileIfMissing(profiles, "/interaction_profiles/khr/simple_controller");
+        AddProfileIfMissing(profiles, kSimpleControllerProfile);
+    }
+    if (IsHandTrackingActive(hand))
+    {
+        AddProfileIfMissing(profiles, kHandInteractionProfile);
     }
 
     return profiles;
@@ -576,7 +620,7 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     }
     if (componentPath == "select/click")
     {
-        return GetGrabValue(hand) > 0.5f;
+        return GetTriggerValue(hand) > 0.5f;
     }
     if (componentPath == "trigger/click")
     {
@@ -629,10 +673,46 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
 
 bool InputManager::GetBooleanComponent(Hand hand, const std::string& componentPath) const
 {
+    return GetBooleanComponentForProfile(hand, componentPath, "");
+}
+
+bool InputManager::GetBooleanComponentForProfile(Hand hand, const std::string& componentPath,
+                                                 const std::string& profilePath) const
+{
+    const auto& automation = GetAutomationState(hand);
+    auto boolIt = automation.boolStates.find(componentPath);
+    if (boolIt != automation.boolStates.end())
+    {
+        return boolIt->second;
+    }
+
+    const bool handInteractionProfile = IsHandInteractionProfile(profilePath);
+    if (handInteractionProfile)
+    {
+        if (componentPath == "pinch_ext/ready_ext" ||
+            componentPath == "grasp_ext/ready_ext" ||
+            componentPath == "aim_activate_ext/ready_ext")
+        {
+            return IsHandTrackingActive(hand);
+        }
+        return false;
+    }
+
+    if (!profilePath.empty() && IsHandInteractionComponent(componentPath))
+    {
+        return false;
+    }
+
     return GetButtonClick(hand, componentPath);
 }
 
 float InputManager::GetFloatComponent(Hand hand, const std::string& componentPath) const
+{
+    return GetFloatComponentForProfile(hand, componentPath, "");
+}
+
+float InputManager::GetFloatComponentForProfile(Hand hand, const std::string& componentPath,
+                                                const std::string& profilePath) const
 {
     const auto& automation = GetAutomationState(hand);
     auto floatIt = automation.floatStates.find(componentPath);
@@ -641,9 +721,29 @@ float InputManager::GetFloatComponent(Hand hand, const std::string& componentPat
         return floatIt->second;
     }
 
+    const bool handInteractionProfile = IsHandInteractionProfile(profilePath);
+    if (handInteractionProfile)
+    {
+        if (componentPath == "grasp_ext/value")
+        {
+            return GetTrackedGraspValue(hand);
+        }
+        if (componentPath == "pinch_ext/value" ||
+            componentPath == "aim_activate_ext/value")
+        {
+            return GetTrackedPinchValue(hand);
+        }
+        return GetBooleanComponentForProfile(hand, componentPath, profilePath) ? 1.0f : 0.0f;
+    }
+
+    if (!profilePath.empty() && IsHandInteractionComponent(componentPath))
+    {
+        return 0.0f;
+    }
+
     if (componentPath == "select/value")
     {
-        return GetGrabValue(hand);
+        return GetTriggerValue(hand);
     }
     if (componentPath == "trigger/value")
     {
@@ -671,16 +771,28 @@ float InputManager::GetFloatComponent(Hand hand, const std::string& componentPat
         return GetTrackedPinchValue(hand);
     }
 
-    return GetBooleanComponent(hand, componentPath) ? 1.0f : 0.0f;
+    return GetBooleanComponentForProfile(hand, componentPath, profilePath) ? 1.0f : 0.0f;
 }
 
 XrVector2f InputManager::GetVector2fComponent(Hand hand, const std::string& componentPath) const
+{
+    return GetVector2fComponentForProfile(hand, componentPath, "");
+}
+
+XrVector2f InputManager::GetVector2fComponentForProfile(Hand hand, const std::string& componentPath,
+                                                        const std::string& profilePath) const
 {
     const auto& automation = GetAutomationState(hand);
     auto vecIt = automation.vector2fStates.find(componentPath);
     if (vecIt != automation.vector2fStates.end())
     {
         return vecIt->second;
+    }
+
+    if (IsHandInteractionProfile(profilePath) ||
+        (!profilePath.empty() && IsHandInteractionComponent(componentPath)))
+    {
+        return {0.0f, 0.0f};
     }
 
     if (componentPath == "thumbstick")
@@ -693,6 +805,12 @@ XrVector2f InputManager::GetVector2fComponent(Hand hand, const std::string& comp
 
 XrPosef InputManager::GetPoseComponent(Hand hand, const std::string& componentPath) const
 {
+    return GetPoseComponentForProfile(hand, componentPath, "");
+}
+
+XrPosef InputManager::GetPoseComponentForProfile(Hand hand, const std::string& componentPath,
+                                                 const std::string& profilePath) const
+{
     const auto& automation = GetAutomationState(hand);
     auto poseIt = automation.poseStates.find(componentPath);
     if (poseIt != automation.poseStates.end())
@@ -700,9 +818,15 @@ XrPosef InputManager::GetPoseComponent(Hand hand, const std::string& componentPa
         return poseIt->second;
     }
 
+    const bool handInteractionProfile = IsHandInteractionProfile(profilePath);
+    if (handInteractionProfile && IsHandTrackingActive(hand))
+    {
+        return GetTrackedHandPose(hand, componentPath);
+    }
+
     if (componentPath == "grip/pose" || componentPath == "aim/pose")
     {
-        if (IsHandTrackingActive(hand))
+        if (profilePath.empty() && IsHandTrackingActive(hand))
         {
             return GetTrackedHandPose(hand, componentPath);
         }
@@ -711,13 +835,19 @@ XrPosef InputManager::GetPoseComponent(Hand hand, const std::string& componentPa
 
     if (componentPath == "pinch_ext/pose" || componentPath == "poke_ext/pose")
     {
-        if (IsHandTrackingActive(hand))
+        if (profilePath.empty() && IsHandTrackingActive(hand))
         {
             return GetTrackedHandPose(hand, componentPath);
         }
         XrPosef pose = GetControllerPose(hand);
         pose.position.z -= 0.05f;
         return pose;
+    }
+
+    if (profilePath.empty() && IsHandInteractionComponent(componentPath) &&
+        IsHandTrackingActive(hand))
+    {
+        return GetTrackedHandPose(hand, componentPath);
     }
 
     return GetControllerPose(hand);

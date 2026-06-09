@@ -3,10 +3,13 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include <istream>
 #include <mutex>
 #include <string>
+#include <thread>
 
 struct ConfigValues
 {
@@ -74,7 +77,9 @@ private:
     bool hasConfigFile_ = false;
     bool hasKnownWriteTime_ = false;
     std::chrono::steady_clock::time_point lastReloadCheck_ = std::chrono::steady_clock::time_point::min();
-    FILE* logcatProcess_ = nullptr;
+    FILE* logcatPipe_ = nullptr;
     FILE* logcatFile_ = nullptr;
-    bool logcatRunning_ = false;
+    std::atomic_bool logcatRunning_{false};
+    std::thread logcatThread_;
+    int logcatPid_ = -1;
 };

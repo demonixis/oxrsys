@@ -160,16 +160,15 @@ TrackingReceiver::~TrackingReceiver()
 
 bool TrackingReceiver::Start()
 {
-    using namespace oxrsys::runtime_socket;
-
-    socket_ = Create(AF_INET, SOCK_DGRAM, 0);
-    if (!IsValid(socket_))
+    socket_ = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
+    if (!oxrsys::runtime_socket::IsValid(socket_))
     {
-        spdlog::error("TrackingReceiver: Failed to create socket: {}", LastErrorText());
+        spdlog::error("TrackingReceiver: Failed to create socket: {}",
+                      oxrsys::runtime_socket::LastErrorText());
         return false;
     }
 
-    SetReuseAddress(socket_);
+    oxrsys::runtime_socket::SetReuseAddress(socket_);
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -179,8 +178,9 @@ bool TrackingReceiver::Start()
     if (bind(socket_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
     {
         spdlog::error("TrackingReceiver: Failed to bind on port {}: {}",
-                       oxr::protocol::TRACKING_PORT, LastErrorText());
-        Close(socket_);
+                       oxr::protocol::TRACKING_PORT,
+                       oxrsys::runtime_socket::LastErrorText());
+        oxrsys::runtime_socket::Close(socket_);
         return false;
     }
 
@@ -195,10 +195,7 @@ void TrackingReceiver::Stop()
 {
     running_.store(false);
 
-    if (oxrsys::runtime_socket::IsValid(socket_))
-    {
-        oxrsys::runtime_socket::Close(socket_);
-    }
+    oxrsys::runtime_socket::Close(socket_);
 
     if (receiveThread_.joinable())
     {
@@ -210,16 +207,14 @@ void TrackingReceiver::Stop()
 
 void TrackingReceiver::ReceiveThread()
 {
-    using namespace oxrsys::runtime_socket;
-
     uint8_t buffer[sizeof(oxr::protocol::TrackingPacket)];
 
     while (running_.load())
     {
-        SetReceiveTimeout(socket_, 0, 5000); // 5ms timeout for responsive shutdown
+        oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
-        int64_t received = Receive(socket_, buffer, sizeof(buffer), 0);
-        if (received < static_cast<int64_t>(sizeof(oxr::protocol::TrackingPacket)))
+        int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
+        if (received < static_cast<int>(sizeof(oxr::protocol::TrackingPacket)))
         {
             continue;
         }

@@ -122,6 +122,7 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
         auto* action = Runtime::Get().FromHandle<ActionState>(
             reinterpret_cast<uint64_t>(space->GetAction()));
         std::string poseBindingPath;
+        std::string poseProfilePath;
         bool poseActive = false;
 
         if (action != nullptr)
@@ -129,12 +130,14 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
             const auto& data = action->GetSubactionData(space->GetSubactionPath());
             poseActive = data.poseActive;
             poseBindingPath = Runtime::Get().GetPathString(data.poseSourcePath);
+            poseProfilePath = data.poseSourceProfile;
 
             if (poseBindingPath.empty() || !poseActive)
             {
                 const auto& fallbackData = action->GetSubactionData(XR_NULL_PATH);
                 poseActive = fallbackData.poseActive;
                 poseBindingPath = Runtime::Get().GetPathString(fallbackData.poseSourcePath);
+                poseProfilePath = fallbackData.poseSourceProfile;
             }
         }
 
@@ -142,7 +145,8 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
         if (poseActive && !poseBindingPath.empty())
         {
             InputManager::Hand hand = HandFromBindingPath(poseBindingPath);
-            result.pose = inputManager.GetPoseComponent(hand, ComponentFromBindingPath(poseBindingPath));
+            result.pose = inputManager.GetPoseComponentForProfile(
+                hand, ComponentFromBindingPath(poseBindingPath), poseProfilePath);
         }
         else
         {

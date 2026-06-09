@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import java.io.File
+
 plugins {
     id("com.android.application")
 }
 
-val oxrsysVersionFile = rootProject.file("../../config/OXRSysVersion.xcconfig")
+fun findOxrsysVersionFile(): File {
+    return generateSequence(rootProject.projectDir) { it.parentFile }
+        .map { File(it, "config/OXRSysVersion.xcconfig") }
+        .firstOrNull { it.isFile }
+        ?: rootProject.file("../../../config/OXRSysVersion.xcconfig")
+}
+
+val oxrsysVersionFile = findOxrsysVersionFile()
 require(oxrsysVersionFile.isFile) {
     "OXRSys version config is missing at ${oxrsysVersionFile.path}"
 }
@@ -36,7 +45,7 @@ android {
 
     defaultConfig {
         applicationId = "net.demonixis.oxrsys.android"
-        minSdk = 29          // Quest 2 minimum
+        minSdk = 29          // Quest 1 minimum
         targetSdk = 32       // Meta recommends targetSdk 32 for Quest
         versionCode = oxrsysBuild
         versionName = oxrsysVersion

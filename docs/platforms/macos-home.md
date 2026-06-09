@@ -6,9 +6,9 @@ The native macOS Home app lives in `clients/Apple/oxrsys-home/` and provides thr
 
 - `Apps`: scans for compatible apps, manages manually added apps, launches them with
   `XR_RUNTIME_JSON`, and captures stdout/stderr logs.
-- `Settings`: installs a bundled runtime, registers the selected OpenXR runtime manifest for the
-  current user, and exposes Home preferences.
-- `Streaming`: edits `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`.
+- `Settings`: registers the selected OpenXR runtime manifest for the current user and exposes
+  Home preferences.
+- `Streaming`: autosaves edits to `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`.
 
 When `Developer Mode` is enabled from the `Settings` tab, the main window also shows a `Developer`
 tab. Its first tool opens the integrated OXRSys Simulator in a single Home-owned window.
@@ -18,8 +18,9 @@ when streaming, the connected device family, the OpenXR application name reporte
 and a WiFi/USB transport readiness control.
 
 The Home app now targets direct notarized distribution instead of App Store/TestFlight sandboxing.
-The full launcher and installer need access to `/Applications`, app executables, Terminal launch
-scripts, `~/.config/openxr/1/active_runtime.json`, `~/Library/LaunchAgents`, and `launchctl`.
+The launcher and registration workflow need access to `/Applications`, app executables, Terminal
+launch scripts, `~/.config/openxr/1/active_runtime.json`, `~/Library/LaunchAgents`, and
+`launchctl`.
 
 ## Build
 
@@ -31,28 +32,26 @@ xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
 ```
 
 The Debug build disables Xcode code signing so the command works without a personal development
-team. It does not embed a runtime by default.
+team. Home does not embed or install a runtime; the user selects the OpenXR runtime JSON to use.
 
 The Home app links the shared `OXRSysSimulator` Swift package so the Developer tab can host the
 simulator without launching a separate app bundle.
 
+## Local Package Folder
+
+Use `scripts/macos_build_package.sh` from the repository root to build the runtime and Home app,
+then copy them into `build/OXRSys-macOS/`. That folder keeps `OXRSys Home.app` next to a complete
+`runtime/` directory containing the runtime dylib, manifest, and TOML config.
+
 ## Direct Distribution Package
 
-Use the packaging script when producing an app bundle that can install its own runtime:
+Use `scripts/macos_sign_notarize.sh` from the repository root for Developer ID signing and optional
+notarization. It can sign the app and runtime from `build/OXRSys-macOS/`, then creates one zip
+archive containing the app and `runtime/` directory. With `--notarize`, it submits that archive to
+Apple using the provided Apple Developer account email and app-specific password, staples the Home
+app after acceptance, and rebuilds the zip so the app in the archive carries the stapled ticket.
 
-```bash
-scripts/package_home.sh
-```
-
-The script builds the CMake runtime, builds the Home app, copies these files into
-`OXRSys Home.app/Contents/Resources/OXRSysRuntime`, and optionally signs the app:
-
-- `liboxrsys-runtime.dylib`
-- `oxrsys-runtime.toml`
-- `oxrsys-runtime.json`
-
-Set `CODE_SIGN_IDENTITY="Developer ID Application: ..."` to sign with Hardened Runtime options.
-Submit the signed app to Apple's notarization flow outside this script.
+The full command examples live in [build.md](../build.md#macos-release-signing-and-notarization).
 
 ## Apps Launcher
 
@@ -71,11 +70,9 @@ hidden auto-detected apps are stored in:
 ```
 
 The launcher resolves `Contents/MacOS/<CFBundleExecutable>` and starts it with the inherited
-environment plus `XR_RUNTIME_JSON`. The launch manifest preference is:
-
-1. installed runtime manifest
-2. selected runtime manifest
-3. `build/runtime/oxrsys-runtime.json` for development builds
+environment plus `XR_RUNTIME_JSON`. It always uses the runtime manifest path selected in
+Settings. Development builds pre-fill that field with `build/runtime/oxrsys-runtime.json`; changing
+the field changes launch behavior directly.
 
 The logs panel is collapsed by default. Click the log button on an app card or manually expand the
 panel to select an app and inspect captured stdout/stderr.
@@ -150,18 +147,7 @@ The Quest USB ADB section can also store a custom `adb` executable path in the S
 be executable and pass `adb version`. If the custom path becomes invalid, Home reports that path and
 does not silently fall back; use `Auto Detect` to clear it and resume automatic detection.
 
-## Runtime Installation And Registration
-
-The packaged Home app installs the bundled runtime into:
-
-```text
-~/Library/Application Support/OXRSys/Runtime/current/
-```
-
-It generates an installed `oxrsys-runtime.json` whose `library_path` points to the copied dylib. The
-user TOML is seeded only when `~/Library/Application Support/OXRSys/oxrsys-runtime.toml` does not
-already exist. Installation and updates are explicit button actions; the app does not silently
-replace an installed runtime.
+## Runtime Registration
 
 Runtime registration mirrors `scripts/oxrsys_runtime_default.sh`:
 
@@ -185,12 +171,25 @@ The structured editor covers the current runtime keys:
 - `logging.file_logging`
 - `logging.quest_logcat`
 
+The bitrate control accepts the shared runtime range, `1` to `200` Mbps. Apple
+and Qt simulator clients do not add their own bitrate ceiling, so the runtime
+status `max_bitrate_mbps` should reflect the configured value when those
+clients connect.
+
+Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
+discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,
+general runtime-enabled, and logging keys to their built-in defaults and writes the file
+immediately. `Reveal Config` opens the TOML location, and `Reveal Runtime Logs` opens
+`~/Library/Application Support/OXRSys/`, which contains `oxrsys-runtime.log`,
+`oxrsys-headset.log`, and `runtime_status.json` when those files exist.
+
 The runtime reloads config file changes opportunistically:
 
 - `runtime_enabled` is applied to subsequent `xrCreateInstance` calls
 - `fov_degrees` is picked up on subsequent view location work
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
-- `quest_logcat` can start or stop adb capture after a config save
+- `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
+  clears headset logcat best-effort with a timeout before capture and continues if that clear fails
 - `bitrate_mbps`, `resolution_scale`, `encoder_preset`, and `transport` apply when streaming or the encoder is recreated
 - file logger sink setup still requires a restart
 

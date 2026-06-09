@@ -3,6 +3,8 @@
 #include "Config.h"
 #include "RuntimePlatform.h"
 
+#include <oxrsys/protocol/Protocol.h>
+
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -12,6 +14,181 @@
 #include <cstdlib>
 #include <filesystem>
 #include <thread>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#if !defined(_WIN32)
+namespace
+{
+
+std::string ResolveAdbExecutable()
+{
+    auto executableFile = [](const std::string& path) {
+        return !path.empty() && access(path.c_str(), X_OK) == 0;
+    };
+
+    if (const char* overridePath = std::getenv("OXRSYS_ADB_PATH");
+        overridePath != nullptr && executableFile(overridePath))
+    {
+        return overridePath;
+    }
+
+    for (const char* envName : {"ANDROID_HOME", "ANDROID_SDK_ROOT"})
+    {
+        const char* sdkRoot = std::getenv(envName);
+        if (sdkRoot == nullptr || *sdkRoot == '\0')
+        {
+            continue;
+        }
+        std::filesystem::path adbPath = std::filesystem::path(sdkRoot) / "platform-tools" / "adb";
+        if (executableFile(adbPath.string()))
+        {
+            return adbPath.string();
+        }
+    }
+
+    for (const char* adbPath : {
+             "/opt/homebrew/bin/adb",
+             "/usr/local/bin/adb",
+             "/Applications/Android Studio.app/Contents/platform-tools/adb",
+         })
+    {
+        if (executableFile(adbPath))
+        {
+            return adbPath;
+        }
+    }
+
+    if (const char* pathEnv = std::getenv("PATH"))
+    {
+        std::string pathList = pathEnv;
+        size_t start = 0;
+        while (start <= pathList.size())
+        {
+            size_t end = pathList.find(':', start);
+            if (end == std::string::npos)
+            {
+                end = pathList.size();
+            }
+            std::filesystem::path adbPath =
+                std::filesystem::path(pathList.substr(start, end - start)) / "adb";
+            if (executableFile(adbPath.string()))
+            {
+                return adbPath.string();
+            }
+            start = end + 1;
+        }
+    }
+
+    return "";
+}
+
+void WaitForLogcatProcessExit(int pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+
+    for (int attempt = 0; attempt < 20; ++attempt)
+    {
+        int status = 0;
+        const pid_t result = waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (result == static_cast<pid_t>(pid) || result == -1)
+        {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
+    kill(static_cast<pid_t>(pid), SIGKILL);
+    int status = 0;
+    waitpid(static_cast<pid_t>(pid), &status, 0);
+}
+
+bool WaitForProcessExit(pid_t pid, std::chrono::milliseconds timeout, int* status)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        const pid_t result = waitpid(pid, status, WNOHANG);
+        if (result == pid)
+        {
+            return true;
+        }
+        if (result == -1)
+        {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return false;
+}
+
+void TerminateProcessGroup(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return;
+    }
+    kill(-pid, SIGTERM);
+    kill(pid, SIGTERM);
+    int status = 0;
+    if (!WaitForProcessExit(pid, std::chrono::milliseconds(500), &status))
+    {
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+}
+
+bool RunAdbLogcatClear(const std::string& adbPath, std::chrono::milliseconds timeout)
+{
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        return false;
+    }
+
+    if (pid == 0)
+    {
+        setpgid(0, 0);
+
+        const int nullFd = open("/dev/null", O_RDWR);
+        if (nullFd >= 0)
+        {
+            dup2(nullFd, STDIN_FILENO);
+            dup2(nullFd, STDOUT_FILENO);
+            dup2(nullFd, STDERR_FILENO);
+            close(nullFd);
+        }
+
+        execl(adbPath.c_str(),
+              adbPath.c_str(),
+              "logcat",
+              "-c",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    setpgid(pid, pid);
+    int status = 0;
+    if (!WaitForProcessExit(pid, timeout, &status))
+    {
+        TerminateProcessGroup(pid);
+        return false;
+    }
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+} // namespace
+#endif
 
 Config& Config::Get()
 {
@@ -45,8 +222,8 @@ void Config::Shutdown()
 
 void Config::DetectDylibDir()
 {
-    dylibDir = oxrsys::runtime_platform::ModuleDirectory();
-
+    dylibDir = oxrsys::runtime_platform::ModuleDirectory(
+        reinterpret_cast<const void*>(&Config::Get));
     appSupportDir = oxrsys::runtime_platform::ConfigRoot();
     std::string stateDir = oxrsys::runtime_platform::StateRoot();
     if (appSupportDir.empty())
@@ -134,7 +311,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             else if (key == "bitrate_mbps")
             {
                 int val = std::stoi(value);
-                if (val > 0 && val <= 200)
+                if (val >= static_cast<int>(oxr::protocol::STREAMING_MIN_BITRATE_MBPS) &&
+                    val <= static_cast<int>(oxr::protocol::STREAMING_MAX_BITRATE_MBPS))
                 {
                     values.bitrateMbps = val;
                 }
@@ -360,24 +538,75 @@ void Config::SetupLogging()
 
 void Config::StartLogcatCapture()
 {
-    if (logcatRunning_ || logcatProcess_ != nullptr)
+#if defined(_WIN32)
+    spdlog::warn("Quest logcat capture is disabled on Windows in this runtime build");
+    return;
+#else
+    if (logcatRunning_.load() || logcatPipe_ != nullptr || logcatPid_ > 0)
     {
         return;
     }
 
-    // Clear logcat first, then start capturing
-    system("adb logcat -c 2>/dev/null");
-
-    std::string cmd = "adb logcat -s "
-                      "'OXRSys-Android:*' "
-                      "'OXRSys-Network:*' "
-                      "'OXRSys-Decoder:*' "
-                      "2>/dev/null";
-
-    logcatProcess_ = popen(cmd.c_str(), "r");
-    if (logcatProcess_ == nullptr)
+    const std::string adbPath = ResolveAdbExecutable();
+    if (adbPath.empty())
     {
-        spdlog::warn("Failed to start adb logcat capture");
+        spdlog::warn("Quest logcat capture requested but adb was not found");
+        return;
+    }
+
+    if (!RunAdbLogcatClear(adbPath, std::chrono::milliseconds(750)))
+    {
+        spdlog::warn("Quest logcat clear timed out or failed; continuing capture without clearing");
+    }
+
+    int pipeFds[2] = {-1, -1};
+    if (pipe(pipeFds) != 0)
+    {
+        spdlog::warn("Failed to create pipe for adb logcat capture");
+        return;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        spdlog::warn("Failed to fork adb logcat capture");
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+        return;
+    }
+
+    if (pid == 0)
+    {
+        close(pipeFds[0]);
+        dup2(pipeFds[1], STDOUT_FILENO);
+        close(pipeFds[1]);
+
+        const int nullFd = open("/dev/null", O_WRONLY);
+        if (nullFd >= 0)
+        {
+            dup2(nullFd, STDERR_FILENO);
+            close(nullFd);
+        }
+
+        execl(adbPath.c_str(),
+              adbPath.c_str(),
+              "logcat",
+              "-s",
+              "OXRSys-Android:*",
+              "OXRSys-Network:*",
+              "OXRSys-Decoder:*",
+              static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    close(pipeFds[1]);
+    logcatPipe_ = fdopen(pipeFds[0], "r");
+    if (logcatPipe_ == nullptr)
+    {
+        spdlog::warn("Failed to open adb logcat capture pipe");
+        close(pipeFds[0]);
+        kill(pid, SIGTERM);
+        WaitForLogcatProcessExit(static_cast<int>(pid));
         return;
     }
 
@@ -386,20 +615,23 @@ void Config::StartLogcatCapture()
     if (logcatFile_ == nullptr)
     {
         spdlog::warn("Failed to open {} for writing", questLogFilePath);
-        pclose(logcatProcess_);
-        logcatProcess_ = nullptr;
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
+        kill(pid, SIGTERM);
+        WaitForLogcatProcessExit(static_cast<int>(pid));
         return;
     }
 
-    logcatRunning_ = true;
+    logcatPid_ = static_cast<int>(pid);
+    logcatRunning_.store(true);
 
     // Background thread to pipe logcat → file
-    std::thread([this]()
+    logcatThread_ = std::thread([this]()
     {
         char buf[4096];
-        while (logcatRunning_ && logcatProcess_ != nullptr)
+        while (logcatRunning_.load() && logcatPipe_ != nullptr)
         {
-            if (fgets(buf, sizeof(buf), logcatProcess_) != nullptr)
+            if (fgets(buf, sizeof(buf), logcatPipe_) != nullptr)
             {
                 if (logcatFile_ != nullptr)
                 {
@@ -412,19 +644,40 @@ void Config::StartLogcatCapture()
                 break;  // EOF or error
             }
         }
-    }).detach();
+    });
 
-    spdlog::info("Quest logcat capture started → {}", questLogFilePath);
+    spdlog::info("Quest logcat capture started via {} → {}", adbPath, questLogFilePath);
+#endif
 }
 
 void Config::StopLogcatCapture()
 {
-    logcatRunning_ = false;
+    logcatRunning_.store(false);
 
-    if (logcatProcess_ != nullptr)
+#if defined(_WIN32)
+    if (logcatPipe_ != nullptr)
     {
-        pclose(logcatProcess_);
-        logcatProcess_ = nullptr;
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
+    }
+#else
+    if (logcatPid_ > 0)
+    {
+        kill(static_cast<pid_t>(logcatPid_), SIGTERM);
+        WaitForLogcatProcessExit(logcatPid_);
+        logcatPid_ = -1;
+    }
+#endif
+
+    if (logcatThread_.joinable())
+    {
+        logcatThread_.join();
+    }
+
+    if (logcatPipe_ != nullptr)
+    {
+        fclose(logcatPipe_);
+        logcatPipe_ = nullptr;
     }
 
     if (logcatFile_ != nullptr)

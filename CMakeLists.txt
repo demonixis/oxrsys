@@ -89,6 +89,8 @@ FetchContent_MakeAvailable(OpenXR)
 # --- Our runtime ---
 add_subdirectory(runtime)
 
+find_package(Vulkan REQUIRED)
+
 add_custom_target(oxrsys_runtime_sync_compile_commands ALL
     COMMAND ${CMAKE_COMMAND}
         -DINPUT_FILE=${CMAKE_BINARY_DIR}/compile_commands.json
@@ -98,21 +100,73 @@ add_custom_target(oxrsys_runtime_sync_compile_commands ALL
 )
 
 # --- Tests ---
+set(OXRSYS_TEST_ENV_ROOT "${CMAKE_BINARY_DIR}/test-env")
+set(OXRSYS_TEST_HOME "${OXRSYS_TEST_ENV_ROOT}/home")
+set(OXRSYS_TEST_XDG_CONFIG_HOME "${OXRSYS_TEST_ENV_ROOT}/xdg-config")
+set(OXRSYS_TEST_XDG_STATE_HOME "${OXRSYS_TEST_ENV_ROOT}/xdg-state")
+set(OXRSYS_TEST_APPDATA "${OXRSYS_TEST_ENV_ROOT}/appdata")
+file(MAKE_DIRECTORY
+    "${OXRSYS_TEST_HOME}"
+    "${OXRSYS_TEST_XDG_CONFIG_HOME}"
+    "${OXRSYS_TEST_XDG_STATE_HOME}"
+    "${OXRSYS_TEST_APPDATA}"
+)
+set(OXRSYS_ISOLATED_TEST_ENV
+    "HOME=${OXRSYS_TEST_HOME}"
+    "XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME}"
+    "XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME}"
+    "APPDATA=${OXRSYS_TEST_APPDATA}"
+)
+
+set(OXRSYS_LOGCAT_TEST_HOME "${OXRSYS_TEST_ENV_ROOT}/home-logcat")
+set(OXRSYS_LOGCAT_TEST_CONFIG_DIR
+    "${OXRSYS_LOGCAT_TEST_HOME}/Library/Application Support/OXRSys"
+)
+set(OXRSYS_FAKE_ADB "${OXRSYS_TEST_ENV_ROOT}/fake-adb")
+file(MAKE_DIRECTORY "${OXRSYS_LOGCAT_TEST_CONFIG_DIR}")
+file(WRITE "${OXRSYS_LOGCAT_TEST_CONFIG_DIR}/oxrsys-runtime.toml"
+    "[logging]\n"
+    "file_logging = false\n"
+    "quest_logcat = true\n"
+)
+file(WRITE "${OXRSYS_FAKE_ADB}"
+    "#!/bin/sh\n"
+    "exec sleep 30\n"
+)
+file(CHMOD "${OXRSYS_FAKE_ADB}"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+set(OXRSYS_LOGCAT_TEST_ENV
+    "HOME=${OXRSYS_LOGCAT_TEST_HOME}"
+    "XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME}"
+    "XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME}"
+    "APPDATA=${OXRSYS_TEST_APPDATA}"
+    "OXRSYS_ADB_PATH=${OXRSYS_FAKE_ADB}"
+)
+
 add_executable(oxrsys_runtime_tests
     tests/TestConfig.cpp
     tests/TestInputManager.cpp
     tests/TestRuntimePlatform.cpp
+    tests/TestStreamingFrameQueue.cpp
+    tests/TestVulkanDispatch.cpp
     tests/TestProtocolLayout.cpp
     runtime/src/InputManager.cpp
     runtime/src/TrackingReceiver.cpp
     runtime/src/Config.cpp
     runtime/src/RuntimePlatform.cpp
     runtime/src/RuntimeSockets.cpp
+    runtime/src/StreamingFrameQueue.cpp
+    runtime/src/VulkanDispatch.cpp
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
     common/protocol/include
     ${openxr_SOURCE_DIR}/include
+    ${Vulkan_INCLUDE_DIRS}
 )
 target_link_libraries(oxrsys_runtime_tests PRIVATE
     Catch2::Catch2WithMain
@@ -128,7 +182,21 @@ if(APPLE)
         XR_USE_GRAPHICS_API_METAL
     )
 endif()
+target_compile_definitions(oxrsys_runtime_tests PRIVATE
+    XR_USE_GRAPHICS_API_VULKAN
+)
 add_test(NAME oxrsys_runtime_tests COMMAND oxrsys_runtime_tests)
+set_tests_properties(oxrsys_runtime_tests PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 120
+)
+add_test(NAME oxrsys_runtime_logcat_timeout
+    COMMAND oxrsys_runtime_tests "Config singleton initializes with bounded Quest logcat clear"
+)
+set_tests_properties(oxrsys_runtime_logcat_timeout PROPERTIES
+    ENVIRONMENT "${OXRSYS_LOGCAT_TEST_ENV}"
+    TIMEOUT 10
+)
 
 add_executable(oxrsys_runtime_status_tests
     tests/TestRuntimeStatus.cpp
@@ -138,6 +206,7 @@ add_executable(oxrsys_runtime_status_tests
 )
 target_include_directories(oxrsys_runtime_status_tests PRIVATE
     runtime/src
+    common/protocol/include
 )
 target_link_libraries(oxrsys_runtime_status_tests PRIVATE
     Catch2::Catch2WithMain
@@ -145,6 +214,10 @@ target_link_libraries(oxrsys_runtime_status_tests PRIVATE
     ${CMAKE_DL_LIBS}
 )
 add_test(NAME oxrsys_runtime_status_tests COMMAND oxrsys_runtime_status_tests)
+set_tests_properties(oxrsys_runtime_status_tests PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 120
+)
 
 set(OXRSYS_RUNTIME_TEST_TARGETS
     oxrsys_runtime
@@ -155,6 +228,7 @@ set(OXRSYS_RUNTIME_TEST_TARGETS
 if(APPLE)
     add_executable(oxrsys_runtime_api_tests
         tests/TestRuntimeApi.cpp
+        tests/TestMetalSupport.mm
     )
     target_include_directories(oxrsys_runtime_api_tests PRIVATE
         runtime/src
@@ -163,6 +237,8 @@ if(APPLE)
     target_link_libraries(oxrsys_runtime_api_tests PRIVATE
         Catch2::Catch2WithMain
         OpenXR::openxr_loader
+        "-framework Metal"
+        "-framework Foundation"
     )
     target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL
@@ -173,7 +249,9 @@ if(APPLE)
     add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
     add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)
     set_tests_properties(oxrsys_runtime_api_tests PROPERTIES
-        ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+        ENVIRONMENT
+            "HOME=${OXRSYS_TEST_HOME};XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME};XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME};APPDATA=${OXRSYS_TEST_APPDATA};XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+        TIMEOUT 120
     )
     list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
 endif()

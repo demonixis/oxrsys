@@ -7,6 +7,7 @@ set(OXRSYS_RUNTIME_SOURCES
     src/RuntimeStatus.cpp
     src/RuntimePlatform.cpp
     src/RuntimeSockets.cpp
+    src/StreamingFrameQueue.cpp
     src/Instance.cpp
     src/Session.cpp
     src/Space.cpp
@@ -15,6 +16,7 @@ set(OXRSYS_RUNTIME_SOURCES
     src/HandTracker.cpp
     src/StreamingServer.cpp
     src/TrackingReceiver.cpp
+    src/VulkanDispatch.cpp
 )
 
 if(APPLE)

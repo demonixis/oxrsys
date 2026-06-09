@@ -69,4 +69,7 @@ struct VulkanDispatch
 // Global instance — set up during Vulkan session creation
 extern VulkanDispatch gVulkanDispatch;
 
+PFN_vkGetInstanceProcAddr ResolveVulkanGetInstanceProcAddrFromProcess(
+    const VulkanDispatch& dispatch);
+
 #endif // XR_USE_GRAPHICS_API_VULKAN

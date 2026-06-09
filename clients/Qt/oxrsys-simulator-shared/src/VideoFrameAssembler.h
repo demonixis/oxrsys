@@ -50,6 +50,7 @@ private:
     QVector<uint8_t> pendingPacketReceived_;
     QByteArray pendingFecData_;
     QVector<uint8_t> pendingFecReceived_;
+    QVector<uint16_t> pendingFecGroupLastPacketSizes_;
     bool pendingRecoveredWithFec_ = false;
     quint64 droppedFrames_ = 0;
     quint64 fecRecoveries_ = 0;

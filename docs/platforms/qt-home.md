@@ -13,6 +13,9 @@ Current responsibilities:
 - edit the shared runtime TOML keys for streaming, logging, encoder preset, and transport
 - detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, and `9946`
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
+- run WiFi readiness, ADB status, device listing, reverse mapping reads, and reverse mapping
+  configuration on a serialized worker thread so slow `adb` or `networksetup` calls do not block
+  the UI
 - show runtime activity and streaming stats from `runtime_status.json`
 - install and register the user OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
 - install the Windows runtime under `%LOCALAPPDATA%\OXRSys\runtime\current`, launch apps with
@@ -44,13 +47,24 @@ only if ActiveRuntime still points to the OXRSys manifest. The `Use installed ru
 checkbox controls whether Home-launched apps prefer the installed copy under the platform data
 directory or use the manifest selected in the registration field.
 
+The Streaming tab autosaves TOML edits after a short debounce. `Default` restores the structured
+streaming, general runtime-enabled, and logging keys to their built-in defaults and writes the file
+immediately. `Reveal Runtime Logs` opens the platform state directory that contains
+`oxrsys-runtime.log`, `oxrsys-headset.log`, and `runtime_status.json` when those files exist.
+The bitrate slider uses the shared runtime range, `1` to `200` Mbps. The Qt simulator sends
+`ClientConnect.maxBitrateMbps = 0`, so it does not add a client-side bitrate cap and the runtime
+status `max_bitrate_mbps` follows the server config when the simulator connects.
+
+Transport readiness work is asynchronous. Qt Home shows checking/configuring status while the
+worker is running, ignores stale results after ADB path, selected serial, or transport changes, and
+keeps the previous main transport selection if USB validation fails.
+
 Platform behavior:
 
-- Linux is the complete target for runtime installation, OpenXR registration, `.desktop` launch, USB ADB, config, state, and launcher persistence.
+- Linux is the complete target for OpenXR registration, `.desktop` launch, USB ADB, config, state, and launcher persistence.
 - macOS can build and use the Qt launcher with `.app` bundles and executables, drag-and-drop
   additions, app-card terminal launch via generated `.command` files, macOS WiFi readiness checks,
-  and improved ADB guidance. Runtime registration and installation stay owned by the SwiftUI Home
-  app for now.
+  and improved ADB guidance. Runtime registration stays owned by the SwiftUI Home app for now.
 - Linux app-card terminal launch tries `x-terminal-emulator`, `gnome-terminal`, `konsole`, then
   `xterm`. No new terminal dependency is required.
 - Windows scans Start Menu `.lnk` files via the Shell COM API, accepts manual `.exe`, `.bat`,

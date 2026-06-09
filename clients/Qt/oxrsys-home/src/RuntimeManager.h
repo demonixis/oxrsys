@@ -33,7 +33,7 @@ public:
     RuntimeInstallStatus installStatus() const;
     QString activeRuntimeTarget() const;
     QString activeLaunchRuntimeManifestPath(const QString& selectedManifestPath,
-                                            bool preferInstalledRuntime) const;
+                                            bool preferInstalledRuntime = false) const;
 
     bool registerRuntimeManifest(const QString& manifestPath, QString* errorMessage) const;
     bool unregisterRuntime(QString* errorMessage) const;

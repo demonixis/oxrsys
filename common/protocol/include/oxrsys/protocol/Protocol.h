@@ -17,6 +17,9 @@ constexpr uint16_t VIDEO_PORT = 9944;
 constexpr uint16_t TRACKING_PORT = 9945;
 constexpr uint16_t CONTROL_PORT = 9946;
 constexpr uint32_t HAND_JOINT_COUNT = 26;
+constexpr uint32_t STREAMING_MIN_BITRATE_MBPS = 1;
+constexpr uint32_t STREAMING_MAX_BITRATE_MBPS = 200;
+constexpr uint32_t CLIENT_MAX_BITRATE_USE_SERVER_CONFIG = 0;
 
 enum class StreamingTransport : uint8_t
 {
@@ -125,6 +128,8 @@ struct VideoPacketHeader
     uint16_t payloadSize;
     uint8_t flags;             // See VideoFlags
     uint8_t codec;             // VideoCodec cast to u8
+    uint16_t fecGroupLastPacketPayloadSize; // FEC packets: payload size of this group's last data packet
+    uint16_t reserved = 0;
     int64_t presentationTimeNs; // Server-side timestamp
 };
 

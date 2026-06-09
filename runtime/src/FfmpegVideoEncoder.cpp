@@ -881,8 +881,7 @@ VideoEncoder::~VideoEncoder()
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                              uint32_t bitrateMbps, GraphicsApi graphicsApi,
-                              void* graphicsDevice)
+                              uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {
     Shutdown();
 
@@ -891,7 +890,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     eyeWidth_ = width / 2;
     fps_ = std::max(fps, 1u);
     bitrateMbps_ = bitrateMbps;
-    graphicsApi_ = graphicsApi;
+    graphicsContext_ = graphicsContext;
     frameCount_ = 0;
     forceKeyframe_.store(false);
     shuttingDown_.store(false);
@@ -899,18 +898,13 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
 
+    const GraphicsApi graphicsApi = graphicsContext_.api;
     std::unique_ptr<VulkanEncoderState, decltype(&DestroyVulkanState)> vkState(
         new VulkanEncoderState(), DestroyVulkanState);
     vkState->graphicsApi = graphicsApi;
     if (graphicsApi == GraphicsApi::Vulkan)
     {
-        auto* graphicsContext = static_cast<VulkanGraphicsContext*>(graphicsDevice);
-        if (graphicsContext == nullptr)
-        {
-            spdlog::error("FFmpegVideoEncoder: missing Vulkan graphics context");
-            return false;
-        }
-        vkState->context = *graphicsContext;
+        vkState->context = graphicsContext_.vulkan;
         if (!InitializeVulkanState(*vkState))
         {
             spdlog::error("FFmpegVideoEncoder: failed to initialize Vulkan readback state");
@@ -920,27 +914,23 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 #if defined(_WIN32)
     else if (graphicsApi == GraphicsApi::D3D11)
     {
-        auto* graphicsContext = static_cast<D3D11GraphicsContext*>(graphicsDevice);
-        if (graphicsContext == nullptr ||
-            graphicsContext->device == nullptr ||
-            graphicsContext->immediateContext == nullptr)
+        if (graphicsContext_.d3d11.device == nullptr ||
+            graphicsContext_.d3d11.immediateContext == nullptr)
         {
             spdlog::error("FFmpegVideoEncoder: missing D3D11 graphics context");
             return false;
         }
-        vkState->d3d11Context = *graphicsContext;
+        vkState->d3d11Context = graphicsContext_.d3d11;
     }
     else if (graphicsApi == GraphicsApi::D3D12)
     {
-        auto* graphicsContext = static_cast<D3D12GraphicsContext*>(graphicsDevice);
-        if (graphicsContext == nullptr ||
-            graphicsContext->device == nullptr ||
-            graphicsContext->queue == nullptr)
+        if (graphicsContext_.d3d12.device == nullptr ||
+            graphicsContext_.d3d12.queue == nullptr)
         {
             spdlog::error("FFmpegVideoEncoder: missing D3D12 graphics context");
             return false;
         }
-        vkState->d3d12Context = *graphicsContext;
+        vkState->d3d12Context = graphicsContext_.d3d12;
         if (!InitializeD3D12State(*vkState))
         {
             spdlog::error("FFmpegVideoEncoder: failed to initialize D3D12 readback state");
@@ -1010,10 +1000,10 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         return false;
     }
 
-    session_ = context;
-    pixelBufferPool_ = frame;
-    textureCache_ = packet;
-    vulkanState_ = vkState.release();
+    ffmpeg_.codecContext = context;
+    ffmpeg_.frame = frame;
+    ffmpeg_.packet = packet;
+    ffmpeg_.readbackState = vkState.release();
 
     const char* backendName =
         graphicsApi == GraphicsApi::Vulkan ? "Vulkan" :
@@ -1028,10 +1018,10 @@ void VideoEncoder::Shutdown()
 {
     shuttingDown_.store(true);
 
-    AVCodecContext* context = CodecContext(session_);
-    AVFrame* frame = Frame(pixelBufferPool_);
-    AVPacket* packet = Packet(textureCache_);
-    VulkanEncoderState* vkState = State(vulkanState_);
+    AVCodecContext* context = CodecContext(ffmpeg_.codecContext);
+    AVFrame* frame = Frame(ffmpeg_.frame);
+    AVPacket* packet = Packet(ffmpeg_.packet);
+    VulkanEncoderState* vkState = State(ffmpeg_.readbackState);
 
     if (context != nullptr)
     {
@@ -1047,34 +1037,37 @@ void VideoEncoder::Shutdown()
     }
     DestroyVulkanState(vkState);
 
-    session_ = nullptr;
-    pixelBufferPool_ = nullptr;
-    textureCache_ = nullptr;
-    vulkanState_ = nullptr;
+    ffmpeg_.codecContext = nullptr;
+    ffmpeg_.frame = nullptr;
+    ffmpeg_.packet = nullptr;
+    ffmpeg_.readbackState = nullptr;
     inFlightFrameCount_.store(0);
 }
 
-bool VideoEncoder::Encode(void* texture, int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                           OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(texture, nullptr, false, timestampNs, std::move(callback), std::move(frameCallback));
+    FrameSource frameSource = {};
+    frameSource.left = std::move(imageSource);
+    return EncodeInternal(std::move(frameSource), false, timestampNs,
+                          std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeStereo(void* leftTexture, void* rightTexture,
-                                int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                                 OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(leftTexture, rightTexture, true, timestampNs, std::move(callback), std::move(frameCallback));
+    return EncodeInternal(std::move(frameSource), true, timestampNs,
+                          std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool stereo,
+bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                   int64_t timestampNs, OnNalUnitCallback callback,
                                   OnFrameEncodedCallback frameCallback)
 {
-    AVCodecContext* context = CodecContext(session_);
-    AVFrame* frame = Frame(pixelBufferPool_);
-    AVPacket* packet = Packet(textureCache_);
-    VulkanEncoderState* vkState = State(vulkanState_);
+    AVCodecContext* context = CodecContext(ffmpeg_.codecContext);
+    AVFrame* frame = Frame(ffmpeg_.frame);
+    AVPacket* packet = Packet(ffmpeg_.packet);
+    VulkanEncoderState* vkState = State(ffmpeg_.readbackState);
     if (context == nullptr || frame == nullptr || packet == nullptr || vkState == nullptr)
     {
         return false;
@@ -1108,10 +1101,12 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
     std::vector<uint8_t> leftReadback;
     std::vector<uint8_t> rightReadback;
 
-    if (graphicsApi_ == GraphicsApi::Vulkan)
+    if (graphicsContext_.api == GraphicsApi::Vulkan)
     {
-        auto* leftSource = static_cast<Swapchain::VulkanFrameSource*>(leftTexture);
-        auto* rightSource = static_cast<Swapchain::VulkanFrameSource*>(stereo ? rightTexture : leftTexture);
+        auto* leftSource =
+            static_cast<Swapchain::VulkanFrameSource*>(frameSource.left.GetImage());
+        auto* rightSource = static_cast<Swapchain::VulkanFrameSource*>(
+            (stereo ? frameSource.right : frameSource.left).GetImage());
         if (leftSource == nullptr || rightSource == nullptr)
         {
             spdlog::warn("FFmpegVideoEncoder: missing Vulkan frame source");
@@ -1138,10 +1133,12 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
         }
     }
 #if defined(_WIN32)
-    else if (graphicsApi_ == GraphicsApi::D3D11)
+    else if (graphicsContext_.api == GraphicsApi::D3D11)
     {
-        auto* leftSource = static_cast<Swapchain::D3D11FrameSource*>(leftTexture);
-        auto* rightSource = static_cast<Swapchain::D3D11FrameSource*>(stereo ? rightTexture : leftTexture);
+        auto* leftSource =
+            static_cast<Swapchain::D3D11FrameSource*>(frameSource.left.GetImage());
+        auto* rightSource = static_cast<Swapchain::D3D11FrameSource*>(
+            (stereo ? frameSource.right : frameSource.left).GetImage());
         if (leftSource == nullptr || rightSource == nullptr)
         {
             spdlog::warn("FFmpegVideoEncoder: missing D3D11 frame source");
@@ -1167,10 +1164,12 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
             return dropFrame();
         }
     }
-    else if (graphicsApi_ == GraphicsApi::D3D12)
+    else if (graphicsContext_.api == GraphicsApi::D3D12)
     {
-        auto* leftSource = static_cast<Swapchain::D3D12FrameSource*>(leftTexture);
-        auto* rightSource = static_cast<Swapchain::D3D12FrameSource*>(stereo ? rightTexture : leftTexture);
+        auto* leftSource =
+            static_cast<Swapchain::D3D12FrameSource*>(frameSource.left.GetImage());
+        auto* rightSource = static_cast<Swapchain::D3D12FrameSource*>(
+            (stereo ? frameSource.right : frameSource.left).GetImage());
         if (leftSource == nullptr || rightSource == nullptr)
         {
             spdlog::warn("FFmpegVideoEncoder: missing D3D12 frame source");
@@ -1273,7 +1272,7 @@ void VideoEncoder::ForceKeyframe()
 void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
 {
     bitrateMbps_ = bitrateMbps;
-    if (AVCodecContext* context = CodecContext(session_))
+    if (AVCodecContext* context = CodecContext(ffmpeg_.codecContext))
     {
         context->bit_rate = static_cast<int64_t>(bitrateMbps_) * 1000 * 1000;
     }

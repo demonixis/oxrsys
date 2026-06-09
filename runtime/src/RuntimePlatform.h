@@ -13,6 +13,7 @@ enum class PlatformKind
     MacOS,
     Linux,
     Windows,
+    Unknown,
 };
 
 struct EnvironmentPaths
@@ -24,15 +25,17 @@ struct EnvironmentPaths
     std::string localAppData;
 };
 
+PlatformKind CurrentPlatform();
 PlatformKind CurrentPlatformKind();
 EnvironmentPaths CurrentEnvironmentPaths();
 
 std::string ConfigRootForPlatform(PlatformKind platform, const EnvironmentPaths& environment);
 std::string StateRootForPlatform(PlatformKind platform, const EnvironmentPaths& environment);
 
-std::string ModuleDirectory();
 std::string ConfigRoot();
 std::string StateRoot();
-int64_t ProcessId();
+std::string ModuleDirectory();
+std::string ModuleDirectory(const void* symbolAddress);
+uint64_t ProcessId();
 
 } // namespace oxrsys::runtime_platform

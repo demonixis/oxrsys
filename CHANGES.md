@@ -1,0 +1,81 @@
+# Changes
+
+This file tracks user-facing, integration-facing, and runtime-relevant changes for OXRSys.
+
+## 1.2.0 - TBD
+
+### Added
+
+- Added Linux-first Qt frontends under `clients/Qt/`, including Qt Home, a standalone Qt simulator, and a reusable simulator widget.
+- Added Qt Home support for compatible app launching, selected-runtime registration on Linux, runtime TOML editing, runtime activity/status display, custom ADB selection, USB reverse mapping setup, and asynchronous transport readiness checks.
+- Added Qt simulator video preview with FFmpeg when available, tracking-only fallback when FFmpeg is unavailable, mouse-driven synthetic head tracking, frame-loss/FEC status, and keyframe recovery requests.
+- Added Linux Vulkan/FFmpeg runtime scaffolding, portable platform helpers, portable socket helpers, and platform-specific config/state directory support.
+- Added first-pass Windows layout and portability scaffolding while keeping the Windows runtime backend non-gating for this release.
+- Added canonical shared protocol headers under `common/protocol/include/oxrsys/protocol/`.
+- Added centralized product versioning in `config/OXRSysVersion.xcconfig` for CMake, Xcode, and Android consumers.
+- Added macOS package and distribution helpers: `scripts/macos_build_package.sh` and `scripts/macos_sign_notarize.sh`.
+- Added the `net.demonixis.oxrsys-unity` Unity Package Manager package with editor runtime selection and a macOS Player OpenXR loader postprocessor.
+- Added runtime tests for portable platform behavior, streaming frame queue replacement, Vulkan dispatch, expanded input handling, protocol layout, runtime status, and loader-backed API behavior.
+
+### Changed
+
+- Moved the repository toward the OXRSys cross-platform layout, including `clients/Android/android-vr/`, `clients/Apple/common/`, and `clients/Qt/`.
+- Changed the runtime graphics plumbing to use typed `GraphicsContext` and `FrameSource` data across sessions, swapchains, streaming, and encoders.
+- Kept Vulkan loader usage app-owned: the runtime resolves Vulkan entry points from the application-provided dispatch path or already-loaded process symbols without directly linking or loading the Vulkan loader.
+- Reworked streaming frame submission around a latest-frame-only queue so replacing a pending frame releases its backend resources.
+- Expanded runtime configuration reload behavior for dynamic streaming values while keeping initialization-time resources restart-bound.
+- Raised the shared streaming bitrate range to `1` through `200` Mbps and allowed clients to send `ClientConnect.maxBitrateMbps = 0` to defer to the server-configured bitrate.
+- Updated Apple and Qt simulator clients to avoid imposing their own bitrate cap.
+- Updated the streaming protocol to carry render-pose metadata per frame and to store the final FEC group packet payload size in the existing video header padding.
+- Updated Quest/PICO controller profile handling to stay profile-aware instead of falling back globally to `KHR simple_controller`.
+- Updated the Android VR client to request the build-configured display refresh rate, advertise the headset OpenXR system name, prefer USB ADB reverse TCP when available, and fall back to WiFi UDP discovery.
+- Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
+- Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
+
+### Fixed
+
+- Fixed Metal streaming frame snapshots so the async encoder reads a release-time staging texture instead of a swapchain slot that the app may already have reused.
+- Fixed controller pose handling so streaming packets only update controller poses when the corresponding controller-active flag is present.
+- Fixed hand tracking and hand-interaction coexistence so hand bindings remain available while controller bindings keep priority for shared actions.
+- Fixed Quest hand tracking ingestion by feeding real `XR_EXT_hand_tracking` joints from the Android client into the runtime.
+- Fixed USB ADB reverse TCP reconnect behavior so closed control/video sockets or video stalls return the Android client to discovery/retry without relaunching the client.
+- Hardened Quest USB TCP sends with bounded socket behavior and stale video dispatch cleanup so failed sends do not block encoder callbacks or `Session::EndFrame()`.
+- Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
+- Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
+- Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
+
+### Documentation
+
+- Reworked platform documentation for build, install, architecture, protocol, Quest/PICO, macOS Home, Qt Home, simulator, visionOS, and testing/conformance workflows.
+- Documented current Linux, Windows-scaffold, macOS package, Unity, USB ADB, protocol, and CTS expectations.
+
+### Known Limits
+
+- Linux video streaming still needs real Vulkan image readback before it can be treated as feature-complete.
+- Windows remains layout and portability scaffolding only for this release.
+- PICO and headset-specific controller/hand tracking behavior still needs regular hardware validation.
+
+## 1.1.0 - 2026-05-26
+
+### Added
+
+- Added first-pass Quest USB streaming through ADB reverse TCP.
+- Added macOS Home workflows for compatible app discovery, app launching with `XR_RUNTIME_JSON`, runtime settings, USB readiness guidance, and active runtime/app status.
+- Added Developer Mode in the macOS Home app with integrated simulator access and live streaming statistics.
+- Added a shared Apple simulator package used by the standalone simulator and the integrated Home simulator.
+- Added a build-configured Android display refresh-rate request path.
+
+### Changed
+
+- Renamed and documented the project as OXRSys.
+- Clarified USB streaming setup, runtime launch workflows, and companion/Home app behavior in the README and docs.
+- Updated Xcode project metadata and the release version for `1.1.0`.
+
+## v1.0.0 - 2026-05-14
+
+### Added
+
+- Initial OpenXR runtime implementation for macOS with Metal swapchains, runtime manifest generation, configuration loading, streaming server plumbing, input/action handling, hand tracking scaffolding, and loader-backed runtime tests.
+- Initial Android OpenXR streaming client with network receive, H.265 decode, tracking return, and Quest-oriented native activity setup.
+- Initial Apple simulator, iOS stereo viewer workflow, and first-pass visionOS viewer.
+- Initial streaming protocol, FEC codec, latency reporting, control channel, and project documentation.

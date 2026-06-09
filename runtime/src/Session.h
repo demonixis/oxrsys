@@ -3,19 +3,16 @@
 #pragma once
 
 #include <openxr/openxr.h>
+
 #include "GraphicsTypes.h"
-#include "Swapchain.h"
-#include "VulkanGraphicsContext.h"
-#if defined(_WIN32)
-#include "D3DGraphicsContext.h"
-#endif
-#include <memory>
-#include <vector>
+
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 class Instance;
 class Swapchain;
@@ -26,16 +23,18 @@ class StreamingServer;
 class Session
 {
 public:
-    // Metal session
-    Session(Instance* instance, void* metalDevice);
+    Session(Instance* instance, void* metalDevice, void* metalCommandQueue = nullptr);
 
-    // Vulkan session (metalDevice for Renderer, Vulkan handles for swapchains)
-    Session(Instance* instance, void* metalDevice,
-            const VulkanGraphicsContext& vulkanContext);
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    Session(Instance* instance, void* metalDevice, const VulkanGraphicsContext& vulkanContext);
+#endif
+    Session(Instance* instance, const GraphicsContext& graphicsContext);
+
 #if defined(_WIN32)
     Session(Instance* instance, const D3D11GraphicsContext& d3d11Context);
     Session(Instance* instance, const D3D12GraphicsContext& d3d12Context);
 #endif
+
     ~Session();
 
     uint64_t GetHandle() const
@@ -50,33 +49,28 @@ public:
 
     void* GetMetalDevice() const
     {
-        return metalDevice_;
+        return graphicsContext_.metalDevice;
     }
 
-    // Session lifecycle
     XrResult BeginSession(const XrSessionBeginInfo* beginInfo);
     XrResult EndSession();
     XrResult RequestExitSession();
 
-    // Frame loop
     XrResult WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState);
     XrResult BeginFrame(const XrFrameBeginInfo* frameBeginInfo);
     XrResult EndFrame(const XrFrameEndInfo* frameEndInfo);
 
-    // Views
     XrResult LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewState* viewState,
-                          uint32_t viewCapacityInput, uint32_t* viewCountOutput, XrView* views);
+                         uint32_t viewCapacityInput, uint32_t* viewCountOutput, XrView* views);
 
-    // Swapchain management
     XrResult CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwapchain* swapchain);
     XrResult DestroySwapchain(Swapchain* swapchain);
 
-    // Space management
     XrResult CreateReferenceSpace(const XrReferenceSpaceCreateInfo* createInfo, XrSpace* space);
-    XrResult CreateActionSpace(XrAction action, XrPath subactionPath, const XrPosef& poseInSpace, XrSpace* space);
+    XrResult CreateActionSpace(XrAction action, XrPath subactionPath,
+                               const XrPosef& poseInSpace, XrSpace* space);
     XrResult DestroySpace(Space* space);
 
-    // Input manager access
     InputManager& GetInputManager()
     {
         return *inputManager_;
@@ -105,7 +99,8 @@ public:
     void BeginDebugUtilsLabelRegion(const XrDebugUtilsLabelEXT& labelInfo);
     void EndDebugUtilsLabelRegion();
     void InsertDebugUtilsLabel(const XrDebugUtilsLabelEXT& labelInfo);
-    void GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std::vector<std::string>& labelNames) const;
+    void GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels,
+                             std::vector<std::string>& labelNames) const;
     void Shutdown();
 
 private:
@@ -120,18 +115,12 @@ private:
     bool OwnsSwapchain(const Swapchain* swapchain) const;
     XrResult ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage) const;
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                     void*& leftTex, void*& rightTex) const;
+                                     FrameSource& frameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
 
     uint64_t handle_ = 0;
     Instance* instance_;
-    void* metalDevice_;
-    GraphicsApi graphicsApi_ = GraphicsApi::Metal;
-    VulkanGraphicsContext vulkanContext_;
-#if defined(_WIN32)
-    D3D11GraphicsContext d3d11Context_;
-    D3D12GraphicsContext d3d12Context_;
-#endif
+    GraphicsContext graphicsContext_ = {};
 
     XrSessionState state_ = XR_SESSION_STATE_IDLE;
     bool running_ = false;
@@ -152,7 +141,6 @@ private:
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;
 
-    // Streaming state
     bool streamingStarted_ = false;
     void StartStreamingIfNeeded();
     void CheckStreamingConnection();

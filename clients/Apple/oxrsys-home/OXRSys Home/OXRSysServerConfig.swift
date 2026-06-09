@@ -3,6 +3,9 @@
 import Foundation
 
 struct OXRSysServerConfig: Equatable {
+    static let minBitrateMbps = 1
+    static let maxBitrateMbps = 200
+
     var runtimeEnabled = true
     var bitrateMbps = 50
     var fovDegrees = 100
@@ -62,7 +65,8 @@ struct OXRSysServerConfig: Equatable {
         if let value = boolValue("runtime_enabled", in: text) {
             config.runtimeEnabled = value
         }
-        if let value = intValue("bitrate_mbps", in: text), (1...200).contains(value) {
+        if let value = intValue("bitrate_mbps", in: text),
+           (Self.minBitrateMbps...Self.maxBitrateMbps).contains(value) {
             config.bitrateMbps = value
         }
         if let value = intValue("fov_degrees", in: text), (60...150).contains(value) {

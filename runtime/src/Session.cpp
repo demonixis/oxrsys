@@ -14,6 +14,7 @@
 #include <cstring>
 #include <numeric>
 #include <thread>
+#include <utility>
 
 #include <openxr/openxr_platform.h>
 
@@ -48,6 +49,22 @@ SessionMetricSummary SummarizeSessionSamples(std::vector<double>& samples)
 bool IsSupportedEnvironmentBlendMode(XrEnvironmentBlendMode blendMode)
 {
     return blendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+}
+
+const char* GraphicsApiName(GraphicsApi api)
+{
+    switch (api)
+    {
+        case GraphicsApi::Metal:
+            return "Metal";
+        case GraphicsApi::Vulkan:
+            return "Vulkan";
+        case GraphicsApi::D3D11:
+            return "D3D11";
+        case GraphicsApi::D3D12:
+            return "D3D12";
+    }
+    return "unknown";
 }
 
 constexpr uint32_t kMaxSupportedCompositionLayers = XR_MIN_COMPOSITION_LAYERS_SUPPORTED;
@@ -111,28 +128,21 @@ bool IsFiniteFov(const XrFovf& fov)
 
 } // namespace
 
-Session::Session(Instance* instance, void* metalDevice)
-    : instance_(instance), metalDevice_(metalDevice), graphicsApi_(GraphicsApi::Metal)
+Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
+    : Session(instance, GraphicsContext::Metal(metalDevice, metalCommandQueue))
 {
-    inputManager_ = std::make_unique<InputManager>();
-
-    startTime_ = std::chrono::steady_clock::now();
-    lastFrameTime_ = startTime_;
-
-    Runtime::Get().RegisterHandle(handle_, this);
-    instance_->SetSession(this);
-
-    TransitionState(XR_SESSION_STATE_IDLE);
-    TransitionState(XR_SESSION_STATE_READY);
-
-    spdlog::info("OXRSys: Metal session created");
 }
 
+#ifdef XR_USE_GRAPHICS_API_VULKAN
 Session::Session(Instance* instance, void* metalDevice,
                   const VulkanGraphicsContext& vulkanContext)
-    : instance_(instance), metalDevice_(metalDevice),
-      graphicsApi_(GraphicsApi::Vulkan),
-      vulkanContext_(vulkanContext)
+    : Session(instance, GraphicsContext::Vulkan(vulkanContext, metalDevice))
+{
+}
+#endif
+
+Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
+    : instance_(instance), graphicsContext_(graphicsContext)
 {
     inputManager_ = std::make_unique<InputManager>();
 
@@ -145,52 +155,22 @@ Session::Session(Instance* instance, void* metalDevice,
     TransitionState(XR_SESSION_STATE_IDLE);
     TransitionState(XR_SESSION_STATE_READY);
 
-    spdlog::info("OXRSys: Vulkan session created");
+    spdlog::info("OXRSys: {} session created", GraphicsApiName(graphicsContext_.api));
 }
 
 #if defined(_WIN32)
 Session::Session(Instance* instance, const D3D11GraphicsContext& d3d11Context)
-    : instance_(instance), metalDevice_(nullptr),
-      graphicsApi_(GraphicsApi::D3D11),
-      d3d11Context_(d3d11Context)
+    : Session(instance, GraphicsContext::D3D11(d3d11Context))
 {
-    AddRefIfNotNull(d3d11Context_.device);
-    AddRefIfNotNull(d3d11Context_.immediateContext);
-
-    inputManager_ = std::make_unique<InputManager>();
-
-    startTime_ = std::chrono::steady_clock::now();
-    lastFrameTime_ = startTime_;
-
-    Runtime::Get().RegisterHandle(handle_, this);
-    instance_->SetSession(this);
-
-    TransitionState(XR_SESSION_STATE_IDLE);
-    TransitionState(XR_SESSION_STATE_READY);
-
-    spdlog::info("OXRSys: D3D11 session created");
+    AddRefIfNotNull(graphicsContext_.d3d11.device);
+    AddRefIfNotNull(graphicsContext_.d3d11.immediateContext);
 }
 
 Session::Session(Instance* instance, const D3D12GraphicsContext& d3d12Context)
-    : instance_(instance), metalDevice_(nullptr),
-      graphicsApi_(GraphicsApi::D3D12),
-      d3d12Context_(d3d12Context)
+    : Session(instance, GraphicsContext::D3D12(d3d12Context))
 {
-    AddRefIfNotNull(d3d12Context_.device);
-    AddRefIfNotNull(d3d12Context_.queue);
-
-    inputManager_ = std::make_unique<InputManager>();
-
-    startTime_ = std::chrono::steady_clock::now();
-    lastFrameTime_ = startTime_;
-
-    Runtime::Get().RegisterHandle(handle_, this);
-    instance_->SetSession(this);
-
-    TransitionState(XR_SESSION_STATE_IDLE);
-    TransitionState(XR_SESSION_STATE_READY);
-
-    spdlog::info("OXRSys: D3D12 session created");
+    AddRefIfNotNull(graphicsContext_.d3d12.device);
+    AddRefIfNotNull(graphicsContext_.d3d12.queue);
 }
 #endif
 
@@ -198,10 +178,10 @@ Session::~Session()
 {
     Shutdown();
 #if defined(_WIN32)
-    ReleaseIfNotNull(d3d11Context_.immediateContext);
-    ReleaseIfNotNull(d3d11Context_.device);
-    ReleaseIfNotNull(d3d12Context_.queue);
-    ReleaseIfNotNull(d3d12Context_.device);
+    ReleaseIfNotNull(graphicsContext_.d3d11.immediateContext);
+    ReleaseIfNotNull(graphicsContext_.d3d11.device);
+    ReleaseIfNotNull(graphicsContext_.d3d12.queue);
+    ReleaseIfNotNull(graphicsContext_.d3d12.device);
 #endif
     instance_->RemoveEventsForSession(reinterpret_cast<XrSession>(handle_));
     instance_->SetSession(nullptr);
@@ -535,9 +515,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         return XR_ERROR_LAYER_INVALID;
     }
 
-    // Extract submitted eye textures for streaming
-    void* leftTex = nullptr;
-    void* rightTex = nullptr;
+    // Extract submitted eye sources for streaming. Missing streaming sources do
+    // not invalidate the OpenXR frame; they only skip this frame's video encode.
+    FrameSource frameSource = {};
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
     {
@@ -552,11 +532,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
                 XrResult result = ValidateProjectionLayer(
-                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), leftTex, rightTex);
+                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), frameSource);
                 if (result != XR_SUCCESS)
                 {
-                    Swapchain::ReleaseTextureSlice(leftTex);
-                    Swapchain::ReleaseTextureSlice(rightTex);
                     return result;
                 }
                 break;
@@ -566,15 +544,11 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                 XrResult result = ValidateQuadLayer(*reinterpret_cast<const XrCompositionLayerQuad*>(layer));
                 if (result != XR_SUCCESS)
                 {
-                    Swapchain::ReleaseTextureSlice(leftTex);
-                    Swapchain::ReleaseTextureSlice(rightTex);
                     return result;
                 }
                 break;
             }
             default:
-                Swapchain::ReleaseTextureSlice(leftTex);
-                Swapchain::ReleaseTextureSlice(rightTex);
                 return XR_ERROR_LAYER_INVALID;
         }
     }
@@ -584,7 +558,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
         auto sendStart = Clock::now();
-        streamingServer_->SendFrame(leftTex, rightTex);
+        streamingServer_->SendFrame(std::move(frameSource));
         double enqueueMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
             Clock::now() - sendStart).count();
 
@@ -599,16 +573,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             enqueueSamples.clear();
             lastLogTime = Clock::now();
         }
-
-        // StreamingServer now owns the retained texture views and will release them
-        // after the async encode path has consumed or replaced them.
-        leftTex = nullptr;
-        rightTex = nullptr;
     }
-
-    // Release texture views created by GetLastReleasedTextureSlice
-    Swapchain::ReleaseTextureSlice(leftTex);
-    Swapchain::ReleaseTextureSlice(rightTex);
 
     {
         std::scoped_lock lock(frameStateMutex_);
@@ -666,7 +631,7 @@ XrResult Session::ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage)
 }
 
 XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                          void*& leftTex, void*& rightTex) const
+                                          FrameSource& frameSource) const
 {
     auto* space = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(layer.space));
     if (space == nullptr || space->GetSession() != this)
@@ -697,14 +662,15 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         }
 
         auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
-        void* textureSlice = swapchain->GetLastReleasedTextureSlice(view.subImage.imageArrayIndex);
+        FrameImageSource imageSource =
+            swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
         if (viewIndex == 0)
         {
-            leftTex = textureSlice;
+            frameSource.left = std::move(imageSource);
         }
         else
         {
-            rightTex = textureSlice;
+            frameSource.right = std::move(imageSource);
         }
     }
 
@@ -843,26 +809,7 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::unique_ptr<Swapchain> sc;
-    if (graphicsApi_ == GraphicsApi::Vulkan)
-    {
-        sc = std::make_unique<Swapchain>(GraphicsApi::Vulkan, metalDevice_,
-                                         &vulkanContext_, createInfo);
-    }
-#if defined(_WIN32)
-    else if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        sc = std::make_unique<Swapchain>(GraphicsApi::D3D11, &d3d11Context_, createInfo);
-    }
-    else if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        sc = std::make_unique<Swapchain>(GraphicsApi::D3D12, &d3d12Context_, createInfo);
-    }
-#endif
-    else
-    {
-        sc = std::make_unique<Swapchain>(metalDevice_, createInfo);
-    }
+    auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
     return XR_SUCCESS;
@@ -950,22 +897,7 @@ void Session::StartStreamingIfNeeded()
     }
 
     streamingServer_ = std::make_unique<StreamingServer>();
-    void* graphicsDevice = metalDevice_;
-    if (graphicsApi_ == GraphicsApi::Vulkan)
-    {
-        graphicsDevice = &vulkanContext_;
-    }
-#if defined(_WIN32)
-    else if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        graphicsDevice = &d3d11Context_;
-    }
-    else if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        graphicsDevice = &d3d12Context_;
-    }
-#endif
-    streamingServer_->SetGraphicsDevice(graphicsApi_, graphicsDevice);
+    streamingServer_->SetGraphicsContext(graphicsContext_);
 
     // Use default resolution until first swapchain is created
     // Will be updated when we know the actual render resolution

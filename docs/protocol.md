@@ -53,6 +53,11 @@ The handshake exposes:
   `ClientConnect.deviceName`
 - preferred codec and bitrate limits
 
+`ClientConnect.maxBitrateMbps` is a client-side ceiling. A value of `0`
+(`CLIENT_MAX_BITRATE_USE_SERVER_CONFIG`) means the client does not impose a
+bitrate cap, so the runtime uses `streaming.bitrate_mbps` from its config. The
+runtime accepts configured bitrates from `1` to `200` Mbps.
+
 ## Video Stream
 
 UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
@@ -62,6 +67,7 @@ UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payl
 - payload size
 - flags
 - codec
+- FEC group final-packet payload size, only meaningful on `VIDEO_FLAG_FEC` packets
 - presentation timestamp
 
 Current codec identifiers:
@@ -76,7 +82,7 @@ The runtime currently targets low-latency headset streaming. The queue is latest
 
 The current stream also includes two recovery and timing helpers:
 
-- `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group.
+- `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
 
 ## Tracking Stream

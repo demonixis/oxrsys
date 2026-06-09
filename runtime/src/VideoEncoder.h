@@ -12,12 +12,10 @@
 #include "GraphicsTypes.h"
 
 /**
- * H.265 video encoder.
+ * H.265 video encoder facade.
  *
- * Takes platform textures from the OpenXR swapchain and encodes them
- * to H.265 NAL units for streaming to the headset client. Apple builds use
- * VideoToolbox. Non-Apple Vulkan builds read back released swapchain images
- * on the encode thread and feed FFmpeg.
+ * Apple builds use VideoToolbox with Metal textures. Linux and Windows builds
+ * use FFmpeg with backend-specific readback state behind GraphicsContext.
  */
 class VideoEncoder
 {
@@ -34,7 +32,6 @@ public:
         bool keyframe = false;
     };
 
-    // Callback for each encoded NAL unit
     using OnNalUnitCallback = std::function<void(const uint8_t* data, size_t size,
                                                   bool isKeyframe, int64_t timestampNs)>;
     using OnFrameEncodedCallback = std::function<void(const FrameMetrics& metrics)>;
@@ -42,35 +39,27 @@ public:
     VideoEncoder();
     ~VideoEncoder();
 
-    // Non-copyable
     VideoEncoder(const VideoEncoder&) = delete;
     VideoEncoder& operator=(const VideoEncoder&) = delete;
 
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                    uint32_t bitrateMbps, GraphicsApi graphicsApi, void* graphicsDevice);
+                    uint32_t bitrateMbps, const GraphicsContext& graphicsContext);
     void Shutdown();
 
-    // Encode a Metal texture (id<MTLTexture>)
-    // The callback is invoked for each NAL unit produced
-    bool Encode(void* metalTexture, int64_t timestampNs, OnNalUnitCallback callback,
+    bool Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                 OnFrameEncodedCallback frameCallback = {});
-
-    // Encode two Metal textures side-by-side (left eye | right eye)
-    // The combined image has double the width of a single eye
-    bool EncodeStereo(void* leftTexture, void* rightTexture,
-                      int64_t timestampNs, OnNalUnitCallback callback,
+    bool EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                       OnFrameEncodedCallback frameCallback = {});
 
-    // Force a keyframe on the next encode
     void ForceKeyframe();
-
-    // Update encoding bitrate mid-stream (VideoToolbox supports this live)
     void SetBitrate(uint32_t bitrateMbps);
     uint32_t GetBitrateMbps() const { return bitrateMbps_; }
 
-    bool IsInitialized() const { return session_ != nullptr; }
+    bool IsInitialized() const
+    {
+        return videoToolbox_.session != nullptr || ffmpeg_.codecContext != nullptr;
+    }
 
-    // Stats
     uint32_t GetEncodedFrameCount() const { return frameCount_; }
     uint32_t GetDroppedFrameCount() const { return droppedFrameCount_.load(); }
     uint32_t GetInFlightFrameCount() const { return inFlightFrameCount_.load(); }
@@ -85,25 +74,38 @@ private:
         bool inUse = false;
     };
 
-    bool EncodeInternal(void* leftTexture, void* rightTexture, bool stereo,
+    bool EncodeInternal(FrameSource frameSource, bool stereo,
                         int64_t timestampNs, OnNalUnitCallback callback,
                         OnFrameEncodedCallback frameCallback);
     bool AcquireSlot(size_t& outSlotIndex);
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();
 
-    void* session_ = nullptr;           // VTCompressionSessionRef
-    void* pixelBufferPool_ = nullptr;   // CVPixelBufferPoolRef
-    void* textureCache_ = nullptr;      // CVMetalTextureCacheRef
-    void* metalDevice_ = nullptr;       // id<MTLDevice>
-    void* commandQueue_ = nullptr;      // id<MTLCommandQueue>
-    void* scaler_ = nullptr;            // MPSImageBilinearScale*
-    void* vulkanState_ = nullptr;       // VulkanEncoderState*
-    GraphicsApi graphicsApi_ = GraphicsApi::Metal;
+    struct VideoToolboxState
+    {
+        void* session = nullptr;          // VTCompressionSessionRef
+        void* pixelBufferPool = nullptr;  // CVPixelBufferPoolRef
+        void* textureCache = nullptr;     // CVMetalTextureCacheRef
+        void* metalDevice = nullptr;      // id<MTLDevice>
+        void* commandQueue = nullptr;     // id<MTLCommandQueue>
+        void* scaler = nullptr;           // MPSImageBilinearScale*
+    };
 
-    uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
+    struct FfmpegState
+    {
+        void* codecContext = nullptr; // AVCodecContext*
+        void* frame = nullptr;        // AVFrame*
+        void* packet = nullptr;       // AVPacket*
+        void* readbackState = nullptr;
+    };
+
+    GraphicsContext graphicsContext_ = {};
+    VideoToolboxState videoToolbox_ = {};
+    FfmpegState ffmpeg_ = {};
+
+    uint32_t width_ = 0;
     uint32_t height_ = 0;
-    uint32_t eyeWidth_ = 0;   // Single eye width (width_/2 for stereo)
+    uint32_t eyeWidth_ = 0;
     uint32_t fps_ = 90;
     uint32_t bitrateMbps_ = 50;
     uint32_t frameCount_ = 0;

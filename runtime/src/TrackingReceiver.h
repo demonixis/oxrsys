@@ -3,10 +3,13 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <thread>
+
+#include "RuntimeSockets.h"
 
 #include <oxrsys/protocol/Protocol.h>
 #include "RuntimeSockets.h"

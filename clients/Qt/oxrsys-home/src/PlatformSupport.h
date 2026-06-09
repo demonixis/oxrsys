@@ -39,3 +39,4 @@ QString defaultRuntimeDirectoryPath();
 bool supportsRuntimeInstall();
 bool supportsRuntimeGlobalRegistration();
 bool supportsRuntimeInstallAndRegistration();
+bool supportsRuntimeRegistration();

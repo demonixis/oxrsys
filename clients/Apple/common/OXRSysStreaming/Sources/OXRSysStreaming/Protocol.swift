@@ -11,6 +11,9 @@ public enum OXRProtocol {
     public static let trackingPort: UInt16 = 9945
     public static let controlPort: UInt16 = 9946
     public static let handJointCount: Int = 26
+    public static let streamingMinBitrateMbps: UInt32 = 1
+    public static let streamingMaxBitrateMbps: UInt32 = 200
+    public static let clientMaxBitrateUseServerConfig: UInt32 = 0
     public static let maxPacketPayload: Int = 1400
     public static let tcpRecordMagic: UInt32 = 0x4f585255
     public static let tcpRecordVersion: UInt16 = 1
@@ -118,8 +121,8 @@ public struct ClientConnect: Sendable {
     public var versionMinor: UInt8 = 0
     public var reserved: UInt8 = 0
     public var preferredCodec: UInt32 = 0 // H265
-    public var maxBitrateMbps: UInt32 = 15
-    public var refreshRateHz: UInt32 = 60
+    public var maxBitrateMbps: UInt32 = OXRProtocol.clientMaxBitrateUseServerConfig
+    public var refreshRateHz: UInt32 = 0
     public var deviceName: (
         UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
         UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
@@ -165,6 +168,8 @@ public struct VideoPacketHeader: Sendable {
     public var payloadSize: UInt16 = 0
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
+    public var fecGroupLastPacketPayloadSize: UInt16 = 0
+    public var reserved: UInt16 = 0
     public var presentationTimeNs: Int64 = 0
 
     public init() {}

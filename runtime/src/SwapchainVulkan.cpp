@@ -117,8 +117,33 @@ static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
 }
 
 Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
-    : device_(metalDevice), graphicsApi_(GraphicsApi::Metal)
+    : Swapchain(GraphicsContext::Metal(metalDevice), createInfo)
 {
+}
+
+Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCreateInfo* createInfo)
+    : device_(graphicsContext.metalDevice),
+      metalCommandQueue_(graphicsContext.metalCommandQueue),
+      graphicsApi_(graphicsContext.api)
+{
+    if (graphicsContext.api == GraphicsApi::Vulkan)
+    {
+        InitVulkan(graphicsContext.metalDevice, &graphicsContext.vulkan, createInfo);
+        return;
+    }
+#if defined(_WIN32)
+    if (graphicsContext.api == GraphicsApi::D3D11)
+    {
+        InitD3D11(&graphicsContext.d3d11, createInfo);
+        return;
+    }
+    if (graphicsContext.api == GraphicsApi::D3D12)
+    {
+        InitD3D12(&graphicsContext.d3d12, createInfo);
+        return;
+    }
+#endif
+
     if (createInfo != nullptr)
     {
         width_ = createInfo->width;
@@ -181,6 +206,10 @@ Swapchain::Swapchain(GraphicsApi api, const D3D12GraphicsContext* d3d12Context,
 void Swapchain::InitMetal(void* /*metalDevice*/, const XrSwapchainCreateInfo* /*createInfo*/)
 {
     spdlog::error("OXRSys: InitMetal called in a non-Apple runtime build");
+}
+
+void Swapchain::InitMetalStaging(void* /*metalDevice*/)
+{
 }
 
 void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* vulkanContext,
@@ -765,6 +794,22 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
     }
 #endif
     return GetLastReleasedTexture();
+}
+
+FrameImageSource Swapchain::GetLastReleasedFrameImageSource(uint32_t arrayIndex) const
+{
+    void* imageSource = GetLastReleasedTextureSlice(arrayIndex);
+    if (imageSource == nullptr)
+    {
+        return {};
+    }
+
+    FrameImageSource source = {};
+    source.api = graphicsApi_;
+    source.image = std::shared_ptr<void>(imageSource, [](void* value) {
+        Swapchain::ReleaseTextureSlice(value);
+    });
+    return source;
 }
 
 void Swapchain::ReleaseTextureSlice(void* textureSlice)
