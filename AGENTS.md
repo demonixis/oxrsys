@@ -30,7 +30,19 @@ runtime 1-200 Mbps bounds, and clients can send `ClientConnect.maxBitrateMbps = 
 server-configured bitrate without adding a client-side cap.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
 same-process window backed by the shared `OXRSysSimulator` Swift package, and show live runtime
-streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
+streaming statistics from the existing telemetry path. The Apple simulator can optionally use one
+or two macOS webcams for approximate face-derived desktop head tracking and Vision hand tracking,
+including single-camera, multi-camera best-view, and calibrated multi-camera source modes plus a
+raw per-camera preview window overlay and a hands-as-controllers mode that maps index pinch to
+trigger/select, uses a stable controller basis independent from raw Vision wrist quaternion noise,
+keeps hand/controller origins independent from face-derived head yaw, and maps a tolerant
+middle/ring/pinky curl to grip/squeeze. The webcam path exposes
+tracking-space, camera-facing mapping, camera-height, head-offset,
+position/rotation interpolation, movement deadzone, head rotation constraints, hand/controller
+Y-offset, hand-depth calibration, controller rotation XYZ offsets, camera-rig selection,
+capture-resolution preset, and
+calibration import controls before
+connecting to a runtime. The Qt Home Developer tab opens the shared
 Qt simulator widget in a dedicated window with UDP video preview, mouse-driven synthetic head
 tracking, explicit FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe recovery requests.
 The macOS package helper builds the runtime dylib and Home app into one local folder with a complete
@@ -140,6 +152,7 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
 swift test --package-path clients/Apple/common/OXRSysStreaming
+swift test --package-path clients/Apple/common/OXRSysSimulator
 swift build --package-path clients/Apple/common/OXRSysSimulator
 swiftc -parse-as-library \
   "clients/Apple/oxrsys-home/OXRSys Home/HomeSupport.swift" \

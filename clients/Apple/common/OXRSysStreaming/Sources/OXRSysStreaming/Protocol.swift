@@ -288,6 +288,12 @@ public struct ButtonFlags {
     public static let x: UInt32 = 0x0004
     public static let y: UInt32 = 0x0008
     public static let menu: UInt32 = 0x0010
+    public static let leftThumbstick: UInt32 = 0x0020
+    public static let rightThumbstick: UInt32 = 0x0040
+    public static let leftTrigger: UInt32 = 0x0080
+    public static let rightTrigger: UInt32 = 0x0100
+    public static let leftGrip: UInt32 = 0x0200
+    public static let rightGrip: UInt32 = 0x0400
 }
 
 // MARK: - Control Channel

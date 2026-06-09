@@ -36,5 +36,9 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightHandJoints), 592)
         XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
         XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
+        XCTAssertEqual(ButtonFlags.leftTrigger, 0x0080)
+        XCTAssertEqual(ButtonFlags.rightTrigger, 0x0100)
+        XCTAssertEqual(ButtonFlags.leftGrip, 0x0200)
+        XCTAssertEqual(ButtonFlags.rightGrip, 0x0400)
     }
 }

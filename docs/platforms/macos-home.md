@@ -89,7 +89,13 @@ debugging.
 The `Open Simulator` button opens the shared simulator view in a single SwiftUI window with a
 default size of `1280x720`. Repeated clicks focus or reuse that window. Closing the window disconnects
 the simulator client through the same cleanup path as the standalone simulator app. Turning Developer
-Mode off hides the tab but does not force-close an already-open simulator window.
+Mode off hides the tab but does not force-close an already-open simulator window. The integrated
+simulator shares the standalone simulator's optional macOS webcam tracking settings, including
+single-camera or two-camera source modes, capture-resolution presets, camera-facing mapping,
+hand-depth calibration, per-camera preview windows, calibration import, deadzone, interpolation,
+and head rotation limit controls; Home includes a
+camera usage description and requests camera permission only if webcam tracking is enabled in that
+simulator window.
 
 The `Runtime Stats` section shows compact live streaming telemetry when the runtime is actively
 streaming. It keeps the last 60 one-second samples in memory and draws lightweight SwiftUI `Canvas`

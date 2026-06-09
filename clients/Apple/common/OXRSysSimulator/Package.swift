@@ -22,5 +22,10 @@ let package = Package(
             dependencies: ["OXRSysStreaming"],
             path: "Sources/OXRSysSimulator"
         ),
+        .testTarget(
+            name: "OXRSysSimulatorTests",
+            dependencies: ["OXRSysSimulator"],
+            path: "Tests/OXRSysSimulatorTests"
+        ),
     ]
 )

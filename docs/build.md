@@ -184,7 +184,16 @@ certificate in the keychain; pass it explicitly when more than one identity is i
 The shared simulator package can be checked directly:
 
 ```bash
+swift test --package-path clients/Apple/common/OXRSysSimulator
 swift build --package-path clients/Apple/common/OXRSysSimulator
+```
+
+The optional macOS multi-camera calibration helper is a standalone Python/OpenCV tool and is not a
+runtime dependency:
+
+```bash
+python3 -m pip install opencv-python
+python3 scripts/calibrate_webcam_rig.py --help
 ```
 
 The unified viewer target under `clients/Apple/oxrsys-simulator/` wraps that package for both the standalone

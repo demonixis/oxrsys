@@ -5,6 +5,7 @@
 import MetalKit
 import OXRSysStreaming
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct OXRSysSimulatorView: View {
     @State private var model = SimulatorModel()
@@ -75,6 +76,15 @@ public struct OXRSysSimulatorView: View {
             }
             .buttonStyle(.borderedProminent)
 
+            #if os(macOS)
+            Button {
+                showSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.bordered)
+            #endif
+
             Text(model.controlHint)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -109,6 +119,15 @@ public struct OXRSysSimulatorView: View {
                 model.disconnect()
             }
             .foregroundStyle(.secondary)
+
+            #if os(macOS)
+            Button {
+                showSettings = true
+            } label: {
+                Label("Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.bordered)
+            #endif
         }
         .padding()
     }
@@ -262,72 +281,20 @@ private struct ViewerHUD: View {
 private struct SettingsSheet: View {
     @Bindable var model: SimulatorModel
     @Environment(\.dismiss) private var dismiss
+    @State private var showCalibrationImporter = false
 
     var body: some View {
+        #if os(macOS)
+        macOSSettings
+        #else
         NavigationStack {
             Form {
-                Section("Mode") {
-                    Picker("Viewer Mode", selection: $model.viewerMode) {
-                        ForEach(model.availableViewerModes()) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    #if os(iOS)
-                    .pickerStyle(.segmented)
-                    #endif
-
-                    Toggle("Show Streaming Stats", isOn: $model.showStats)
-                }
-
-                Section("Stereo") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("IPD Offset")
-                            Spacer()
-                            Text(String(format: "%.3f", model.ipdOffset))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $model.ipdOffset, in: -0.05...0.05, step: 0.001)
-                        HStack {
-                            Text("Convergent")
-                            Spacer()
-                            Text("Divergent")
-                        }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    Button("Reset IPD") {
-                        model.ipdOffset = 0
-                    }
-                    .foregroundStyle(.secondary)
-                }
-
-                Section("Controls") {
-                    Text(model.controlHint)
-                        .foregroundStyle(.secondary)
-
-                    if model.canResetPose {
-                        Button {
-                            model.resetPose()
-                            dismiss()
-                        } label: {
-                            Label("Reset Position and Orientation", systemImage: "arrow.counterclockwise")
-                        }
-                    }
-
-                    Button {
-                        model.requestKeyframe()
-                    } label: {
-                        Label("Request Keyframe", systemImage: "arrow.clockwise.icloud")
-                    }
-                }
+                modeSection
+                stereoSection
+                controlsSection
             }
             .navigationTitle("Viewer Settings")
-            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
-            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Close") {
@@ -336,10 +303,448 @@ private struct SettingsSheet: View {
                 }
             }
         }
-        #if os(macOS)
-        .frame(minWidth: 420, minHeight: 360)
         #endif
     }
+
+    private var modeSection: some View {
+        Section("Mode") {
+            Picker("Viewer Mode", selection: $model.viewerMode) {
+                ForEach(model.availableViewerModes()) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            #if os(iOS)
+            .pickerStyle(.segmented)
+            #endif
+
+            Toggle("Show Streaming Stats", isOn: $model.showStats)
+        }
+    }
+
+    private var stereoSection: some View {
+        Section("Stereo") {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("IPD Offset")
+                    Spacer()
+                    Text(String(format: "%.3f", model.ipdOffset))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $model.ipdOffset, in: -0.05...0.05, step: 0.001)
+                HStack {
+                    Text("Convergent")
+                    Spacer()
+                    Text("Divergent")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+
+            Button("Reset IPD") {
+                model.ipdOffset = 0
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var controlsSection: some View {
+        Section("Controls") {
+            Text(model.controlHint)
+                .foregroundStyle(.secondary)
+
+            if model.canResetPose {
+                Button {
+                    model.resetPose()
+                    dismiss()
+                } label: {
+                    Label("Reset Position and Orientation", systemImage: "arrow.counterclockwise")
+                }
+            }
+
+            Button {
+                model.requestKeyframe()
+            } label: {
+                Label("Request Keyframe", systemImage: "arrow.clockwise.icloud")
+            }
+        }
+    }
+
+    #if os(macOS)
+    private var macOSSettings: some View {
+        NavigationStack {
+            TabView {
+                Form {
+                    modeSection
+                    stereoSection
+                    controlsSection
+                }
+                .formStyle(.grouped)
+                .tabItem {
+                    Label("General", systemImage: "slider.horizontal.3")
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        webcamSourcePanel
+                        webcamRigPanel
+                        webcamHeadPanel
+                        webcamHandPanel
+                        webcamStatusPanel
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .scrollIndicators(.visible)
+                .tabItem {
+                    Label("Webcam", systemImage: "camera")
+                }
+            }
+            .navigationTitle("Viewer Settings")
+            .fileImporter(
+                isPresented: $showCalibrationImporter,
+                allowedContentTypes: [.json]
+            ) { result in
+                if case let .success(url) = result {
+                    model.importWebcamCalibration(from: url)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .frame(
+            minWidth: 560,
+            idealWidth: 680,
+            maxWidth: .infinity,
+            minHeight: 440,
+            idealHeight: 640,
+            maxHeight: .infinity
+        )
+    }
+
+    private var webcamSourcePanel: some View {
+        GroupBox("Source") {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Use Webcam Tracking", isOn: $model.webcamTrackingEnabled)
+
+                Picker("Output", selection: $model.webcamOutputMode) {
+                    ForEach(WebcamTrackingOutputMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!model.webcamTrackingEnabled)
+
+                Toggle("Head Tracking", isOn: $model.webcamHeadTrackingEnabled)
+                    .disabled(!model.webcamTrackingEnabled)
+
+                Picker("Tracking Space", selection: $model.webcamTrackingSpace) {
+                    ForEach(WebcamTrackingSpace.allCases) { space in
+                        Text(space.rawValue).tag(space)
+                    }
+                }
+                .disabled(!model.webcamTrackingEnabled)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var webcamRigPanel: some View {
+        GroupBox("Camera Rig") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Mode", selection: $model.webcamSourceMode) {
+                    ForEach(WebcamTrackingSourceMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+
+                Picker("Capture", selection: $model.webcamCaptureResolution) {
+                    ForEach(WebcamCaptureResolution.allCases) { resolution in
+                        Text(resolution.rawValue).tag(resolution)
+                    }
+                }
+
+                Picker("Camera Facing", selection: $model.webcamCameraFacing) {
+                    ForEach(WebcamCameraFacing.allCases) { facing in
+                        Text(facing.rawValue).tag(facing)
+                    }
+                }
+
+                Picker("Primary Camera", selection: $model.selectedWebcamID) {
+                    ForEach(model.webcamDeviceChoices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+
+                Picker("Secondary Camera", selection: $model.secondaryWebcamID) {
+                    ForEach(model.webcamSecondaryDeviceChoices) { device in
+                        Text(device.name).tag(device.id)
+                    }
+                }
+                .disabled(model.webcamSourceMode == .singleCamera)
+
+                HStack {
+                    if model.webcamPreviewWindowsOpen {
+                        Button {
+                            model.closeWebcamPreviewWindows()
+                        } label: {
+                            Label("Close Previews", systemImage: "eye.slash")
+                        }
+                    } else {
+                        Button {
+                            model.openWebcamPreviewWindows()
+                        } label: {
+                            Label("Open Previews", systemImage: "eye")
+                        }
+                        .disabled(!model.webcamTrackingEnabled)
+                    }
+
+                    Button {
+                        showCalibrationImporter = true
+                    } label: {
+                        Label("Import Calibration", systemImage: "square.and.arrow.down")
+                    }
+
+                    Button {
+                        model.resetWebcamCalibration()
+                    } label: {
+                        Label("Reset", systemImage: "xmark.circle")
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                Text(model.webcamCalibrationStatusText)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var webcamHeadPanel: some View {
+        GroupBox("Head Calibration") {
+            VStack(alignment: .leading, spacing: 14) {
+                metricSlider(
+                    title: "Camera Y",
+                    value: $model.webcamCameraY,
+                    range: 0.2...2.4,
+                    step: 0.01,
+                    unit: "m"
+                )
+
+                Text("Head Offset")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamHeadOffsetX,
+                    y: $model.webcamHeadOffsetY,
+                    z: $model.webcamHeadOffsetZ,
+                    range: -1...1,
+                    step: 0.01,
+                    unit: "m"
+                )
+
+                metricSlider(
+                    title: "Move Deadzone",
+                    value: $model.webcamMovementDeadzone,
+                    range: 0...0.1,
+                    step: 0.001,
+                    unit: "m",
+                    precision: 3
+                )
+
+                Text("Head Position Interpolation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamHeadPositionInterpolationX,
+                    y: $model.webcamHeadPositionInterpolationY,
+                    z: $model.webcamHeadPositionInterpolationZ,
+                    range: 0...1,
+                    step: 0.01,
+                    unit: ""
+                )
+
+                Text("Head Rotation Interpolation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamHeadRotationInterpolationYaw,
+                    y: $model.webcamHeadRotationInterpolationPitch,
+                    z: $model.webcamHeadRotationInterpolationRoll,
+                    range: 0...1,
+                    step: 0.01,
+                    unit: "",
+                    labels: ("Yaw", "Pitch", "Roll")
+                )
+
+                metricSlider(
+                    title: "Rot Deadzone",
+                    value: $model.webcamHeadRotationDeadzoneDegrees,
+                    range: 0...10,
+                    step: 0.1,
+                    unit: "deg",
+                    precision: 1
+                )
+
+                Text("Head Rotation Limits")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamHeadRotationLimitYawDegrees,
+                    y: $model.webcamHeadRotationLimitPitchDegrees,
+                    z: $model.webcamHeadRotationLimitRollDegrees,
+                    range: 0...90,
+                    step: 1,
+                    unit: "deg",
+                    labels: ("Yaw", "Pitch", "Roll"),
+                    precision: 0
+                )
+            }
+            .disabled(!model.webcamTrackingEnabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var webcamHandPanel: some View {
+        GroupBox("Hand and Controller Calibration") {
+            VStack(alignment: .leading, spacing: 14) {
+                metricSlider(
+                    title: "Hands Y Offset",
+                    value: $model.webcamHandYOffset,
+                    range: -1...1,
+                    step: 0.01,
+                    unit: "m"
+                )
+
+                Text("Hands Position Interpolation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamHandPositionInterpolationX,
+                    y: $model.webcamHandPositionInterpolationY,
+                    z: $model.webcamHandPositionInterpolationZ,
+                    range: 0...1,
+                    step: 0.01,
+                    unit: ""
+                )
+
+                metricSlider(
+                    title: "Rotation Interp",
+                    value: $model.webcamHandRotationInterpolation,
+                    range: 0...1,
+                    step: 0.01,
+                    unit: ""
+                )
+
+                metricSlider(
+                    title: "Depth Scale",
+                    value: $model.webcamHandDepthScale,
+                    range: 0.5...1.8,
+                    step: 0.01,
+                    unit: ""
+                )
+
+                metricSlider(
+                    title: "Depth Offset",
+                    value: $model.webcamHandDepthOffset,
+                    range: -0.5...0.5,
+                    step: 0.01,
+                    unit: "m"
+                )
+
+                metricSlider(
+                    title: "Depth Smoothing",
+                    value: $model.webcamHandDepthSmoothing,
+                    range: 0...1,
+                    step: 0.01,
+                    unit: ""
+                )
+
+                Text("Controller Rotation Offset")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                axisSliderGrid(
+                    x: $model.webcamControllerRotationXDegrees,
+                    y: $model.webcamControllerRotationYDegrees,
+                    z: $model.webcamControllerRotationZDegrees,
+                    range: 0...360,
+                    step: 1,
+                    unit: "deg",
+                    labels: ("X", "Y", "Z"),
+                    precision: 0
+                )
+            }
+            .disabled(!model.webcamTrackingEnabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private var webcamStatusPanel: some View {
+        HStack {
+            Text(model.webcamStatusText)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Refresh Cameras") {
+                model.refreshWebcamDevices()
+            }
+        }
+    }
+
+    private func axisSliderGrid(
+        x: Binding<Float>,
+        y: Binding<Float>,
+        z: Binding<Float>,
+        range: ClosedRange<Float>,
+        step: Float,
+        unit: String,
+        labels: (String, String, String) = ("X", "Y", "Z"),
+        precision: Int = 2
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            metricSlider(title: labels.0, value: x, range: range, step: step, unit: unit, precision: precision)
+            metricSlider(title: labels.1, value: y, range: range, step: step, unit: unit, precision: precision)
+            metricSlider(title: labels.2, value: z, range: range, step: step, unit: unit, precision: precision)
+        }
+    }
+
+    private func metricSlider(
+        title: String,
+        value: Binding<Float>,
+        range: ClosedRange<Float>,
+        step: Float,
+        unit: String,
+        precision: Int = 2
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .frame(width: 110, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+                .frame(minWidth: 180)
+            Text(formattedMetric(value.wrappedValue, unit: unit, precision: precision))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(width: 72, alignment: .trailing)
+        }
+    }
+
+    private func formattedMetric(_ value: Float, unit: String, precision: Int) -> String {
+        let number = String(format: "%.\(precision)f", value)
+        if unit.isEmpty {
+            return number
+        }
+        return "\(number) \(unit)"
+    }
+    #endif
 }
 
 #if os(iOS)

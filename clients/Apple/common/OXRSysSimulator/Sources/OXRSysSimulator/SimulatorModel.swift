@@ -4,6 +4,7 @@
 
 import CoreMedia
 import CoreVideo
+import Foundation
 import Observation
 import simd
 import SwiftUI
@@ -88,6 +89,162 @@ final class SimulatorModel {
     #if os(iOS)
     private let arTracking = ARTrackingManager()
     #endif
+    #if os(macOS)
+    private let desktopWebcamTracking = DesktopWebcamTrackingManager()
+    private let webcamPreviewWindows = WebcamPreviewWindowManager()
+    private let webcamSnapshotLock = NSLock()
+    private var latestWebcamSnapshot: WebcamTrackingSnapshot?
+    private var webcamPreviewGeneration: UInt64 = 0
+    var webcamTrackingEnabled: Bool = false {
+        didSet {
+            guard oldValue != webcamTrackingEnabled else { return }
+            if webcamTrackingEnabled {
+                startDesktopWebcamTrackingIfNeeded()
+            } else {
+                closeWebcamPreviewWindows()
+                desktopWebcamTracking.stop()
+                storeWebcamSnapshot(nil)
+                webcamStatusText = "Webcam tracking off"
+            }
+        }
+    }
+    var webcamHeadTrackingEnabled: Bool = false {
+        didSet {
+            guard webcamHeadTrackingEnabled, oldValue != webcamHeadTrackingEnabled else { return }
+            desktopWebcamTracking.resetHeadPose()
+        }
+    }
+    var webcamOutputMode: WebcamTrackingOutputMode = .hands
+    var webcamSourceMode: WebcamTrackingSourceMode = .singleCamera {
+        didSet {
+            guard oldValue != webcamSourceMode else { return }
+            restartDesktopWebcamTrackingIfNeeded()
+        }
+    }
+    var webcamCaptureResolution: WebcamCaptureResolution = .medium {
+        didSet {
+            guard oldValue != webcamCaptureResolution else { return }
+            restartDesktopWebcamTrackingIfNeeded()
+        }
+    }
+    var webcamTrackingSpace: WebcamTrackingSpace = .localFloor {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamCameraFacing: WebcamCameraFacing = .userFacing {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamCameraY: Float = 1.6 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadOffsetX: Float = 0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadOffsetY: Float = 0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadOffsetZ: Float = 0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandYOffset: Float = 0.5 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadPositionInterpolationX: Float = 0.01 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadPositionInterpolationY: Float = 0.01 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadPositionInterpolationZ: Float = 0.01 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationInterpolationYaw: Float = 0.03 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationInterpolationPitch: Float = 0.03 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationInterpolationRoll: Float = 0.03 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandPositionInterpolationX: Float = 0.25 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandPositionInterpolationY: Float = 0.25 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandPositionInterpolationZ: Float = 0.25 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandRotationInterpolation: Float = 0.25 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandDepthScale: Float = 1.0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandDepthOffset: Float = 0.0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHandDepthSmoothing: Float = 0.35 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamMovementDeadzone: Float = 0.015 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationDeadzoneDegrees: Float = 1.5 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationLimitYawDegrees: Float = 45 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationLimitPitchDegrees: Float = 35 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamHeadRotationLimitRollDegrees: Float = 8 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamControllerRotationXDegrees: Float = 90 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamControllerRotationYDegrees: Float = 0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var webcamControllerRotationZDegrees: Float = 0 {
+        didSet { updateDesktopWebcamSettings() }
+    }
+    var selectedWebcamID: String = "" {
+        didSet {
+            guard oldValue != selectedWebcamID else { return }
+            if secondaryWebcamID == selectedWebcamID {
+                secondaryWebcamID = ""
+            }
+            restartDesktopWebcamTrackingIfNeeded()
+        }
+    }
+    var secondaryWebcamID: String = "" {
+        didSet {
+            guard oldValue != secondaryWebcamID else { return }
+            if secondaryWebcamID == selectedWebcamID {
+                secondaryWebcamID = ""
+                return
+            }
+            restartDesktopWebcamTrackingIfNeeded()
+        }
+    }
+    var webcamDevices: [DesktopWebcamDevice] = []
+    var webcamStatusText: String = "Webcam tracking off"
+    var webcamCalibrationStatusText: String = "No calibration loaded"
+    var webcamPreviewWindowsOpen: Bool = false
+    private var webcamRigCalibration: WebcamRigCalibration?
+
+    var webcamDeviceChoices: [DesktopWebcamDevice] {
+        [DesktopWebcamDevice(id: "", name: "Default Camera")] + webcamDevices
+    }
+
+    var webcamSecondaryDeviceChoices: [DesktopWebcamDevice] {
+        [DesktopWebcamDevice(id: "", name: "Auto Secondary Camera")] +
+            webcamDevices.filter { $0.id != selectedWebcamID }
+    }
+    #endif
 
     init() {
         let initialViewerMode: ViewerMode
@@ -112,6 +269,34 @@ final class SimulatorModel {
         renderer?.displayMode = initialViewerMode.rendererMode
         renderer?.ipdOffset = 0
         self.renderer = renderer
+
+        #if os(macOS)
+        refreshWebcamDevices()
+        updateDesktopWebcamSettings()
+        desktopWebcamTracking.onTrackingUpdate = { [weak self] snapshot in
+            self?.storeWebcamSnapshot(snapshot)
+            Task { @MainActor [weak self] in
+                guard let self, self.webcamTrackingEnabled else { return }
+                self.isTracking = snapshot.isTracking
+            }
+        }
+        desktopWebcamTracking.onStatusUpdate = { [weak self] status in
+            Task { @MainActor [weak self] in
+                self?.webcamStatusText = status
+            }
+        }
+        desktopWebcamTracking.onPreviewUpdate = { [weak self] frame in
+            Task { @MainActor [weak self] in
+                self?.handleWebcamPreviewFrame(frame)
+            }
+        }
+        webcamPreviewWindows.onAllWindowsClosed = { [weak self] in
+            guard let self else { return }
+            self.webcamPreviewGeneration &+= 1
+            self.webcamPreviewWindowsOpen = false
+            self.desktopWebcamTracking.setPreviewEnabled(false, generation: self.webcamPreviewGeneration)
+        }
+        #endif
     }
 
     var refreshRate: Int {
@@ -127,15 +312,22 @@ final class SimulatorModel {
     }
 
     var canResetPose: Bool {
+        #if os(macOS)
+        return webcamTrackingEnabled && webcamHeadTrackingEnabled
+        #else
         #if os(iOS)
         return viewerMode == .stereoView
         #else
         return false
         #endif
+        #endif
     }
 
     var controlHint: String {
         #if os(macOS)
+        if webcamTrackingEnabled {
+            return "Webcam tracking active; keyboard and mouse remain head-pose fallback"
+        }
         return "ZQSD/WASD move, mouse look, right-click captures the cursor"
         #else
         switch viewerMode {
@@ -242,6 +434,9 @@ final class SimulatorModel {
         decoder.invalidate()
         discovery.stop()
         latencyReporter.reset()
+        #if os(macOS)
+        closeWebcamPreviewWindows()
+        #endif
 
         state = .disconnected
         discoveredServer = nil
@@ -261,6 +456,12 @@ final class SimulatorModel {
     }
 
     func resetPose() {
+        #if os(macOS)
+        if webcamTrackingEnabled && webcamHeadTrackingEnabled {
+            desktopWebcamTracking.resetHeadPose()
+            return
+        }
+        #endif
         #if os(iOS)
         guard viewerMode == .stereoView else { return }
         arTracking.resetPose()
@@ -286,6 +487,9 @@ final class SimulatorModel {
     private func startSimulatorTracking() {
         isTracking = true
         lastTrackingTimeNs = VideoReceiver.monotonicNs()
+        #if os(macOS)
+        startDesktopWebcamTrackingIfNeeded()
+        #endif
 
         let source = DispatchSource.makeTimerSource(
             flags: .strict,
@@ -302,7 +506,18 @@ final class SimulatorModel {
             let dt = Float(now - self.lastTrackingTimeNs) / 1_000_000_000.0
             self.lastTrackingTimeNs = now
             self.inputManager.update(deltaTime: max(dt, 0.001))
-            let packet = self.inputManager.buildTrackingPacket()
+            var packet = self.inputManager.buildTrackingPacket()
+            #if os(macOS)
+            if self.webcamTrackingEnabled {
+                packet = WebcamGestureMapper.makeTrackingPacket(
+                    basePacket: packet,
+                    snapshot: self.loadWebcamSnapshot(),
+                    outputMode: self.webcamOutputMode,
+                    headTrackingEnabled: self.webcamHeadTrackingEnabled,
+                    settings: self.currentWebcamSettings()
+                )
+            }
+            #endif
             self.trackingSender.send(packet)
         }
         source.resume()
@@ -389,11 +604,194 @@ final class SimulatorModel {
     private func stopTracking() {
         trackingSource?.cancel()
         trackingSource = nil
+        #if os(macOS)
+        desktopWebcamTracking.stop()
+        storeWebcamSnapshot(nil)
+        #endif
         #if os(iOS)
         arTracking.stop()
         #endif
         isTracking = false
     }
+
+    #if os(macOS)
+    func refreshWebcamDevices() {
+        webcamDevices = DesktopWebcamTrackingManager.availableVideoDevices()
+        if !selectedWebcamID.isEmpty && !webcamDevices.contains(where: { $0.id == selectedWebcamID }) {
+            selectedWebcamID = ""
+        }
+        if !secondaryWebcamID.isEmpty &&
+            (!webcamDevices.contains(where: { $0.id == secondaryWebcamID }) ||
+                secondaryWebcamID == selectedWebcamID) {
+            secondaryWebcamID = ""
+        }
+    }
+
+    func importWebcamCalibration(from url: URL) {
+        do {
+            let needsScopedAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if needsScopedAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            let data = try Data(contentsOf: url)
+            let calibration = try JSONDecoder().decode(WebcamRigCalibration.self, from: data)
+            guard calibration.isUsable else {
+                webcamCalibrationStatusText = "Calibration needs at least two cameras"
+                return
+            }
+            webcamRigCalibration = calibration
+            let errorText: String
+            if let error = calibration.reprojectionError {
+                errorText = String(format: ", %.3f reprojection error", Double(error))
+            } else {
+                errorText = ""
+            }
+            webcamCalibrationStatusText = "Loaded \(calibration.cameras.count)-camera calibration\(errorText)"
+            restartDesktopWebcamTrackingIfNeeded()
+        } catch {
+            webcamCalibrationStatusText = "Calibration import failed"
+        }
+    }
+
+    func resetWebcamCalibration() {
+        webcamRigCalibration = nil
+        webcamCalibrationStatusText = "No calibration loaded"
+        restartDesktopWebcamTrackingIfNeeded()
+    }
+
+    func openWebcamPreviewWindows() {
+        refreshWebcamDevices()
+        let devices = selectedWebcamPreviewDevices()
+        webcamPreviewGeneration &+= 1
+        webcamPreviewWindows.showWindows(for: devices)
+        webcamPreviewWindowsOpen = !devices.isEmpty
+        desktopWebcamTracking.setPreviewEnabled(
+            webcamPreviewWindowsOpen,
+            generation: webcamPreviewGeneration
+        )
+        if webcamPreviewWindowsOpen {
+            startDesktopWebcamTrackingIfNeeded()
+        }
+    }
+
+    func closeWebcamPreviewWindows() {
+        webcamPreviewGeneration &+= 1
+        webcamPreviewWindowsOpen = false
+        desktopWebcamTracking.setPreviewEnabled(false, generation: webcamPreviewGeneration)
+        webcamPreviewWindows.closeAll()
+    }
+
+    private func handleWebcamPreviewFrame(_ frame: WebcamPreviewFrame) {
+        guard webcamPreviewWindowsOpen, frame.previewGeneration == webcamPreviewGeneration else { return }
+        webcamPreviewWindows.show(frame: frame)
+    }
+
+    private func selectedWebcamPreviewDevices() -> [DesktopWebcamDevice] {
+        guard !webcamDevices.isEmpty else { return [] }
+        let primary = webcamDevices.first { $0.id == selectedWebcamID } ?? webcamDevices[0]
+        guard webcamSourceMode != .singleCamera else { return [primary] }
+
+        let secondary =
+            webcamDevices.first { $0.id == secondaryWebcamID && $0.id != primary.id } ??
+            webcamDevices.first { $0.id != primary.id }
+
+        if let secondary {
+            return [primary, secondary]
+        }
+        return [primary]
+    }
+
+    private func startDesktopWebcamTrackingIfNeeded() {
+        guard webcamTrackingEnabled else {
+            desktopWebcamTracking.stop()
+            storeWebcamSnapshot(nil)
+            return
+        }
+
+        refreshWebcamDevices()
+        updateDesktopWebcamSettings()
+        storeWebcamSnapshot(nil)
+        webcamStatusText = "Starting webcam tracking"
+        desktopWebcamTracking.start(
+            configuration: DesktopWebcamTrackingConfiguration(
+                sourceMode: webcamSourceMode,
+                primaryDeviceID: selectedWebcamID,
+                secondaryDeviceID: secondaryWebcamID,
+                captureResolution: webcamCaptureResolution,
+                calibration: webcamRigCalibration
+            )
+        )
+    }
+
+    private func restartDesktopWebcamTrackingIfNeeded() {
+        guard webcamTrackingEnabled else { return }
+        startDesktopWebcamTrackingIfNeeded()
+    }
+
+    private func updateDesktopWebcamSettings() {
+        desktopWebcamTracking.updateSettings(currentWebcamSettings())
+    }
+
+    private func currentWebcamSettings() -> WebcamTrackingSettings {
+        WebcamTrackingSettings(
+            trackingSpace: webcamTrackingSpace,
+            cameraFacing: webcamCameraFacing,
+            cameraY: webcamCameraY,
+            headOffset: SIMD3<Float>(
+                webcamHeadOffsetX,
+                webcamHeadOffsetY,
+                webcamHeadOffsetZ
+            ),
+            handYOffset: webcamHandYOffset,
+            headPositionInterpolation: SIMD3<Float>(
+                webcamHeadPositionInterpolationX,
+                webcamHeadPositionInterpolationY,
+                webcamHeadPositionInterpolationZ
+            ),
+            headRotationInterpolation: SIMD3<Float>(
+                webcamHeadRotationInterpolationYaw,
+                webcamHeadRotationInterpolationPitch,
+                webcamHeadRotationInterpolationRoll
+            ),
+            handPositionInterpolation: SIMD3<Float>(
+                webcamHandPositionInterpolationX,
+                webcamHandPositionInterpolationY,
+                webcamHandPositionInterpolationZ
+            ),
+            handRotationInterpolation: webcamHandRotationInterpolation,
+            handDepthScale: webcamHandDepthScale,
+            handDepthOffset: webcamHandDepthOffset,
+            handDepthSmoothing: webcamHandDepthSmoothing,
+            movementDeadzone: webcamMovementDeadzone,
+            headRotationDeadzoneDegrees: webcamHeadRotationDeadzoneDegrees,
+            headRotationLimitDegrees: SIMD3<Float>(
+                webcamHeadRotationLimitYawDegrees,
+                webcamHeadRotationLimitPitchDegrees,
+                webcamHeadRotationLimitRollDegrees
+            ),
+            controllerRotationOffsetDegrees: SIMD3<Float>(
+                webcamControllerRotationXDegrees,
+                webcamControllerRotationYDegrees,
+                webcamControllerRotationZDegrees
+            )
+        )
+    }
+
+    private func storeWebcamSnapshot(_ snapshot: WebcamTrackingSnapshot?) {
+        webcamSnapshotLock.lock()
+        latestWebcamSnapshot = snapshot
+        webcamSnapshotLock.unlock()
+    }
+
+    private func loadWebcamSnapshot() -> WebcamTrackingSnapshot? {
+        webcamSnapshotLock.lock()
+        let snapshot = latestWebcamSnapshot
+        webcamSnapshotLock.unlock()
+        return snapshot
+    }
+    #endif
 
     nonisolated private static func nanoseconds(from time: CMTime) -> Int64 {
         guard time.isValid else { return 0 }
