@@ -40,10 +40,10 @@ bool StreamingFrameQueue::PushLatest(StreamingFrame frame)
         std::lock_guard<std::mutex> lock(mutex_);
         if (pendingFrame_.valid)
         {
-            replacedFrame = pendingFrame_;
+            replacedFrame = std::move(pendingFrame_);
             replaced = true;
         }
-        pendingFrame_ = frame;
+        pendingFrame_ = std::move(frame);
     }
 
     ReleaseFrame(replacedFrame);
@@ -64,7 +64,7 @@ bool StreamingFrameQueue::WaitPop(const std::atomic<bool>& running, StreamingFra
         return false;
     }
 
-    outFrame = pendingFrame_;
+    outFrame = std::move(pendingFrame_);
     pendingFrame_ = {};
     return true;
 }
@@ -74,7 +74,7 @@ void StreamingFrameQueue::Clear()
     StreamingFrame frame = {};
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        frame = pendingFrame_;
+        frame = std::move(pendingFrame_);
         pendingFrame_ = {};
     }
     ReleaseFrame(frame);

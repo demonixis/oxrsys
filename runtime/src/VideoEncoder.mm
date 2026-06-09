@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <utility>
 
 namespace
 {
@@ -30,6 +31,7 @@ struct EncodeFrameContext
     VideoEncoder::OnNalUnitCallback nalCallback;
     VideoEncoder::OnFrameEncodedCallback frameCallback;
     std::function<void(size_t)> releaseSlot;
+    FrameSource frameSource;
     VideoEncoder::FrameMetrics metrics;
     size_t slotIndex = 0;
     Clock::time_point encodeStart;
@@ -157,6 +159,22 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
 
         callback(nalUnit.data(), nalUnit.size(), isKeyframe, timestampNs);
         offset += naluLength;
+    }
+}
+
+void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImageSource& source)
+{
+    if (commandBuffer == nil ||
+        source.sync.api != GraphicsApi::Metal ||
+        !source.sync.IsValid())
+    {
+        return;
+    }
+
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)source.sync.waitObject.get();
+    if (event != nil)
+    {
+        [commandBuffer encodeWaitForEvent:event value:source.sync.waitValue];
     }
 }
 
@@ -442,26 +460,29 @@ void VideoEncoder::Shutdown()
                   frameCount_, droppedFrameCount_.load());
 }
 
-bool VideoEncoder::Encode(void* metalTexture, int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                            OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(metalTexture, nullptr, false, timestampNs,
+    FrameSource frameSource = {};
+    frameSource.left = std::move(imageSource);
+    return EncodeInternal(std::move(frameSource), false, timestampNs,
                           std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeStereo(void* leftTexture, void* rightTexture,
-                                 int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                                  OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(leftTexture, rightTexture, true, timestampNs,
+    return EncodeInternal(std::move(frameSource), true, timestampNs,
                           std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool stereo,
+bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
                                    OnFrameEncodedCallback frameCallback)
 {
-    if (videoToolbox_.session == nullptr || leftTexture == nullptr || (stereo && rightTexture == nullptr))
+    if (videoToolbox_.session == nullptr ||
+        !frameSource.left.IsValid() ||
+        (stereo && !frameSource.right.IsValid()))
     {
         return false;
     }
@@ -494,14 +515,20 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
         return false;
     }
 
-    id<MTLTexture> leftTex = (__bridge id<MTLTexture>)leftTexture;
-    id<MTLTexture> rightTex = stereo ? (__bridge id<MTLTexture>)rightTexture : nil;
+    id<MTLTexture> leftTex = (__bridge id<MTLTexture>)frameSource.left.GetImage();
+    id<MTLTexture> rightTex = stereo ? (__bridge id<MTLTexture>)frameSource.right.GetImage() : nil;
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)videoToolbox_.commandQueue;
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     if (cmdBuf == nil)
     {
         ReleaseSlot(slotIndex);
         return false;
+    }
+
+    EncodeWaitForFrameImage(cmdBuf, frameSource.left);
+    if (stereo)
+    {
+        EncodeWaitForFrameImage(cmdBuf, frameSource.right);
     }
 
     bool forceKeyframe = forceKeyframe_.exchange(false);
@@ -606,6 +633,7 @@ bool VideoEncoder::EncodeInternal(void* leftTexture, void* rightTexture, bool st
     context->releaseSlot = [this](size_t releasedSlotIndex) {
         ReleaseSlot(releasedSlotIndex);
     };
+    context->frameSource = std::move(frameSource);
     context->slotIndex = slotIndex;
     context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
     context->metrics.timestampNs = timestampNs;

@@ -48,7 +48,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 
 ## Status
 
-- macOS: Metal rendering, core runtime flow, Vulkan interop, typed graphics/frame plumbing, and loader-backed runtime tests are in place.
+- macOS: Metal rendering, release-time Metal streaming snapshots, core runtime flow, Vulkan interop, typed graphics/frame plumbing, and loader-backed runtime tests are in place.
 - Linux: Vulkan runtime scaffolding and an FFmpeg encoder path are wired; real Vulkan image readback is still the main remaining Linux video gap.
 - Windows: the runtime backend remains scaffold-only, while shared platform, config, status, and socket helpers are being kept portable.
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
@@ -60,6 +60,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 ## Documentation
 
 - [Install](docs/install.md)
+- [Changes](CHANGES.md)
 - [Build and versioning](docs/build.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)

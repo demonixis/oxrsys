@@ -22,10 +22,34 @@ static constexpr const char* UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS =
     "xrGetMetalGraphicsRequirementsKHRX2";
 static constexpr const char* XR_LOCATE_SPACES_KHR_FUNCTION_ALIAS = "xrLocateSpacesKHR";
 
-void* DummyMetalCommandQueue()
+extern "C" void* OxrsysTestCreateMetalCommandQueue();
+extern "C" void OxrsysTestReleaseMetalObject(void* object);
+
+class TestMetalCommandQueue
 {
-    return reinterpret_cast<void*>(static_cast<uintptr_t>(0x1));
-}
+public:
+    TestMetalCommandQueue()
+        : queue_(OxrsysTestCreateMetalCommandQueue())
+    {
+        REQUIRE(queue_ != nullptr);
+    }
+
+    ~TestMetalCommandQueue()
+    {
+        OxrsysTestReleaseMetalObject(queue_);
+    }
+
+    TestMetalCommandQueue(const TestMetalCommandQueue&) = delete;
+    TestMetalCommandQueue& operator=(const TestMetalCommandQueue&) = delete;
+
+    void* Get() const
+    {
+        return queue_;
+    }
+
+private:
+    void* queue_ = nullptr;
+};
 
 void CheckXr(XrResult result, const char* expression)
 {
@@ -178,7 +202,7 @@ struct RuntimeSessionContext
         XR_CHECK(getMetalGraphicsRequirementsKHR(instance, systemId, &graphicsRequirements));
 
         XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-        graphicsBinding.commandQueue = DummyMetalCommandQueue();
+        graphicsBinding.commandQueue = metalCommandQueue.Get();
 
         XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
         sessionCreateInfo.next = &graphicsBinding;
@@ -234,6 +258,7 @@ struct RuntimeSessionContext
     }
 
     std::vector<const char*> enabledExtensions;
+    TestMetalCommandQueue metalCommandQueue;
     XrInstance instance = XR_NULL_HANDLE;
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     XrSession session = XR_NULL_HANDLE;
@@ -479,8 +504,9 @@ TEST_CASE("Runtime requires Metal graphics requirements before session creation"
     XrSystemId systemId = XR_NULL_SYSTEM_ID;
     XR_CHECK(xrGetSystem(instance, &systemGetInfo, &systemId));
 
+    TestMetalCommandQueue metalCommandQueue;
     XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-    graphicsBinding.commandQueue = DummyMetalCommandQueue();
+    graphicsBinding.commandQueue = metalCommandQueue.Get();
 
     XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
     sessionCreateInfo.next = &graphicsBinding;
@@ -523,8 +549,9 @@ TEST_CASE("Runtime validates the session system id before graphics checks", "[ru
     XrGraphicsRequirementsMetalKHR graphicsRequirements = {XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR};
     XR_CHECK(getMetalGraphicsRequirementsKHR(instance, systemId, &graphicsRequirements));
 
+    TestMetalCommandQueue metalCommandQueue;
     XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-    graphicsBinding.commandQueue = DummyMetalCommandQueue();
+    graphicsBinding.commandQueue = metalCommandQueue.Get();
 
     XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
     sessionCreateInfo.next = &graphicsBinding;
@@ -713,8 +740,9 @@ TEST_CASE("Runtime hides LOCAL_FLOOR for OpenXR 1.0 instances", "[runtime][space
     XrGraphicsRequirementsMetalKHR graphicsRequirements = {XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR};
     XR_CHECK(getMetalGraphicsRequirementsKHR(instance, systemId, &graphicsRequirements));
 
+    TestMetalCommandQueue metalCommandQueue;
     XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-    graphicsBinding.commandQueue = DummyMetalCommandQueue();
+    graphicsBinding.commandQueue = metalCommandQueue.Get();
 
     XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
     sessionCreateInfo.next = &graphicsBinding;
@@ -998,8 +1026,9 @@ TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loa
     XrGraphicsRequirementsMetalKHR graphicsRequirements = {XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR};
     XR_CHECK(getMetalGraphicsRequirementsKHR(instance, systemId, &graphicsRequirements));
 
+    TestMetalCommandQueue metalCommandQueue;
     XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-    graphicsBinding.commandQueue = DummyMetalCommandQueue();
+    graphicsBinding.commandQueue = metalCommandQueue.Get();
 
     XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
     sessionCreateInfo.next = &graphicsBinding;
@@ -1055,8 +1084,9 @@ TEST_CASE("DestroyInstance tolerates active session resources", "[runtime][loade
     XrGraphicsRequirementsMetalKHR graphicsRequirements = {XR_TYPE_GRAPHICS_REQUIREMENTS_METAL_KHR};
     XR_CHECK(getMetalGraphicsRequirementsKHR(instance, systemId, &graphicsRequirements));
 
+    TestMetalCommandQueue metalCommandQueue;
     XrGraphicsBindingMetalKHR graphicsBinding = {XR_TYPE_GRAPHICS_BINDING_METAL_KHR};
-    graphicsBinding.commandQueue = DummyMetalCommandQueue();
+    graphicsBinding.commandQueue = metalCommandQueue.Get();
 
     XrSessionCreateInfo sessionCreateInfo = {XR_TYPE_SESSION_CREATE_INFO};
     sessionCreateInfo.next = &graphicsBinding;

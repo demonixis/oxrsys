@@ -50,13 +50,12 @@ public:
 
     // Encode one backend-native texture/image source.
     // The callback is invoked for each NAL unit produced
-    bool Encode(void* metalTexture, int64_t timestampNs, OnNalUnitCallback callback,
+    bool Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                 OnFrameEncodedCallback frameCallback = {});
 
     // Encode two backend-native texture/image sources side-by-side (left eye | right eye)
     // The combined image has double the width of a single eye
-    bool EncodeStereo(void* leftTexture, void* rightTexture,
-                      int64_t timestampNs, OnNalUnitCallback callback,
+    bool EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                       OnFrameEncodedCallback frameCallback = {});
 
     // Force a keyframe on the next encode
@@ -86,7 +85,7 @@ private:
         bool inUse = false;
     };
 
-    bool EncodeInternal(void* leftTexture, void* rightTexture, bool stereo,
+    bool EncodeInternal(FrameSource frameSource, bool stereo,
                         int64_t timestampNs, OnNalUnitCallback callback,
                         OnFrameEncodedCallback frameCallback);
     bool AcquireSlot(size_t& outSlotIndex);

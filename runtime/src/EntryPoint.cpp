@@ -945,7 +945,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateSession(
     if (metalBinding)
     {
         gGraphicsApi = GraphicsApi::Metal;
-        gSession = std::make_unique<Session>(inst, gMetalDevice);
+        gSession = std::make_unique<Session>(inst, gMetalDevice, metalBinding->commandQueue);
         *session = reinterpret_cast<XrSession>(gSession->GetHandle());
         spdlog::info("OXRSys: Session created with Metal binding");
         return XR_SUCCESS;

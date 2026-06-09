@@ -18,6 +18,7 @@
 #include <limits>
 #include <numeric>
 #include <thread>
+#include <utility>
 
 #if !defined(_WIN32)
 #include <ifaddrs.h>
@@ -904,9 +905,9 @@ void StreamingServer::EncodeThread()
             }
         }
 
+        const uint32_t submittedFrameIndex = frame.frameIndex;
         bool encoded = encoder->EncodeStereo(
-            frame.source.leftTexture,
-            frame.source.rightTexture,
+            std::move(frame.source),
             frame.timestampNs,
             [packetDispatchState, frameIndex = frame.frameIndex, timestampNs = frame.timestampNs](
                 const uint8_t* nalData, size_t nalSize, bool isKeyframe, int64_t /*pts*/)
@@ -1005,7 +1006,7 @@ void StreamingServer::EncodeThread()
         if (++logFrameCounter <= 5 || logFrameCounter % 300 == 0)
         {
             spdlog::info("StreamingServer: queued frame #{} encodeSubmitted={} queueWait={:.2f}ms inflight={}",
-                          frame.frameIndex, encoded, queueWaitMs, encoder->GetInFlightFrameCount());
+                          submittedFrameIndex, encoded, queueWaitMs, encoder->GetInFlightFrameCount());
         }
     }
 
@@ -1368,12 +1369,10 @@ void StreamingServer::UpdatePredictionHorizon()
     trackingReceiver_->SetPredictionHorizonMs(horizonMs);
 }
 
-void StreamingServer::SendFrame(void* leftTexture, void* rightTexture)
+void StreamingServer::SendFrame(FrameSource frameSource)
 {
-    if (leftTexture == nullptr || rightTexture == nullptr || state_.load() != State::Connected)
+    if (!frameSource.IsStereoValid() || state_.load() != State::Connected)
     {
-        Swapchain::ReleaseTextureSlice(leftTexture);
-        Swapchain::ReleaseTextureSlice(rightTexture);
         return;
     }
 
@@ -1381,15 +1380,12 @@ void StreamingServer::SendFrame(void* leftTexture, void* rightTexture)
         std::lock_guard<std::mutex> encoderLock(encoderMutex_);
         if (encoder_ == nullptr || !encoder_->IsInitialized())
         {
-            Swapchain::ReleaseTextureSlice(leftTexture);
-            Swapchain::ReleaseTextureSlice(rightTexture);
             return;
         }
     }
 
     StreamingFrame frame = {};
-    frame.source.leftTexture = leftTexture;
-    frame.source.rightTexture = rightTexture;
+    frame.source = std::move(frameSource);
     frame.frameIndex = frameIndex_++;
     frame.timestampNs = SteadyClockNowNs();
     frame.valid = true;
@@ -1407,7 +1403,7 @@ void StreamingServer::SendFrame(void* leftTexture, void* rightTexture)
         }
     }
 
-    if (frameQueue_.PushLatest(frame))
+    if (frameQueue_.PushLatest(std::move(frame)))
     {
         replacedFrameCount_.fetch_add(1);
     }
@@ -1420,8 +1416,6 @@ void StreamingServer::ReleaseStreamingFrame(StreamingFrame& frame)
         return;
     }
 
-    Swapchain::ReleaseTextureSlice(frame.source.leftTexture);
-    Swapchain::ReleaseTextureSlice(frame.source.rightTexture);
     frame = {};
 }
 
