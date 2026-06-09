@@ -55,8 +55,9 @@ public:
     void Stop();
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
-    // The handles are platform graphics resources retained/owned by Swapchain.
-    void SendFrame(void* leftTexture, void* rightTexture);
+    // The source owns backend graphics resources until the frame is encoded,
+    // dropped, or replaced by a newer pending frame.
+    void SendFrame(FrameSource frameSource);
 
     // Set the platform graphics device for VideoEncoder initialization.
     void SetGraphicsContext(const GraphicsContext& graphicsContext) { graphicsContext_ = graphicsContext; }

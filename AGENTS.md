@@ -8,7 +8,8 @@ The repository also includes a native SwiftUI macOS Home app and a Qt Home app f
 launching, runtime selection, runtime configuration, and runtime registration workflows.
 
 **Current state:** Metal/core runtime, Vulkan interop, Linux Vulkan/FFmpeg scaffolding,
-typed internal graphics/frame plumbing, portable platform/socket helpers,
+typed internal graphics/frame plumbing, release-time Metal streaming snapshots,
+portable platform/socket helpers,
 controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
 are in place. Windows is scaffolded in layout/docs only for this pass. The Android VR client now feeds
@@ -76,13 +77,16 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 
 `README.md` must stay short. Put detailed build, platform, protocol, simulator, and test guidance in `docs/`.
 
-Avoid duplicating the same guidance in multiple files. If commands, platform status, or CTS results change, update the single page that owns that topic and keep cross-links accurate.
+`CHANGES.md` owns release notes. Keep pending release dates as `TBD` until the release owner sets the final date.
+
+Avoid duplicating the same guidance in multiple files. If commands, platform status, release notes, or CTS results change, update the single page that owns that topic and keep cross-links accurate.
 
 ## Important Technical Constraints
 
 - The runtime does not link directly against Vulkan. Resolve Vulkan functions through the app-provided loader path; Vulkan v1 may fall back only to an already-loaded process `vkGetInstanceProcAddr` and must not call `LoadLibrary`/`dlopen` for the Vulkan loader.
 - `Session::EndFrame()` must stay non-blocking.
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
+- Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
 - Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encode callback or `Session::EndFrame()`.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
@@ -107,6 +111,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 ```text
 oxrsys_runtime/
 ├── CMakeLists.txt
+├── CHANGES.md
 ├── cmake/RunOpenXRCTS.cmake
 ├── config/OXRSysVersion.xcconfig
 ├── runtime/

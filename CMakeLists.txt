@@ -225,6 +225,7 @@ set(OXRSYS_RUNTIME_TEST_TARGETS
 if(APPLE)
     add_executable(oxrsys_runtime_api_tests
         tests/TestRuntimeApi.cpp
+        tests/TestMetalSupport.mm
     )
     target_include_directories(oxrsys_runtime_api_tests PRIVATE
         runtime/src
@@ -233,6 +234,8 @@ if(APPLE)
     target_link_libraries(oxrsys_runtime_api_tests PRIVATE
         Catch2::Catch2WithMain
         OpenXR::openxr_loader
+        "-framework Metal"
+        "-framework Foundation"
     )
     target_compile_definitions(oxrsys_runtime_api_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL

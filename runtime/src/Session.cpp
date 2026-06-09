@@ -14,6 +14,7 @@
 #include <cstring>
 #include <numeric>
 #include <thread>
+#include <utility>
 
 #include <openxr/openxr_platform.h>
 
@@ -90,8 +91,8 @@ bool IsFiniteFov(const XrFovf& fov)
 
 } // namespace
 
-Session::Session(Instance* instance, void* metalDevice)
-    : instance_(instance), graphicsContext_(GraphicsContext::Metal(metalDevice))
+Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
+    : instance_(instance), graphicsContext_(GraphicsContext::Metal(metalDevice, metalCommandQueue))
 {
     inputManager_ = std::make_unique<InputManager>();
 
@@ -459,9 +460,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         return XR_ERROR_LAYER_INVALID;
     }
 
-    // Extract submitted eye textures for streaming
-    void* leftTex = nullptr;
-    void* rightTex = nullptr;
+    // Extract submitted eye sources for streaming. Missing streaming sources do
+    // not invalidate the OpenXR frame; they only skip this frame's video encode.
+    FrameSource frameSource = {};
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
     {
@@ -476,11 +477,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
                 XrResult result = ValidateProjectionLayer(
-                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), leftTex, rightTex);
+                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), frameSource);
                 if (result != XR_SUCCESS)
                 {
-                    Swapchain::ReleaseTextureSlice(leftTex);
-                    Swapchain::ReleaseTextureSlice(rightTex);
                     return result;
                 }
                 break;
@@ -490,15 +489,11 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                 XrResult result = ValidateQuadLayer(*reinterpret_cast<const XrCompositionLayerQuad*>(layer));
                 if (result != XR_SUCCESS)
                 {
-                    Swapchain::ReleaseTextureSlice(leftTex);
-                    Swapchain::ReleaseTextureSlice(rightTex);
                     return result;
                 }
                 break;
             }
             default:
-                Swapchain::ReleaseTextureSlice(leftTex);
-                Swapchain::ReleaseTextureSlice(rightTex);
                 return XR_ERROR_LAYER_INVALID;
         }
     }
@@ -508,7 +503,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
         auto sendStart = Clock::now();
-        streamingServer_->SendFrame(leftTex, rightTex);
+        streamingServer_->SendFrame(std::move(frameSource));
         double enqueueMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
             Clock::now() - sendStart).count();
 
@@ -523,16 +518,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             enqueueSamples.clear();
             lastLogTime = Clock::now();
         }
-
-        // StreamingServer now owns the retained texture views and will release them
-        // after the async encode path has consumed or replaced them.
-        leftTex = nullptr;
-        rightTex = nullptr;
     }
-
-    // Release texture views created by GetLastReleasedTextureSlice
-    Swapchain::ReleaseTextureSlice(leftTex);
-    Swapchain::ReleaseTextureSlice(rightTex);
 
     {
         std::scoped_lock lock(frameStateMutex_);
@@ -590,7 +576,7 @@ XrResult Session::ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage)
 }
 
 XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                          void*& leftTex, void*& rightTex) const
+                                          FrameSource& frameSource) const
 {
     auto* space = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(layer.space));
     if (space == nullptr || space->GetSession() != this)
@@ -621,14 +607,15 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         }
 
         auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
-        void* textureSlice = swapchain->GetLastReleasedTextureSlice(view.subImage.imageArrayIndex);
+        FrameImageSource imageSource =
+            swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
         if (viewIndex == 0)
         {
-            leftTex = textureSlice;
+            frameSource.left = std::move(imageSource);
         }
         else
         {
-            rightTex = textureSlice;
+            frameSource.right = std::move(imageSource);
         }
     }
 
@@ -767,17 +754,7 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    std::unique_ptr<Swapchain> sc;
-    if (graphicsContext_.api == GraphicsApi::Vulkan)
-    {
-        sc = std::make_unique<Swapchain>(GraphicsApi::Vulkan, graphicsContext_.metalDevice,
-                                          graphicsContext_.vulkan,
-                                          createInfo);
-    }
-    else
-    {
-        sc = std::make_unique<Swapchain>(graphicsContext_.metalDevice, createInfo);
-    }
+    auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
     return XR_SUCCESS;

@@ -179,20 +179,23 @@ void VideoEncoder::Shutdown()
     inFlightFrameCount_.store(0);
 }
 
-bool VideoEncoder::Encode(void* texture, int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                           OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(texture, nullptr, false, timestampNs, std::move(callback), std::move(frameCallback));
+    FrameSource frameSource = {};
+    frameSource.left = std::move(imageSource);
+    return EncodeInternal(std::move(frameSource), false, timestampNs,
+                          std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeStereo(void* leftTexture, void* rightTexture,
-                                int64_t timestampNs, OnNalUnitCallback callback,
+bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                                 OnFrameEncodedCallback frameCallback)
 {
-    return EncodeInternal(leftTexture, rightTexture, true, timestampNs, std::move(callback), std::move(frameCallback));
+    return EncodeInternal(std::move(frameSource), true, timestampNs,
+                          std::move(callback), std::move(frameCallback));
 }
 
-bool VideoEncoder::EncodeInternal(void* /*leftTexture*/, void* /*rightTexture*/, bool /*stereo*/,
+bool VideoEncoder::EncodeInternal(FrameSource /*frameSource*/, bool /*stereo*/,
                                   int64_t timestampNs, OnNalUnitCallback callback,
                                   OnFrameEncodedCallback frameCallback)
 {

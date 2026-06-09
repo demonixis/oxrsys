@@ -6,6 +6,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -15,46 +18,68 @@ void* TestHandle(uintptr_t value)
     return reinterpret_cast<void*>(value);
 }
 
+FrameImageSource TestImageSource(uintptr_t value, std::vector<uintptr_t>& releasedHandles)
+{
+    FrameImageSource source = {};
+    source.image = std::shared_ptr<void>(TestHandle(value), [&releasedHandles, value](void*) {
+        releasedHandles.push_back(value);
+    });
+    return source;
+}
+
+FrameSource TestFrameSource(uintptr_t left, uintptr_t right, std::vector<uintptr_t>& releasedHandles)
+{
+    FrameSource source = {};
+    source.left = TestImageSource(left, releasedHandles);
+    source.right = TestImageSource(right, releasedHandles);
+    return source;
+}
+
 } // namespace
 
 TEST_CASE("StreamingFrameQueue replaces the pending frame and releases it", "[streaming]")
 {
     uint32_t releasedFrameIndex = 0;
-    uint32_t releaseCount = 0;
+    std::vector<uintptr_t> releasedHandles;
     StreamingFrameQueue queue([&](StreamingFrame& frame) {
         releasedFrameIndex = frame.frameIndex;
-        if (frame.source.leftTexture != nullptr)
-        {
-            releaseCount++;
-        }
-        if (frame.source.rightTexture != nullptr)
-        {
-            releaseCount++;
-        }
     });
     queue.Start();
 
     StreamingFrame first = {};
-    first.source.leftTexture = TestHandle(1);
-    first.source.rightTexture = TestHandle(2);
+    first.source = TestFrameSource(1, 2, releasedHandles);
     first.frameIndex = 7;
-    CHECK(!queue.PushLatest(first));
+    CHECK(!queue.PushLatest(std::move(first)));
 
     StreamingFrame second = {};
-    second.source.leftTexture = TestHandle(3);
-    second.source.rightTexture = TestHandle(4);
+    second.source = TestFrameSource(3, 4, releasedHandles);
     second.frameIndex = 8;
-    CHECK(queue.PushLatest(second));
+    CHECK(queue.PushLatest(std::move(second)));
     CHECK(releasedFrameIndex == 7);
-    CHECK(releaseCount == 2);
+    REQUIRE(releasedHandles.size() == 2);
+    CHECK(releasedHandles[0] == 1);
+    CHECK(releasedHandles[1] == 2);
 
     std::atomic<bool> running{true};
     StreamingFrame popped = {};
     CHECK(queue.WaitPop(running, popped));
     CHECK(popped.frameIndex == 8);
-    CHECK(popped.source.leftTexture == TestHandle(3));
-    CHECK(popped.source.rightTexture == TestHandle(4));
+    CHECK(popped.source.left.GetImage() == TestHandle(3));
+    CHECK(popped.source.right.GetImage() == TestHandle(4));
+    CHECK(releasedHandles.size() == 2);
+
+    popped = {};
+    REQUIRE(releasedHandles.size() == 4);
+    CHECK(releasedHandles[2] == 3);
+    CHECK(releasedHandles[3] == 4);
+
+    StreamingFrame third = {};
+    third.source = TestFrameSource(5, 6, releasedHandles);
+    third.frameIndex = 9;
+    CHECK(!queue.PushLatest(std::move(third)));
 
     queue.Clear();
-    CHECK(releaseCount == 2);
+    REQUIRE(releasedHandles.size() == 6);
+    CHECK(releasedHandles[4] == 5);
+    CHECK(releasedHandles[5] == 6);
 }

@@ -22,7 +22,7 @@ class Session
 {
 public:
     // Metal session
-    Session(Instance* instance, void* metalDevice);
+    Session(Instance* instance, void* metalDevice, void* metalCommandQueue = nullptr);
 
     // Vulkan session (metalDevice for Renderer, Vulkan handles for swapchains)
     Session(Instance* instance, const GraphicsContext& graphicsContext);
@@ -110,7 +110,7 @@ private:
     bool OwnsSwapchain(const Swapchain* swapchain) const;
     XrResult ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage) const;
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                     void*& leftTex, void*& rightTex) const;
+                                     FrameSource& frameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
 
     uint64_t handle_ = 0;

@@ -82,9 +82,17 @@ static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
     return 0;
 }
 
-Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
-    : device_(metalDevice), graphicsApi_(GraphicsApi::Metal)
+Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCreateInfo* createInfo)
+    : device_(graphicsContext.metalDevice),
+      metalCommandQueue_(graphicsContext.metalCommandQueue),
+      graphicsApi_(graphicsContext.api)
 {
+    if (graphicsContext.api == GraphicsApi::Vulkan)
+    {
+        InitVulkan(graphicsContext.metalDevice, graphicsContext.vulkan, createInfo);
+        return;
+    }
+
     if (createInfo != nullptr)
     {
         width_ = createInfo->width;
@@ -96,25 +104,13 @@ Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
     spdlog::error("OXRSys: Metal swapchains are not available in this Linux runtime build");
 }
 
-Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
-                     const VulkanGraphicsContext& vulkanContext,
-                     const XrSwapchainCreateInfo* createInfo)
-    : device_(metalDevice), graphicsApi_(api)
-{
-    if (api == GraphicsApi::Vulkan)
-    {
-        InitVulkan(metalDevice, vulkanContext, createInfo);
-    }
-    else
-    {
-        Runtime::Get().RegisterHandle(handle_, this);
-        spdlog::error("OXRSys: Metal swapchains are not available in this Linux runtime build");
-    }
-}
-
 void Swapchain::InitMetal(void* /*metalDevice*/, const XrSwapchainCreateInfo* /*createInfo*/)
 {
     spdlog::error("OXRSys: InitMetal called in a non-Apple runtime build");
+}
+
+void Swapchain::InitMetalStaging(void* /*metalDevice*/)
+{
 }
 
 void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext& vulkanContext,
@@ -377,6 +373,26 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
         return nullptr;
     }
     return GetLastReleasedTexture();
+}
+
+FrameImageSource Swapchain::GetLastReleasedFrameImageSource(uint32_t arrayIndex) const
+{
+    std::scoped_lock lock(stateMutex_);
+    if (!hasReleasedImage_ || arrayIndex >= arraySize_ || vkImages_.empty())
+    {
+        return {};
+    }
+
+    void* image = reinterpret_cast<void*>(vkImages_[lastReleasedIndex_]);
+    if (image == nullptr)
+    {
+        return {};
+    }
+
+    FrameImageSource source = {};
+    source.api = GraphicsApi::Vulkan;
+    source.image = std::shared_ptr<void>(image, [](void*) {});
+    return source;
 }
 
 void Swapchain::ReleaseTextureSlice(void* /*textureSlice*/)
