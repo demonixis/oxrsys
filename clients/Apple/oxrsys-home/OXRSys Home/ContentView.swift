@@ -382,6 +382,8 @@ struct ContentView: View {
                     Toggle("Runtime enabled", isOn: streamingBinding(\.runtimeEnabled))
                     Toggle("Write server log file", isOn: streamingBinding(\.fileLogging))
                     Toggle("Capture Quest logcat", isOn: streamingBinding(\.questLogcat))
+                    Toggle("Quest shader upscaling", isOn: streamingBinding(\.clientUpscaling))
+                    Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
 
                     LabeledSlider(
                         title: "Bitrate",
@@ -411,6 +413,12 @@ struct ContentView: View {
                         displayValue: "\(model.serverConfig.fovDegrees) degrees"
                     )
 
+                    Picker("Refresh rate", selection: streamingBinding(\.refreshRateHz)) {
+                        ForEach(OXRSysServerConfig.supportedRefreshRates, id: \.self) { rate in
+                            Text("\(rate) Hz").tag(rate)
+                        }
+                    }
+
                     LabeledSlider(
                         title: "Resolution Scale",
                         value: streamingBinding(\.resolutionScale),
@@ -435,6 +443,18 @@ struct ContentView: View {
                     Picker("Encoder preset", selection: streamingBinding(\.encoderPreset)) {
                         ForEach(EncoderPreset.allCases) { preset in
                             Text(preset.rawValue.capitalized).tag(preset)
+                        }
+                    }
+
+                    Picker("Foveated encoding", selection: streamingBinding(\.foveatedEncodingPreset)) {
+                        ForEach(FoveationPresetSetting.allCases) { preset in
+                            Text(preset.displayName).tag(preset)
+                        }
+                    }
+
+                    Picker("Headset foveation", selection: streamingBinding(\.clientFoveationPreset)) {
+                        ForEach(FoveationPresetSetting.allCases) { preset in
+                            Text(preset.displayName).tag(preset)
                         }
                     }
 

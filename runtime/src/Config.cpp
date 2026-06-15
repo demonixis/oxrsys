@@ -261,6 +261,11 @@ static bool ParseBool(const std::string& value)
     return lower == "true" || lower == "1" || lower == "yes";
 }
 
+static bool IsSupportedRefreshRate(uint32_t value)
+{
+    return value == 60 || value == 72 || value == 80 || value == 90 || value == 120;
+}
+
 static std::string ParseString(std::string value)
 {
     value = Trim(value);
@@ -325,6 +330,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.fovDegrees = val;
                 }
             }
+            else if (key == "refresh_rate_hz")
+            {
+                int val = std::stoi(value);
+                if (val > 0 && IsSupportedRefreshRate(static_cast<uint32_t>(val)))
+                {
+                    values.refreshRateHz = static_cast<uint32_t>(val);
+                }
+            }
             else if (key == "resolution_scale")
             {
                 float val = std::stof(value);
@@ -356,6 +369,30 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                 {
                     values.streamingTransport = value;
                 }
+            }
+            else if (key == "foveated_encoding_preset")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "light" || value == "medium" || value == "high")
+                {
+                    values.foveatedEncodingPreset = value;
+                }
+            }
+            else if (key == "client_foveation_preset")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "light" || value == "medium" || value == "high")
+                {
+                    values.clientFoveationPreset = value;
+                }
+            }
+            else if (key == "client_upscaling")
+            {
+                values.clientUpscaling = ParseBool(value);
+            }
+            else if (key == "headset_audio")
+            {
+                values.headsetAudio = ParseBool(value);
             }
         }
         catch (const std::exception&)
@@ -454,15 +491,20 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} res_scale={:.2f} keyframe={}s preset={} transport={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
             newValues.fovDegrees,
+            newValues.refreshRateHz,
             newValues.resolutionScale,
             newValues.keyframeIntervalSec,
             newValues.encoderPreset,
             newValues.streamingTransport,
+            newValues.foveatedEncodingPreset,
+            newValues.clientFoveationPreset,
+            newValues.clientUpscaling,
+            newValues.headsetAudio,
             newValues.questLogcat);
     }
 
@@ -529,9 +571,12 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° res_scale={:.2f} keyframe={}s preset={} transport={}",
-                  values_.bitrateMbps, values_.fovDegrees, values_.resolutionScale,
-                  values_.keyframeIntervalSec, values_.encoderPreset, values_.streamingTransport);
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} audio={}",
+                  values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
+                  values_.resolutionScale, values_.keyframeIntervalSec,
+                  values_.encoderPreset, values_.streamingTransport,
+                  values_.foveatedEncodingPreset, values_.clientFoveationPreset,
+                  values_.clientUpscaling, values_.headsetAudio);
 }
 
 // ─── Quest logcat capture ────────────────────────────────────────────────────

@@ -53,6 +53,11 @@ RuntimeStreamingStats RuntimeStreamingStats::parse(const QJsonObject& object)
     stats.renderHeight = intValue(object, "render_height");
     stats.encodedWidth = intValue(object, "encoded_width");
     stats.encodedHeight = intValue(object, "encoded_height");
+    stats.encoderPreset = object.value("encoder_preset").toString();
+    stats.foveatedEncodingPreset = object.value("foveated_encoding_preset").toString();
+    stats.clientFoveationPreset = object.value("client_foveation_preset").toString();
+    stats.clientUpscaling = object.value("client_upscaling").toBool();
+    stats.headsetAudio = object.value("headset_audio").toBool();
 
     stats.serverPipelineMs = doubleValue(latency, "server_pipeline");
     stats.clientPipelineMs = doubleValue(latency, "client_pipeline");

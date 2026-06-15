@@ -110,7 +110,17 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     context->gop_size = static_cast<int>(std::max(Config::Get().GetValues().keyframeIntervalSec * fps_, 1u));
     context->max_b_frames = 0;
 
-    av_opt_set(context->priv_data, "preset", "ultrafast", 0);
+    const std::string encoderPreset = Config::Get().GetValues().encoderPreset;
+    const char* ffmpegPreset = "superfast";
+    if (encoderPreset == "speed")
+    {
+        ffmpegPreset = "ultrafast";
+    }
+    else if (encoderPreset == "quality")
+    {
+        ffmpegPreset = "veryfast";
+    }
+    av_opt_set(context->priv_data, "preset", ffmpegPreset, 0);
     av_opt_set(context->priv_data, "tune", "zerolatency", 0);
 
     if (avcodec_open2(context, codec, nullptr) < 0)
@@ -147,8 +157,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     ffmpeg_.frame = frame;
     ffmpeg_.packet = packet;
 
-    spdlog::info("FFmpegVideoEncoder: initialized HEVC encoder {}x{} @ {}Hz {}Mbps",
-                 width_, height_, fps_, bitrateMbps_);
+    spdlog::info("FFmpegVideoEncoder: initialized HEVC encoder {}x{} @ {}Hz {}Mbps preset={} ({})",
+                 width_, height_, fps_, bitrateMbps_, encoderPreset, ffmpegPreset);
     return true;
 }
 

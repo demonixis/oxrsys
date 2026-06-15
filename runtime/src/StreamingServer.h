@@ -133,7 +133,11 @@ private:
     uint32_t renderHeight_ = 0;
     uint32_t scaledWidth_ = 0;      // After resolution_scale (per eye)
     uint32_t scaledHeight_ = 0;     // After resolution_scale
+    uint32_t encodedWidth_ = 0;     // Actual encoded stereo width
+    uint32_t encodedHeight_ = 0;    // Actual encoded height
     uint32_t refreshRateHz_ = 90;
+    bool foveatedEncodingActive_ = false;
+    std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic<uint32_t> targetRefreshRateHz_{90};
     std::atomic<float> clientPipelineLatencyMs_{18.0f};
     std::atomic<float> serverPipelineLatencyMs_{10.0f};

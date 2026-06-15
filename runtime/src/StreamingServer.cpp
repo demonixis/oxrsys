@@ -7,6 +7,7 @@
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
+#include <oxrsys/protocol/Foveation.h>
 #include <oxrsys/protocol/FecCodec.h>
 
 #include <spdlog/spdlog.h>
@@ -59,6 +60,73 @@ size_t BoundedStringLength(const char* value, size_t capacity)
         length++;
     }
     return length;
+}
+
+oxr::protocol::FoveationPreset ParseFoveationPreset(const std::string& value)
+{
+    if (value == "light")
+    {
+        return oxr::protocol::FoveationPreset::Light;
+    }
+    if (value == "medium")
+    {
+        return oxr::protocol::FoveationPreset::Medium;
+    }
+    if (value == "high")
+    {
+        return oxr::protocol::FoveationPreset::High;
+    }
+    return oxr::protocol::FoveationPreset::Off;
+}
+
+oxr::protocol::ClientFoveationPreset ParseClientFoveationPreset(const std::string& value)
+{
+    if (value == "light")
+    {
+        return oxr::protocol::ClientFoveationPreset::Light;
+    }
+    if (value == "medium")
+    {
+        return oxr::protocol::ClientFoveationPreset::Medium;
+    }
+    if (value == "high")
+    {
+        return oxr::protocol::ClientFoveationPreset::High;
+    }
+    return oxr::protocol::ClientFoveationPreset::Off;
+}
+
+bool PlatformSupportsFoveatedEncoding()
+{
+#if defined(__APPLE__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool HasClientCapability(const oxr::protocol::ClientConnect& clientConnect, uint32_t flag)
+{
+    return (clientConnect.clientCapabilities & flag) != 0;
+}
+
+VideoEncoder::FoveationSettings BuildEncoderFoveationSettings(
+    bool enabled,
+    const oxr::protocol::FoveationLayout& layout)
+{
+    VideoEncoder::FoveationSettings settings = {};
+    settings.enabled = enabled;
+    settings.targetEyeWidth = layout.targetEyeWidth;
+    settings.targetEyeHeight = layout.targetEyeHeight;
+    settings.eyeWidthRatio = layout.eyeWidthRatio;
+    settings.eyeHeightRatio = layout.eyeHeightRatio;
+    settings.centerSizeX = layout.parameters.centerSizeX;
+    settings.centerSizeY = layout.parameters.centerSizeY;
+    settings.centerShiftX = layout.parameters.centerShiftX;
+    settings.centerShiftY = layout.parameters.centerShiftY;
+    settings.edgeRatioX = layout.parameters.edgeRatioX;
+    settings.edgeRatioY = layout.parameters.edgeRatioY;
+    return settings;
 }
 
 bool IsGraphicsContextValid(const GraphicsContext& context)
@@ -286,6 +354,7 @@ StreamingServer::~StreamingServer()
 
 bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz)
 {
+    (void)refreshRateHz;
     if (running_.load())
     {
         return false;
@@ -293,10 +362,10 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
 
     renderWidth_ = renderWidth;
     renderHeight_ = renderHeight;
-    refreshRateHz_ = refreshRateHz;
-    targetRefreshRateHz_.store(refreshRateHz);
 
     const ConfigValues config = Config::Get().GetValues();
+    refreshRateHz_ = config.refreshRateHz;
+    targetRefreshRateHz_.store(refreshRateHz_);
     wifiEnabled_ = config.streamingTransport != "usb_adb";
     usbAdbEnabled_ = config.streamingTransport != "wifi";
     float scale = config.resolutionScale;
@@ -304,9 +373,38 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     scaledHeight_ = static_cast<uint32_t>(renderHeight * scale);
     scaledWidth_ = (scaledWidth_ + 15) & ~15u;
     scaledHeight_ = (scaledHeight_ + 15) & ~15u;
+    encodedWidth_ = scaledWidth_ * 2;
+    encodedHeight_ = scaledHeight_;
+    foveatedEncodingActive_ = false;
+    clientFoveatedEncodingActive_.store(false);
 
-    spdlog::info("StreamingServer: Resolution scaling {:.0f}%: {}x{} -> {}x{} per eye",
-                  scale * 100.0f, renderWidth, renderHeight, scaledWidth_, scaledHeight_);
+    const oxr::protocol::FoveationPreset foveationPreset =
+        ParseFoveationPreset(config.foveatedEncodingPreset);
+    if (foveationPreset != oxr::protocol::FoveationPreset::Off &&
+        PlatformSupportsFoveatedEncoding())
+    {
+        const oxr::protocol::FoveationLayout layout =
+            oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+        encodedWidth_ = layout.optimizedEyeWidth * 2;
+        encodedHeight_ = layout.optimizedEyeHeight;
+        foveatedEncodingActive_ = encodedWidth_ < scaledWidth_ * 2 ||
+                                  encodedHeight_ < scaledHeight_;
+    }
+    else if (foveationPreset != oxr::protocol::FoveationPreset::Off)
+    {
+        spdlog::warn("StreamingServer: foveated encoding preset '{}' is configured but disabled on this platform",
+                     config.foveatedEncodingPreset);
+    }
+
+    spdlog::info("StreamingServer: Resolution scaling {:.0f}%: {}x{} -> {}x{} per eye, encoded {}x{}{}",
+                  scale * 100.0f,
+                  renderWidth,
+                  renderHeight,
+                  scaledWidth_,
+                  scaledHeight_,
+                  encodedWidth_,
+                  encodedHeight_,
+                  foveatedEncodingActive_ ? " with foveated encoding" : "");
 
     broadcastSocket_ = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
     if (!oxrsys::runtime_socket::IsValid(broadcastSocket_))
@@ -508,15 +606,54 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce() const
     oxr::protocol::ServerAnnounce announce = {};
     announce.type = oxr::protocol::MessageType::ServerAnnounce;
     announce.versionMajor = 1;
-    announce.versionMinor = 0;
+    announce.versionMinor = 1;
     announce.videoPort = oxr::protocol::VIDEO_PORT;
     announce.trackingPort = oxr::protocol::TRACKING_PORT;
     announce.renderWidth = renderWidth_ * 2;
     announce.renderHeight = renderHeight_;
     announce.refreshRateHz = refreshRateHz_;
-    announce.encodedWidth = scaledWidth_ * 2;
-    announce.encodedHeight = scaledHeight_;
+    announce.encodedWidth = encodedWidth_;
+    announce.encodedHeight = encodedHeight_;
     strncpy(announce.serverName, "OXRSys Runtime", sizeof(announce.serverName) - 1);
+
+    const ConfigValues config = Config::Get().GetValues();
+    const oxr::protocol::FoveationPreset foveationPreset =
+        foveatedEncodingActive_
+            ? ParseFoveationPreset(config.foveatedEncodingPreset)
+            : oxr::protocol::FoveationPreset::Off;
+    const oxr::protocol::FoveationLayout layout =
+        oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+
+    if (foveatedEncodingActive_)
+    {
+        announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_FOVEATED_ENCODING;
+    }
+    oxr::protocol::ClientFoveationPreset clientFoveationPreset =
+        ParseClientFoveationPreset(config.clientFoveationPreset);
+    if (clientFoveationPreset != oxr::protocol::ClientFoveationPreset::Off)
+    {
+        announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_CLIENT_FOVEATION;
+    }
+    if (config.clientUpscaling)
+    {
+        announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_CLIENT_UPSCALING;
+    }
+    // Headset audio is part of the wire protocol, but the stream is advertised
+    // only once an actual capture/playback path is attached.
+
+    announce.audioPort = oxr::protocol::AUDIO_PORT;
+    announce.foveatedEncodingPreset = foveationPreset;
+    announce.clientFoveationPreset = clientFoveationPreset;
+    announce.clientUpscalingMode = config.clientUpscaling
+        ? oxr::protocol::ClientUpscalingMode::SnapdragonGsr
+        : oxr::protocol::ClientUpscalingMode::Off;
+    announce.audioSampleRateHz = 48000;
+    announce.foveationCenterSizeX = layout.parameters.centerSizeX;
+    announce.foveationCenterSizeY = layout.parameters.centerSizeY;
+    announce.foveationCenterShiftX = layout.parameters.centerShiftX;
+    announce.foveationCenterShiftY = layout.parameters.centerShiftY;
+    announce.foveationEdgeRatioX = layout.parameters.edgeRatioX;
+    announce.foveationEdgeRatioY = layout.parameters.edgeRatioY;
     return announce;
 }
 
@@ -543,11 +680,14 @@ void StreamingServer::ControlThread()
 
         uint8_t type = buffer[0];
         if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
-            received >= static_cast<int>(sizeof(oxr::protocol::ClientConnect)))
+            received >= static_cast<int>(oxr::protocol::CLIENT_CONNECT_BASE_SIZE))
         {
             if (wifiEnabled_)
             {
-                HandleClientConnect(*reinterpret_cast<oxr::protocol::ClientConnect*>(buffer), clientAddr);
+                oxr::protocol::ClientConnect clientConnect = {};
+                memcpy(&clientConnect, buffer, std::min<size_t>(
+                    static_cast<size_t>(received), sizeof(clientConnect)));
+                HandleClientConnect(clientConnect, clientAddr);
             }
         }
         else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ServerDisconnect))
@@ -661,10 +801,12 @@ void StreamingServer::TcpControlThread()
             }
 
             if (header.type == oxr::protocol::TcpRecordType::ClientConnect &&
-                payload.size() >= sizeof(oxr::protocol::ClientConnect))
+                payload.size() >= oxr::protocol::CLIENT_CONNECT_BASE_SIZE)
             {
-                HandleUsbClientConnect(*reinterpret_cast<const oxr::protocol::ClientConnect*>(
-                    payload.data()));
+                oxr::protocol::ClientConnect clientConnect = {};
+                memcpy(&clientConnect, payload.data(),
+                       std::min(payload.size(), sizeof(clientConnect)));
+                HandleUsbClientConnect(clientConnect);
             }
             else if (header.type == oxr::protocol::TcpRecordType::Control)
             {
@@ -914,7 +1056,7 @@ void StreamingServer::EncodeThread()
             {
                 SendNalUnit(packetDispatchState, frameIndex, nalData, nalSize, isKeyframe, timestampNs);
             },
-            [this, telemetry, queueWaitMs, encoder](const VideoEncoder::FrameMetrics& metrics)
+            [this, telemetry, queueWaitMs, encoder, config](const VideoEncoder::FrameMetrics& metrics)
             {
                 telemetry->gpuCopyMs.Add(metrics.gpuCopyMs);
                 telemetry->encodeSubmitMs.Add(metrics.encodeSubmitMs);
@@ -950,8 +1092,15 @@ void StreamingServer::EncodeThread()
                     stats.maxBitrateMbps = configMaxBitrateMbps_.load();
                     stats.renderWidth = renderWidth_ * 2;
                     stats.renderHeight = renderHeight_;
-                    stats.encodedWidth = scaledWidth_ * 2;
-                    stats.encodedHeight = scaledHeight_;
+                    stats.encodedWidth = encodedWidth_;
+                    stats.encodedHeight = encodedHeight_;
+                    stats.encoderPreset = config.encoderPreset;
+                    stats.foveatedEncodingPreset = clientFoveatedEncodingActive_.load()
+                        ? config.foveatedEncodingPreset
+                        : "off";
+                    stats.clientFoveationPreset = config.clientFoveationPreset;
+                    stats.clientUpscaling = config.clientUpscaling;
+                    stats.headsetAudio = false;
                     stats.serverPipelineLatencyMs = serverPipelineLatencyMs_.load();
                     stats.clientPipelineLatencyMs = clientPipelineLatencyMs_.load();
                     stats.clientReceiveToSubmitMs = clientReceiveToSubmitMs_.load();
@@ -1062,8 +1211,25 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             currentBitrateMbps_.store(bitrateMbps);
             lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
             lastKeyframeRequestCountForAbr_ = 0;
-            uint32_t stereoWidth = scaledWidth_ * 2;
-            if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
+            const oxr::protocol::FoveationPreset foveationPreset =
+                foveatedEncodingActive_
+                    ? ParseFoveationPreset(config.foveatedEncodingPreset)
+                    : oxr::protocol::FoveationPreset::Off;
+            const oxr::protocol::FoveationLayout layout =
+                oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+            const bool clientSupportsFoveatedEncoding =
+                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
+            const bool useFoveatedEncoding =
+                foveatedEncodingActive_ && clientSupportsFoveatedEncoding;
+            clientFoveatedEncodingActive_.store(useFoveatedEncoding);
+            encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
+                useFoveatedEncoding, layout));
+            if (foveatedEncodingActive_ && !clientSupportsFoveatedEncoding)
+            {
+                spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
+                             clientName);
+            }
+            if (encoder_->Initialize(encodedWidth_, encodedHeight_, negotiatedRefresh,
                                      bitrateMbps, graphicsContext_))
             {
                 encoder_->ForceKeyframe();
@@ -1144,8 +1310,25 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
             currentBitrateMbps_.store(bitrateMbps);
             lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
             lastKeyframeRequestCountForAbr_ = 0;
-            uint32_t stereoWidth = scaledWidth_ * 2;
-            if (encoder_->Initialize(stereoWidth, scaledHeight_, negotiatedRefresh,
+            const oxr::protocol::FoveationPreset foveationPreset =
+                foveatedEncodingActive_
+                    ? ParseFoveationPreset(config.foveatedEncodingPreset)
+                    : oxr::protocol::FoveationPreset::Off;
+            const oxr::protocol::FoveationLayout layout =
+                oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+            const bool clientSupportsFoveatedEncoding =
+                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
+            const bool useFoveatedEncoding =
+                foveatedEncodingActive_ && clientSupportsFoveatedEncoding;
+            clientFoveatedEncodingActive_.store(useFoveatedEncoding);
+            encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
+                useFoveatedEncoding, layout));
+            if (foveatedEncodingActive_ && !clientSupportsFoveatedEncoding)
+            {
+                spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
+                             clientName);
+            }
+            if (encoder_->Initialize(encodedWidth_, encodedHeight_, negotiatedRefresh,
                                      bitrateMbps, graphicsContext_))
             {
                 encoder_->ForceKeyframe();
@@ -1231,6 +1414,7 @@ void StreamingServer::HandleClientDisconnect()
     }
 
     targetRefreshRateHz_.store(refreshRateHz_);
+    clientFoveatedEncodingActive_.store(false);
     UpdatePredictionHorizon();
 
     if (previousState == State::Connected && broadcastThread_.joinable())
