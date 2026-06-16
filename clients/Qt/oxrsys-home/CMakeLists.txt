@@ -38,9 +38,16 @@ set(OXRSYS_HOME_CORE_SOURCES
 
 add_executable(oxrsys-home
     ${OXRSYS_HOME_CORE_SOURCES}
+    ../assets/oxrsys-home-icons.qrc
     src/MainWindow.cpp
     src/main.cpp
 )
+
+if(WIN32)
+    target_sources(oxrsys-home PRIVATE
+        ../assets/oxrsys-home.rc
+    )
+endif()
 
 target_include_directories(oxrsys-home PRIVATE
     src
@@ -52,12 +59,14 @@ target_link_libraries(oxrsys-home PRIVATE
     oxrsys-simulator-shared
 )
 if(WIN32)
+    oxrsys_configure_qt_gui_executable(oxrsys-home)
     target_link_libraries(oxrsys-home PRIVATE
         advapi32
         ole32
         shell32
         uuid
     )
+    oxrsys_deploy_qt_runtime(oxrsys-home)
 endif()
 
 add_executable(oxrsys-home-tests
@@ -83,3 +92,4 @@ if(WIN32)
 endif()
 
 add_test(NAME oxrsys-home-tests COMMAND oxrsys-home-tests)
+oxrsys_configure_qt_test_environment(oxrsys-home-tests)

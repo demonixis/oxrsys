@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "oxrsys-runtime",
+  "version-string": "0",
+  "builtin-baseline": "cb2981c4e03d421fa03b9bb5044cd1986180e7e4",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "swscale"
+      ]
+    }
+  ]
+}

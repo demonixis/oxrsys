@@ -16,6 +16,8 @@
 #include <thread>
 #include <utility>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <openxr/openxr_platform.h>
 
 namespace
@@ -124,6 +126,39 @@ bool IsFiniteFov(const XrFovf& fov)
 {
     return std::isfinite(fov.angleLeft) && std::isfinite(fov.angleRight) &&
            std::isfinite(fov.angleUp) && std::isfinite(fov.angleDown);
+}
+
+glm::quat ToGlm(const XrQuaternionf& q)
+{
+    return glm::quat(q.w, q.x, q.y, q.z);
+}
+
+glm::vec3 ToGlm(const XrVector3f& v)
+{
+    return glm::vec3(v.x, v.y, v.z);
+}
+
+XrQuaternionf ToXr(const glm::quat& q)
+{
+    return {q.x, q.y, q.z, q.w};
+}
+
+XrVector3f ToXr(const glm::vec3& v)
+{
+    return {v.x, v.y, v.z};
+}
+
+XrPosef PoseRelativeToBase(const XrPosef& worldPose, const XrPosef& baseWorldPose)
+{
+    const glm::quat baseRotInv = glm::inverse(ToGlm(baseWorldPose.orientation));
+    const glm::vec3 basePos = ToGlm(baseWorldPose.position);
+    const glm::quat worldRot = ToGlm(worldPose.orientation);
+    const glm::vec3 worldPos = ToGlm(worldPose.position);
+
+    XrPosef pose = {};
+    pose.orientation = ToXr(baseRotInv * worldRot);
+    pose.position = ToXr(baseRotInv * (worldPos - basePos));
+    return pose;
 }
 
 } // namespace
@@ -664,6 +699,10 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
         FrameImageSource imageSource =
             swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
+        imageSource.sourceX = static_cast<uint32_t>(view.subImage.imageRect.offset.x);
+        imageSource.sourceY = static_cast<uint32_t>(view.subImage.imageRect.offset.y);
+        imageSource.sourceWidth = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
+        imageSource.sourceHeight = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
         if (viewIndex == 0)
         {
             frameSource.left = std::move(imageSource);
@@ -747,6 +786,11 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     }
 
     inputManager_->GetEyeViews(views, 2);
+    const XrPosef baseWorldPose = baseSpace->ResolveWorldPose();
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        views[i].pose = PoseRelativeToBase(views[i].pose, baseWorldPose);
+    }
     return XR_SUCCESS;
 }
 

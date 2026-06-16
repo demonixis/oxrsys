@@ -27,6 +27,7 @@ class RuntimeManager
 {
 public:
     explicit RuntimeManager(HomePaths paths = homePaths());
+    RuntimeManager(HomePaths paths, QString bundledRuntimeDirectoryOverride);
 
     const HomePaths& paths() const;
     RuntimeRegistrationStatus registrationStatus() const;
@@ -44,8 +45,10 @@ public:
 
 private:
     QString bundledRuntimeDirectory() const;
+    QStringList runtimeCompanionFileNames(const QString& runtimeDirectory) const;
     bool replaceFile(const QString& source, const QString& destination, QString* errorMessage) const;
     bool filesHaveSameContents(const QString& lhs, const QString& rhs) const;
 
     HomePaths paths_;
+    QString bundledRuntimeDirectoryOverride_;
 };

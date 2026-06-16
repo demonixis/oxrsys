@@ -164,6 +164,16 @@ XrPosef MakePose(const glm::vec3& position, const glm::quat& orientation)
     return pose;
 }
 
+glm::quat NormalizeOrIdentity(const glm::quat& quat)
+{
+    const float lengthSquared = glm::dot(quat, quat);
+    if (!std::isfinite(lengthSquared) || lengthSquared <= 0.000001f)
+    {
+        return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    return glm::normalize(quat);
+}
+
 } // namespace
 
 InputManager::InputManager() = default;
@@ -171,6 +181,7 @@ InputManager::InputManager() = default;
 void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
 {
     trackingReceiver_ = receiver;
+    ResetStreamingOrigin();
     if (receiver == nullptr)
     {
         streamingControllerActive_.fill(false);
@@ -185,10 +196,22 @@ void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
 
 void InputManager::SetStreamingClientName(const std::string& clientName)
 {
+    if (streamingClientName_ != clientName)
+    {
+        ResetStreamingOrigin();
+    }
     streamingClientName_ = clientName;
     streamingControllerProfile_ = DetectStreamingControllerProfile(clientName);
     spdlog::info("InputManager: streaming client='{}' controller_profile='{}'",
                  streamingClientName_, streamingControllerProfile_);
+}
+
+void InputManager::ResetStreamingOrigin()
+{
+    streamingOriginValid_ = false;
+    streamingOriginPosition_ = glm::vec3(0.0f, 0.0f, 0.0f);
+    streamingOriginOrientation_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    streamingOriginRuntimeHeadPosition_ = glm::vec3(0.0f, 1.6f, 0.0f);
 }
 
 glm::quat InputManager::GetHeadRotation() const
@@ -215,14 +238,35 @@ void InputManager::UpdateFromStreaming()
     }
 
     // Apply head pose from headset tracking — store quaternion directly
-    headPosition_ = glm::vec3(packet.headPosition[0],
-                                packet.headPosition[1],
-                                packet.headPosition[2]);
+    const glm::vec3 rawHeadPosition(packet.headPosition[0],
+                                    packet.headPosition[1],
+                                    packet.headPosition[2]);
+    const glm::quat rawHeadQuat = NormalizeOrIdentity(glm::quat(packet.headOrientation[3],
+                                                                packet.headOrientation[0],
+                                                                packet.headOrientation[1],
+                                                                packet.headOrientation[2]));
+    if (!streamingOriginValid_)
+    {
+        streamingOriginValid_ = true;
+        streamingOriginPosition_ = rawHeadPosition;
+        streamingOriginOrientation_ = rawHeadQuat;
+        streamingOriginRuntimeHeadPosition_ = glm::vec3(0.0f, 1.6f, 0.0f);
+        spdlog::info("InputManager: streaming origin pos=({:.3f}, {:.3f}, {:.3f})",
+                     streamingOriginPosition_.x,
+                     streamingOriginPosition_.y,
+                     streamingOriginPosition_.z);
+    }
 
-    headQuat_ = glm::quat(packet.headOrientation[3],  // w
-                           packet.headOrientation[0],   // x
-                           packet.headOrientation[1],   // y
-                           packet.headOrientation[2]);  // z
+    const glm::quat inverseOrigin = glm::inverse(streamingOriginOrientation_);
+    auto toRuntimePosition = [&](const glm::vec3& position) {
+        return streamingOriginRuntimeHeadPosition_ + inverseOrigin * (position - streamingOriginPosition_);
+    };
+    auto toRuntimeOrientation = [&](const glm::quat& orientation) {
+        return NormalizeOrIdentity(inverseOrigin * orientation);
+    };
+
+    headPosition_ = toRuntimePosition(rawHeadPosition);
+    headQuat_ = toRuntimeOrientation(rawHeadQuat);
 
     const bool leftControllerActive =
         (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
@@ -247,23 +291,23 @@ void InputManager::UpdateFromStreaming()
 
     if (leftControllerActive)
     {
-        leftControllerPos_ = glm::vec3(packet.leftControllerPos[0],
-                                       packet.leftControllerPos[1],
-                                       packet.leftControllerPos[2]);
-        leftControllerRot_ = glm::quat(packet.leftControllerRot[3],
-                                       packet.leftControllerRot[0],
-                                       packet.leftControllerRot[1],
-                                       packet.leftControllerRot[2]);
+        leftControllerPos_ = toRuntimePosition(glm::vec3(packet.leftControllerPos[0],
+                                                         packet.leftControllerPos[1],
+                                                         packet.leftControllerPos[2]));
+        leftControllerRot_ = toRuntimeOrientation(glm::quat(packet.leftControllerRot[3],
+                                                            packet.leftControllerRot[0],
+                                                            packet.leftControllerRot[1],
+                                                            packet.leftControllerRot[2]));
     }
     if (rightControllerActive)
     {
-        rightControllerPos_ = glm::vec3(packet.rightControllerPos[0],
-                                        packet.rightControllerPos[1],
-                                        packet.rightControllerPos[2]);
-        rightControllerRot_ = glm::quat(packet.rightControllerRot[3],
-                                        packet.rightControllerRot[0],
-                                        packet.rightControllerRot[1],
-                                        packet.rightControllerRot[2]);
+        rightControllerPos_ = toRuntimePosition(glm::vec3(packet.rightControllerPos[0],
+                                                          packet.rightControllerPos[1],
+                                                          packet.rightControllerPos[2]));
+        rightControllerRot_ = toRuntimeOrientation(glm::quat(packet.rightControllerRot[3],
+                                                             packet.rightControllerRot[0],
+                                                             packet.rightControllerRot[1],
+                                                             packet.rightControllerRot[2]));
     }
 
     // Apply button/trigger states
@@ -302,10 +346,13 @@ void InputManager::UpdateFromStreaming()
         const auto& sourceJoints = handIndex == 0 ? packet.leftHandJoints : packet.rightHandJoints;
         for (size_t jointIndex = 0; jointIndex < oxr::protocol::HAND_JOINT_COUNT; ++jointIndex)
         {
+            const glm::vec3 jointPosition = toRuntimePosition(glm::vec3(sourceJoints[jointIndex][0],
+                                                                        sourceJoints[jointIndex][1],
+                                                                        sourceJoints[jointIndex][2]));
             streamingHands_[handIndex].joints[jointIndex] = glm::vec4(
-                sourceJoints[jointIndex][0],
-                sourceJoints[jointIndex][1],
-                sourceJoints[jointIndex][2],
+                jointPosition.x,
+                jointPosition.y,
+                jointPosition.z,
                 sourceJoints[jointIndex][3]);
         }
     }
@@ -348,6 +395,16 @@ XrPosef InputManager::GetHeadPose() const
     pose.position.x = headPosition_.x;
     pose.position.y = headPosition_.y;
     pose.position.z = headPosition_.z;
+    return pose;
+}
+
+XrPosef InputManager::GetLocalSpacePose() const
+{
+    XrPosef pose{};
+    pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    pose.position.x = streamingOriginRuntimeHeadPosition_.x;
+    pose.position.y = streamingOriginRuntimeHeadPosition_.y;
+    pose.position.z = streamingOriginRuntimeHeadPosition_.z;
     return pose;
 }
 

@@ -89,10 +89,19 @@ struct FrameImageSource
     std::shared_ptr<void> image = {};
     FrameSyncToken sync = {};
     std::shared_ptr<void> lifetime = {};
+    uint32_t sourceX = 0;
+    uint32_t sourceY = 0;
+    uint32_t sourceWidth = 0;
+    uint32_t sourceHeight = 0;
 
     void* GetImage() const
     {
         return image.get();
+    }
+
+    bool HasSourceRect() const
+    {
+        return sourceWidth != 0 && sourceHeight != 0;
     }
 
     bool IsValid() const
@@ -105,6 +114,10 @@ struct FrameImageSource
         image.reset();
         sync = {};
         lifetime.reset();
+        sourceX = 0;
+        sourceY = 0;
+        sourceWidth = 0;
+        sourceHeight = 0;
     }
 };
 

@@ -83,7 +83,11 @@ The runtime also supports:
 - `XR_EXT_debug_utils`
 - `xrLocateSpacesKHR` as an alias for OpenXR 1.1 `xrLocateSpaces`
 
-Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`. `XR_EXT_local_floor`
+is advertised for OpenXR 1.0 apps, while OpenXR 1.1 apps can use the core `LOCAL_FLOOR` space.
+`LOCAL` is treated as the eye-level origin captured when streaming starts; `LOCAL_FLOOR` and `STAGE`
+remain floor-level origins. View poses returned by `xrLocateViews` are transformed into the base
+space requested by the application.
 
 ## Configuration
 

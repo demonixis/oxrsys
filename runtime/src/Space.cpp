@@ -109,6 +109,8 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
                 result.pose = inputManager.GetHeadPose();
                 break;
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
+                result.pose = inputManager.GetLocalSpacePose();
+                break;
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
             case XR_REFERENCE_SPACE_TYPE_STAGE:
                 // Identity — world origin
@@ -168,6 +170,11 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
     result.pose.orientation = ToXr(finalRot);
     result.pose.position = ToXr(finalPos);
     return result;
+}
+
+XrPosef Space::ResolveWorldPose() const
+{
+    return GetWorldPose(const_cast<Space*>(this), session_->GetInputManager()).pose;
 }
 
 XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)

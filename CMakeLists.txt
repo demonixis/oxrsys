@@ -35,19 +35,9 @@ if(APPLE)
 endif()
 enable_testing()
 
-execute_process(
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-        ${CMAKE_BINARY_DIR}/compile_commands.json
-        ${CMAKE_SOURCE_DIR}/compile_commands.json
-    RESULT_VARIABLE oxrsys_runtime_compile_commands_symlink_result
-)
-
-if(NOT oxrsys_runtime_compile_commands_symlink_result EQUAL 0)
-    message(STATUS "Failed to create compile_commands.json symlink during configure. The build sync step will retry.")
-endif()
-
 # --- FetchContent dependencies ---
 include(FetchContent)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ResolveVulkanHeaders.cmake)
 
 # spdlog
 FetchContent_Declare(
@@ -88,8 +78,6 @@ FetchContent_MakeAvailable(OpenXR)
 
 # --- Our runtime ---
 add_subdirectory(runtime)
-
-find_package(Vulkan REQUIRED)
 
 add_custom_target(oxrsys_runtime_sync_compile_commands ALL
     COMMAND ${CMAKE_COMMAND}
@@ -166,7 +154,7 @@ target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
     common/protocol/include
     ${openxr_SOURCE_DIR}/include
-    ${Vulkan_INCLUDE_DIRS}
+    ${OXRSYS_VULKAN_INCLUDE_DIRS}
 )
 target_link_libraries(oxrsys_runtime_tests PRIVATE
     Catch2::Catch2WithMain
@@ -280,9 +268,9 @@ if(WIN32)
     set_tests_properties(oxrsys_runtime_d3d_tests PROPERTIES
         ENVIRONMENT "XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
     )
-    if(FFMPEG_ROOT AND EXISTS "${FFMPEG_ROOT}/bin")
+    if(OXRSYS_FFMPEG_BINARY_DIR)
         set_tests_properties(oxrsys_runtime_d3d_tests PROPERTIES
-            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${FFMPEG_ROOT}/bin"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${OXRSYS_FFMPEG_BINARY_DIR}"
         )
     endif()
     list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_d3d_tests)

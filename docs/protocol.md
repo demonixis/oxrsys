@@ -79,6 +79,9 @@ Current codec identifiers:
 USB TCP video sends complete encoded NAL units as `VideoNal` records. It does not use UDP fragmentation, FEC, or NACK recovery.
 
 The runtime currently targets low-latency headset streaming. The queue is latest-frame-only rather than fully reliable.
+Before encoding, the runtime packs the submitted stereo projection views side by side. Each eye uses
+the corresponding OpenXR `XrSwapchainSubImage.imageRect`, so apps may submit either separate eye
+swapchain array slices or a single side-by-side swapchain atlas.
 
 The current stream also includes two recovery and timing helpers:
 
@@ -95,6 +98,12 @@ The current stream also includes two recovery and timing helpers:
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+
+The packet pose values are client tracking-space values. When a streaming client connects, the
+runtime captures the first valid headset pose as the session origin and exposes subsequent headset,
+controller, and hand poses relative to that origin. This keeps a headset's absolute guardian or room
+space from moving the OpenXR application camera at connection time while preserving per-frame IPD and
+FOV overrides.
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and

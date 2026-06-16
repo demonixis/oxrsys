@@ -85,6 +85,7 @@ struct TransportRefreshResult
 {
     int requestId = 0;
     bool validateUsbSelection = false;
+    bool reverseMappingsVerified = false;
     QString adbPath;
     QString requestedSerial;
     WifiReadiness wifi;
@@ -134,6 +135,18 @@ QString processOutput(const QString& program,
         return {};
     }
     return stdoutText;
+}
+
+bool hasRequiredReversePorts(const QSet<int>& ports)
+{
+    for (int port : AdbBridge::reversePorts())
+    {
+        if (!ports.contains(port))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 WifiReadiness wifiReadinessStatus()
@@ -257,6 +270,7 @@ TransportRefreshResult collectTransportRefresh(int requestId,
             result.usbStatus = "Failed to read adb reverse mappings: " + error;
             return result;
         }
+        result.reverseMappingsVerified = true;
     }
 
     if (result.devices.isEmpty())
@@ -308,27 +322,90 @@ UsbConfigureResult collectUsbConfigure(int requestId,
 
 } // namespace
 
+TransportReadiness questUsbTransportReadiness(const AdbStatus& adbStatus,
+                                              const QList<AdbDevice>& devices,
+                                              const QString& selectedSerial,
+                                              const QSet<int>& reversePorts)
+{
+    const QList<int> expectedPorts = AdbBridge::reversePorts();
+    const bool reverseReady = !selectedSerial.isEmpty() &&
+        hasRequiredReversePorts(reversePorts);
+    if (reverseReady)
+    {
+        if (!adbStatus.isAvailable())
+        {
+            return {true, false,
+                    QString("USB reverse was previously verified for %1 on %2. ADB is not currently available; keep the VR app running or reconnect and reconfigure after relaunch if streaming fails.")
+                        .arg(selectedSerial, portsText(expectedPorts))};
+        }
+        if (!containsUsableDevice(devices, selectedSerial))
+        {
+            return {true, false,
+                    QString("USB reverse was previously verified for %1 on %2. ADB no longer reports that device, but an already launched headset app can keep using the reverse sockets.")
+                        .arg(selectedSerial, portsText(expectedPorts))};
+        }
+        return {true, false,
+                QString("USB reverse ready for %1 on %2.")
+                    .arg(selectedSerial, portsText(expectedPorts))};
+    }
+
+    if (!adbStatus.isAvailable())
+    {
+        return {false, false, adbStatus.message};
+    }
+    if (selectedSerial.isEmpty() ||
+        !containsUsableDevice(devices, selectedSerial))
+    {
+        return {false, false, "No authorized Quest device visible over adb."};
+    }
+
+    QList<int> missingPorts;
+    for (int port : expectedPorts)
+    {
+        if (!reversePorts.contains(port))
+        {
+            missingPorts.append(port);
+        }
+    }
+    return {false, true,
+            QString("USB reverse missing port%1 %2.")
+                .arg(missingPorts.size() > 1 ? "s" : "", portsText(missingPorts))};
+}
+
 HomeModel::HomeModel(QObject* parent,
                      const QString& settingsOrganization,
                      const QString& settingsApplication,
                      HomePaths paths)
+    : HomeModel(parent, settingsOrganization, settingsApplication, paths, true)
+{
+}
+
+HomeModel::HomeModel(QObject* parent,
+                     const QString& settingsOrganization,
+                     const QString& settingsApplication,
+                     HomePaths paths,
+                     bool enableTransportChecks)
     : QObject(parent)
     , paths_(paths)
     , runtimeManager_(paths_)
     , settings_(settingsOrganization, settingsApplication)
+    , transportChecksEnabled_(enableTransportChecks)
 {
     runtimeManifestPath_ =
         settings_.value("runtimeManifestPath", defaultRuntimeManifestPath()).toString();
     preferInstalledRuntimeForLaunches_ =
         settings_.value("preferInstalledRuntimeForLaunches", false).toBool();
     customAdbPath_ = cleanedPath(settings_.value("customAdbPath").toString());
-    transportWorkerThread_ = new QThread(this);
-    transportWorkerThread_->setObjectName("OXRSysHomeTransportWorker");
-    transportWorker_ = new QObject();
-    transportWorker_->moveToThread(transportWorkerThread_);
-    connect(transportWorkerThread_, &QThread::finished, transportWorker_, &QObject::deleteLater);
-    transportWorkerThread_->start();
-    loadAll();
+    if (transportChecksEnabled_)
+    {
+        transportWorkerThread_ = new QThread(this);
+        transportWorkerThread_->setObjectName("OXRSysHomeTransportWorker");
+        transportWorker_ = new QObject();
+        transportWorker_->moveToThread(transportWorkerThread_);
+        connect(transportWorkerThread_, &QThread::finished, transportWorker_, &QObject::deleteLater);
+        transportWorkerThread_->start();
+    }
+    loadAll(false);
 
     configSaveTimer_.setSingleShot(true);
     configSaveTimer_.setInterval(600);
@@ -343,6 +420,13 @@ HomeModel::HomeModel(QObject* parent,
         pollConfigChangesIfNeeded();
     });
     pollTimer_.start();
+
+    if (transportChecksEnabled_)
+    {
+        QTimer::singleShot(0, this, [this]() {
+            refreshTransportHealth(true);
+        });
+    }
 }
 
 HomeModel::~HomeModel()
@@ -513,36 +597,10 @@ TransportReadiness HomeModel::mainTransportReadiness() const
         return {wifiReady_, false, wifiStatus_};
     }
 
-    if (!adbStatus_.isAvailable())
-    {
-        return {false, false, adbStatus_.message};
-    }
-    if (selectedQuestUsbSerial_.isEmpty() ||
-        !containsUsableDevice(questUsbDevices_, selectedQuestUsbSerial_))
-    {
-        return {false, false, "No authorized Quest device visible over adb."};
-    }
-
-    const QList<int> expectedPorts = AdbBridge::reversePorts();
-    bool allPortsConfigured = true;
-    QList<int> missingPorts;
-    for (int port : expectedPorts)
-    {
-        if (!selectedQuestUsbReversePorts_.contains(port))
-        {
-            allPortsConfigured = false;
-            missingPorts.append(port);
-        }
-    }
-    if (allPortsConfigured)
-    {
-        return {true, false,
-                QString("USB reverse ready for %1 on %2.")
-                    .arg(selectedQuestUsbSerial_, portsText(expectedPorts))};
-    }
-    return {false, true,
-            QString("USB reverse missing port%1 %2.")
-                .arg(missingPorts.size() > 1 ? "s" : "", portsText(missingPorts))};
+    return questUsbTransportReadiness(adbStatus_,
+                                      questUsbDevices_,
+                                      selectedQuestUsbSerial_,
+                                      selectedQuestUsbReversePorts_);
 }
 
 bool HomeModel::developerModeEnabled() const
@@ -563,12 +621,20 @@ bool HomeModel::isAppRunning(const LauncherApp& app) const
 
 void HomeModel::loadAll()
 {
+    loadAll(true);
+}
+
+void HomeModel::loadAll(bool refreshTransport)
+{
     loadConfigFromDisk();
     refreshRuntimeStatus();
     refreshRuntimeInstallStatus();
     refreshRuntimeActivity();
     reloadLauncherApps();
-    refreshTransportHealth(true);
+    if (refreshTransport)
+    {
+        refreshTransportHealth(true);
+    }
     emit changed();
 }
 
@@ -1160,17 +1226,39 @@ void HomeModel::requestTransportRefresh(bool force, bool validateUsbSelection)
                                           target->wifiStatus_ = result.wifi.message;
                                           target->adbStatus_ = result.adbStatus;
                                           target->questUsbDevices_ = result.devices;
-                                          target->selectedQuestUsbSerial_ =
-                                              result.selectedSerial;
-                                          target->selectedQuestUsbReversePorts_ =
-                                              result.reversePorts;
-                                          target->questUsbStatus_ = result.usbStatus;
+                                          const bool keepPreviouslyVerifiedReverse =
+                                              !result.reverseMappingsVerified &&
+                                              !target->selectedQuestUsbSerial_.isEmpty() &&
+                                              hasRequiredReversePorts(
+                                                  target->selectedQuestUsbReversePorts_);
+                                          if (keepPreviouslyVerifiedReverse)
+                                          {
+                                              const QString previousStatus =
+                                                  result.usbStatus.isEmpty()
+                                                  ? "ADB did not report an authorized Quest device."
+                                                  : result.usbStatus;
+                                              target->questUsbStatus_ =
+                                                  QString("%1 Keeping previously verified adb reverse for %2 on ports %3. Reconfigure USB after relaunch if streaming fails.")
+                                                      .arg(previousStatus,
+                                                           target->selectedQuestUsbSerial_,
+                                                           portsText(AdbBridge::reversePorts()));
+                                          }
+                                          else
+                                          {
+                                              target->selectedQuestUsbSerial_ =
+                                                  result.selectedSerial;
+                                              target->selectedQuestUsbReversePorts_ =
+                                                  result.reversePorts;
+                                              target->questUsbStatus_ = result.usbStatus;
+                                          }
 
                                           if (result.validateUsbSelection &&
                                               target->pendingMainTransportSelection_ == "usb_adb")
                                           {
                                               target->pendingMainTransportSelection_.clear();
-                                              if (target->adbStatus_.isAvailable())
+                                              const TransportReadiness readiness =
+                                                  target->mainTransportReadiness();
+                                              if (readiness.isReady || readiness.canConfigureUsb)
                                               {
                                                   target->mainTransportOverride_ = "usb_adb";
                                                   target->serverConfig_.transport = "usb_adb";
@@ -1180,7 +1268,7 @@ void HomeModel::requestTransportRefresh(bool force, bool validateUsbSelection)
                                               }
                                               else
                                               {
-                                                  target->setErrorMessage(target->questUsbStatus_);
+                                                  target->setErrorMessage(readiness.message);
                                               }
                                           }
                                           emit target->changed();

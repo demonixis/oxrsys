@@ -40,8 +40,6 @@ add_library(oxrsys_runtime SHARED
     ${OXRSYS_RUNTIME_SOURCES}
 )
 
-find_package(Vulkan REQUIRED)
-
 set(OXRSYS_RUNTIME_LINK_LIBRARIES
     spdlog::spdlog
     glm::glm
@@ -59,47 +57,24 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         PkgConfig::FFMPEG
     )
 elseif(WIN32)
-    set(FFMPEG_ROOT "" CACHE PATH "Root directory for FFmpeg headers and import libraries on Windows")
-    find_path(FFMPEG_INCLUDE_DIR
-        NAMES libavcodec/avcodec.h
-        HINTS
-            "${FFMPEG_ROOT}/include"
-            "$ENV{FFMPEG_ROOT}/include"
-    )
-    find_library(FFMPEG_AVCODEC_LIBRARY
-        NAMES avcodec
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    find_library(FFMPEG_AVUTIL_LIBRARY
-        NAMES avutil
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    find_library(FFMPEG_SWSCALE_LIBRARY
-        NAMES swscale
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    if(NOT FFMPEG_INCLUDE_DIR OR NOT FFMPEG_AVCODEC_LIBRARY OR
-       NOT FFMPEG_AVUTIL_LIBRARY OR NOT FFMPEG_SWSCALE_LIBRARY)
-        message(FATAL_ERROR
-            "FFmpeg development files were not found. Set -DFFMPEG_ROOT=<path> "
-            "with include/ and lib/ containing avcodec, avutil, and swscale."
-        )
-    endif()
+    include(${CMAKE_SOURCE_DIR}/cmake/ResolveFFmpeg.cmake)
     list(APPEND OXRSYS_RUNTIME_LINK_LIBRARIES
-        ${FFMPEG_AVCODEC_LIBRARY}
-        ${FFMPEG_AVUTIL_LIBRARY}
-        ${FFMPEG_SWSCALE_LIBRARY}
+        ${OXRSYS_FFMPEG_LIBRARIES}
         d3d11
         d3d12
         dxgi
         ws2_32
     )
+    if(NOT OXRSYS_FFMPEG_BINARY_DIR)
+        file(GLOB _oxrsys_stale_ffmpeg_runtime_dlls
+            "${CMAKE_CURRENT_BINARY_DIR}/avcodec*.dll"
+            "${CMAKE_CURRENT_BINARY_DIR}/avutil*.dll"
+            "${CMAKE_CURRENT_BINARY_DIR}/swscale*.dll"
+        )
+        if(_oxrsys_stale_ffmpeg_runtime_dlls)
+            file(REMOVE ${_oxrsys_stale_ffmpeg_runtime_dlls})
+        endif()
+    endif()
 endif()
 
 target_include_directories(oxrsys_runtime PRIVATE
@@ -107,13 +82,18 @@ target_include_directories(oxrsys_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/common/protocol/include
     ${openxr_SOURCE_DIR}/include
     ${openxr_SOURCE_DIR}/src/common
-    ${Vulkan_INCLUDE_DIRS}
+    ${OXRSYS_VULKAN_INCLUDE_DIRS}
 )
 
 if(WIN32)
     target_include_directories(oxrsys_runtime PRIVATE
-        ${FFMPEG_INCLUDE_DIR}
+        ${OXRSYS_FFMPEG_INCLUDE_DIRS}
     )
+    if(OXRSYS_FFMPEG_LIBRARY_DIRS)
+        target_link_directories(oxrsys_runtime PRIVATE
+            ${OXRSYS_FFMPEG_LIBRARY_DIRS}
+        )
+    endif()
 endif()
 
 target_compile_definitions(oxrsys_runtime PRIVATE

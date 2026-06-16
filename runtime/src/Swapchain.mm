@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 
 #import <Metal/Metal.h>
+#include <algorithm>
 #include <atomic>
 
 namespace
@@ -590,12 +591,17 @@ XrResult Swapchain::WaitImage(const XrSwapchainImageWaitInfo* waitInfo)
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    uint32_t waitIndex = acquiredImageOrder_.front();
-    if (imageStates_[waitIndex] != ImageState::Acquired)
+    auto waitIt = std::find_if(acquiredImageOrder_.begin(), acquiredImageOrder_.end(),
+                               [this](uint32_t imageIndex) {
+                                   return imageIndex < imageStates_.size() &&
+                                          imageStates_[imageIndex] == ImageState::Acquired;
+                               });
+    if (waitIt == acquiredImageOrder_.end())
     {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
+    uint32_t waitIndex = *waitIt;
     imageStates_[waitIndex] = ImageState::Waited;
     return XR_SUCCESS;
 }

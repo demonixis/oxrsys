@@ -302,6 +302,7 @@ TEST_CASE("Loader-backed runtime exposes CTS-focused extensions", "[runtime][loa
     CHECK(hasExtension(XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME));
     CHECK(hasExtension(XR_EXT_HAND_INTERACTION_EXTENSION_NAME));
     CHECK(hasExtension(XR_EXT_DEBUG_UTILS_EXTENSION_NAME));
+    CHECK(hasExtension(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME));
 #ifdef XR_META_touch_controller_plus
     CHECK(hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME));
 #endif
@@ -708,8 +709,27 @@ TEST_CASE("Runtime enumerates and creates LOCAL_FLOOR reference spaces", "[runti
     CHECK((location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0);
     CHECK((location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0);
     CHECK_THAT(location.pose.position.x, WithinAbs(0.0f, 0.001f));
-    CHECK_THAT(location.pose.position.y, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(location.pose.position.y, WithinAbs(-1.6f, 0.001f));
     CHECK_THAT(location.pose.position.z, WithinAbs(0.0f, 0.001f));
+
+    XrViewLocateInfo viewLocateInfo = {XR_TYPE_VIEW_LOCATE_INFO};
+    viewLocateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    viewLocateInfo.displayTime = sampleTime;
+    XrViewState viewState = {XR_TYPE_VIEW_STATE};
+    uint32_t viewCount = 0;
+    std::array<XrView, 2> views = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+
+    viewLocateInfo.space = context.localSpace;
+    XR_CHECK(xrLocateViews(context.session, &viewLocateInfo, &viewState,
+                           static_cast<uint32_t>(views.size()), &viewCount, views.data()));
+    REQUIRE(viewCount == 2);
+    CHECK_THAT(views[0].pose.position.y, WithinAbs(0.0f, 0.001f));
+
+    viewLocateInfo.space = localFloorSpace;
+    XR_CHECK(xrLocateViews(context.session, &viewLocateInfo, &viewState,
+                           static_cast<uint32_t>(views.size()), &viewCount, views.data()));
+    REQUIRE(viewCount == 2);
+    CHECK_THAT(views[0].pose.position.y, WithinAbs(1.6f, 0.001f));
 
     XR_CHECK(xrDestroySpace(localFloorSpace));
 }
@@ -768,6 +788,28 @@ TEST_CASE("Runtime hides LOCAL_FLOOR for OpenXR 1.0 instances", "[runtime][space
 
     XR_CHECK(xrDestroySession(session));
     XR_CHECK(xrDestroyInstance(instance));
+}
+
+TEST_CASE("Runtime exposes LOCAL_FLOOR for OpenXR 1.0 with XR_EXT_local_floor", "[runtime][spaces]")
+{
+    RuntimeSessionContext context(
+        {XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_EXT_LOCAL_FLOOR_EXTENSION_NAME},
+        true,
+        XR_MAKE_VERSION(1, 0, 57));
+
+    uint32_t spaceCount = 0;
+    XR_CHECK(xrEnumerateReferenceSpaces(context.session, 0, &spaceCount, nullptr));
+    std::vector<XrReferenceSpaceType> spaces(spaceCount);
+    XR_CHECK(xrEnumerateReferenceSpaces(context.session, spaceCount, &spaceCount, spaces.data()));
+    CHECK(std::find(spaces.begin(), spaces.end(), XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR) != spaces.end());
+
+    XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR;
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+
+    XrSpace localFloorSpace = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &localFloorSpace));
+    XR_CHECK(xrDestroySpace(localFloorSpace));
 }
 
 TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[runtime][spaces]")
@@ -2605,6 +2647,17 @@ TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime]
     }
 
     XR_CHECK(xrDestroySwapchain(swapchain));
+
+    XrSwapchain pipelinedSwapchain = CreateColorSwapchain(context.session, format);
+    uint32_t firstPipelinedIndex = UINT32_MAX;
+    uint32_t secondPipelinedIndex = UINT32_MAX;
+    XR_CHECK(xrAcquireSwapchainImage(pipelinedSwapchain, nullptr, &firstPipelinedIndex));
+    XR_CHECK(xrWaitSwapchainImage(pipelinedSwapchain, &waitInfo));
+    XR_CHECK(xrAcquireSwapchainImage(pipelinedSwapchain, nullptr, &secondPipelinedIndex));
+    XR_CHECK(xrWaitSwapchainImage(pipelinedSwapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(pipelinedSwapchain, nullptr));
+    XR_CHECK(xrReleaseSwapchainImage(pipelinedSwapchain, nullptr));
+    XR_CHECK(xrDestroySwapchain(pipelinedSwapchain));
 
     XrSwapchain staticSwapchain =
         CreateColorSwapchain(context.session, format, XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT);

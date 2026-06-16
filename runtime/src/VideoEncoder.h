@@ -113,6 +113,7 @@ private:
     std::atomic<bool> shuttingDown_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};
+    std::atomic<uint32_t> consecutiveNoPacketFrames_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};
     std::mutex slotMutex_;
     static constexpr size_t SlotCount = 3;

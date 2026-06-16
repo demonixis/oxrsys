@@ -3,12 +3,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
 
 #include <d3d11.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+
+#include <openxr/openxr_platform.h>
 
 #include <algorithm>
 #include <array>
@@ -172,6 +173,60 @@ XrSwapchain CreateColorSwapchain(XrSession session, int64_t format)
     return swapchain;
 }
 
+void SubmitProjectionFrame(XrSession session, XrSwapchain swapchain)
+{
+    XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
+    beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    XR_CHECK(xrBeginSession(session, &beginInfo));
+
+    XrReferenceSpaceCreateInfo spaceInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    spaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    spaceInfo.poseInReferenceSpace.orientation.w = 1.0f;
+
+    XrSpace space = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateReferenceSpace(session, &spaceInfo, &space));
+
+    XrFrameWaitInfo waitFrameInfo{XR_TYPE_FRAME_WAIT_INFO};
+    XrFrameState frameState{XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(session, &waitFrameInfo, &frameState));
+
+    XrFrameBeginInfo beginFrameInfo{XR_TYPE_FRAME_BEGIN_INFO};
+    XR_CHECK(xrBeginFrame(session, &beginFrameInfo));
+
+    std::array<XrCompositionLayerProjectionView, 2> views = {
+        XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+        XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+    };
+    for (uint32_t eye = 0; eye < views.size(); ++eye)
+    {
+        views[eye].pose.orientation.w = 1.0f;
+        views[eye].fov.angleLeft = -0.5f;
+        views[eye].fov.angleRight = 0.5f;
+        views[eye].fov.angleUp = 0.5f;
+        views[eye].fov.angleDown = -0.5f;
+        views[eye].subImage.swapchain = swapchain;
+        views[eye].subImage.imageRect.extent = {16, 16};
+        views[eye].subImage.imageArrayIndex = eye;
+    }
+
+    XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    layer.space = space;
+    layer.viewCount = static_cast<uint32_t>(views.size());
+    layer.views = views.data();
+
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer),
+    };
+    XrFrameEndInfo endFrameInfo{XR_TYPE_FRAME_END_INFO};
+    endFrameInfo.displayTime = frameState.predictedDisplayTime;
+    endFrameInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endFrameInfo.layerCount = 1;
+    endFrameInfo.layers = layers;
+    XR_CHECK(xrEndFrame(session, &endFrameInfo));
+
+    XR_CHECK(xrDestroySpace(space));
+}
+
 } // namespace
 
 TEST_CASE("Windows runtime advertises D3D extensions")
@@ -241,6 +296,7 @@ TEST_CASE("D3D11 session and swapchain images can be created")
     XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
     XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     XR_CHECK(xrReleaseSwapchainImage(swapchain, &releaseInfo));
+    SubmitProjectionFrame(session, swapchain);
 
     XR_CHECK(xrDestroySwapchain(swapchain));
     XR_CHECK(xrDestroySession(session));
@@ -291,6 +347,7 @@ TEST_CASE("D3D12 session and swapchain images can be created")
     XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
     XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     XR_CHECK(xrReleaseSwapchainImage(swapchain, &releaseInfo));
+    SubmitProjectionFrame(session, swapchain);
 
     XR_CHECK(xrDestroySwapchain(swapchain));
     XR_CHECK(xrDestroySession(session));

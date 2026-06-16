@@ -198,6 +198,10 @@ void fillSimulatorTrackingPacket(const SimulatorTrackingPose& pose,
         packet.rightGrip = 1.0f;
     }
     packet.ipd = 0.064f;
+    packet.eyeFov[0] = -0.90f;
+    packet.eyeFov[1] = 0.90f;
+    packet.eyeFov[2] = 0.87f;
+    packet.eyeFov[3] = -0.87f;
 }
 
 int simulatorKeyIdentifier(const QKeyEvent& event)

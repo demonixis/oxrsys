@@ -8,10 +8,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFileInfoList>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -19,8 +21,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <shellapi.h>
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 namespace
@@ -223,7 +225,13 @@ bool runElevatedWindowsCommand(const QStringList& arguments, QString* errorMessa
 } // namespace
 
 RuntimeManager::RuntimeManager(HomePaths paths)
+    : RuntimeManager(std::move(paths), {})
+{
+}
+
+RuntimeManager::RuntimeManager(HomePaths paths, QString bundledRuntimeDirectoryOverride)
     : paths_(std::move(paths))
+    , bundledRuntimeDirectoryOverride_(std::move(bundledRuntimeDirectoryOverride))
 {
 }
 
@@ -267,10 +275,23 @@ RuntimeInstallStatus RuntimeManager::installStatus() const
     status.bundledRuntimeExists = QFileInfo(bundledLibraryPath).isFile();
     status.installedRuntimeExists = QFileInfo(installedLibraryPath).isFile();
     status.installedManifestExists = QFileInfo(paths_.installedRuntimeManifestPath).isFile();
-    status.installedRuntimeNeedsUpdate =
-        status.bundledRuntimeExists &&
+    status.installedRuntimeNeedsUpdate = status.bundledRuntimeExists &&
         status.installedRuntimeExists &&
         !filesHaveSameContents(bundledLibraryPath, installedLibraryPath);
+    if (status.bundledRuntimeExists && status.installedRuntimeExists)
+    {
+        for (const QString& fileName : runtimeCompanionFileNames(status.bundledRuntimePath))
+        {
+            const QString sourcePath = QDir(status.bundledRuntimePath).filePath(fileName);
+            const QString installedPath = QDir(paths_.installedRuntimeDirectory).filePath(fileName);
+            if (!QFileInfo(installedPath).isFile() ||
+                !filesHaveSameContents(sourcePath, installedPath))
+            {
+                status.installedRuntimeNeedsUpdate = true;
+                break;
+            }
+        }
+    }
     return status;
 }
 
@@ -475,6 +496,15 @@ bool RuntimeManager::installBundledRuntime(QString* installedManifestPath, QStri
     {
         return false;
     }
+    for (const QString& fileName : runtimeCompanionFileNames(sourceDirectory))
+    {
+        const QString sourcePath = QDir(sourceDirectory).filePath(fileName);
+        const QString destinationPath = QDir(paths_.installedRuntimeDirectory).filePath(fileName);
+        if (!replaceFile(sourcePath, destinationPath, errorMessage))
+        {
+            return false;
+        }
+    }
 
     if (QFileInfo(sourceConfig).isFile())
     {
@@ -580,6 +610,12 @@ int RuntimeManager::handleElevatedWindowsCommand(const QStringList& arguments, Q
 
 QString RuntimeManager::bundledRuntimeDirectory() const
 {
+    if (!bundledRuntimeDirectoryOverride_.isEmpty() &&
+        QFileInfo(QDir(bundledRuntimeDirectoryOverride_).filePath(runtimeLibraryFileName())).isFile())
+    {
+        return QFileInfo(bundledRuntimeDirectoryOverride_).absoluteFilePath();
+    }
+
     const QString defaultDirectory = defaultRuntimeDirectoryPath();
     if (QFileInfo(QDir(defaultDirectory).filePath(runtimeLibraryFileName())).isFile())
     {
@@ -593,6 +629,31 @@ QString RuntimeManager::bundledRuntimeDirectory() const
         return appResourceDirectory;
     }
     return defaultDirectory;
+}
+
+QStringList RuntimeManager::runtimeCompanionFileNames(const QString& runtimeDirectory) const
+{
+    QStringList fileNames;
+#if defined(Q_OS_WIN)
+    const QDir directory(runtimeDirectory);
+    const QFileInfoList entries =
+        directory.entryInfoList({"*.dll"}, QDir::Files | QDir::Readable, QDir::Name);
+    const QString runtimeLibrary = runtimeLibraryFileName();
+    for (const QFileInfo& entry : entries)
+    {
+        if (entry.fileName().compare(runtimeLibrary, Qt::CaseInsensitive) == 0)
+        {
+            continue;
+        }
+        fileNames.append(entry.fileName());
+    }
+    std::sort(fileNames.begin(), fileNames.end(), [](const QString& lhs, const QString& rhs) {
+        return lhs.compare(rhs, Qt::CaseInsensitive) < 0;
+    });
+#else
+    Q_UNUSED(runtimeDirectory);
+#endif
+    return fileNames;
 }
 
 bool RuntimeManager::replaceFile(const QString& source,

@@ -46,6 +46,7 @@ public:
 
     // Head pose
     XrPosef GetHeadPose() const;
+    XrPosef GetLocalSpacePose() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
 
     // Controller poses (world space)
@@ -107,6 +108,7 @@ private:
 
     glm::quat GetHeadRotation() const;
     void UpdateFromStreaming();
+    void ResetStreamingOrigin();
     const AutomationHandState& GetAutomationState(Hand hand) const;
     AutomationHandState& GetAutomationState(Hand hand);
     void GenerateHandJoints(Hand hand, const glm::vec3& palmPos, const glm::quat& palmRot,
@@ -134,6 +136,10 @@ private:
     std::array<bool, 2> streamingControllerActive_ = {false, false};
     std::string streamingClientName_;
     std::string streamingControllerProfile_;
+    bool streamingOriginValid_ = false;
+    glm::vec3 streamingOriginPosition_ = {0.0f, 0.0f, 0.0f};
+    glm::quat streamingOriginOrientation_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 streamingOriginRuntimeHeadPosition_ = {0.0f, 1.6f, 0.0f};
 
     // Controller positions (world space offsets)
     glm::vec3 leftControllerPos_ = {-0.2f, 1.3f, -0.4f};

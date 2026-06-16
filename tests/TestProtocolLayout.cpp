@@ -2,6 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "GraphicsTypes.h"
+
 #include <oxrsys/protocol/Protocol.h>
 
 #include <cstddef>
@@ -36,4 +38,19 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TrackingPacket, rightHandJoints) == 592);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
     STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
+}
+
+TEST_CASE("Frame image sources default to full-source encoding", "[streaming]")
+{
+    FrameImageSource source = {};
+    CHECK_FALSE(source.HasSourceRect());
+
+    source.sourceX = 4;
+    source.sourceY = 2;
+    source.sourceWidth = 8;
+    source.sourceHeight = 6;
+    CHECK(source.HasSourceRect());
+
+    source.Reset();
+    CHECK_FALSE(source.HasSourceRect());
 }

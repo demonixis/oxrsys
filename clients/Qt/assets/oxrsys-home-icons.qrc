@@ -1,0 +1,11 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<RCC>
+    <qresource prefix="/icons/oxrsys-home">
+        <file alias="appicon-16.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-16.png</file>
+        <file alias="appicon-32.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-32.png</file>
+        <file alias="appicon-64.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-64.png</file>
+        <file alias="appicon-128.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-128.png</file>
+        <file alias="appicon-256.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-256.png</file>
+        <file alias="appicon-512.png">../../Apple/oxrsys-home/OXRSys Home/Assets.xcassets/AppIcon.appiconset/appicon-512.png</file>
+    </qresource>
+</RCC>

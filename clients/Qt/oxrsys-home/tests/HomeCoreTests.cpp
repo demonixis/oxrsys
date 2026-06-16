@@ -18,6 +18,7 @@
 #include <QTemporaryDir>
 #include <QUuid>
 
+#include <cstdio>
 #include <stdexcept>
 
 namespace
@@ -40,6 +41,13 @@ void writeFile(const QString& path, const QByteArray& data)
     file.write(data);
 }
 
+QByteArray readFile(const QString& path)
+{
+    QFile file(path);
+    expect(file.open(QIODevice::ReadOnly), "Failed to read " + path);
+    return file.readAll();
+}
+
 void makeExecutable(const QString& path)
 {
     QFile::setPermissions(path,
@@ -59,6 +67,20 @@ bool containsCleanPath(const QStringList& paths, const QString& expected)
         }
     }
     return false;
+}
+
+HomePaths testHomePaths(const QString& root)
+{
+    HomePaths paths;
+    paths.configRoot = QDir(root).filePath("config");
+    paths.dataRoot = QDir(root).filePath("data");
+    paths.stateRoot = QDir(root).filePath("state");
+    paths.activeRuntimeDirectory = QDir(root).filePath("openxr/1");
+    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
+    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
+    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
+    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+    return paths;
 }
 
 void testServerConfigRoundTrip()
@@ -90,15 +112,7 @@ void testHomeModelResetsStreamingConfigToDefaults()
     QTemporaryDir temporaryDir;
     expect(temporaryDir.isValid(), "Expected temporary directory");
 
-    HomePaths paths;
-    paths.configRoot = QDir(temporaryDir.path()).filePath("config");
-    paths.dataRoot = QDir(temporaryDir.path()).filePath("data");
-    paths.stateRoot = QDir(temporaryDir.path()).filePath("state");
-    paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
-    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
-    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
-    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
-    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+    HomePaths paths = testHomePaths(temporaryDir.path());
 
     writeFile(paths.configFilePath, R"(
 [general]
@@ -120,7 +134,7 @@ quest_logcat = true
     QSettings settings(organization, application);
     settings.clear();
 
-    HomeModel model(nullptr, organization, application, paths);
+    HomeModel model(nullptr, organization, application, paths, false);
     expect(model.serverConfig().bitrateMbps == 85,
            "Expected custom bitrate before default reset");
     expect(model.serverConfig().transport == "usb_adb",
@@ -214,6 +228,92 @@ void testRuntimeLaunchManifestPreference()
            "Expected installed manifest when installed runtime is preferred");
 }
 
+void testWindowsRuntimeInstallCopiesCompanionDlls()
+{
+#if defined(Q_OS_WIN)
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    const QString sourceDirectory = QDir(temporaryDir.path()).filePath("bundled-runtime");
+    const QString installedDirectory = QDir(temporaryDir.path()).filePath("installed-runtime");
+    const QString configPath = QDir(temporaryDir.path()).filePath("config/oxrsys-runtime.toml");
+    const QString installedManifestPath = QDir(installedDirectory).filePath("oxrsys-runtime.json");
+
+    writeFile(QDir(sourceDirectory).filePath(runtimeLibraryFileName()), "runtime-v1");
+    writeFile(QDir(sourceDirectory).filePath("oxrsys-runtime.toml"), "transport = \"auto\"\n");
+    writeFile(QDir(sourceDirectory).filePath("avcodec-62.dll"), "avcodec-v1");
+    writeFile(QDir(sourceDirectory).filePath("avutil-60.dll"), "avutil-v1");
+    writeFile(QDir(sourceDirectory).filePath("swscale-9.dll"), "swscale-v1");
+
+    HomePaths paths;
+    paths.configFilePath = configPath;
+    paths.installedRuntimeDirectory = installedDirectory;
+    paths.installedRuntimeManifestPath = installedManifestPath;
+
+    RuntimeManager manager(paths, sourceDirectory);
+    QString installedManifest;
+    QString error;
+    expect(manager.installBundledRuntime(&installedManifest, &error),
+           "Expected runtime install to succeed: " + error);
+    expect(installedManifest == installedManifestPath, "Expected installed manifest path");
+
+    expect(readFile(QDir(installedDirectory).filePath(runtimeLibraryFileName())) == "runtime-v1",
+           "Expected runtime library copy");
+    expect(readFile(QDir(installedDirectory).filePath("avcodec-62.dll")) == "avcodec-v1",
+           "Expected avcodec companion DLL copy");
+    expect(readFile(QDir(installedDirectory).filePath("avutil-60.dll")) == "avutil-v1",
+           "Expected avutil companion DLL copy");
+    expect(readFile(QDir(installedDirectory).filePath("swscale-9.dll")) == "swscale-v1",
+           "Expected swscale companion DLL copy");
+    expect(!manager.installStatus().installedRuntimeNeedsUpdate,
+           "Expected freshly installed runtime to be current");
+
+    QFile::remove(QDir(installedDirectory).filePath("avutil-60.dll"));
+    expect(manager.installStatus().installedRuntimeNeedsUpdate,
+           "Expected missing companion DLL to require update");
+
+    writeFile(QDir(installedDirectory).filePath("avutil-60.dll"), "avutil-v0");
+    expect(manager.installStatus().installedRuntimeNeedsUpdate,
+           "Expected changed companion DLL to require update");
+#endif
+}
+
+void testWindowsRuntimeInstallAcceptsStaticRuntimeWithoutCompanionDlls()
+{
+#if defined(Q_OS_WIN)
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    const QString sourceDirectory = QDir(temporaryDir.path()).filePath("bundled-runtime");
+    const QString installedDirectory = QDir(temporaryDir.path()).filePath("installed-runtime");
+    const QString configPath = QDir(temporaryDir.path()).filePath("config/oxrsys-runtime.toml");
+    const QString installedManifestPath = QDir(installedDirectory).filePath("oxrsys-runtime.json");
+
+    writeFile(QDir(sourceDirectory).filePath(runtimeLibraryFileName()), "runtime-static-v1");
+    writeFile(QDir(sourceDirectory).filePath("oxrsys-runtime.toml"), "transport = \"auto\"\n");
+
+    HomePaths paths;
+    paths.configFilePath = configPath;
+    paths.installedRuntimeDirectory = installedDirectory;
+    paths.installedRuntimeManifestPath = installedManifestPath;
+
+    RuntimeManager manager(paths, sourceDirectory);
+    QString installedManifest;
+    QString error;
+    expect(manager.installBundledRuntime(&installedManifest, &error),
+           "Expected static runtime install to succeed: " + error);
+    expect(installedManifest == installedManifestPath, "Expected installed manifest path");
+
+    expect(readFile(QDir(installedDirectory).filePath(runtimeLibraryFileName())) ==
+               "runtime-static-v1",
+           "Expected static runtime library copy");
+    expect(!QFileInfo(QDir(installedDirectory).filePath("avcodec-62.dll")).exists(),
+           "Expected no FFmpeg companion DLL for static runtime");
+    expect(!manager.installStatus().installedRuntimeNeedsUpdate,
+           "Expected static runtime without companion DLLs to be current");
+#endif
+}
+
 void testRuntimeBuildDirectoryCandidates()
 {
     const QString appDirRuntime =
@@ -244,6 +344,40 @@ UsbFfs tcp:9946 tcp:9946
     expectedPorts.insert(9945);
     expectedPorts.insert(9946);
     expect(ports == expectedPorts, "Expected reverse ports");
+}
+
+void testQuestUsbReadinessKeepsPreviouslyVerifiedReverse()
+{
+    QSet<int> completePorts;
+    for (int port : AdbBridge::reversePorts())
+    {
+        completePorts.insert(port);
+    }
+
+    const QString serial = "1WMHH000000000";
+    const AdbStatus unavailableAdb;
+    const TransportReadiness unavailableReadiness =
+        questUsbTransportReadiness(unavailableAdb, {}, serial, completePorts);
+    expect(unavailableReadiness.isReady,
+           "Expected previously verified reverse to stay ready when adb is unavailable");
+    expect(!unavailableReadiness.canConfigureUsb,
+           "Expected unavailable adb not to advertise configure action");
+    expect(unavailableReadiness.message.contains("previously verified"),
+           "Expected previously verified readiness message");
+
+    const AdbStatus availableAdb = {"adb", "ADB found."};
+    const TransportReadiness hiddenDeviceReadiness =
+        questUsbTransportReadiness(availableAdb, {}, serial, completePorts);
+    expect(hiddenDeviceReadiness.isReady,
+           "Expected previously verified reverse to stay ready when adb no longer reports the device");
+
+    const QList<AdbDevice> visibleDevices = {{serial, "device", "model:Quest_3"}};
+    const QSet<int> partialPorts = {9944};
+    const TransportReadiness missingPortsReadiness =
+        questUsbTransportReadiness(availableAdb, visibleDevices, serial, partialPorts);
+    expect(!missingPortsReadiness.isReady, "Expected incomplete reverse ports not to be ready");
+    expect(missingPortsReadiness.canConfigureUsb,
+           "Expected visible device with missing ports to allow USB configure");
 }
 
 void testAdbCustomPathSelection()
@@ -284,6 +418,10 @@ void testAdbCustomPathSelection()
 
 void testCustomAdbPreferencePersistence()
 {
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+    const HomePaths paths = testHomePaths(temporaryDir.path());
+
     const QString organization = "OXRSysHomeTests";
     const QString application =
         "HomeQt-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -291,13 +429,13 @@ void testCustomAdbPreferencePersistence()
     settings.clear();
 
     {
-        HomeModel model(nullptr, organization, application);
+        HomeModel model(nullptr, organization, application, paths, false);
         model.setCustomAdbPath("/tmp/custom-adb");
         expect(model.customAdbPath() == "/tmp/custom-adb",
                "Expected custom adb path to update in model");
     }
     {
-        HomeModel model(nullptr, organization, application);
+        HomeModel model(nullptr, organization, application, paths, false);
         expect(model.customAdbPath() == "/tmp/custom-adb",
                "Expected custom adb path to persist in settings");
         model.clearCustomAdbPath();
@@ -305,7 +443,7 @@ void testCustomAdbPreferencePersistence()
                "Expected custom adb path to clear in model");
     }
     {
-        HomeModel model(nullptr, organization, application);
+        HomeModel model(nullptr, organization, application, paths, false);
         expect(model.customAdbPath().isEmpty(),
                "Expected cleared custom adb path to persist");
     }
@@ -334,15 +472,7 @@ void testHomeModelTransportRefreshIsAsyncWithSlowAdb()
               "exit 0\n");
     makeExecutable(slowAdbPath);
 
-    HomePaths paths;
-    paths.configRoot = QDir(temporaryDir.path()).filePath("config");
-    paths.dataRoot = QDir(temporaryDir.path()).filePath("data");
-    paths.stateRoot = QDir(temporaryDir.path()).filePath("state");
-    paths.activeRuntimeDirectory = QDir(temporaryDir.path()).filePath("openxr/1");
-    paths.activeRuntimePath = QDir(paths.activeRuntimeDirectory).filePath("active_runtime.json");
-    paths.configFilePath = QDir(paths.configRoot).filePath("oxrsys-runtime.toml");
-    paths.launcherAppsPath = QDir(paths.configRoot).filePath("launcher_apps.json");
-    paths.runtimeStatusPath = QDir(paths.stateRoot).filePath("runtime_status.json");
+    HomePaths paths = testHomePaths(temporaryDir.path());
 
     const QString organization = "OXRSysHomeTests";
     const QString application =
@@ -406,6 +536,9 @@ void testRuntimeActivityParsing()
 
 void testDesktopInspection()
 {
+#if defined(Q_OS_WIN)
+    return;
+#else
     QTemporaryDir temporaryDir;
     expect(temporaryDir.isValid(), "Expected temporary directory");
 
@@ -426,10 +559,14 @@ void testDesktopInspection()
     expect(app.name == "Godot Test", "Expected desktop app name");
     expect(app.kind == "godot", "Expected Godot kind");
     expect(app.executablePath == executablePath, "Expected desktop executable path");
+#endif
 }
 
 void testMacAppInspection()
 {
+#if defined(Q_OS_WIN)
+    return;
+#else
     QTemporaryDir temporaryDir;
     expect(temporaryDir.isValid(), "Expected temporary directory");
 
@@ -453,6 +590,25 @@ void testMacAppInspection()
     expect(app.name == "Unity", "Expected app bundle name");
     expect(app.kind == "unity", "Expected Unity kind");
     expect(app.executablePath == executablePath, "Expected app bundle executable");
+#endif
+}
+
+void testWindowsExecutableInspection()
+{
+#if defined(Q_OS_WIN)
+    QTemporaryDir temporaryDir;
+    expect(temporaryDir.isValid(), "Expected temporary directory");
+
+    const QString executablePath = QDir(temporaryDir.path()).filePath("Godot.exe");
+    writeFile(executablePath, "MZ");
+    makeExecutable(executablePath);
+
+    const LauncherApp app = LauncherScanner::inspectPath(executablePath, "manual", false);
+    expect(app.name == "Godot", "Expected Windows executable app name");
+    expect(app.kind == "godot", "Expected Windows executable kind");
+    expect(app.executablePath == QFileInfo(executablePath).absoluteFilePath(),
+           "Expected Windows executable path");
+#endif
 }
 
 void testLauncherStore()
@@ -514,24 +670,30 @@ int main(int argc, char** argv)
         testHomeModelResetsStreamingConfigToDefaults();
         testRuntimeRegistration();
         testRuntimeLaunchManifestPreference();
+        testWindowsRuntimeInstallCopiesCompanionDlls();
+        testWindowsRuntimeInstallAcceptsStaticRuntimeWithoutCompanionDlls();
         testRuntimeBuildDirectoryCandidates();
         testAdbParsing();
+        testQuestUsbReadinessKeepsPreviouslyVerifiedReverse();
         testAdbCustomPathSelection();
         testCustomAdbPreferencePersistence();
         testHomeModelTransportRefreshIsAsyncWithSlowAdb();
         testRuntimeActivityParsing();
         testDesktopInspection();
         testMacAppInspection();
+        testWindowsExecutableInspection();
         testLauncherStore();
         testShellSplitting();
         testTerminalLaunchScript();
     }
     catch (const std::exception& error)
     {
+        std::fprintf(stderr, "Home core tests failed: %s\n", error.what());
         qCritical("Home core tests failed: %s", error.what());
         return 1;
     }
 
+    std::fprintf(stderr, "Home core tests passed\n");
     qInfo("Home core tests passed");
     return 0;
 }

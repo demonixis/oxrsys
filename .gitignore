@@ -12,6 +12,7 @@ lib/
 out/
 cmake-build-*/
 _deps/
+vcpkg_installed/
 
 # --- CMake Generated Files ---
 CMakeCache.txt
@@ -24,6 +25,8 @@ CMakeUserPresets.json
 install_manifest.txt
 !cmake/Dependencies.cmake
 !cmake/GenerateStrings.cmake
+!cmake/ResolveFFmpeg.cmake
+!cmake/ResolveVulkanHeaders.cmake
 !cmake/RunOpenXRCTS.cmake
 !cmake/SyncCompileCommands.cmake
 !clients/Qt/cmake/

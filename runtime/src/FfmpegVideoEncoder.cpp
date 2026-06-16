@@ -14,8 +14,10 @@
 extern "C"
 {
 #include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
 
@@ -53,6 +55,98 @@ AVFrame* Frame(void* ptr)
 AVPacket* Packet(void* ptr)
 {
     return static_cast<AVPacket*>(ptr);
+}
+
+bool CodecSupportsPixelFormat(const AVCodec* codec, AVPixelFormat format)
+{
+    if (codec == nullptr || codec->pix_fmts == nullptr)
+    {
+        return true;
+    }
+
+    for (const AVPixelFormat* pixelFormat = codec->pix_fmts;
+         *pixelFormat != AV_PIX_FMT_NONE;
+         ++pixelFormat)
+    {
+        if (*pixelFormat == format)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+AVPixelFormat ChooseEncoderPixelFormat(const AVCodec* codec)
+{
+    if (CodecSupportsPixelFormat(codec, AV_PIX_FMT_NV12))
+    {
+        return AV_PIX_FMT_NV12;
+    }
+    if (CodecSupportsPixelFormat(codec, AV_PIX_FMT_YUV420P))
+    {
+        return AV_PIX_FMT_YUV420P;
+    }
+    if (codec != nullptr && codec->pix_fmts != nullptr && codec->pix_fmts[0] != AV_PIX_FMT_NONE)
+    {
+        return codec->pix_fmts[0];
+    }
+    return AV_PIX_FMT_YUV420P;
+}
+
+const AVCodec* FindNamedEncoder(const char* name)
+{
+    const AVCodec* codec = avcodec_find_encoder_by_name(name);
+    return (codec != nullptr && av_codec_is_encoder(codec) != 0) ? codec : nullptr;
+}
+
+bool IsMediaFoundationEncoder(const AVCodec* codec)
+{
+    return codec != nullptr && codec->name != nullptr &&
+           std::strcmp(codec->name, "hevc_mf") == 0;
+}
+
+const char* FfmpegErrorString(int error)
+{
+    static thread_local char buffer[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(error, buffer, sizeof(buffer));
+    return buffer;
+}
+
+const AVCodec* SelectHevcEncoder()
+{
+#if defined(_WIN32)
+    if (const AVCodec* codec = FindNamedEncoder("hevc_mf"))
+    {
+        return codec;
+    }
+#endif
+
+    const AVCodec* fallback = nullptr;
+    void* iterator = nullptr;
+    while (const AVCodec* codec = av_codec_iterate(&iterator))
+    {
+        if (av_codec_is_encoder(codec) == 0 || codec->type != AVMEDIA_TYPE_VIDEO ||
+            codec->id != AV_CODEC_ID_HEVC)
+        {
+            continue;
+        }
+
+        const char* name = codec->name != nullptr ? codec->name : "";
+        if (std::strcmp(name, "hevc_d3d12va") == 0)
+        {
+            fallback = fallback == nullptr ? codec : fallback;
+            continue;
+        }
+
+        if (CodecSupportsPixelFormat(codec, AV_PIX_FMT_NV12) ||
+            CodecSupportsPixelFormat(codec, AV_PIX_FMT_YUV420P))
+        {
+            return codec;
+        }
+        fallback = fallback == nullptr ? codec : fallback;
+    }
+
+    return fallback;
 }
 
 struct VulkanEncoderState
@@ -795,6 +889,10 @@ bool ScaleEyeToStereoRgba(VulkanEncoderState& state,
                           uint32_t sourceWidth,
                           uint32_t sourceHeight,
                           const std::vector<uint8_t>& readback,
+                          uint32_t sourceX,
+                          uint32_t sourceY,
+                          uint32_t sourceCropWidth,
+                          uint32_t sourceCropHeight,
                           uint32_t outputX,
                           uint32_t outputEyeWidth,
                           uint32_t outputHeight,
@@ -809,13 +907,15 @@ bool ScaleEyeToStereoRgba(VulkanEncoderState& state,
         static_cast<int>(outputStereoWidth * 4),
         0, 0, 0,
     };
-    const uint8_t* srcData[4] = {readback.data(), nullptr, nullptr, nullptr};
+    const size_t sourceOffset =
+        (static_cast<size_t>(sourceY) * sourceWidth + sourceX) * 4;
+    const uint8_t* srcData[4] = {readback.data() + sourceOffset, nullptr, nullptr, nullptr};
     int srcLinesize[4] = {static_cast<int>(sourceWidth * 4), 0, 0, 0};
 
     state.eyeScaleContext = sws_getCachedContext(
         state.eyeScaleContext,
-        static_cast<int>(sourceWidth),
-        static_cast<int>(sourceHeight),
+        static_cast<int>(sourceCropWidth),
+        static_cast<int>(sourceCropHeight),
         sourceFormat,
         static_cast<int>(outputEyeWidth),
         static_cast<int>(outputHeight),
@@ -833,9 +933,45 @@ bool ScaleEyeToStereoRgba(VulkanEncoderState& state,
                      srcData,
                      srcLinesize,
                      0,
-                     static_cast<int>(sourceHeight),
+                     static_cast<int>(sourceCropHeight),
                      dstData,
                      dstLinesize) > 0;
+}
+
+struct SourceRect
+{
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+std::optional<SourceRect> ResolveSourceRect(const FrameImageSource& source,
+                                            uint32_t imageWidth,
+                                            uint32_t imageHeight)
+{
+    SourceRect rect = {};
+    if (source.HasSourceRect())
+    {
+        rect.x = source.sourceX;
+        rect.y = source.sourceY;
+        rect.width = source.sourceWidth;
+        rect.height = source.sourceHeight;
+    }
+    else
+    {
+        rect.width = imageWidth;
+        rect.height = imageHeight;
+    }
+
+    const uint64_t maxX = static_cast<uint64_t>(rect.x) + rect.width;
+    const uint64_t maxY = static_cast<uint64_t>(rect.y) + rect.height;
+    if (rect.width == 0 || rect.height == 0 ||
+        maxX > imageWidth || maxY > imageHeight)
+    {
+        return std::nullopt;
+    }
+    return rect;
 }
 
 bool ConvertStereoRgbaToYuv(VulkanEncoderState& state,
@@ -944,7 +1080,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         return false;
     }
 
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_HEVC);
+    const AVCodec* codec = SelectHevcEncoder();
     if (codec == nullptr)
     {
         spdlog::error("FFmpegVideoEncoder: no HEVC encoder available");
@@ -962,17 +1098,31 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     context->height = static_cast<int>(height_);
     context->time_base = AVRational{1, static_cast<int>(fps_)};
     context->framerate = AVRational{static_cast<int>(fps_), 1};
-    context->pix_fmt = AV_PIX_FMT_YUV420P;
+    context->pix_fmt = ChooseEncoderPixelFormat(codec);
     context->bit_rate = static_cast<int64_t>(bitrateMbps_) * 1000 * 1000;
+    context->rc_max_rate = context->bit_rate;
+    context->rc_buffer_size = static_cast<int>(std::max<int64_t>(context->bit_rate / std::max<uint32_t>(fps_, 1), 1));
     context->gop_size = static_cast<int>(std::max(Config::Get().GetValues().keyframeIntervalSec * fps_, 1u));
     context->max_b_frames = 0;
+    context->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
-    av_opt_set(context->priv_data, "preset", "ultrafast", 0);
-    av_opt_set(context->priv_data, "tune", "zerolatency", 0);
+    if (IsMediaFoundationEncoder(codec))
+    {
+        av_opt_set(context->priv_data, "rate_control", "cbr", 0);
+        av_opt_set(context->priv_data, "scenario", "camera_record", 0);
+        av_opt_set_int(context->priv_data, "hw_encoding", 1, 0);
+    }
+    else
+    {
+        av_opt_set(context->priv_data, "preset", "ultrafast", 0);
+        av_opt_set(context->priv_data, "tune", "zerolatency", 0);
+    }
 
     if (avcodec_open2(context, codec, nullptr) < 0)
     {
-        spdlog::error("FFmpegVideoEncoder: failed to open HEVC encoder {}", codec->name);
+        spdlog::error("FFmpegVideoEncoder: failed to open HEVC encoder {} with pixel format {}",
+                      codec->name,
+                      av_get_pix_fmt_name(context->pix_fmt));
         avcodec_free_context(&context);
         return false;
     }
@@ -991,6 +1141,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     frame->format = context->pix_fmt;
     frame->width = context->width;
     frame->height = context->height;
+    frame->duration = 1;
     if (av_frame_get_buffer(frame, 32) < 0)
     {
         spdlog::error("FFmpegVideoEncoder: failed to allocate frame buffer");
@@ -1009,8 +1160,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         graphicsApi == GraphicsApi::Vulkan ? "Vulkan" :
         graphicsApi == GraphicsApi::D3D11 ? "D3D11" :
         graphicsApi == GraphicsApi::D3D12 ? "D3D12" : "unknown";
-    spdlog::info("FFmpegVideoEncoder: initialized {} HEVC encoder {}x{} @ {}Hz {}Mbps",
-                 backendName, width_, height_, fps_, bitrateMbps_);
+    spdlog::info("FFmpegVideoEncoder: initialized {} HEVC encoder {} {}x{} @ {}Hz {}Mbps pix_fmt={}",
+                 backendName,
+                 codec->name,
+                 width_,
+                 height_,
+                 fps_,
+                 bitrateMbps_,
+                 av_get_pix_fmt_name(context->pix_fmt));
     return true;
 }
 
@@ -1042,6 +1199,7 @@ void VideoEncoder::Shutdown()
     ffmpeg_.packet = nullptr;
     ffmpeg_.readbackState = nullptr;
     inFlightFrameCount_.store(0);
+    consecutiveNoPacketFrames_.store(0);
 }
 
 bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
@@ -1115,17 +1273,37 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         const auto leftFormat = AvPixelFormatForVulkanFormat(leftSource->format);
         const auto rightFormat = AvPixelFormatForVulkanFormat(rightSource->format);
+        const uint32_t leftWidth = leftSource->width;
+        const uint32_t leftHeight = leftSource->height;
+        const uint32_t rightWidth = rightSource->width;
+        const uint32_t rightHeight = rightSource->height;
+        const std::optional<SourceRect> leftRect =
+            ResolveSourceRect(frameSource.left, leftWidth, leftHeight);
+        const std::optional<SourceRect> rightRect =
+            ResolveSourceRect(stereo ? frameSource.right : frameSource.left, rightWidth, rightHeight);
         if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !leftRect.has_value() || !rightRect.has_value() ||
             !ReadVulkanFrameSource(*vkState, *leftSource, leftReadback) ||
             !ReadVulkanFrameSource(*vkState, *rightSource, rightReadback))
         {
             spdlog::warn("FFmpegVideoEncoder: Vulkan readback failed or unsupported format");
             return dropFrame();
         }
-        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
-                                  leftReadback, 0, eyeWidth_, height_, width_) ||
-            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
-                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+        if (metrics.frameNumber == 1)
+        {
+            spdlog::info("FFmpegVideoEncoder: Vulkan source rect L={}x{}+{},{} R={}x{}+{},{}",
+                         leftRect->width, leftRect->height, leftRect->x, leftRect->y,
+                         rightRect->width, rightRect->height, rightRect->x, rightRect->y);
+        }
+        frameSource = {};
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftWidth, leftHeight,
+                                  leftReadback, leftRect->x, leftRect->y,
+                                  leftRect->width, leftRect->height,
+                                  0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightWidth, rightHeight,
+                                  rightReadback, rightRect->x, rightRect->y,
+                                  rightRect->width, rightRect->height,
+                                  eyeWidth_, eyeWidth_, height_, width_) ||
             !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
         {
             spdlog::warn("FFmpegVideoEncoder: Vulkan frame conversion failed");
@@ -1147,17 +1325,37 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         const auto leftFormat = AvPixelFormatForDxgiFormat(leftSource->format);
         const auto rightFormat = AvPixelFormatForDxgiFormat(rightSource->format);
+        const uint32_t leftWidth = leftSource->width;
+        const uint32_t leftHeight = leftSource->height;
+        const uint32_t rightWidth = rightSource->width;
+        const uint32_t rightHeight = rightSource->height;
+        const std::optional<SourceRect> leftRect =
+            ResolveSourceRect(frameSource.left, leftWidth, leftHeight);
+        const std::optional<SourceRect> rightRect =
+            ResolveSourceRect(stereo ? frameSource.right : frameSource.left, rightWidth, rightHeight);
         if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !leftRect.has_value() || !rightRect.has_value() ||
             !ReadD3D11FrameSource(*vkState, *leftSource, leftReadback) ||
             !ReadD3D11FrameSource(*vkState, *rightSource, rightReadback))
         {
             spdlog::warn("FFmpegVideoEncoder: D3D11 readback failed or unsupported format");
             return dropFrame();
         }
-        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
-                                  leftReadback, 0, eyeWidth_, height_, width_) ||
-            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
-                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+        if (metrics.frameNumber == 1)
+        {
+            spdlog::info("FFmpegVideoEncoder: D3D11 source rect L={}x{}+{},{} R={}x{}+{},{}",
+                         leftRect->width, leftRect->height, leftRect->x, leftRect->y,
+                         rightRect->width, rightRect->height, rightRect->x, rightRect->y);
+        }
+        frameSource = {};
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftWidth, leftHeight,
+                                  leftReadback, leftRect->x, leftRect->y,
+                                  leftRect->width, leftRect->height,
+                                  0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightWidth, rightHeight,
+                                  rightReadback, rightRect->x, rightRect->y,
+                                  rightRect->width, rightRect->height,
+                                  eyeWidth_, eyeWidth_, height_, width_) ||
             !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
         {
             spdlog::warn("FFmpegVideoEncoder: D3D11 frame conversion failed");
@@ -1178,17 +1376,37 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         const auto leftFormat = AvPixelFormatForDxgiFormat(leftSource->format);
         const auto rightFormat = AvPixelFormatForDxgiFormat(rightSource->format);
+        const uint32_t leftWidth = leftSource->width;
+        const uint32_t leftHeight = leftSource->height;
+        const uint32_t rightWidth = rightSource->width;
+        const uint32_t rightHeight = rightSource->height;
+        const std::optional<SourceRect> leftRect =
+            ResolveSourceRect(frameSource.left, leftWidth, leftHeight);
+        const std::optional<SourceRect> rightRect =
+            ResolveSourceRect(stereo ? frameSource.right : frameSource.left, rightWidth, rightHeight);
         if (!leftFormat.has_value() || !rightFormat.has_value() ||
+            !leftRect.has_value() || !rightRect.has_value() ||
             !ReadD3D12FrameSource(*vkState, *leftSource, leftReadback) ||
             !ReadD3D12FrameSource(*vkState, *rightSource, rightReadback))
         {
             spdlog::warn("FFmpegVideoEncoder: D3D12 readback failed or unsupported format");
             return dropFrame();
         }
-        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftSource->width, leftSource->height,
-                                  leftReadback, 0, eyeWidth_, height_, width_) ||
-            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightSource->width, rightSource->height,
-                                  rightReadback, eyeWidth_, eyeWidth_, height_, width_) ||
+        if (metrics.frameNumber == 1)
+        {
+            spdlog::info("FFmpegVideoEncoder: D3D12 source rect L={}x{}+{},{} R={}x{}+{},{}",
+                         leftRect->width, leftRect->height, leftRect->x, leftRect->y,
+                         rightRect->width, rightRect->height, rightRect->x, rightRect->y);
+        }
+        frameSource = {};
+        if (!ScaleEyeToStereoRgba(*vkState, *leftFormat, leftWidth, leftHeight,
+                                  leftReadback, leftRect->x, leftRect->y,
+                                  leftRect->width, leftRect->height,
+                                  0, eyeWidth_, height_, width_) ||
+            !ScaleEyeToStereoRgba(*vkState, *rightFormat, rightWidth, rightHeight,
+                                  rightReadback, rightRect->x, rightRect->y,
+                                  rightRect->width, rightRect->height,
+                                  eyeWidth_, eyeWidth_, height_, width_) ||
             !ConvertStereoRgbaToYuv(*vkState, frame, width_, height_))
         {
             spdlog::warn("FFmpegVideoEncoder: D3D12 frame conversion failed");
@@ -1203,6 +1421,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     metrics.gpuCopyMs = ToMilliseconds(Clock::now() - copyStart);
 
     frame->pts = static_cast<int64_t>(frameCount_);
+    frame->duration = 1;
     if (forceKeyframe_.exchange(false))
     {
         frame->pict_type = AV_PICTURE_TYPE_I;
@@ -1218,6 +1437,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     metrics.encodeSubmitMs = ToMilliseconds(Clock::now() - submitStart);
     if (sendResult < 0)
     {
+        spdlog::warn("FFmpegVideoEncoder: avcodec_send_frame failed: {}",
+                     FfmpegErrorString(sendResult));
         return dropFrame();
     }
 
@@ -1231,6 +1452,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         }
         if (receiveResult < 0)
         {
+            spdlog::warn("FFmpegVideoEncoder: avcodec_receive_packet failed: {}",
+                         FfmpegErrorString(receiveResult));
             droppedFrameCount_.fetch_add(1);
             metrics.frameDropped = true;
             break;
@@ -1243,6 +1466,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
             callback(packet->data, static_cast<size_t>(packet->size), packetIsKeyframe, timestampNs);
         }
         emittedPacket = true;
+        consecutiveNoPacketFrames_.store(0);
         av_packet_unref(packet);
     }
 
@@ -1252,6 +1476,12 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
     if (!emittedPacket)
     {
+        const uint32_t noPacketFrames = consecutiveNoPacketFrames_.fetch_add(1) + 1;
+        if (noPacketFrames == 5 || noPacketFrames == 30 || noPacketFrames % 120 == 0)
+        {
+            spdlog::warn("FFmpegVideoEncoder: encoder accepted {} consecutive frame(s) without output packets",
+                         noPacketFrames);
+        }
         droppedFrameCount_.fetch_add(1);
         metrics.frameDropped = true;
     }

@@ -327,6 +327,9 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
         {XR_EXT_DEBUG_UTILS_EXTENSION_NAME, XR_EXT_debug_utils_SPEC_VERSION},
+#ifdef XR_EXT_local_floor
+        {XR_EXT_LOCAL_FLOOR_EXTENSION_NAME, XR_EXT_local_floor_SPEC_VERSION},
+#endif
 #ifdef XR_META_touch_controller_plus
         {XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME, XR_META_touch_controller_plus_SPEC_VERSION},
 #endif
@@ -2191,6 +2194,9 @@ static XrPosef ResolveSpaceWorldPose(Space* space)
                 break;
 
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
+                worldPose = inputManager.GetLocalSpacePose();
+                break;
+            case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
             case XR_REFERENCE_SPACE_TYPE_STAGE:
             default:
                 break;

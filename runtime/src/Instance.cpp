@@ -266,7 +266,8 @@ bool Instance::IsExtensionEnabled(const char* extensionName) const
 
 bool Instance::SupportsLocalFloor() const
 {
-    return apiVersion_ >= XR_MAKE_VERSION(1, 1, 0);
+    return apiVersion_ >= XR_MAKE_VERSION(1, 1, 0) ||
+           IsExtensionEnabled(XR_EXT_LOCAL_FLOOR_EXTENSION_NAME);
 }
 
 bool Instance::IsSystemIdValid(XrSystemId systemId) const

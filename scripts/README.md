@@ -1,5 +1,36 @@
 # Scripts
 
+## Windows Configure
+
+`scripts/windows_configure.ps1` locates CMake, Ninja, Visual Studio MSVC tools, and vcpkg, loads
+`vcvarsall.bat`, and configures a Windows Ninja build. Use it when the current shell cannot see
+freshly installed tools through `PATH`, or when you want vcpkg to install FFmpeg automatically:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 -Architecture x64
+```
+
+Pass `-FFmpegRoot C:\dev\ffmpeg` to use a local FFmpeg development package instead of vcpkg.
+With vcpkg, the helper defaults to `x64-windows-static-md` or `arm64-windows-static-md`, so FFmpeg
+is statically linked into the runtime DLL while the MSVC CRT remains dynamically linked. Pass
+`-DynamicFFmpeg` only when you intentionally want vcpkg dynamic FFmpeg DLLs.
+The helper defaults `-QtFrontends AUTO`, so the Windows runtime can configure without Qt installed;
+pass `-QtFrontends ON` to build Qt Home and the Qt simulator after installing Qt 6.
+Qt Online Installer kits under `C:\Qt\<version>\<kit>` are detected automatically; otherwise set
+`CMAKE_PREFIX_PATH` or `Qt6_DIR` before running the helper.
+The configure script only configures. Build with `scripts/windows_build.ps1`, which loads
+`vcvarsall.bat` before invoking CMake so MSVC can find Windows SDK import libraries such as
+`secur32.lib`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1 -Architecture x64
+```
+
+Run tests with `ctest --test-dir build/windows-x64 --output-on-failure`.
+When Qt frontends are enabled on Windows, the build runs `windeployqt` after linking
+`oxrsys-home.exe` and `oxrsys-simulator.exe` so their Qt DLLs and plugins are copied next to the
+executables.
+
 ## macOS Build Package
 
 `scripts/macos_build_package.sh` builds the macOS runtime and `OXRSys Home.app`, then assembles a

@@ -213,10 +213,18 @@ TEST_CASE("InputManager — streaming head pose", "[input]")
     im.Update(0.0f);
 
     XrPosef pose = im.GetHeadPose();
-    CHECK_THAT(pose.position.x, WithinAbs(1.0, 0.001));
-    CHECK_THAT(pose.position.y, WithinAbs(2.0, 0.001));
-    CHECK_THAT(pose.position.z, WithinAbs(3.0, 0.001));
-    CHECK(std::abs(pose.orientation.y) > 0.01f);
+    CHECK_THAT(pose.position.x, WithinAbs(0.0, 0.001));
+    CHECK_THAT(pose.position.y, WithinAbs(1.6, 0.001));
+    CHECK_THAT(pose.position.z, WithinAbs(0.0, 0.001));
+    CHECK_THAT(pose.orientation.w, WithinAbs(1.0, 0.001));
+
+    packet.timestampNs = 1'011'111'111;
+    packet.headPosition[0] = 1.2f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    pose = im.GetHeadPose();
+    CHECK(pose.position.x > 0.10f);
 }
 
 TEST_CASE("InputManager — streaming controller activity gates pose updates", "[input]")
@@ -228,6 +236,7 @@ TEST_CASE("InputManager — streaming controller activity gates pose updates", "
 
     oxr::protocol::TrackingPacket active = {};
     active.timestampNs = 1'000'000'000;
+    active.headPosition[1] = 1.6f;
     active.headOrientation[3] = 1.0f;
     active.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
                            oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
@@ -254,6 +263,7 @@ TEST_CASE("InputManager — streaming controller activity gates pose updates", "
 
     oxr::protocol::TrackingPacket inactive = {};
     inactive.timestampNs = 1'011'111'111;
+    inactive.headPosition[1] = 1.6f;
     inactive.headOrientation[3] = 1.0f;
     receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&inactive), sizeof(inactive));
     im.Update(0.0f);
@@ -296,6 +306,7 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
 
         oxr::protocol::TrackingPacket packet = {};
         packet.timestampNs = 1'000'000'000;
+        packet.headPosition[1] = 1.6f;
         packet.headOrientation[3] = 1.0f;
         packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
         packet.leftControllerRot[3] = 1.0f;
@@ -324,6 +335,7 @@ TEST_CASE("InputManager — streaming hands and controllers stay profile separat
 
     oxr::protocol::TrackingPacket packet = {};
     packet.timestampNs = 1'000'000'000;
+    packet.headPosition[1] = 1.6f;
     packet.headOrientation[3] = 1.0f;
     packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
                            oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
@@ -384,6 +396,7 @@ TEST_CASE("InputManager — streaming hands and controllers stay profile separat
 
     oxr::protocol::TrackingPacket handOnly = {};
     handOnly.timestampNs = 1'011'111'111;
+    handOnly.headPosition[1] = 1.6f;
     handOnly.headOrientation[3] = 1.0f;
     handOnly.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
     PopulateLeftPinchingHand(handOnly, 0.20f, 1.35f, -0.25f);
@@ -415,6 +428,7 @@ TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[
 
     oxr::protocol::TrackingPacket packet = {};
     packet.timestampNs = 1'000'000'000;
+    packet.headPosition[1] = 1.6f;
     packet.headOrientation[3] = 1.0f;
     packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
     packet.leftControllerRot[3] = 1.0f;

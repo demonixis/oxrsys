@@ -37,6 +37,9 @@ The viewer connects to the runtime as a streaming client, using the same UDP pro
 - Captures keyboard and mouse input and sends simulated tracking data to the runtime
 - Displays a single-eye preview across the full screen
 
+The Qt simulator includes a synthetic IPD and left-eye FOV in its tracking packets so the runtime can
+render with the same streaming eye-data path used by headset clients.
+
 The Qt simulator uses the same UDP discovery, video, control, and tracking ports. With FFmpeg
 development libraries available at build time, the Qt widget decodes the H.265 stream into its
 preview surface. That surface is also the interaction target for click, drag, scroll, keyboard focus,

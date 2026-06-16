@@ -1,0 +1,10 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<RCC>
+    <qresource prefix="/icons/oxrsys-simulator">
+        <file alias="icon-16.png">../../Apple/oxrsys-simulator/OXRSys Simulator/Assets.xcassets/AppIcon.appiconset/icon-16.png</file>
+        <file alias="icon-32.png">../../Apple/oxrsys-simulator/OXRSys Simulator/Assets.xcassets/AppIcon.appiconset/icon-32.png</file>
+        <file alias="icon-128.png">../../Apple/oxrsys-simulator/OXRSys Simulator/Assets.xcassets/AppIcon.appiconset/icon-128.png</file>
+        <file alias="icon-256.png">../../Apple/oxrsys-simulator/OXRSys Simulator/Assets.xcassets/AppIcon.appiconset/icon-256.png</file>
+        <file alias="icon-512.png">../../Apple/oxrsys-simulator/OXRSys Simulator/Assets.xcassets/AppIcon.appiconset/icon-512.png</file>
+    </qresource>
+</RCC>

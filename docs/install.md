@@ -18,9 +18,10 @@ installed elsewhere, both Home apps can store a custom ADB executable path from 
 panel. The SwiftUI Home and Qt Home preferences are intentionally separate; clear the custom path to
 return to automatic SDK/Homebrew/PATH detection.
 
-Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper checks Homebrew,
-MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as
-`~/Qt/6.10.2/macos`.
+Qt frontends need Qt 6 Core, Widgets, and Network. The build helper checks `QTDIR`, `Qt6_DIR`, and
+Qt Online Installer layouts such as `~/Qt/<version>/<kit>` on macOS/Linux and
+`C:\Qt\<version>\<kit>` on Windows. You can also set `CMAKE_PREFIX_PATH` to the kit root, such as
+`C:\Qt\6.11.1\msvc2022_64`, or `Qt6_DIR` to its `lib\cmake\Qt6` directory.
 
 For the Swift/Xcode applications and Swift package Metal shaders, install the full Xcode app, not only the Command Line Tools. Finish first-launch setup after installing or updating Xcode:
 
@@ -53,25 +54,43 @@ sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config \
 On Fedora systems that only use Fedora's free FFmpeg package set, use
 `ffmpeg-free-devel` instead of `ffmpeg-devel`.
 
-Windows runtime and Qt frontend builds need:
+Windows runtime builds need:
 
 - Visual Studio Build Tools or a Visual Studio installation with the Windows SDK
 - CMake and Ninja
-- Vulkan SDK headers for the Vulkan OpenXR path
+- Vulkan SDK headers for the Vulkan OpenXR path, unless the CMake FetchContent fallback is used
 - Windows SDK Direct3D headers and libraries for the D3D11/D3D12 OpenXR paths
-- FFmpeg development headers and import libraries for `avcodec`, `avutil`, and `swscale`
-- Qt 6 Core, Widgets, and Network
+- FFmpeg development headers and import libraries for `avcodec`, `avutil`, and `swscale`, or vcpkg through the Windows configure helper
 - Android Platform Tools if you use Quest USB ADB transport setup
 
-Set `FFMPEG_ROOT` to the FFmpeg development package root:
+Qt frontend builds additionally need Qt 6 Core, Widgets, and Network.
+
+The easiest Windows path is the repository helper, which locates CMake, Ninja, Visual Studio, and
+vcpkg. When `-FFmpegRoot` is omitted, vcpkg manifest mode builds the required FFmpeg libraries with
+static library linkage and dynamic MSVC CRT linkage (`x64-windows-static-md` or
+`arm64-windows-static-md`). The helper defaults Qt frontends to `AUTO`, so a runtime-only Windows
+configure does not require Qt. Use the matching build helper so MSVC and Windows SDK library paths
+are active during link:
 
 ```powershell
-cmake --preset windows-x64 -DFFMPEG_ROOT=C:\dev\ffmpeg
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 -Architecture x64
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1 -Architecture x64
 ```
 
-`FFMPEG_ROOT` must contain `include\libavcodec\avcodec.h` and import libraries under `lib\`.
-At runtime, the matching FFmpeg DLLs must also be on `PATH` or copied next to the executable/DLLs.
-Use FFmpeg, Vulkan SDK, and Qt packages that match the selected Windows target architecture
+To use a local FFmpeg development package instead, set `FFMPEG_ROOT` or pass `-FFmpegRoot`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 `
+  -Architecture x64 `
+  -FFmpegRoot C:\dev\ffmpeg
+```
+
+When used, `FFMPEG_ROOT` must contain `include\libavcodec\avcodec.h` and import libraries under `lib\`.
+At runtime, local dynamic FFmpeg packages still need their matching FFmpeg DLLs on `PATH` or copied
+next to the executable/DLLs. To force dynamic vcpkg FFmpeg instead of the static default, pass
+`-DynamicFFmpeg` to `scripts/windows_configure.ps1`.
+Pass `-QtFrontends ON` after installing Qt 6 to build Qt Home and the Qt simulator. Use FFmpeg and
+Qt packages that match the selected Windows target architecture
 (`windows-x64` or `windows-arm64`). The ARM64 preset should be run from an ARM64 Visual Studio
 developer environment, or from an IDE that activates the preset architecture.
 Qt Home can also store a custom `adb.exe` path from the Quest USB ADB panel if Platform Tools are

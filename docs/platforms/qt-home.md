@@ -19,7 +19,8 @@ Current responsibilities:
 - show runtime activity and streaming stats from `runtime_status.json`
 - install and register the user OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
 - install the Windows runtime under `%LOCALAPPDATA%\OXRSys\runtime\current`, launch apps with
-  `XR_RUNTIME_JSON`, and optionally register `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC
+  `XR_RUNTIME_JSON`, copy required runtime companion DLLs, and optionally register
+  `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC
 - launch apps with either the installed runtime manifest or the manually selected manifest
 - open the shared Qt simulator widget from the Developer tab in a reusable `1280x720` window,
   including H.265 video preview when FFmpeg is available and mouse-driven synthetic head tracking
@@ -35,6 +36,11 @@ ctest --test-dir build --output-on-failure
 On Linux, `OXRSYS_BUILD_QT_FRONTENDS=AUTO` enables the Qt apps when Qt6 Core/Widgets/Network are found.
 On macOS, the Qt finder also checks Qt Online Installer prefixes under `~/Qt/<version>/<kit>`,
 for example `~/Qt/6.10.2/macos`, in addition to Homebrew, MacPorts, `QTDIR`, and `Qt6_DIR`.
+On Windows, `scripts/windows_configure.ps1` defaults Qt frontends to `AUTO`, which keeps runtime
+builds working without Qt installed; pass `-QtFrontends ON` after installing Qt 6 to build Qt Home
+and the Qt simulator. Qt Online Installer kits under `C:\Qt\<version>\<kit>` are detected
+automatically; otherwise set `CMAKE_PREFIX_PATH` to the kit root or `Qt6_DIR` to
+`<kit>\lib\cmake\Qt6`.
 
 The simulator shared target also has internal tests for UDP frame assembly, FEC recovery, partial
 frame drops, ignored render-pose packets, tracking flags, and shift-modified controller movement.
@@ -57,7 +63,11 @@ status `max_bitrate_mbps` follows the server config when the simulator connects.
 
 Transport readiness work is asynchronous. Qt Home shows checking/configuring status while the
 worker is running, ignores stale results after ADB path, selected serial, or transport changes, and
-keeps the previous main transport selection if USB validation fails.
+keeps the previous main transport selection if USB validation fails. After a successful Quest USB
+reverse configuration, Qt Home keeps that verified serial and port set if a later ADB poll can no
+longer see the headset, which can happen on some Windows/Quest setups when the VR app enters
+immersive mode. ADB must still see the device again before Home can prove that mappings changed or
+apply a fresh reverse setup.
 
 Platform behavior:
 
@@ -73,15 +83,30 @@ Platform behavior:
 
 Windows notes:
 
-- Build with `-DFFMPEG_ROOT=<path>` when FFmpeg is not discoverable through pkg-config. The runtime
-  requires FFmpeg headers/import libraries; the Qt simulator uses the same root opportunistically.
+- Build with `scripts/windows_configure.ps1` to let vcpkg install FFmpeg automatically, or pass
+  `-FFmpegRoot <path>` when using a local FFmpeg development package. Vcpkg builds use static
+  FFmpeg library linkage by default (`x64-windows-static-md` or `arm64-windows-static-md`) so the
+  runtime DLL does not require FFmpeg companion DLLs. Pass `-DynamicFFmpeg` only when dynamic vcpkg
+  FFmpeg DLLs are desired. The runtime requires FFmpeg headers/import libraries; the Qt simulator
+  uses the same root opportunistically.
   For `windows-arm64`, use ARM64 FFmpeg and Qt packages and run from an ARM64-capable Visual Studio
   developer environment or matching IDE preset activation.
+- `scripts/windows_configure.ps1` can locate Visual Studio CMake/Ninja/MSVC/vcpkg tools and configure
+  the Windows build when the current shell has not picked up fresh `PATH` changes.
+- Windows builds run `windeployqt` after linking `oxrsys-home.exe` and `oxrsys-simulator.exe` so
+  the required Qt DLLs and plugins are copied into the executable directories.
+- `oxrsys-home.exe` and `oxrsys-simulator.exe` embed icons generated from the corresponding Xcode
+  app icon assets. They are built as GUI-subsystem apps, so launching Qt Home from Explorer does not
+  open a console window.
 - Global registration is machine-wide HKLM state. Qt Home uses `ShellExecuteEx(..., "runas")` for
   register/unregister and waits for the elevated helper to finish before refreshing the status.
 - Windows runtime launches can use Vulkan, D3D11, or D3D12 OpenXR applications. Video streaming is
   currently limited to common RGBA/BGRA 8-bit Vulkan or DXGI color swapchain formats; unsupported
   formats are logged and dropped without changing the OpenXR wire protocol.
+- Qt Home's Windows install action copies `oxrsys-runtime.dll`, `oxrsys-runtime.toml`, and any
+  sibling runtime DLLs into `%LOCALAPPDATA%\OXRSys\runtime\current`. Static FFmpeg builds normally
+  have no FFmpeg companion DLLs; dynamic builds still report an update when any bundled companion
+  DLL is missing or differs from the installed copy.
 
 If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
 

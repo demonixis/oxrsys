@@ -25,8 +25,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 add_executable(oxrsys-simulator
+    ../assets/oxrsys-simulator-icons.qrc
     src/main.cpp
 )
+
+if(WIN32)
+    target_sources(oxrsys-simulator PRIVATE
+        ../assets/oxrsys-simulator.rc
+    )
+endif()
 
 target_include_directories(oxrsys-simulator PRIVATE
     src
@@ -35,3 +42,8 @@ target_include_directories(oxrsys-simulator PRIVATE
 target_link_libraries(oxrsys-simulator PRIVATE
     oxrsys-simulator-shared
 )
+
+if(WIN32)
+    oxrsys_configure_qt_gui_executable(oxrsys-simulator)
+    oxrsys_deploy_qt_runtime(oxrsys-simulator)
+endif()

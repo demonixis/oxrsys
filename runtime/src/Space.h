@@ -59,6 +59,7 @@ public:
         return action_;
     }
 
+    XrPosef ResolveWorldPose() const;
     XrResult LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location);
 
 private:

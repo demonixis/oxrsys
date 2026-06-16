@@ -9,6 +9,7 @@
 #include <QDebug>
 #include <QSet>
 
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -216,6 +217,10 @@ void testTrackingFlagsAndMovementTargets()
     expect((packet.trackingFlags & oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0,
            "Expected right controller active flag");
     expect(packet.timestampNs == 42, "Expected caller-provided monotonic timestamp");
+    expect(packet.ipd > 0.0f, "Expected simulator IPD");
+    expect(packet.eyeFov[0] < 0.0f && packet.eyeFov[1] > 0.0f &&
+           packet.eyeFov[2] > 0.0f && packet.eyeFov[3] < 0.0f,
+           "Expected simulator FOV");
 }
 
 } // namespace
@@ -234,6 +239,7 @@ int main()
     }
     catch (const std::exception& error)
     {
+        std::fprintf(stderr, "Simulator shared tests failed: %s\n", error.what());
         qWarning("Simulator shared tests failed: %s", error.what());
         return 1;
     }

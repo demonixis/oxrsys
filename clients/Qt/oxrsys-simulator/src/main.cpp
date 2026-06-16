@@ -3,10 +3,12 @@
 #include "SimulatorWidget.h"
 
 #include <QApplication>
+#include <QIcon>
 
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
+    app.setWindowIcon(QIcon(":/icons/oxrsys-simulator/icon-256.png"));
 
     SimulatorWidget widget;
     widget.setWindowTitle("OXRSys Simulator");

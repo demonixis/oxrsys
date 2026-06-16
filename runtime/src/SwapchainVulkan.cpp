@@ -91,6 +91,12 @@ static bool IsD3DDepthFormat(DXGI_FORMAT format)
            format == DXGI_FORMAT_D32_FLOAT ||
            format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 }
+
+static D3D12_RESOURCE_STATES InitialD3D12ResourceState(bool isDepth)
+{
+    return isDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                   : D3D12_RESOURCE_STATE_RENDER_TARGET;
+}
 #endif
 
 static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
@@ -453,7 +459,7 @@ void Swapchain::InitD3D12(const D3D12GraphicsContext* d3d12Context,
             &heapProps,
             D3D12_HEAP_FLAG_NONE,
             &desc,
-            D3D12_RESOURCE_STATE_COMMON,
+            InitialD3D12ResourceState(isDepth),
             isDepth ? &clearValue : nullptr,
             __uuidof(ID3D12Resource),
             reinterpret_cast<void**>(&resource));
@@ -593,23 +599,46 @@ XrResult Swapchain::AcquireImage(const XrSwapchainImageAcquireInfo* acquireInfo,
 
     if (staticImageAcquired_ || acquiredImageOrder_.size() >= imageCount_)
     {
+        spdlog::warn("OXRSys: xrAcquireSwapchainImage rejected (staticAcquired={}, acquired={}, images={})",
+                     staticImageAcquired_,
+                     acquiredImageOrder_.size(),
+                     imageCount_);
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
     uint32_t acquiredIndex = imageCount_;
+    uint32_t retainedFallbackIndex = imageCount_;
     for (uint32_t i = 0; i < imageCount_; ++i)
     {
         uint32_t candidateIndex = (nextAcquireIndex_ + i) % imageCount_;
-        if (imageStates_[candidateIndex] == ImageState::Available &&
-            (candidateIndex >= imageRetainCounts_.size() || imageRetainCounts_[candidateIndex] == 0))
+        if (imageStates_[candidateIndex] != ImageState::Available)
+        {
+            continue;
+        }
+        if (candidateIndex >= imageRetainCounts_.size() || imageRetainCounts_[candidateIndex] == 0)
         {
             acquiredIndex = candidateIndex;
             break;
         }
+        if (retainedFallbackIndex == imageCount_)
+        {
+            retainedFallbackIndex = candidateIndex;
+        }
+    }
+
+    if (acquiredIndex == imageCount_ && retainedFallbackIndex != imageCount_)
+    {
+        acquiredIndex = retainedFallbackIndex;
+        spdlog::warn("OXRSys: reusing swapchain image {} while streaming still holds {} reference(s)",
+                     acquiredIndex,
+                     imageRetainCounts_[acquiredIndex]);
     }
 
     if (acquiredIndex == imageCount_)
     {
+        spdlog::warn("OXRSys: xrAcquireSwapchainImage rejected (no available image, acquired={}, images={})",
+                     acquiredImageOrder_.size(),
+                     imageCount_);
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
@@ -634,12 +663,17 @@ XrResult Swapchain::WaitImage(const XrSwapchainImageWaitInfo* waitInfo)
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    uint32_t waitIndex = acquiredImageOrder_.front();
-    if (imageStates_[waitIndex] != ImageState::Acquired)
+    auto waitIt = std::find_if(acquiredImageOrder_.begin(), acquiredImageOrder_.end(),
+                               [this](uint32_t imageIndex) {
+                                   return imageIndex < imageStates_.size() &&
+                                          imageStates_[imageIndex] == ImageState::Acquired;
+                               });
+    if (waitIt == acquiredImageOrder_.end())
     {
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
+    uint32_t waitIndex = *waitIt;
     imageStates_[waitIndex] = ImageState::Waited;
     return XR_SUCCESS;
 }

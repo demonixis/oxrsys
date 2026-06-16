@@ -27,10 +27,34 @@ bool Contains(const std::string& text, const std::string& needle)
     return text.find(needle) != std::string::npos;
 }
 
+void SetEnvironmentForTest(const char* name, const std::string& value)
+{
+#if defined(_WIN32)
+    REQUIRE(_putenv_s(name, value.c_str()) == 0);
+#else
+    REQUIRE(setenv(name, value.c_str(), 1) == 0);
+#endif
+}
+
+void ConfigureRuntimeStatusEnvironment(const std::filesystem::path& home)
+{
+#if defined(_WIN32)
+    SetEnvironmentForTest("APPDATA", (home / "Roaming").string());
+    SetEnvironmentForTest("LOCALAPPDATA", (home / "Local").string());
+    SetEnvironmentForTest("USERPROFILE", home.string());
+#else
+    SetEnvironmentForTest("HOME", home.string());
+    SetEnvironmentForTest("XDG_CONFIG_HOME", "");
+    SetEnvironmentForTest("XDG_STATE_HOME", "");
+#endif
+}
+
 std::filesystem::path RuntimeStatusPathForHome(const std::filesystem::path& home)
 {
 #if defined(__APPLE__)
     return home / "Library/Application Support/OXRSys/runtime_status.json";
+#elif defined(_WIN32)
+    return home / "Local/OXRSys/runtime_status.json";
 #else
     return home / ".local/state/oxrsys/runtime_status.json";
 #endif
@@ -46,7 +70,7 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
         ("openxr-runtime-status-test-" + std::to_string(suffix));
     std::filesystem::create_directories(home);
 
-    setenv("HOME", home.string().c_str(), 1);
+    ConfigureRuntimeStatusEnvironment(home);
 
     RuntimeStatus::SetApplicationName("Status Test");
     RuntimeStatus::SetStreaming("usb_adb", "Quest 3");

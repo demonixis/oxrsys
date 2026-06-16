@@ -25,6 +25,11 @@ struct TransportReadiness
     QString message;
 };
 
+TransportReadiness questUsbTransportReadiness(const AdbStatus& adbStatus,
+                                              const QList<AdbDevice>& devices,
+                                              const QString& selectedSerial,
+                                              const QSet<int>& reversePorts);
+
 class HomeModel final : public QObject
 {
     Q_OBJECT
@@ -34,6 +39,11 @@ public:
                        const QString& settingsOrganization = "OXRSys",
                        const QString& settingsApplication = "HomeQt",
                        HomePaths paths = homePaths());
+    HomeModel(QObject* parent,
+              const QString& settingsOrganization,
+              const QString& settingsApplication,
+              HomePaths paths,
+              bool enableTransportChecks);
     ~HomeModel() override;
 
     const HomePaths& paths() const;
@@ -101,6 +111,7 @@ signals:
     void errorOccurred(const QString& message);
 
 private:
+    void loadAll(bool refreshTransport);
     void loadConfigFromDisk();
     void appendLog(const QString& appId, const QString& text);
     void finishLaunchedApp(const QString& appId, int exitCode);
@@ -120,6 +131,7 @@ private:
     QTimer configSaveTimer_;
     QThread* transportWorkerThread_ = nullptr;
     QObject* transportWorker_ = nullptr;
+    bool transportChecksEnabled_ = true;
     QString runtimeManifestPath_;
     bool preferInstalledRuntimeForLaunches_ = false;
     ServerConfig serverConfig_;

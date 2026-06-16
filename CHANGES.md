@@ -11,6 +11,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added Qt simulator video preview with FFmpeg when available, tracking-only fallback when FFmpeg is unavailable, mouse-driven synthetic head tracking, frame-loss/FEC status, and keyframe recovery requests.
 - Added Linux Vulkan/FFmpeg runtime scaffolding, portable platform helpers, portable socket helpers, and platform-specific config/state directory support.
 - Added first-pass Windows layout and portability scaffolding while keeping the Windows runtime backend non-gating for this release.
+- Added Windows configure/build helpers that locate CMake, Ninja, and the Visual Studio MSVC environment before running Ninja configure/build steps, with Qt frontends left in `AUTO` mode by default.
+- Added a vcpkg manifest fallback for Windows FFmpeg development libraries so local `FFMPEG_ROOT` setup is optional when using the Windows configure helper.
+- Added Windows Qt runtime deployment through `windeployqt` for the Qt Home and Qt simulator executables.
+- Added Qt Home and Qt simulator app icons derived from the existing Xcode Home and Simulator app icon assets.
 - Added canonical shared protocol headers under `common/protocol/include/oxrsys/protocol/`.
 - Added centralized product versioning in `config/OXRSysVersion.xcconfig` for CMake, Xcode, and Android consumers.
 - Added macOS package and distribution helpers: `scripts/macos_build_package.sh` and `scripts/macos_sign_notarize.sh`.
@@ -31,9 +35,18 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated the Android VR client to request the build-configured display refresh rate, advertise the headset OpenXR system name, prefer USB ADB reverse TCP when available, and fall back to WiFi UDP discovery.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
 - Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
+- Updated Windows CMake dependency resolution so Vulkan headers can come from the Vulkan SDK or a FetchContent `Vulkan-Headers` fallback without linking the Vulkan loader.
+- Updated Windows FFmpeg dependency resolution to prefer `FFMPEG_ROOT` when provided and otherwise use vcpkg manifest installs, with static FFmpeg library linkage as the default for vcpkg Windows builds.
+- Updated Windows Qt Home and Qt simulator builds to use the GUI subsystem so opening the apps does not spawn a console window.
 
 ### Fixed
 
+- Fixed Windows Qt Home runtime installation so required runtime companion DLLs, including FFmpeg DLLs, are copied and included in update detection.
+- Fixed Windows FFmpeg HEVC encoder selection so static vcpkg builds prefer the Media Foundation encoder instead of accidentally opening the D3D12VA encoder with software frames.
+- Fixed Windows FFmpeg streaming to honor submitted OpenXR sub-image rectangles before stereo packing, preventing side-by-side swapchain atlases from being duplicated into both eyes.
+- Fixed reference-space tracking for Unreal-style floor-origin apps by advertising `XR_EXT_local_floor`, separating `LOCAL` from floor-level spaces, and returning `xrLocateViews` poses relative to the requested base space.
+- Fixed Qt Home USB readiness so a previously verified Quest ADB reverse setup is not cleared when `adb devices` temporarily stops reporting the headset after the VR app enters immersive mode.
+- Fixed swapchain wait ordering for pipelined render loops that acquire the next image before releasing the previous waited image.
 - Fixed Metal streaming frame snapshots so the async encoder reads a release-time staging texture instead of a swapchain slot that the app may already have reused.
 - Fixed controller pose handling so streaming packets only update controller poses when the corresponding controller-active flag is present.
 - Fixed hand tracking and hand-interaction coexistence so hand bindings remain available while controller bindings keep priority for shared actions.
@@ -43,16 +56,17 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
 - Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
+- Hardened D3D12 swapchain allocation so color and depth resources start in the states assumed by the streaming readback path.
 
 ### Documentation
 
 - Reworked platform documentation for build, install, architecture, protocol, Quest/PICO, macOS Home, Qt Home, simulator, visionOS, and testing/conformance workflows.
-- Documented current Linux, Windows-scaffold, macOS package, Unity, USB ADB, protocol, and CTS expectations.
+- Documented current Linux, Windows OpenXR, macOS package, Unity, USB ADB, protocol, and CTS expectations.
 
 ### Known Limits
 
 - Linux video streaming still needs real Vulkan image readback before it can be treated as feature-complete.
-- Windows remains layout and portability scaffolding only for this release.
+- Windows video streaming currently supports common RGBA/BGRA 8-bit Vulkan or DXGI color swapchains for video.
 - PICO and headset-specific controller/hand tracking behavior still needs regular hardware validation.
 
 ## 1.1.0 - 2026-05-26

@@ -106,7 +106,7 @@ Confirm:
 
 ## USB ADB Transport
 
-The USB path is optimized for sideloaded Quest development. The macOS Home can detect an authorized Quest through `adb devices -l`, clear stale reverse mappings, and apply:
+The USB path is optimized for sideloaded Quest development. Home can detect an authorized Quest through `adb devices -l`, clear stale reverse mappings, and apply:
 
 ```bash
 adb -s <serial> reverse tcp:9944 tcp:9944
@@ -115,6 +115,13 @@ adb -s <serial> reverse tcp:9946 tcp:9946
 ```
 
 With `streaming.transport = "auto"`, the Quest app connects to `127.0.0.1:9946` first. If the ADB reverse control channel answers, the client receives `ServerAnnounce`, opens TCP video and tracking channels, and sends `ClientConnect`. If USB is unavailable, it falls back to WiFi UDP discovery while continuing to retry USB periodically so launch order is not critical. When the runtime closes the USB control/video sockets or video stalls after an app exits, the Quest client resets connection state and returns to the same retry loop without requiring the Android app to be relaunched. With `streaming.transport = "usb_adb"`, the runtime disables WiFi discovery fallback.
+
+Some Quest/Windows combinations can temporarily stop reporting the headset through `adb devices`
+when the Android VR app enters immersive mode. The already-created ADB reverse mappings are still
+the intended USB transport path: configure reverse ports before launching the VR app, then let the
+headset client connect to the runtime's localhost listeners. Qt Home preserves a previously verified
+reverse setup while ADB visibility is temporarily unavailable and asks for reconfiguration only after
+ADB can inspect the device again or streaming fails after relaunch.
 
 The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIPE` where available, and a bounded send timeout. If a TCP video send fails or times out, the runtime disables the stale TCP video dispatch path so the encode callback can keep releasing frames and the Android client can reconnect through its existing retry loop.
 

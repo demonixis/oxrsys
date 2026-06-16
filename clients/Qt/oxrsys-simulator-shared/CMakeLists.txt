@@ -11,44 +11,22 @@ target_include_directories(oxrsys-simulator-shared PUBLIC
     ${OXRSYS_PROTOCOL_INCLUDE_DIR}
 )
 
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(QT_SIMULATOR_FFMPEG QUIET IMPORTED_TARGET
-        libavcodec
-        libavutil
-        libswscale
-    )
-endif()
-
-if(NOT QT_SIMULATOR_FFMPEG_FOUND AND WIN32)
-    set(FFMPEG_ROOT "" CACHE PATH "Root directory for FFmpeg headers and import libraries on Windows")
-    find_path(QT_SIMULATOR_FFMPEG_INCLUDE_DIR
-        NAMES libavcodec/avcodec.h
-        HINTS
-            "${FFMPEG_ROOT}/include"
-            "$ENV{FFMPEG_ROOT}/include"
-    )
-    find_library(QT_SIMULATOR_FFMPEG_AVCODEC_LIBRARY
-        NAMES avcodec
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    find_library(QT_SIMULATOR_FFMPEG_AVUTIL_LIBRARY
-        NAMES avutil
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    find_library(QT_SIMULATOR_FFMPEG_SWSCALE_LIBRARY
-        NAMES swscale
-        HINTS
-            "${FFMPEG_ROOT}/lib"
-            "$ENV{FFMPEG_ROOT}/lib"
-    )
-    if(QT_SIMULATOR_FFMPEG_INCLUDE_DIR AND QT_SIMULATOR_FFMPEG_AVCODEC_LIBRARY AND
-       QT_SIMULATOR_FFMPEG_AVUTIL_LIBRARY AND QT_SIMULATOR_FFMPEG_SWSCALE_LIBRARY)
+if(WIN32)
+    include(${CMAKE_SOURCE_DIR}/cmake/ResolveFFmpeg.cmake)
+    if(OXRSYS_FFMPEG_FOUND)
         set(QT_SIMULATOR_FFMPEG_FOUND TRUE)
+        set(QT_SIMULATOR_FFMPEG_INCLUDE_DIRS ${OXRSYS_FFMPEG_INCLUDE_DIRS})
+        set(QT_SIMULATOR_FFMPEG_LIBRARIES ${OXRSYS_FFMPEG_LIBRARIES})
+        set(QT_SIMULATOR_FFMPEG_LIBRARY_DIRS ${OXRSYS_FFMPEG_LIBRARY_DIRS})
+    endif()
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(QT_SIMULATOR_FFMPEG QUIET IMPORTED_TARGET
+            libavcodec
+            libavutil
+            libswscale
+        )
     endif()
 endif()
 
@@ -59,14 +37,17 @@ if(QT_SIMULATOR_FFMPEG_FOUND)
     target_link_libraries(oxrsys-simulator-shared PRIVATE
         $<$<TARGET_EXISTS:PkgConfig::QT_SIMULATOR_FFMPEG>:PkgConfig::QT_SIMULATOR_FFMPEG>
     )
-    if(WIN32 AND QT_SIMULATOR_FFMPEG_INCLUDE_DIR)
+    if(WIN32 AND QT_SIMULATOR_FFMPEG_INCLUDE_DIRS)
         target_include_directories(oxrsys-simulator-shared PRIVATE
-            ${QT_SIMULATOR_FFMPEG_INCLUDE_DIR}
+            ${QT_SIMULATOR_FFMPEG_INCLUDE_DIRS}
         )
+        if(QT_SIMULATOR_FFMPEG_LIBRARY_DIRS)
+            target_link_directories(oxrsys-simulator-shared PRIVATE
+                ${QT_SIMULATOR_FFMPEG_LIBRARY_DIRS}
+            )
+        endif()
         target_link_libraries(oxrsys-simulator-shared PRIVATE
-            ${QT_SIMULATOR_FFMPEG_AVCODEC_LIBRARY}
-            ${QT_SIMULATOR_FFMPEG_AVUTIL_LIBRARY}
-            ${QT_SIMULATOR_FFMPEG_SWSCALE_LIBRARY}
+            ${QT_SIMULATOR_FFMPEG_LIBRARIES}
         )
     endif()
 endif()
@@ -85,3 +66,7 @@ target_link_libraries(oxrsys-simulator-shared-tests PRIVATE
 )
 
 add_test(NAME oxrsys-simulator-shared-tests COMMAND oxrsys-simulator-shared-tests)
+oxrsys_configure_qt_test_environment(
+    oxrsys-simulator-shared-tests
+    ${OXRSYS_FFMPEG_BINARY_DIR}
+)

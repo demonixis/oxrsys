@@ -68,6 +68,29 @@ cmake --build build/windows-arm64
 ctest --test-dir build/windows-arm64 --output-on-failure
 ```
 
+If CMake or Ninja were installed after the current shell started, or if you want the repository to
+load the Visual Studio compiler environment for you, use the Windows configure helper. When
+`-FFmpegRoot` is omitted, the helper enables vcpkg manifest mode and installs the required FFmpeg
+development files automatically. The default vcpkg triplets are `x64-windows-static-md` and
+`arm64-windows-static-md`, so FFmpeg is linked into `oxrsys-runtime.dll` without shipping FFmpeg
+DLLs while the MSVC CRT stays dynamically linked:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 `
+  -Architecture x64
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1 `
+  -Architecture x64
+ctest --test-dir build/windows-x64 --output-on-failure
+```
+
+The helper uses `OXRSYS_BUILD_QT_FRONTENDS=AUTO` by default, which keeps Windows runtime builds
+usable without Qt installed. Pass `-QtFrontends ON` after installing Qt 6 to build Qt Home and the
+Qt simulator on Windows. Qt installed with the Qt Online Installer under `C:\Qt\<version>\<kit>` is
+detected automatically; otherwise set `CMAKE_PREFIX_PATH` to the Qt kit root or `Qt6_DIR` to
+`<kit>\lib\cmake\Qt6`.
+Pass `-DynamicFFmpeg` to the configure helper only when you intentionally want the older dynamic
+vcpkg FFmpeg triplets (`x64-windows` or `arm64-windows`) and companion FFmpeg DLLs.
+
 Key outputs in the selected build directory. With the default build these are under `build/runtime`; with a preset they are under `build/<preset>/runtime`.
 
 - `build/runtime/liboxrsys-runtime.dylib`
@@ -75,11 +98,11 @@ Key outputs in the selected build directory. With the default build these are un
 - `build/runtime/oxrsys-runtime.dll` on Windows
 - `build/runtime/oxrsys-runtime.json`
 - `build/runtime/oxrsys-runtime.toml`
-- `compile_commands.json` symlinked at the project root for editor integration
+- `compile_commands.json` synced at the project root for editor integration
 
 All third-party C++ dependencies are fetched through CMake `FetchContent`.
 Linux additionally requires system/toolchain packages for Vulkan headers, FFmpeg development libraries, and pkg-config.
-Windows additionally requires the Windows SDK, Vulkan SDK headers, FFmpeg development headers/import libraries, and the platform `ws2_32`, `d3d11`, `d3d12`, and `dxgi` libraries. Set `FFMPEG_ROOT` to a directory containing `include/` and `lib/` for `avcodec`, `avutil`, and `swscale`, matching the selected architecture. The ARM64 preset expects an ARM64-capable Visual Studio developer environment or an IDE that honors the preset architecture. The Windows runtime advertises Vulkan, `XR_KHR_D3D11_enable`, and `XR_KHR_D3D12_enable`; D3D video streaming is currently limited to common RGBA/BGRA 8-bit DXGI color swapchains.
+Windows additionally requires the Windows SDK and the platform `ws2_32`, `d3d11`, `d3d12`, and `dxgi` libraries. Vulkan headers are discovered from the Vulkan SDK when present or fetched through `Vulkan-Headers` when no SDK is installed; the runtime still does not link the Vulkan loader. FFmpeg can be supplied with `FFMPEG_ROOT`, or installed automatically through static vcpkg manifest mode when using `scripts/windows_configure.ps1` without `-FFmpegRoot`. Qt 6 is only required when `OXRSYS_BUILD_QT_FRONTENDS=ON`. The ARM64 preset expects an ARM64-capable Visual Studio developer environment or an IDE that honors the preset architecture. The Windows runtime advertises Vulkan, `XR_KHR_D3D11_enable`, and `XR_KHR_D3D12_enable`; D3D video streaming is currently limited to common RGBA/BGRA 8-bit DXGI color swapchains.
 
 ## Versioning
 
@@ -114,7 +137,7 @@ For GUI applications such as Unity, Steam, or Godot launched outside a shell:
 
 The helper creates `~/.config/openxr/1/active_runtime.json` and installs a per-user LaunchAgent that restores `XR_RUNTIME_JSON` for GUI sessions.
 
-On Windows, Qt Home-launched apps use `XR_RUNTIME_JSON` and do not require admin. Global OpenXR registration is optional and writes `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC from Qt Home.
+On Windows, Qt Home-launched apps use `XR_RUNTIME_JSON` and do not require admin. Its install action copies the runtime DLL into `%LOCALAPPDATA%\OXRSys\runtime\current`; when a dynamic FFmpeg build produces sibling runtime DLLs, those companion DLLs are copied and tracked too. Global OpenXR registration is optional and writes `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime` through UAC from Qt Home.
 The Windows test lane includes `oxrsys_runtime_d3d_tests`, which uses WARP where available to cover D3D extension advertisement, graphics requirements, session creation, and D3D swapchain image enumeration.
 
 ### Native macOS Home App
@@ -257,6 +280,10 @@ the same shared simulator widget in a dedicated window. FFmpeg development libra
 when they are found at configure time, the Qt simulator decodes video into the preview surface,
 otherwise it stays in tracking-only preview mode with an explicit status message. See
 [qt-home.md](platforms/qt-home.md) for Linux and Windows registration/install behavior.
+On Windows, `windeployqt` runs after linking `oxrsys-home` and `oxrsys-simulator` to copy the
+required Qt DLLs and plugins next to each executable. The Qt app executables embed icons generated
+from the matching Xcode Home and Simulator app icon assets and use the Windows GUI subsystem, so
+launching Qt Home does not open a console window.
 
 ### Unity Editor And macOS Player Helpers
 

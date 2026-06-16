@@ -13,12 +13,16 @@ portable platform/socket helpers,
 controller and hand input paths, loader-backed
 runtime tests, `XR_EXT_conformance_automation`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils`
 are in place. Windows now supports Vulkan plus first-pass D3D11/D3D12 session, swapchain, and
-streaming readback paths, with Qt Home install/launch support and explicit HKLM OpenXR registration
-through UAC. The Android VR client now feeds
+streaming readback paths, with Qt Home install/launch support, explicit HKLM OpenXR registration
+through UAC, CMake Vulkan header fallback through `Vulkan-Headers`, vcpkg manifest fallback for
+Windows static FFmpeg development files, optional installed-runtime companion DLL copying, and a
+`scripts/windows_configure.ps1` helper for Visual Studio/Ninja configure environments. Qt Home and
+the Qt simulator reuse the Xcode app icon assets and open as GUI-subsystem apps on Windows. The Android VR client now feeds
 real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with explicit active flags,
 keeps hand-interaction bindings available alongside active controllers with controller-first priority,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
-compositor reprojection, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
+compositor reprojection, recenters incoming streaming poses around the first headset pose for each
+client session, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
 and can request a build-configured display refresh rate. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
@@ -50,7 +54,7 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is fully gr
 - **Always build and verify before declaring success** — run the macOS build + tests and/or Android build as appropriate before saying everything works
 - **Always update `README.md`, `AGENTS.md`, and the relevant files in `docs/` when making significant project changes**
 - Keep SwiftUI Home and Qt Home companion behavior in sync when changing shared Home workflows; only diverge for frontend-specific changes or when the user explicitly asks for a feature to be limited to one frontend.
-- Core C++ dependencies are fetched via CMake FetchContent; Qt, FFmpeg, Vulkan SDKs, and platform SDKs are system/toolchain dependencies.
+- Core C++ dependencies are fetched via CMake FetchContent; Qt, optional local FFmpeg packages, optional Vulkan SDKs, and platform SDKs are system/toolchain dependencies. Windows uses vcpkg manifest mode for static FFmpeg by default via `scripts/windows_configure.ps1`; pass `-DynamicFFmpeg` only when dynamic FFmpeg DLLs are desired.
 - Product versions are centralized in `config/OXRSysVersion.xcconfig`; do not hardcode
   marketing versions or build numbers in CMake, Xcode, Gradle, or native client code.
 - All source code and documentation must be in English
@@ -76,20 +80,26 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - The runtime does not link directly against Vulkan. Resolve Vulkan functions through the app-provided loader path; Vulkan v1 may fall back only to an already-loaded process `vkGetInstanceProcAddr` and must not call `LoadLibrary`/`dlopen` for the Vulkan loader.
 - `Session::EndFrame()` must stay non-blocking.
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
+- Streaming encoders must honor each projection view's submitted `XrSwapchainSubImage.imageRect`
+  before packing the side-by-side headset video frame.
 - Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
-- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming.
+- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming. Home must keep a previously verified reverse setup usable if a later ADB poll temporarily stops reporting the headset after the VR app enters immersive mode.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encode callback or `Session::EndFrame()`.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
 - Headset refresh rate is negotiated from the client.
 - The Quest Android client requests its preferred display refresh rate from the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value.
 - Latency reports feed bounded pose prediction.
+- Runtime-consumed streaming poses are relative to the first valid headset pose of each streaming
+  client session; do not apply absolute headset room-space poses directly to OpenXR app spaces.
 - Headset clients must match `VIDEO_FLAG_RENDER_POSE` metadata to the decoded frame before projection submission.
 - UDP FEC uses the existing 24-byte `VideoPacketHeader` padding to carry the final data packet size for each FEC group; clients must use it only when recovering the last packet in that group.
 - Quest hand tracking depends on the Android manifest permission `com.oculus.permission.HAND_TRACKING` and the optional `oculus.software.handtracking` feature.
 - Streaming controller poses are valid only when `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE` is present; missing controller flags must not overwrite the last valid runtime pose.
 - The action system is profile-aware and must not regress to hard-forcing `KHR simple_controller`.
 - `xrLocateSpacesKHR` is accepted as an alias of the OpenXR 1.1 `xrLocateSpaces` entry point.
-- Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+- Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`; `LOCAL` is
+  eye-level at the streaming origin while `LOCAL_FLOOR` and `STAGE` remain floor-level spaces, and
+  `xrLocateViews` must return eye poses relative to the app-requested base space.
 - Runtime configuration is loaded from the platform config directory:
   macOS `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`,
   Linux `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`,
@@ -178,14 +188,14 @@ cmake -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_BUILD_QT_FRONTENDS=
 cmake --build build-qt
 ctest --test-dir build-qt --output-on-failure
 
-# Windows host, with FFmpeg development files installed:
-cmake --preset windows-x64 -DFFMPEG_ROOT=C:\path\to\ffmpeg
-cmake --build build/windows-x64
+# Windows host, with vcpkg-managed FFmpeg through the helper:
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 -Architecture x64
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1 -Architecture x64
 ctest --test-dir build/windows-x64 --output-on-failure
 
-# Windows ARM64 host/toolchain, with ARM64 FFmpeg development files installed:
-cmake --preset windows-arm64 -DFFMPEG_ROOT=C:\path\to\ffmpeg-arm64
-cmake --build build/windows-arm64
+# Windows ARM64 host/toolchain, with vcpkg-managed FFmpeg through the helper:
+powershell -ExecutionPolicy Bypass -File scripts\windows_configure.ps1 -Architecture arm64
+powershell -ExecutionPolicy Bypass -File scripts\windows_build.ps1 -Architecture arm64
 ctest --test-dir build/windows-arm64 --output-on-failure
 ```
 
