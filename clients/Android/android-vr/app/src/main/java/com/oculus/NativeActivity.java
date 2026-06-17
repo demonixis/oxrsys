@@ -7,7 +7,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
@@ -41,14 +40,12 @@ public class NativeActivity extends android.app.NativeActivity
             {
                 handleUsbPermissionResult(intent);
             }
-            else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action) ||
-                     UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(action))
+            else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action))
             {
                 Log.i(TAG, "USB attach intent received: " + action);
                 probeUsbPermissionTargets(intent);
             }
-            else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action) ||
-                     UsbManager.ACTION_USB_ACCESSORY_DETACHED.equals(action))
+            else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action))
             {
                 Log.i(TAG, "USB detach intent received: " + action);
             }
@@ -114,8 +111,6 @@ public class NativeActivity extends android.app.NativeActivity
         IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-        filter.addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED);
-        filter.addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
         {
             registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -144,14 +139,6 @@ public class NativeActivity extends android.app.NativeActivity
             requestedPermission |= requestDevicePermissionIfNeeded(attachedDevice, "intent");
         }
 
-        UsbAccessory attachedAccessory = launchIntent != null
-            ? launchIntent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
-            : null;
-        if (attachedAccessory != null)
-        {
-            requestedPermission |= requestAccessoryPermissionIfNeeded(attachedAccessory, "intent");
-        }
-
         HashMap<String, UsbDevice> devices = usbManager.getDeviceList();
         if (devices != null)
         {
@@ -161,18 +148,9 @@ public class NativeActivity extends android.app.NativeActivity
             }
         }
 
-        UsbAccessory[] accessories = usbManager.getAccessoryList();
-        if (accessories != null)
-        {
-            for (UsbAccessory accessory : accessories)
-            {
-                requestedPermission |= requestAccessoryPermissionIfNeeded(accessory, "enumeration");
-            }
-        }
-
         if (!requestedPermission)
         {
-            Log.i(TAG, "No UsbManager device/accessory target needs permission. "
+            Log.i(TAG, "No UsbManager device target needs permission. "
                     + "ADB reverse USB streaming does not require an app USB permission dialog.");
         }
     }
@@ -194,40 +172,18 @@ public class NativeActivity extends android.app.NativeActivity
         return true;
     }
 
-    private boolean requestAccessoryPermissionIfNeeded(UsbAccessory accessory, String source)
-    {
-        Log.i(TAG, "USB accessory from " + source + ": manufacturer=" + accessory.getManufacturer()
-                + " model=" + accessory.getModel()
-                + " version=" + accessory.getVersion());
-        if (usbManager.hasPermission(accessory))
-        {
-            Log.i(TAG, "USB accessory permission already granted: " + accessory.getModel());
-            return false;
-        }
-
-        Log.i(TAG, "Requesting USB accessory permission: " + accessory.getModel());
-        usbManager.requestPermission(accessory, usbPermissionIntent);
-        return true;
-    }
-
     private void handleUsbPermissionResult(Intent intent)
     {
         boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
         UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-        UsbAccessory accessory = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY);
         if (device != null)
         {
             Log.i(TAG, "USB device permission result: granted=" + granted
                     + " name=" + device.getDeviceName());
         }
-        else if (accessory != null)
-        {
-            Log.i(TAG, "USB accessory permission result: granted=" + granted
-                    + " model=" + accessory.getModel());
-        }
         else
         {
-            Log.i(TAG, "USB permission result without device/accessory: granted=" + granted);
+            Log.i(TAG, "USB permission result without device: granted=" + granted);
         }
     }
 }

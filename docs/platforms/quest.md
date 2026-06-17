@@ -33,7 +33,7 @@ Quest hand tracking requires the Android manifest to declare:
 If these entries are missing, the runtime can still operate, but headset-side hand joints will not be available.
 PICO runtimes expose hand tracking through their OpenXR runtime support; validate this per headset with the log matrix below because Android manifest requirements differ from Meta's Quest permission model.
 
-USB diagnostics use Android's official `UsbManager` host/accessory intents and filters. The app requests app-level USB permission when Android exposes a real USB device or accessory to the headset. ADB reverse streaming itself does not require or produce that app permission dialog; it may instead trigger the headset's USB debugging authorization prompt when the Mac is first authorized for ADB.
+USB diagnostics use Android's official `UsbManager` host-device intents and filters. The app requests app-level USB permission only when Android exposes a real USB device to the headset. ADB reverse streaming itself does not require or produce that app permission dialog; it may instead trigger the headset's USB debugging authorization prompt when the Mac is first authorized for ADB.
 
 ## Preferred Display Refresh
 

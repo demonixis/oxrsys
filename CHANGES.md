@@ -28,7 +28,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated Apple and Qt simulator clients to avoid imposing their own bitrate cap.
 - Updated the streaming protocol to carry render-pose metadata per frame and to store the final FEC group packet payload size in the existing video header padding.
 - Updated Quest/PICO controller profile handling to stay profile-aware instead of falling back globally to `KHR simple_controller`.
-- Updated the Android VR client to request the build-configured display refresh rate, advertise the headset OpenXR system name, prefer USB ADB reverse TCP when available, and fall back to WiFi UDP discovery.
+- Reworked Android VR client transport handling to prefer USB ADB reverse TCP when available, fall back to WiFi UDP discovery, request the build-configured display refresh rate, and advertise the headset OpenXR system name.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
 - Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
 
