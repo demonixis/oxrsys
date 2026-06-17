@@ -2667,3 +2667,38 @@ TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime]
     CHECK(xrAcquireSwapchainImage(staticSwapchain, nullptr, &extraIndex) == XR_ERROR_CALL_ORDER_INVALID);
     XR_CHECK(xrDestroySwapchain(staticSwapchain));
 }
+
+TEST_CASE("CreateSwapchain rejects invalid shape and unsupported format", "[runtime][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    const int64_t supportedFormat = SelectColorSwapchainFormat(context.session);
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = supportedFormat;
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+
+    XrSwapchain swapchain = XR_NULL_HANDLE;
+    XrSwapchainCreateInfo invalidFormatInfo = createInfo;
+    invalidFormatInfo.format = -1;
+    CHECK(xrCreateSwapchain(context.session, &invalidFormatInfo, &swapchain) ==
+          XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    XrSwapchainCreateInfo invalidShapeInfo = createInfo;
+    invalidShapeInfo.width = 0;
+    CHECK(xrCreateSwapchain(context.session, &invalidShapeInfo, &swapchain) ==
+          XR_ERROR_VALIDATION_FAILURE);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    invalidShapeInfo = createInfo;
+    invalidShapeInfo.sampleCount = 2;
+    CHECK(xrCreateSwapchain(context.session, &invalidShapeInfo, &swapchain) ==
+          XR_ERROR_VALIDATION_FAILURE);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}

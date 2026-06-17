@@ -1228,8 +1228,10 @@ void MainWindow::refreshSettings()
     selectedRuntimeActiveLabel_->setText(selectedActive ? "Yes" : "No");
     setElidedText(launchTargetLabel_, model_->activeLaunchRuntimeManifestPath());
     registerRuntimeButton_->setText(registrationButtonTitle(*model_));
-    registerRuntimeButton_->setEnabled(supportsRuntimeGlobalRegistration());
-    unregisterRuntimeButton_->setEnabled(supportsRuntimeGlobalRegistration() &&
+    const bool canChangeRegistration =
+        supportsRuntimeGlobalRegistration() && !model_->runtimeOperationPending();
+    registerRuntimeButton_->setEnabled(canChangeRegistration);
+    unregisterRuntimeButton_->setEnabled(canChangeRegistration &&
                                          model_->runtimeRegistrationStatus().activeRuntimeExists);
 }
 

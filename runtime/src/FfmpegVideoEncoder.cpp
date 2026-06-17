@@ -613,102 +613,36 @@ bool ReadVulkanFrameSource(VulkanEncoderState& state,
                            const Swapchain::VulkanFrameSource& source,
                            std::vector<uint8_t>& output)
 {
+    (void)state;
     const auto format = AvPixelFormatForVulkanFormat(source.format);
-    if (!format.has_value() || source.image == VK_NULL_HANDLE ||
-        source.width == 0 || source.height == 0)
+    if (!format.has_value() || source.stagingBuffer == VK_NULL_HANDLE ||
+        source.stagingMemory == VK_NULL_HANDLE || source.mapMemory == nullptr ||
+        source.unmapMemory == nullptr || source.width == 0 || source.height == 0)
     {
         return false;
     }
 
     const size_t bytesPerPixel = 4;
     const size_t readbackSize = static_cast<size_t>(source.width) * source.height * bytesPerPixel;
-    if (!EnsureStagingBuffer(state, readbackSize))
+    if (source.stagingSize < readbackSize)
     {
         return false;
     }
 
-    state.resetFences(state.context.device, 1, &state.fence);
-    state.resetCommandPool(state.context.device, state.commandPool, 0);
-
-    VkCommandBufferBeginInfo beginInfo = {};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    if (state.beginCommandBuffer(state.commandBuffer, &beginInfo) != VK_SUCCESS)
-    {
-        return false;
-    }
-
-    VkImageMemoryBarrier toTransfer = {};
-    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toTransfer.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toTransfer.image = source.image;
-    toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    toTransfer.subresourceRange.baseMipLevel = 0;
-    toTransfer.subresourceRange.levelCount = 1;
-    toTransfer.subresourceRange.baseArrayLayer = source.arrayLayer;
-    toTransfer.subresourceRange.layerCount = 1;
-
-    state.cmdPipelineBarrier(
-        state.commandBuffer,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &toTransfer);
-
-    VkBufferImageCopy region = {};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = source.arrayLayer;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent = {source.width, source.height, 1};
-    state.cmdCopyImageToBuffer(state.commandBuffer, source.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               state.stagingBuffer, 1, &region);
-
-    VkImageMemoryBarrier backToColor = toTransfer;
-    backToColor.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    backToColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    backToColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    backToColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    state.cmdPipelineBarrier(
-        state.commandBuffer,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &backToColor);
-
-    if (state.endCommandBuffer(state.commandBuffer) != VK_SUCCESS)
-    {
-        return false;
-    }
-
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &state.commandBuffer;
-    if (state.queueSubmit(state.context.queue, 1, &submitInfo, state.fence) != VK_SUCCESS)
-    {
-        return false;
-    }
-    if (state.waitForFences(state.context.device, 1, &state.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+    if (source.fenceSubmitted && source.fence != VK_NULL_HANDLE && source.waitForFences != nullptr &&
+        source.waitForFences(source.context.device, 1, &source.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
     {
         return false;
     }
 
     void* mapped = nullptr;
-    if (state.mapMemory(state.context.device, state.stagingMemory, 0, readbackSize, 0, &mapped) != VK_SUCCESS)
+    if (source.mapMemory(source.context.device, source.stagingMemory, 0, readbackSize, 0, &mapped) != VK_SUCCESS)
     {
         return false;
     }
     output.resize(readbackSize);
     std::memcpy(output.data(), mapped, readbackSize);
-    state.unmapMemory(state.context.device, state.stagingMemory);
+    source.unmapMemory(source.context.device, source.stagingMemory);
     return true;
 }
 
@@ -717,33 +651,18 @@ bool ReadD3D11FrameSource(VulkanEncoderState& state,
                           const Swapchain::D3D11FrameSource& source,
                           std::vector<uint8_t>& output)
 {
+    (void)state;
     const auto format = AvPixelFormatForDxgiFormat(source.format);
-    if (!format.has_value() || source.texture == nullptr ||
-        state.d3d11Context.immediateContext == nullptr ||
+    if (!format.has_value() || source.stagingTexture == nullptr ||
+        source.immediateContext == nullptr ||
         source.width == 0 || source.height == 0)
     {
         return false;
     }
-    if (!EnsureD3D11StagingTexture(state, source))
-    {
-        return false;
-    }
-
-    const UINT sourceSubresource = D3D11CalcSubresource(
-        0, source.arrayLayer, 1);
-    state.d3d11Context.immediateContext->CopySubresourceRegion(
-        state.d3d11StagingTexture,
-        0,
-        0,
-        0,
-        0,
-        source.texture,
-        sourceSubresource,
-        nullptr);
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    HRESULT result = state.d3d11Context.immediateContext->Map(
-        state.d3d11StagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    HRESULT result = source.immediateContext->Map(
+        source.stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(result))
     {
         return false;
@@ -758,7 +677,7 @@ bool ReadD3D11FrameSource(VulkanEncoderState& state,
                     src + static_cast<size_t>(mapped.RowPitch) * y,
                     rowBytes);
     }
-    state.d3d11Context.immediateContext->Unmap(state.d3d11StagingTexture, 0);
+    source.immediateContext->Unmap(source.stagingTexture, 0);
     return true;
 }
 
@@ -766,104 +685,30 @@ bool ReadD3D12FrameSource(VulkanEncoderState& state,
                           const Swapchain::D3D12FrameSource& source,
                           std::vector<uint8_t>& output)
 {
+    (void)state;
     const auto format = AvPixelFormatForDxgiFormat(source.format);
-    if (!format.has_value() || source.texture == nullptr ||
-        state.d3d12Context.device == nullptr || state.d3d12Context.queue == nullptr ||
-        state.d3d12CommandAllocator == nullptr || state.d3d12CommandList == nullptr ||
-        state.d3d12Fence == nullptr || source.width == 0 || source.height == 0)
+    if (!format.has_value() || source.readbackBuffer == nullptr ||
+        source.fence == nullptr || source.width == 0 || source.height == 0 ||
+        source.totalBytes == 0)
     {
         return false;
     }
-
-    D3D12_RESOURCE_DESC textureDesc = source.texture->GetDesc();
-    if (source.arrayLayer >= textureDesc.DepthOrArraySize)
+    if (source.fenceSubmitted && source.fence->GetCompletedValue() < source.fenceValue)
     {
-        return false;
-    }
-    const UINT sourceSubresource = source.arrayLayer * textureDesc.MipLevels;
-
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-    UINT numRows = 0;
-    UINT64 rowSizeInBytes = 0;
-    UINT64 totalBytes = 0;
-    state.d3d12Context.device->GetCopyableFootprints(
-        &textureDesc,
-        sourceSubresource,
-        1,
-        0,
-        &footprint,
-        &numRows,
-        &rowSizeInBytes,
-        &totalBytes);
-    if (totalBytes == 0 || rowSizeInBytes < static_cast<UINT64>(source.width) * 4)
-    {
-        return false;
-    }
-    if (!EnsureD3D12ReadbackBuffer(state, static_cast<size_t>(totalBytes)))
-    {
-        return false;
-    }
-
-    if (FAILED(state.d3d12CommandAllocator->Reset()))
-    {
-        return false;
-    }
-    if (FAILED(state.d3d12CommandList->Reset(state.d3d12CommandAllocator, nullptr)))
-    {
-        return false;
-    }
-
-    D3D12_RESOURCE_BARRIER toCopy = {};
-    toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    toCopy.Transition.pResource = source.texture;
-    toCopy.Transition.Subresource = sourceSubresource;
-    toCopy.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    state.d3d12CommandList->ResourceBarrier(1, &toCopy);
-
-    D3D12_TEXTURE_COPY_LOCATION dst = {};
-    dst.pResource = state.d3d12ReadbackBuffer;
-    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dst.PlacedFootprint = footprint;
-
-    D3D12_TEXTURE_COPY_LOCATION src = {};
-    src.pResource = source.texture;
-    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    src.SubresourceIndex = sourceSubresource;
-    state.d3d12CommandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-    D3D12_RESOURCE_BARRIER backToRender = toCopy;
-    backToRender.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    backToRender.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    state.d3d12CommandList->ResourceBarrier(1, &backToRender);
-
-    if (FAILED(state.d3d12CommandList->Close()))
-    {
-        return false;
-    }
-    ID3D12CommandList* lists[] = {state.d3d12CommandList};
-    state.d3d12Context.queue->ExecuteCommandLists(1, lists);
-
-    const uint64_t fenceValue = ++state.d3d12FenceValue;
-    if (FAILED(state.d3d12Context.queue->Signal(state.d3d12Fence, fenceValue)))
-    {
-        return false;
-    }
-    if (state.d3d12Fence->GetCompletedValue() < fenceValue)
-    {
-        if (FAILED(state.d3d12Fence->SetEventOnCompletion(fenceValue, state.d3d12FenceEvent)))
+        if (source.fenceEvent == nullptr ||
+            FAILED(source.fence->SetEventOnCompletion(source.fenceValue, source.fenceEvent)))
         {
             return false;
         }
-        WaitForSingleObject(state.d3d12FenceEvent, INFINITE);
+        WaitForSingleObject(source.fenceEvent, INFINITE);
     }
 
     D3D12_RANGE readRange = {
-        static_cast<SIZE_T>(footprint.Offset),
-        static_cast<SIZE_T>(footprint.Offset + totalBytes),
+        static_cast<SIZE_T>(source.footprint.Offset),
+        static_cast<SIZE_T>(source.footprint.Offset + source.totalBytes),
     };
     void* mapped = nullptr;
-    if (FAILED(state.d3d12ReadbackBuffer->Map(0, &readRange, &mapped)))
+    if (FAILED(source.readbackBuffer->Map(0, &readRange, &mapped)))
     {
         return false;
     }
@@ -871,15 +716,15 @@ bool ReadD3D12FrameSource(VulkanEncoderState& state,
     const size_t rowBytes = static_cast<size_t>(source.width) * 4;
     output.resize(rowBytes * source.height);
     const auto* mappedBytes = static_cast<const uint8_t*>(mapped);
-    const auto* srcRows = mappedBytes + footprint.Offset;
+    const auto* srcRows = mappedBytes + source.footprint.Offset;
     for (uint32_t y = 0; y < source.height; ++y)
     {
         std::memcpy(output.data() + rowBytes * y,
-                    srcRows + static_cast<size_t>(footprint.Footprint.RowPitch) * y,
+                    srcRows + static_cast<size_t>(source.footprint.Footprint.RowPitch) * y,
                     rowBytes);
     }
     D3D12_RANGE writtenRange = {0, 0};
-    state.d3d12ReadbackBuffer->Unmap(0, &writtenRange);
+    source.readbackBuffer->Unmap(0, &writtenRange);
     return true;
 }
 #endif

@@ -182,6 +182,7 @@ QString quoteWindowsArgument(QString value)
 
 bool runElevatedWindowsCommand(const QStringList& arguments, QString* errorMessage)
 {
+    constexpr DWORD ElevatedCommandTimeoutMs = 120000;
     QStringList quoted;
     for (const QString& argument : arguments)
     {
@@ -205,7 +206,25 @@ bool runElevatedWindowsCommand(const QStringList& arguments, QString* errorMessa
         }
         return false;
     }
-    WaitForSingleObject(info.hProcess, INFINITE);
+    const DWORD waitResult = WaitForSingleObject(info.hProcess, ElevatedCommandTimeoutMs);
+    if (waitResult == WAIT_TIMEOUT)
+    {
+        CloseHandle(info.hProcess);
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Elevated Windows registration command timed out after 120 seconds.";
+        }
+        return false;
+    }
+    if (waitResult != WAIT_OBJECT_0)
+    {
+        CloseHandle(info.hProcess);
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Failed while waiting for the elevated Windows registration command.";
+        }
+        return false;
+    }
     DWORD exitCode = 1;
     GetExitCodeProcess(info.hProcess, &exitCode);
     CloseHandle(info.hProcess);

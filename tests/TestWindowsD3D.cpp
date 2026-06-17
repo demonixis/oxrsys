@@ -173,6 +173,38 @@ XrSwapchain CreateColorSwapchain(XrSession session, int64_t format)
     return swapchain;
 }
 
+void CheckInvalidSwapchainCreation(XrSession session, int64_t validFormat)
+{
+    XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = validFormat;
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+
+    XrSwapchain swapchain = XR_NULL_HANDLE;
+    XrSwapchainCreateInfo invalidFormatInfo = createInfo;
+    invalidFormatInfo.format = DXGI_FORMAT_UNKNOWN;
+    CHECK(xrCreateSwapchain(session, &invalidFormatInfo, &swapchain) ==
+          XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    XrSwapchainCreateInfo invalidShapeInfo = createInfo;
+    invalidShapeInfo.height = 0;
+    CHECK(xrCreateSwapchain(session, &invalidShapeInfo, &swapchain) ==
+          XR_ERROR_VALIDATION_FAILURE);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    invalidShapeInfo = createInfo;
+    invalidShapeInfo.mipCount = 2;
+    CHECK(xrCreateSwapchain(session, &invalidShapeInfo, &swapchain) ==
+          XR_ERROR_VALIDATION_FAILURE);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}
+
 void SubmitProjectionFrame(XrSession session, XrSwapchain swapchain)
 {
     XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
@@ -276,6 +308,7 @@ TEST_CASE("D3D11 session and swapchain images can be created")
 
     auto formats = EnumerateFormats(session);
     REQUIRE(std::find(formats.begin(), formats.end(), DXGI_FORMAT_R8G8B8A8_UNORM) != formats.end());
+    CheckInvalidSwapchainCreation(session, DXGI_FORMAT_R8G8B8A8_UNORM);
 
     XrSwapchain swapchain = CreateColorSwapchain(session, DXGI_FORMAT_R8G8B8A8_UNORM);
     uint32_t imageCount = 0;
@@ -327,6 +360,7 @@ TEST_CASE("D3D12 session and swapchain images can be created")
 
     auto formats = EnumerateFormats(session);
     REQUIRE(std::find(formats.begin(), formats.end(), DXGI_FORMAT_B8G8R8A8_UNORM) != formats.end());
+    CheckInvalidSwapchainCreation(session, DXGI_FORMAT_B8G8R8A8_UNORM);
 
     XrSwapchain swapchain = CreateColorSwapchain(session, DXGI_FORMAT_B8G8R8A8_UNORM);
     uint32_t imageCount = 0;

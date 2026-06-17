@@ -53,6 +53,81 @@ bool IsSupportedEnvironmentBlendMode(XrEnvironmentBlendMode blendMode)
     return blendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 }
 
+template <size_t N>
+bool ContainsFormat(const int64_t (&formats)[N], int64_t format)
+{
+    return std::find(std::begin(formats), std::end(formats), format) != std::end(formats);
+}
+
+bool IsSupportedSwapchainFormat(GraphicsApi api, int64_t format)
+{
+    static const int64_t metalFormats[] = {
+        81,  // MTLPixelFormatBGRA8Unorm_sRGB
+        80,  // MTLPixelFormatBGRA8Unorm
+        71,  // MTLPixelFormatRGBA8Unorm_sRGB
+        70,  // MTLPixelFormatRGBA8Unorm
+        252, // MTLPixelFormatDepth32Float
+        260, // MTLPixelFormatDepth32Float_Stencil8
+    };
+
+    if (api == GraphicsApi::Metal)
+    {
+        return ContainsFormat(metalFormats, format);
+    }
+
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    static const int64_t vulkanFormats[] = {
+        50,  // VK_FORMAT_B8G8R8A8_SRGB
+        44,  // VK_FORMAT_B8G8R8A8_UNORM
+        43,  // VK_FORMAT_R8G8B8A8_SRGB
+        37,  // VK_FORMAT_R8G8B8A8_UNORM
+        126, // VK_FORMAT_D32_SFLOAT
+        130, // VK_FORMAT_D32_SFLOAT_S8_UINT
+    };
+    if (api == GraphicsApi::Vulkan)
+    {
+        return ContainsFormat(vulkanFormats, format);
+    }
+#endif
+
+#if defined(_WIN32)
+    static const int64_t d3dFormats[] = {
+        DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT_D16_UNORM,
+        DXGI_FORMAT_D24_UNORM_S8_UINT,
+        DXGI_FORMAT_D32_FLOAT,
+        DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+    };
+    if (api == GraphicsApi::D3D11 || api == GraphicsApi::D3D12)
+    {
+        return ContainsFormat(d3dFormats, format);
+    }
+#endif
+
+    return false;
+}
+
+XrResult ValidateSwapchainCreateInfo(GraphicsApi api, const XrSwapchainCreateInfo& createInfo)
+{
+    if (createInfo.type != XR_TYPE_SWAPCHAIN_CREATE_INFO ||
+        createInfo.width == 0 || createInfo.height == 0 ||
+        createInfo.sampleCount != 1 ||
+        createInfo.faceCount != 1 ||
+        createInfo.mipCount != 1 ||
+        createInfo.arraySize == 0)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (!IsSupportedSwapchainFormat(api, createInfo.format))
+    {
+        return XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+    }
+    return XR_SUCCESS;
+}
+
 const char* GraphicsApiName(GraphicsApi api)
 {
     switch (api)
@@ -550,8 +625,12 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         return XR_ERROR_LAYER_INVALID;
     }
 
-    // Extract submitted eye sources for streaming. Missing streaming sources do
-    // not invalidate the OpenXR frame; they only skip this frame's video encode.
+    CheckStreamingConnection();
+    const bool captureStreamingFrame = streamingServer_ && streamingServer_->IsClientConnected();
+
+    // Extract submitted eye sources only when a headset client is ready for streaming.
+    // Missing streaming sources do not invalidate the OpenXR frame; they only skip
+    // this frame's video encode.
     FrameSource frameSource = {};
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
@@ -567,7 +646,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
                 XrResult result = ValidateProjectionLayer(
-                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), frameSource);
+                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer),
+                    frameSource,
+                    captureStreamingFrame);
                 if (result != XR_SUCCESS)
                 {
                     return result;
@@ -589,8 +670,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     }
 
     // Send to connected headset client if streaming
-    CheckStreamingConnection();
-    if (streamingServer_ && streamingServer_->IsClientConnected())
+    if (captureStreamingFrame && streamingServer_ && streamingServer_->IsClientConnected())
     {
         auto sendStart = Clock::now();
         streamingServer_->SendFrame(std::move(frameSource));
@@ -666,7 +746,8 @@ XrResult Session::ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage)
 }
 
 XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                          FrameSource& frameSource) const
+                                          FrameSource& frameSource,
+                                          bool captureFrameSource) const
 {
     auto* space = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(layer.space));
     if (space == nullptr || space->GetSession() != this)
@@ -696,20 +777,23 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
             return subImageResult;
         }
 
-        auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
-        FrameImageSource imageSource =
-            swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
-        imageSource.sourceX = static_cast<uint32_t>(view.subImage.imageRect.offset.x);
-        imageSource.sourceY = static_cast<uint32_t>(view.subImage.imageRect.offset.y);
-        imageSource.sourceWidth = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
-        imageSource.sourceHeight = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
-        if (viewIndex == 0)
+        if (captureFrameSource)
         {
-            frameSource.left = std::move(imageSource);
-        }
-        else
-        {
-            frameSource.right = std::move(imageSource);
+            auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
+            FrameImageSource imageSource =
+                swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
+            imageSource.sourceX = static_cast<uint32_t>(view.subImage.imageRect.offset.x);
+            imageSource.sourceY = static_cast<uint32_t>(view.subImage.imageRect.offset.y);
+            imageSource.sourceWidth = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
+            imageSource.sourceHeight = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
+            if (viewIndex == 0)
+            {
+                frameSource.left = std::move(imageSource);
+            }
+            else
+            {
+                frameSource.right = std::move(imageSource);
+            }
         }
     }
 
@@ -852,8 +936,21 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    *swapchain = XR_NULL_HANDLE;
+
+    XrResult validationResult = ValidateSwapchainCreateInfo(graphicsContext_.api, *createInfo);
+    if (validationResult != XR_SUCCESS)
+    {
+        return validationResult;
+    }
 
     auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
+    XrResult initializationResult = sc->InitializationResult();
+    if (initializationResult != XR_SUCCESS)
+    {
+        return initializationResult;
+    }
+
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
     return XR_SUCCESS;

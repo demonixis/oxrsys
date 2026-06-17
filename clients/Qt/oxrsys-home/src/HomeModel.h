@@ -71,6 +71,7 @@ public:
     TransportReadiness mainTransportReadiness() const;
     bool developerModeEnabled() const;
     bool preferInstalledRuntimeForLaunches() const;
+    bool runtimeOperationPending() const;
     bool isAppRunning(const LauncherApp& app) const;
 
 public slots:
@@ -163,6 +164,7 @@ private:
     int latestUsbConfigureRequestId_ = 0;
     bool transportRefreshPending_ = false;
     bool usbConfigurePending_ = false;
+    bool runtimeOperationPending_ = false;
     QString pendingMainTransportSelection_;
     QString statusMessage_;
 };

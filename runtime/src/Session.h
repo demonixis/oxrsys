@@ -115,7 +115,8 @@ private:
     bool OwnsSwapchain(const Swapchain* swapchain) const;
     XrResult ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage) const;
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
-                                     FrameSource& frameSource) const;
+                                     FrameSource& frameSource,
+                                     bool captureFrameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
 
     uint64_t handle_ = 0;

@@ -16,7 +16,7 @@
 
 #include <algorithm>
 #include <mutex>
-#include <unordered_set>
+#include <thread>
 
 struct VkDeviceFuncs
 {
@@ -26,18 +26,54 @@ struct VkDeviceFuncs
     PFN_vkAllocateMemory allocateMemory = nullptr;
     PFN_vkFreeMemory freeMemory = nullptr;
     PFN_vkBindImageMemory bindImageMemory = nullptr;
+    PFN_vkCreateBuffer createBuffer = nullptr;
+    PFN_vkDestroyBuffer destroyBuffer = nullptr;
+    PFN_vkGetBufferMemoryRequirements getBufferMemoryRequirements = nullptr;
+    PFN_vkBindBufferMemory bindBufferMemory = nullptr;
+    PFN_vkCreateCommandPool createCommandPool = nullptr;
+    PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
+    PFN_vkAllocateCommandBuffers allocateCommandBuffers = nullptr;
+    PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+    PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+    PFN_vkCmdCopyImageToBuffer cmdCopyImageToBuffer = nullptr;
+    PFN_vkQueueSubmit queueSubmit = nullptr;
+    PFN_vkCreateFence createFence = nullptr;
+    PFN_vkDestroyFence destroyFence = nullptr;
+    PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkGetFenceStatus getFenceStatus = nullptr;
+    PFN_vkMapMemory mapMemory = nullptr;
+    PFN_vkUnmapMemory unmapMemory = nullptr;
+    PFN_vkInvalidateMappedMemoryRanges invalidateMappedMemoryRanges = nullptr;
 };
 
 static VkDeviceFuncs gDeviceFuncs;
 static VkDevice gLastLoadedDevice = VK_NULL_HANDLE;
-static std::mutex gVulkanFrameSourceMutex;
-static std::unordered_set<Swapchain::VulkanFrameSource*> gVulkanFrameSources;
-#if defined(_WIN32)
-static std::mutex gD3D11FrameSourceMutex;
-static std::mutex gD3D12FrameSourceMutex;
-static std::unordered_set<Swapchain::D3D11FrameSource*> gD3D11FrameSources;
-static std::unordered_set<Swapchain::D3D12FrameSource*> gD3D12FrameSources;
+static constexpr uint32_t kBackendSnapshotCount = Swapchain::SwapchainImageCount * 2 + 2;
 
+static std::shared_ptr<void> TryAcquireBackendSnapshotLease(
+    const std::shared_ptr<SwapchainSnapshotPoolState>& pool)
+{
+    if (!pool)
+    {
+        return {};
+    }
+
+    uint32_t current = pool->inUse.load(std::memory_order_acquire);
+    while (current < kBackendSnapshotCount)
+    {
+        if (pool->inUse.compare_exchange_weak(
+                current, current + 1, std::memory_order_acq_rel, std::memory_order_acquire))
+        {
+            return std::shared_ptr<void>(pool.get(), [pool](void*) {
+                pool->inUse.fetch_sub(1, std::memory_order_acq_rel);
+            });
+        }
+    }
+    return {};
+}
+
+#if defined(_WIN32)
 static std::string HResultString(HRESULT result)
 {
     std::ostringstream stream;
@@ -72,6 +108,28 @@ static void LoadDeviceFunctions(VkDevice device)
     gDeviceFuncs.allocateMemory = reinterpret_cast<PFN_vkAllocateMemory>(get("vkAllocateMemory"));
     gDeviceFuncs.freeMemory = reinterpret_cast<PFN_vkFreeMemory>(get("vkFreeMemory"));
     gDeviceFuncs.bindImageMemory = reinterpret_cast<PFN_vkBindImageMemory>(get("vkBindImageMemory"));
+    gDeviceFuncs.createBuffer = reinterpret_cast<PFN_vkCreateBuffer>(get("vkCreateBuffer"));
+    gDeviceFuncs.destroyBuffer = reinterpret_cast<PFN_vkDestroyBuffer>(get("vkDestroyBuffer"));
+    gDeviceFuncs.getBufferMemoryRequirements =
+        reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(get("vkGetBufferMemoryRequirements"));
+    gDeviceFuncs.bindBufferMemory = reinterpret_cast<PFN_vkBindBufferMemory>(get("vkBindBufferMemory"));
+    gDeviceFuncs.createCommandPool = reinterpret_cast<PFN_vkCreateCommandPool>(get("vkCreateCommandPool"));
+    gDeviceFuncs.destroyCommandPool = reinterpret_cast<PFN_vkDestroyCommandPool>(get("vkDestroyCommandPool"));
+    gDeviceFuncs.allocateCommandBuffers =
+        reinterpret_cast<PFN_vkAllocateCommandBuffers>(get("vkAllocateCommandBuffers"));
+    gDeviceFuncs.beginCommandBuffer = reinterpret_cast<PFN_vkBeginCommandBuffer>(get("vkBeginCommandBuffer"));
+    gDeviceFuncs.endCommandBuffer = reinterpret_cast<PFN_vkEndCommandBuffer>(get("vkEndCommandBuffer"));
+    gDeviceFuncs.cmdPipelineBarrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(get("vkCmdPipelineBarrier"));
+    gDeviceFuncs.cmdCopyImageToBuffer = reinterpret_cast<PFN_vkCmdCopyImageToBuffer>(get("vkCmdCopyImageToBuffer"));
+    gDeviceFuncs.queueSubmit = reinterpret_cast<PFN_vkQueueSubmit>(get("vkQueueSubmit"));
+    gDeviceFuncs.createFence = reinterpret_cast<PFN_vkCreateFence>(get("vkCreateFence"));
+    gDeviceFuncs.destroyFence = reinterpret_cast<PFN_vkDestroyFence>(get("vkDestroyFence"));
+    gDeviceFuncs.waitForFences = reinterpret_cast<PFN_vkWaitForFences>(get("vkWaitForFences"));
+    gDeviceFuncs.getFenceStatus = reinterpret_cast<PFN_vkGetFenceStatus>(get("vkGetFenceStatus"));
+    gDeviceFuncs.mapMemory = reinterpret_cast<PFN_vkMapMemory>(get("vkMapMemory"));
+    gDeviceFuncs.unmapMemory = reinterpret_cast<PFN_vkUnmapMemory>(get("vkUnmapMemory"));
+    gDeviceFuncs.invalidateMappedMemoryRanges =
+        reinterpret_cast<PFN_vkInvalidateMappedMemoryRanges>(get("vkInvalidateMappedMemoryRanges"));
 }
 
 static bool IsDepthFormat(int64_t format)
@@ -93,6 +151,12 @@ static bool IsD3DDepthFormat(DXGI_FORMAT format)
 }
 
 static D3D12_RESOURCE_STATES InitialD3D12ResourceState(bool isDepth)
+{
+    return isDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
+                   : D3D12_RESOURCE_STATE_RENDER_TARGET;
+}
+
+static D3D12_RESOURCE_STATES SnapshotD3D12ResourceState(bool isDepth)
 {
     return isDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE
                    : D3D12_RESOURCE_STATE_RENDER_TARGET;
@@ -120,6 +184,41 @@ static uint32_t FindMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
     }
 
     return 0;
+}
+
+static uint32_t FindMemoryTypeOrInvalid(VkPhysicalDevice physDevice, uint32_t typeFilter,
+                                        VkMemoryPropertyFlags properties)
+{
+    VkPhysicalDeviceMemoryProperties memProps = {};
+    if (gVulkanDispatch.getPhysicalDeviceMemoryProperties == nullptr)
+    {
+        return UINT32_MAX;
+    }
+
+    gVulkanDispatch.getPhysicalDeviceMemoryProperties(physDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+    {
+        if ((typeFilter & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & properties) == properties)
+        {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static bool RequiredVulkanSnapshotFunctionsAvailable()
+{
+    return gDeviceFuncs.createBuffer && gDeviceFuncs.destroyBuffer &&
+           gDeviceFuncs.getBufferMemoryRequirements && gDeviceFuncs.allocateMemory &&
+           gDeviceFuncs.freeMemory && gDeviceFuncs.bindBufferMemory &&
+           gDeviceFuncs.createCommandPool && gDeviceFuncs.destroyCommandPool &&
+           gDeviceFuncs.allocateCommandBuffers && gDeviceFuncs.beginCommandBuffer &&
+           gDeviceFuncs.endCommandBuffer && gDeviceFuncs.cmdPipelineBarrier &&
+           gDeviceFuncs.cmdCopyImageToBuffer && gDeviceFuncs.queueSubmit &&
+           gDeviceFuncs.createFence && gDeviceFuncs.destroyFence &&
+           gDeviceFuncs.waitForFences && gDeviceFuncs.getFenceStatus &&
+           gDeviceFuncs.mapMemory && gDeviceFuncs.unmapMemory;
 }
 
 Swapchain::Swapchain(void* metalDevice, const XrSwapchainCreateInfo* createInfo)
@@ -157,6 +256,7 @@ Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCr
         format_ = createInfo->format;
         arraySize_ = createInfo->arraySize > 0 ? createInfo->arraySize : 1;
     }
+    initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
     Runtime::Get().RegisterHandle(handle_, this);
     spdlog::error("OXRSys: Metal swapchains are not available in this Linux runtime build");
 }
@@ -172,6 +272,7 @@ Swapchain::Swapchain(GraphicsApi api, void* metalDevice,
     }
     else
     {
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         spdlog::error("OXRSys: Metal swapchains are not available in this Linux runtime build");
     }
@@ -188,6 +289,7 @@ Swapchain::Swapchain(GraphicsApi api, const D3D11GraphicsContext* d3d11Context,
     }
     else
     {
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         spdlog::error("OXRSys: invalid D3D11 swapchain graphics API");
     }
@@ -203,6 +305,7 @@ Swapchain::Swapchain(GraphicsApi api, const D3D12GraphicsContext* d3d12Context,
     }
     else
     {
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         spdlog::error("OXRSys: invalid D3D12 swapchain graphics API");
     }
@@ -211,6 +314,7 @@ Swapchain::Swapchain(GraphicsApi api, const D3D12GraphicsContext* d3d12Context,
 
 void Swapchain::InitMetal(void* /*metalDevice*/, const XrSwapchainCreateInfo* /*createInfo*/)
 {
+    initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
     spdlog::error("OXRSys: InitMetal called in a non-Apple runtime build");
 }
 
@@ -241,6 +345,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
         vulkanContext_->physicalDevice == VK_NULL_HANDLE)
     {
         spdlog::error("OXRSys: Missing Vulkan graphics context for swapchain creation");
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         return;
     }
@@ -255,6 +360,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
         gDeviceFuncs.bindImageMemory == nullptr)
     {
         spdlog::error("OXRSys: Missing Vulkan device functions for swapchain creation");
+        initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
         Runtime::Get().RegisterHandle(handle_, this);
         return;
     }
@@ -279,7 +385,6 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
 
     vkImages_.resize(imageCount_);
     vkMemories_.resize(imageCount_);
-    imageRetainCounts_.assign(imageCount_, 0);
     textures_.resize(imageCount_, nullptr);
     imageStates_.assign(imageCount_, ImageState::Available);
 
@@ -290,6 +395,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
         if (result != VK_SUCCESS)
         {
             spdlog::error("OXRSys: vkCreateImage failed with {}", static_cast<int>(result));
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
             continue;
         }
         vkImages_[i] = reinterpret_cast<uint64_t>(image);
@@ -308,6 +414,7 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
         if (result != VK_SUCCESS)
         {
             spdlog::error("OXRSys: vkAllocateMemory failed with {}", static_cast<int>(result));
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
             continue;
         }
         vkMemories_[i] = reinterpret_cast<uint64_t>(memory);
@@ -316,6 +423,16 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext* v
         if (result != VK_SUCCESS)
         {
             spdlog::error("OXRSys: vkBindImageMemory failed with {}", static_cast<int>(result));
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
+        }
+    }
+
+    for (uint32_t i = 0; i < imageCount_; ++i)
+    {
+        if (vkImages_[i] == 0 || vkMemories_[i] == 0)
+        {
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
+            break;
         }
     }
 
@@ -346,12 +463,12 @@ void Swapchain::InitD3D11(const D3D11GraphicsContext* d3d11Context,
 
     d3d11Textures_.resize(imageCount_, nullptr);
     textures_.resize(imageCount_, nullptr);
-    imageRetainCounts_.assign(imageCount_, 0);
     imageStates_.assign(imageCount_, ImageState::Available);
 
     if (d3d11Context_ == nullptr || d3d11Context_->device == nullptr)
     {
         spdlog::error("OXRSys: Missing D3D11 graphics context for swapchain creation");
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         return;
     }
@@ -379,9 +496,19 @@ void Swapchain::InitD3D11(const D3D11GraphicsContext* d3d11Context,
         {
             spdlog::error("OXRSys: ID3D11Device::CreateTexture2D failed with {}",
                           HResultString(result));
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
             continue;
         }
         d3d11Textures_[i] = texture;
+    }
+
+    for (uint32_t i = 0; i < imageCount_; ++i)
+    {
+        if (d3d11Textures_[i] == nullptr)
+        {
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
+            break;
+        }
     }
 
     Runtime::Get().RegisterHandle(handle_, this);
@@ -410,12 +537,13 @@ void Swapchain::InitD3D12(const D3D12GraphicsContext* d3d12Context,
 
     d3d12Resources_.resize(imageCount_, nullptr);
     textures_.resize(imageCount_, nullptr);
-    imageRetainCounts_.assign(imageCount_, 0);
     imageStates_.assign(imageCount_, ImageState::Available);
 
-    if (d3d12Context_ == nullptr || d3d12Context_->device == nullptr)
+    if (d3d12Context_ == nullptr || d3d12Context_->device == nullptr ||
+        d3d12Context_->queue == nullptr)
     {
         spdlog::error("OXRSys: Missing D3D12 graphics context for swapchain creation");
+        initializationResult_ = XR_ERROR_GRAPHICS_DEVICE_INVALID;
         Runtime::Get().RegisterHandle(handle_, this);
         return;
     }
@@ -467,9 +595,19 @@ void Swapchain::InitD3D12(const D3D12GraphicsContext* d3d12Context,
         {
             spdlog::error("OXRSys: ID3D12Device::CreateCommittedResource failed with {}",
                           HResultString(result));
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
             continue;
         }
         d3d12Resources_[i] = resource;
+    }
+
+    for (uint32_t i = 0; i < imageCount_; ++i)
+    {
+        if (d3d12Resources_[i] == nullptr)
+        {
+            initializationResult_ = XR_ERROR_RUNTIME_FAILURE;
+            break;
+        }
     }
 
     Runtime::Get().RegisterHandle(handle_, this);
@@ -607,31 +745,14 @@ XrResult Swapchain::AcquireImage(const XrSwapchainImageAcquireInfo* acquireInfo,
     }
 
     uint32_t acquiredIndex = imageCount_;
-    uint32_t retainedFallbackIndex = imageCount_;
     for (uint32_t i = 0; i < imageCount_; ++i)
     {
         uint32_t candidateIndex = (nextAcquireIndex_ + i) % imageCount_;
-        if (imageStates_[candidateIndex] != ImageState::Available)
-        {
-            continue;
-        }
-        if (candidateIndex >= imageRetainCounts_.size() || imageRetainCounts_[candidateIndex] == 0)
+        if (imageStates_[candidateIndex] == ImageState::Available)
         {
             acquiredIndex = candidateIndex;
             break;
         }
-        if (retainedFallbackIndex == imageCount_)
-        {
-            retainedFallbackIndex = candidateIndex;
-        }
-    }
-
-    if (acquiredIndex == imageCount_ && retainedFallbackIndex != imageCount_)
-    {
-        acquiredIndex = retainedFallbackIndex;
-        spdlog::warn("OXRSys: reusing swapchain image {} while streaming still holds {} reference(s)",
-                     acquiredIndex,
-                     imageRetainCounts_[acquiredIndex]);
     }
 
     if (acquiredIndex == imageCount_)
@@ -758,85 +879,36 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
         spdlog::warn("OXRSys: arrayIndex {} >= arraySize {}", arrayIndex, arraySize_);
         return nullptr;
     }
+
+    std::scoped_lock lock(stateMutex_);
+    if (!hasReleasedImage_)
+    {
+        return nullptr;
+    }
     if (graphicsApi_ == GraphicsApi::Vulkan)
     {
-        std::scoped_lock lock(stateMutex_);
-        if (!hasReleasedImage_ || lastReleasedIndex_ >= vkImages_.size() ||
-            lastReleasedIndex_ >= imageRetainCounts_.size() || vulkanContext_ == nullptr)
+        if (lastReleasedIndex_ >= vkImages_.size())
         {
             return nullptr;
         }
-
-        auto* source = new VulkanFrameSource();
-        source->owner = const_cast<Swapchain*>(this);
-        source->context = vulkanContext_;
-        source->image = reinterpret_cast<VkImage>(vkImages_[lastReleasedIndex_]);
-        source->format = static_cast<VkFormat>(format_);
-        source->width = width_;
-        source->height = height_;
-        source->arrayLayer = arrayIndex;
-        source->imageIndex = lastReleasedIndex_;
-        const_cast<Swapchain*>(this)->RetainImage(lastReleasedIndex_);
-        {
-            std::lock_guard<std::mutex> sourceLock(gVulkanFrameSourceMutex);
-            gVulkanFrameSources.insert(source);
-        }
-        return source;
+        return reinterpret_cast<void*>(vkImages_[lastReleasedIndex_]);
     }
 #if defined(_WIN32)
     if (graphicsApi_ == GraphicsApi::D3D11)
     {
-        std::scoped_lock lock(stateMutex_);
-        if (!hasReleasedImage_ || lastReleasedIndex_ >= d3d11Textures_.size() ||
-            lastReleasedIndex_ >= imageRetainCounts_.size() || d3d11Context_ == nullptr ||
-            d3d11Textures_[lastReleasedIndex_] == nullptr)
+        if (lastReleasedIndex_ >= d3d11Textures_.size())
         {
             return nullptr;
         }
-
-        auto* source = new D3D11FrameSource();
-        source->owner = const_cast<Swapchain*>(this);
-        source->context = d3d11Context_;
-        source->texture = static_cast<ID3D11Texture2D*>(d3d11Textures_[lastReleasedIndex_]);
-        source->texture->AddRef();
-        source->format = static_cast<DXGI_FORMAT>(format_);
-        source->width = width_;
-        source->height = height_;
-        source->arrayLayer = arrayIndex;
-        source->imageIndex = lastReleasedIndex_;
-        const_cast<Swapchain*>(this)->RetainImage(lastReleasedIndex_);
-        {
-            std::lock_guard<std::mutex> sourceLock(gD3D11FrameSourceMutex);
-            gD3D11FrameSources.insert(source);
-        }
-        return source;
+        return d3d11Textures_[lastReleasedIndex_];
     }
     if (graphicsApi_ == GraphicsApi::D3D12)
     {
-        std::scoped_lock lock(stateMutex_);
-        if (!hasReleasedImage_ || lastReleasedIndex_ >= d3d12Resources_.size() ||
-            lastReleasedIndex_ >= imageRetainCounts_.size() || d3d12Context_ == nullptr ||
-            d3d12Resources_[lastReleasedIndex_] == nullptr)
+        if (lastReleasedIndex_ >= d3d12Resources_.size())
         {
             return nullptr;
         }
-
-        auto* source = new D3D12FrameSource();
-        source->owner = const_cast<Swapchain*>(this);
-        source->context = d3d12Context_;
-        source->texture = static_cast<ID3D12Resource*>(d3d12Resources_[lastReleasedIndex_]);
-        source->texture->AddRef();
-        source->format = static_cast<DXGI_FORMAT>(format_);
-        source->width = width_;
-        source->height = height_;
-        source->arrayLayer = arrayIndex;
-        source->imageIndex = lastReleasedIndex_;
-        const_cast<Swapchain*>(this)->RetainImage(lastReleasedIndex_);
-        {
-            std::lock_guard<std::mutex> sourceLock(gD3D12FrameSourceMutex);
-            gD3D12FrameSources.insert(source);
-        }
-        return source;
+        return d3d12Resources_[lastReleasedIndex_];
     }
 #endif
     return GetLastReleasedTexture();
@@ -844,33 +916,27 @@ void* Swapchain::GetLastReleasedTextureSlice(uint32_t arrayIndex) const
 
 FrameImageSource Swapchain::GetLastReleasedFrameImageSource(uint32_t arrayIndex) const
 {
-    void* imageSource = GetLastReleasedTextureSlice(arrayIndex);
-    if (imageSource == nullptr)
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    if (graphicsApi_ == GraphicsApi::Vulkan)
     {
-        return {};
+        return SnapshotVulkanFrameImageSource(arrayIndex);
     }
-
-    FrameImageSource source = {};
-    source.api = graphicsApi_;
-    source.image = std::shared_ptr<void>(imageSource, [](void* value) {
-        Swapchain::ReleaseTextureSlice(value);
-    });
-    return source;
+#endif
+#if defined(_WIN32)
+    if (graphicsApi_ == GraphicsApi::D3D11)
+    {
+        return SnapshotD3D11FrameImageSource(arrayIndex);
+    }
+    if (graphicsApi_ == GraphicsApi::D3D12)
+    {
+        return SnapshotD3D12FrameImageSource(arrayIndex);
+    }
+#endif
+    return {};
 }
 
-void Swapchain::ReleaseTextureSlice(void* textureSlice)
+void Swapchain::ReleaseTextureSlice(void* /*textureSlice*/)
 {
-    if (TryReleaseVulkanFrameSource(textureSlice))
-    {
-        return;
-    }
-#if defined(_WIN32)
-    if (TryReleaseD3D11FrameSource(textureSlice))
-    {
-        return;
-    }
-    TryReleaseD3D12FrameSource(textureSlice);
-#endif
 }
 
 bool Swapchain::HasReleasedImage() const
@@ -879,107 +945,668 @@ bool Swapchain::HasReleasedImage() const
     return hasReleasedImage_ && imageStates_[lastReleasedIndex_] == ImageState::Available;
 }
 
-void Swapchain::RetainImage(uint32_t imageIndex)
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+FrameImageSource Swapchain::SnapshotVulkanFrameImageSource(uint32_t arrayIndex) const
 {
-    if (imageIndex < imageRetainCounts_.size())
+    VulkanGraphicsContext context = {};
+    VkImage image = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::shared_ptr<SwapchainSnapshotPoolState> pool;
     {
-        imageRetainCounts_[imageIndex]++;
+        std::scoped_lock lock(stateMutex_);
+        if (!hasReleasedImage_ || arrayIndex >= arraySize_ ||
+            lastReleasedIndex_ >= vkImages_.size() || vulkanContext_ == nullptr)
+        {
+            return {};
+        }
+        image = reinterpret_cast<VkImage>(vkImages_[lastReleasedIndex_]);
+        context = *vulkanContext_;
+        format = static_cast<VkFormat>(format_);
+        width = width_;
+        height = height_;
+        pool = backendSnapshotPool_;
     }
+
+    if (image == VK_NULL_HANDLE || context.device == VK_NULL_HANDLE ||
+        context.queue == VK_NULL_HANDLE || IsDepthFormat(format) ||
+        width == 0 || height == 0)
+    {
+        return {};
+    }
+
+    std::shared_ptr<void> lease = TryAcquireBackendSnapshotLease(pool);
+    if (!lease)
+    {
+        spdlog::debug("OXRSys: Vulkan snapshot pool is full; streaming frame dropped");
+        return {};
+    }
+
+    LoadDeviceFunctions(context.device);
+    if (!RequiredVulkanSnapshotFunctionsAvailable())
+    {
+        spdlog::warn("OXRSys: Vulkan snapshot unavailable because required device functions are missing");
+        return {};
+    }
+
+    auto* source = new VulkanFrameSource();
+    source->lifetime = lease;
+    source->context = context;
+    source->format = format;
+    source->width = width;
+    source->height = height;
+    source->destroyCommandPool = gDeviceFuncs.destroyCommandPool;
+    source->destroyBuffer = gDeviceFuncs.destroyBuffer;
+    source->freeMemory = gDeviceFuncs.freeMemory;
+    source->destroyFence = gDeviceFuncs.destroyFence;
+    source->waitForFences = gDeviceFuncs.waitForFences;
+    source->getFenceStatus = gDeviceFuncs.getFenceStatus;
+    source->mapMemory = gDeviceFuncs.mapMemory;
+    source->unmapMemory = gDeviceFuncs.unmapMemory;
+    source->invalidateMappedMemoryRanges = gDeviceFuncs.invalidateMappedMemoryRanges;
+
+    const size_t bytesPerPixel = 4;
+    const size_t readbackSize = static_cast<size_t>(width) * height * bytesPerPixel;
+
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = readbackSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (gDeviceFuncs.createBuffer(context.device, &bufferInfo, nullptr, &source->stagingBuffer) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkMemoryRequirements memoryRequirements = {};
+    gDeviceFuncs.getBufferMemoryRequirements(context.device, source->stagingBuffer, &memoryRequirements);
+    const uint32_t memoryType = FindMemoryTypeOrInvalid(
+        context.physicalDevice,
+        memoryRequirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memoryType == UINT32_MAX)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memoryRequirements.size;
+    allocInfo.memoryTypeIndex = memoryType;
+    if (gDeviceFuncs.allocateMemory(context.device, &allocInfo, nullptr, &source->stagingMemory) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+    if (gDeviceFuncs.bindBufferMemory(context.device, source->stagingBuffer, source->stagingMemory, 0) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = context.queueFamilyIndex;
+    if (gDeviceFuncs.createCommandPool(context.device, &poolInfo, nullptr, &source->commandPool) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandInfo = {};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandInfo.commandPool = source->commandPool;
+    commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandInfo.commandBufferCount = 1;
+    if (gDeviceFuncs.allocateCommandBuffers(context.device, &commandInfo, &commandBuffer) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (gDeviceFuncs.createFence(context.device, &fenceInfo, nullptr, &source->fence) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (gDeviceFuncs.beginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkImageMemoryBarrier toTransfer = {};
+    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = image;
+    toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    toTransfer.subresourceRange.baseMipLevel = 0;
+    toTransfer.subresourceRange.levelCount = 1;
+    toTransfer.subresourceRange.baseArrayLayer = arrayIndex;
+    toTransfer.subresourceRange.layerCount = 1;
+
+    gDeviceFuncs.cmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+
+    VkBufferImageCopy region = {};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = arrayIndex;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {width, height, 1};
+    gDeviceFuncs.cmdCopyImageToBuffer(
+        commandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, source->stagingBuffer, 1, &region);
+
+    VkImageMemoryBarrier backToColor = toTransfer;
+    backToColor.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    backToColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    backToColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    backToColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    gDeviceFuncs.cmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &backToColor);
+
+    if (gDeviceFuncs.endCommandBuffer(commandBuffer) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    if (gDeviceFuncs.queueSubmit(context.queue, 1, &submitInfo, source->fence) != VK_SUCCESS)
+    {
+        ReleaseVulkanFrameSource(source);
+        return {};
+    }
+    source->fenceSubmitted = true;
+    source->stagingSize = readbackSize;
+
+    FrameImageSource frameSource = {};
+    frameSource.api = GraphicsApi::Vulkan;
+    frameSource.lifetime = lease;
+    frameSource.image = std::shared_ptr<void>(source, [](void* value) {
+        ReleaseVulkanFrameSource(static_cast<VulkanFrameSource*>(value));
+    });
+    return frameSource;
 }
 
-void Swapchain::ReleaseImageRetention(uint32_t imageIndex)
+void Swapchain::ReleaseVulkanFrameSource(VulkanFrameSource* source)
 {
-    std::scoped_lock lock(stateMutex_);
-    if (imageIndex < imageRetainCounts_.size() && imageRetainCounts_[imageIndex] > 0)
-    {
-        imageRetainCounts_[imageIndex]--;
-    }
-}
-
-bool Swapchain::TryReleaseVulkanFrameSource(void* textureSlice)
-{
-    auto* source = static_cast<VulkanFrameSource*>(textureSlice);
     if (source == nullptr)
     {
-        return false;
+        return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(gVulkanFrameSourceMutex);
-        auto it = gVulkanFrameSources.find(source);
-        if (it == gVulkanFrameSources.end())
+    auto destroy = [](VulkanFrameSource* sourceToDestroy) {
+        if (sourceToDestroy->fenceSubmitted && sourceToDestroy->fence != VK_NULL_HANDLE &&
+            sourceToDestroy->waitForFences != nullptr)
         {
-            return false;
+            sourceToDestroy->waitForFences(
+                sourceToDestroy->context.device, 1, &sourceToDestroy->fence, VK_TRUE, UINT64_MAX);
         }
-        gVulkanFrameSources.erase(it);
-    }
+        if (sourceToDestroy->commandPool != VK_NULL_HANDLE &&
+            sourceToDestroy->destroyCommandPool != nullptr)
+        {
+            sourceToDestroy->destroyCommandPool(
+                sourceToDestroy->context.device, sourceToDestroy->commandPool, nullptr);
+        }
+        if (sourceToDestroy->stagingBuffer != VK_NULL_HANDLE &&
+            sourceToDestroy->destroyBuffer != nullptr)
+        {
+            sourceToDestroy->destroyBuffer(
+                sourceToDestroy->context.device, sourceToDestroy->stagingBuffer, nullptr);
+        }
+        if (sourceToDestroy->stagingMemory != VK_NULL_HANDLE &&
+            sourceToDestroy->freeMemory != nullptr)
+        {
+            sourceToDestroy->freeMemory(
+                sourceToDestroy->context.device, sourceToDestroy->stagingMemory, nullptr);
+        }
+        if (sourceToDestroy->fence != VK_NULL_HANDLE &&
+            sourceToDestroy->destroyFence != nullptr)
+        {
+            sourceToDestroy->destroyFence(
+                sourceToDestroy->context.device, sourceToDestroy->fence, nullptr);
+        }
+        delete sourceToDestroy;
+    };
 
-    if (source->owner != nullptr)
+    if (source->fenceSubmitted && source->fence != VK_NULL_HANDLE &&
+        source->getFenceStatus != nullptr &&
+        source->getFenceStatus(source->context.device, source->fence) == VK_NOT_READY)
     {
-        source->owner->ReleaseImageRetention(source->imageIndex);
+        std::thread(destroy, source).detach();
+        return;
     }
-    delete source;
-    return true;
+    destroy(source);
 }
+#endif
 
 #if defined(_WIN32)
-bool Swapchain::TryReleaseD3D11FrameSource(void* textureSlice)
+FrameImageSource Swapchain::SnapshotD3D11FrameImageSource(uint32_t arrayIndex) const
 {
-    auto* source = static_cast<D3D11FrameSource*>(textureSlice);
-    if (source == nullptr)
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* immediateContext = nullptr;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::shared_ptr<SwapchainSnapshotPoolState> pool;
     {
-        return false;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(gD3D11FrameSourceMutex);
-        auto it = gD3D11FrameSources.find(source);
-        if (it == gD3D11FrameSources.end())
+        std::scoped_lock lock(stateMutex_);
+        if (!hasReleasedImage_ || arrayIndex >= arraySize_ ||
+            lastReleasedIndex_ >= d3d11Textures_.size() || d3d11Context_ == nullptr ||
+            d3d11Context_->device == nullptr || d3d11Context_->immediateContext == nullptr ||
+            d3d11Textures_[lastReleasedIndex_] == nullptr)
         {
-            return false;
+            return {};
         }
-        gD3D11FrameSources.erase(it);
+        texture = static_cast<ID3D11Texture2D*>(d3d11Textures_[lastReleasedIndex_]);
+        texture->AddRef();
+        device = d3d11Context_->device;
+        device->AddRef();
+        immediateContext = d3d11Context_->immediateContext;
+        immediateContext->AddRef();
+        format = static_cast<DXGI_FORMAT>(format_);
+        width = width_;
+        height = height_;
+        pool = backendSnapshotPool_;
     }
 
-    if (source->owner != nullptr)
+    auto releaseLocals = [&]() {
+        if (texture != nullptr)
+        {
+            texture->Release();
+            texture = nullptr;
+        }
+        if (device != nullptr)
+        {
+            device->Release();
+            device = nullptr;
+        }
+        if (immediateContext != nullptr)
+        {
+            immediateContext->Release();
+            immediateContext = nullptr;
+        }
+    };
+
+    if (IsD3DDepthFormat(format) || width == 0 || height == 0)
     {
-        source->owner->ReleaseImageRetention(source->imageIndex);
+        releaseLocals();
+        return {};
     }
-    if (source->texture != nullptr)
+
+    std::shared_ptr<void> lease = TryAcquireBackendSnapshotLease(pool);
+    if (!lease)
     {
-        source->texture->Release();
+        releaseLocals();
+        spdlog::debug("OXRSys: D3D11 snapshot pool is full; streaming frame dropped");
+        return {};
     }
-    delete source;
-    return true;
+
+    auto* source = new D3D11FrameSource();
+    source->lifetime = lease;
+    source->immediateContext = immediateContext;
+    immediateContext = nullptr;
+    source->format = format;
+    source->width = width;
+    source->height = height;
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    HRESULT result = device->CreateTexture2D(&desc, nullptr, &source->stagingTexture);
+    if (FAILED(result))
+    {
+        spdlog::warn("OXRSys: D3D11 staging texture creation failed with {}", HResultString(result));
+        releaseLocals();
+        ReleaseD3D11FrameSource(source);
+        return {};
+    }
+
+    const UINT sourceSubresource = D3D11CalcSubresource(0, arrayIndex, 1);
+    source->immediateContext->CopySubresourceRegion(
+        source->stagingTexture, 0, 0, 0, 0, texture, sourceSubresource, nullptr);
+    releaseLocals();
+
+    FrameImageSource frameSource = {};
+    frameSource.api = GraphicsApi::D3D11;
+    frameSource.lifetime = lease;
+    frameSource.image = std::shared_ptr<void>(source, [](void* value) {
+        ReleaseD3D11FrameSource(static_cast<D3D11FrameSource*>(value));
+    });
+    return frameSource;
 }
 
-bool Swapchain::TryReleaseD3D12FrameSource(void* textureSlice)
+FrameImageSource Swapchain::SnapshotD3D12FrameImageSource(uint32_t arrayIndex) const
 {
-    auto* source = static_cast<D3D12FrameSource*>(textureSlice);
+    ID3D12Device* device = nullptr;
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12Resource* texture = nullptr;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::shared_ptr<SwapchainSnapshotPoolState> pool;
+    {
+        std::scoped_lock lock(stateMutex_);
+        if (!hasReleasedImage_ || arrayIndex >= arraySize_ ||
+            lastReleasedIndex_ >= d3d12Resources_.size() || d3d12Context_ == nullptr ||
+            d3d12Context_->device == nullptr || d3d12Context_->queue == nullptr ||
+            d3d12Resources_[lastReleasedIndex_] == nullptr)
+        {
+            return {};
+        }
+        device = d3d12Context_->device;
+        device->AddRef();
+        queue = d3d12Context_->queue;
+        queue->AddRef();
+        texture = static_cast<ID3D12Resource*>(d3d12Resources_[lastReleasedIndex_]);
+        texture->AddRef();
+        format = static_cast<DXGI_FORMAT>(format_);
+        width = width_;
+        height = height_;
+        pool = backendSnapshotPool_;
+    }
+
+    auto releaseLocals = [&]() {
+        if (texture != nullptr)
+        {
+            texture->Release();
+            texture = nullptr;
+        }
+        if (queue != nullptr)
+        {
+            queue->Release();
+            queue = nullptr;
+        }
+        if (device != nullptr)
+        {
+            device->Release();
+            device = nullptr;
+        }
+    };
+
+    const bool isDepth = IsD3DDepthFormat(format);
+    if (isDepth || width == 0 || height == 0)
+    {
+        releaseLocals();
+        return {};
+    }
+
+    std::shared_ptr<void> lease = TryAcquireBackendSnapshotLease(pool);
+    if (!lease)
+    {
+        releaseLocals();
+        spdlog::debug("OXRSys: D3D12 snapshot pool is full; streaming frame dropped");
+        return {};
+    }
+
+    auto* source = new D3D12FrameSource();
+    source->lifetime = lease;
+    source->sourceTexture = texture;
+    texture = nullptr;
+    source->format = format;
+    source->width = width;
+    source->height = height;
+
+    D3D12_RESOURCE_DESC textureDesc = source->sourceTexture->GetDesc();
+    const UINT sourceSubresource = arrayIndex * textureDesc.MipLevels;
+    UINT numRows = 0;
+    UINT64 rowSizeInBytes = 0;
+    device->GetCopyableFootprints(
+        &textureDesc,
+        sourceSubresource,
+        1,
+        0,
+        &source->footprint,
+        &numRows,
+        &rowSizeInBytes,
+        &source->totalBytes);
+    if (source->totalBytes == 0 || rowSizeInBytes < static_cast<UINT64>(width) * 4)
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+
+    D3D12_HEAP_PROPERTIES heapProps = {};
+    heapProps.Type = D3D12_HEAP_TYPE_READBACK;
+    heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heapProps.CreationNodeMask = 1;
+    heapProps.VisibleNodeMask = 1;
+
+    D3D12_RESOURCE_DESC readbackDesc = {};
+    readbackDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    readbackDesc.Width = source->totalBytes;
+    readbackDesc.Height = 1;
+    readbackDesc.DepthOrArraySize = 1;
+    readbackDesc.MipLevels = 1;
+    readbackDesc.Format = DXGI_FORMAT_UNKNOWN;
+    readbackDesc.SampleDesc.Count = 1;
+    readbackDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    HRESULT result = device->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &readbackDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        nullptr,
+        __uuidof(ID3D12Resource),
+        reinterpret_cast<void**>(&source->readbackBuffer));
+    if (FAILED(result))
+    {
+        spdlog::warn("OXRSys: D3D12 readback buffer creation failed with {}", HResultString(result));
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+
+    const D3D12_COMMAND_LIST_TYPE listType = queue->GetDesc().Type;
+    if (listType != D3D12_COMMAND_LIST_TYPE_DIRECT &&
+        listType != D3D12_COMMAND_LIST_TYPE_COPY)
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+    if (FAILED(device->CreateCommandAllocator(
+            listType,
+            __uuidof(ID3D12CommandAllocator),
+            reinterpret_cast<void**>(&source->commandAllocator))) ||
+        FAILED(device->CreateCommandList(
+            0,
+            listType,
+            source->commandAllocator,
+            nullptr,
+            __uuidof(ID3D12GraphicsCommandList),
+            reinterpret_cast<void**>(&source->commandList))) ||
+        FAILED(device->CreateFence(
+            0,
+            D3D12_FENCE_FLAG_NONE,
+            __uuidof(ID3D12Fence),
+            reinterpret_cast<void**>(&source->fence))))
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+    source->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (source->fenceEvent == nullptr)
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+
+    D3D12_RESOURCE_BARRIER toCopy = {};
+    toCopy.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toCopy.Transition.pResource = source->sourceTexture;
+    toCopy.Transition.Subresource = sourceSubresource;
+    toCopy.Transition.StateBefore = SnapshotD3D12ResourceState(isDepth);
+    toCopy.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    source->commandList->ResourceBarrier(1, &toCopy);
+
+    D3D12_TEXTURE_COPY_LOCATION dst = {};
+    dst.pResource = source->readbackBuffer;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = source->footprint;
+
+    D3D12_TEXTURE_COPY_LOCATION src = {};
+    src.pResource = source->sourceTexture;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = sourceSubresource;
+    source->commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+    D3D12_RESOURCE_BARRIER backToRender = toCopy;
+    backToRender.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    backToRender.Transition.StateAfter = SnapshotD3D12ResourceState(isDepth);
+    source->commandList->ResourceBarrier(1, &backToRender);
+
+    if (FAILED(source->commandList->Close()))
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+
+    ID3D12CommandList* commandLists[] = {source->commandList};
+    queue->ExecuteCommandLists(1, commandLists);
+    source->fenceValue = 1;
+    if (FAILED(queue->Signal(source->fence, source->fenceValue)))
+    {
+        releaseLocals();
+        ReleaseD3D12FrameSource(source);
+        return {};
+    }
+    source->fenceSubmitted = true;
+    releaseLocals();
+
+    FrameImageSource frameSource = {};
+    frameSource.api = GraphicsApi::D3D12;
+    frameSource.lifetime = lease;
+    frameSource.image = std::shared_ptr<void>(source, [](void* value) {
+        ReleaseD3D12FrameSource(static_cast<D3D12FrameSource*>(value));
+    });
+    return frameSource;
+}
+
+void Swapchain::ReleaseD3D11FrameSource(D3D11FrameSource* source)
+{
     if (source == nullptr)
     {
-        return false;
+        return;
     }
-
+    if (source->stagingTexture != nullptr)
     {
-        std::lock_guard<std::mutex> lock(gD3D12FrameSourceMutex);
-        auto it = gD3D12FrameSources.find(source);
-        if (it == gD3D12FrameSources.end())
-        {
-            return false;
-        }
-        gD3D12FrameSources.erase(it);
+        source->stagingTexture->Release();
+        source->stagingTexture = nullptr;
     }
-
-    if (source->owner != nullptr)
+    if (source->immediateContext != nullptr)
     {
-        source->owner->ReleaseImageRetention(source->imageIndex);
-    }
-    if (source->texture != nullptr)
-    {
-        source->texture->Release();
+        source->immediateContext->Release();
+        source->immediateContext = nullptr;
     }
     delete source;
-    return true;
+}
+
+void Swapchain::ReleaseD3D12FrameSource(D3D12FrameSource* source)
+{
+    if (source == nullptr)
+    {
+        return;
+    }
+
+    auto destroy = [](D3D12FrameSource* sourceToDestroy) {
+        if (sourceToDestroy->fenceSubmitted && sourceToDestroy->fence != nullptr &&
+            sourceToDestroy->fence->GetCompletedValue() < sourceToDestroy->fenceValue)
+        {
+            bool waitingOnEvent = false;
+            if (sourceToDestroy->fenceEvent != nullptr &&
+                SUCCEEDED(sourceToDestroy->fence->SetEventOnCompletion(
+                    sourceToDestroy->fenceValue, sourceToDestroy->fenceEvent)))
+            {
+                waitingOnEvent = true;
+                WaitForSingleObject(sourceToDestroy->fenceEvent, INFINITE);
+            }
+            while (!waitingOnEvent &&
+                   sourceToDestroy->fence->GetCompletedValue() < sourceToDestroy->fenceValue)
+            {
+                Sleep(1);
+            }
+        }
+        if (sourceToDestroy->commandList != nullptr)
+        {
+            sourceToDestroy->commandList->Release();
+            sourceToDestroy->commandList = nullptr;
+        }
+        if (sourceToDestroy->commandAllocator != nullptr)
+        {
+            sourceToDestroy->commandAllocator->Release();
+            sourceToDestroy->commandAllocator = nullptr;
+        }
+        if (sourceToDestroy->readbackBuffer != nullptr)
+        {
+            sourceToDestroy->readbackBuffer->Release();
+            sourceToDestroy->readbackBuffer = nullptr;
+        }
+        if (sourceToDestroy->sourceTexture != nullptr)
+        {
+            sourceToDestroy->sourceTexture->Release();
+            sourceToDestroy->sourceTexture = nullptr;
+        }
+        if (sourceToDestroy->fence != nullptr)
+        {
+            sourceToDestroy->fence->Release();
+            sourceToDestroy->fence = nullptr;
+        }
+        if (sourceToDestroy->fenceEvent != nullptr)
+        {
+            CloseHandle(sourceToDestroy->fenceEvent);
+            sourceToDestroy->fenceEvent = nullptr;
+        }
+        delete sourceToDestroy;
+    };
+
+    if (source->fenceSubmitted && source->fence != nullptr &&
+        source->fence->GetCompletedValue() < source->fenceValue)
+    {
+        std::thread(destroy, source).detach();
+        return;
+    }
+    destroy(source);
 }
 #endif

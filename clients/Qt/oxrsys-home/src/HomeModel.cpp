@@ -613,6 +613,11 @@ bool HomeModel::preferInstalledRuntimeForLaunches() const
     return preferInstalledRuntimeForLaunches_;
 }
 
+bool HomeModel::runtimeOperationPending() const
+{
+    return runtimeOperationPending_;
+}
+
 bool HomeModel::isAppRunning(const LauncherApp& app) const
 {
     QProcess* process = launchedProcesses_.value(app.id(), nullptr);
@@ -763,31 +768,71 @@ void HomeModel::setPreferInstalledRuntimeForLaunches(bool enabled)
 
 void HomeModel::installBundledRuntimeAndRegister()
 {
-    QString installedManifestPath;
-    QString error;
-    if (!runtimeManager_.installBundledRuntime(&installedManifestPath, &error))
+    if (runtimeOperationPending_)
     {
-        setErrorMessage("Failed to install runtime: " + error);
-        refreshRuntimeInstallStatus();
+        setStatusMessage("Runtime registration is already in progress.");
         return;
     }
 
-    runtimeManifestPath_ = installedManifestPath;
-    preferInstalledRuntimeForLaunches_ = true;
-    settings_.setValue("runtimeManifestPath", runtimeManifestPath_);
-    settings_.setValue("preferInstalledRuntimeForLaunches", preferInstalledRuntimeForLaunches_);
-    loadConfigFromDisk();
-    refreshRuntimeInstallStatus();
-    if (!runtimeManager_.registerRuntimeManifest(runtimeManifestPath_, &error))
-    {
-        setErrorMessage("Installed runtime but failed to register it: " + error);
-        refreshRuntimeStatus();
-        return;
-    }
+    runtimeOperationPending_ = true;
+    setStatusMessage("Installing and registering the bundled runtime.");
 
-    refreshRuntimeStatus();
-    setStatusMessage("Installed and registered the bundled runtime.");
-    emit changed();
+    RuntimeManager manager = runtimeManager_;
+    QPointer<HomeModel> target(this);
+    QThread* worker = QThread::create([target, manager]() mutable {
+        QString installedManifestPath;
+        QString installError;
+        const bool installed = manager.installBundledRuntime(&installedManifestPath, &installError);
+        QString registerError;
+        bool registered = false;
+        if (installed)
+        {
+            registered = manager.registerRuntimeManifest(installedManifestPath, &registerError);
+        }
+
+        if (target)
+        {
+            QMetaObject::invokeMethod(target, [target,
+                                               installed,
+                                               installedManifestPath,
+                                               installError,
+                                               registered,
+                                               registerError]() {
+                if (!target)
+                {
+                    return;
+                }
+
+                target->runtimeOperationPending_ = false;
+                if (!installed)
+                {
+                    target->setErrorMessage("Failed to install runtime: " + installError);
+                    target->refreshRuntimeInstallStatus();
+                    return;
+                }
+
+                target->runtimeManifestPath_ = installedManifestPath;
+                target->preferInstalledRuntimeForLaunches_ = true;
+                target->settings_.setValue("runtimeManifestPath", target->runtimeManifestPath_);
+                target->settings_.setValue("preferInstalledRuntimeForLaunches",
+                                           target->preferInstalledRuntimeForLaunches_);
+                target->loadConfigFromDisk();
+                target->refreshRuntimeInstallStatus();
+                if (!registered)
+                {
+                    target->setErrorMessage("Installed runtime but failed to register it: " + registerError);
+                    target->refreshRuntimeStatus();
+                    return;
+                }
+
+                target->refreshRuntimeStatus();
+                target->setStatusMessage("Installed and registered the bundled runtime.");
+                emit target->changed();
+            }, Qt::QueuedConnection);
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void HomeModel::useInstalledRuntimeManifest()
@@ -814,30 +859,85 @@ void HomeModel::refreshRuntimeInstallStatus()
 
 void HomeModel::registerRuntime()
 {
+    if (runtimeOperationPending_)
+    {
+        setStatusMessage("Runtime registration is already in progress.");
+        return;
+    }
+
     runtimeManifestPath_ = cleanedPath(runtimeManifestPath_);
     settings_.setValue("runtimeManifestPath", runtimeManifestPath_);
     const bool wasRegistered = runtimeRegistrationStatus_.activeRuntimeExists;
-    QString error;
-    if (!runtimeManager_.registerRuntimeManifest(runtimeManifestPath_, &error))
-    {
-        setErrorMessage("Failed to register runtime: " + error);
-        return;
-    }
-    refreshRuntimeStatus();
-    setStatusMessage(wasRegistered ? "Updated the OpenXR runtime registration."
-                                   : "Registered the OpenXR runtime.");
+    const QString runtimeManifestPath = runtimeManifestPath_;
+    runtimeOperationPending_ = true;
+    setStatusMessage("Registering the OpenXR runtime.");
+
+    RuntimeManager manager = runtimeManager_;
+    QPointer<HomeModel> target(this);
+    QThread* worker = QThread::create([target, manager, runtimeManifestPath, wasRegistered]() mutable {
+        QString error;
+        const bool registered = manager.registerRuntimeManifest(runtimeManifestPath, &error);
+        if (target)
+        {
+            QMetaObject::invokeMethod(target, [target, registered, error, wasRegistered]() {
+                if (!target)
+                {
+                    return;
+                }
+                target->runtimeOperationPending_ = false;
+                if (!registered)
+                {
+                    target->setErrorMessage("Failed to register runtime: " + error);
+                    target->refreshRuntimeStatus();
+                    return;
+                }
+                target->refreshRuntimeStatus();
+                target->setStatusMessage(wasRegistered ? "Updated the OpenXR runtime registration."
+                                                       : "Registered the OpenXR runtime.");
+            }, Qt::QueuedConnection);
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void HomeModel::unregisterRuntime()
 {
-    QString error;
-    if (!runtimeManager_.unregisterRuntime(&error))
+    if (runtimeOperationPending_)
     {
-        setErrorMessage("Failed to unregister runtime: " + error);
+        setStatusMessage("Runtime registration is already in progress.");
         return;
     }
-    refreshRuntimeStatus();
-    setStatusMessage("Unregistered the OpenXR runtime.");
+
+    runtimeOperationPending_ = true;
+    setStatusMessage("Unregistering the OpenXR runtime.");
+
+    RuntimeManager manager = runtimeManager_;
+    QPointer<HomeModel> target(this);
+    QThread* worker = QThread::create([target, manager]() mutable {
+        QString error;
+        const bool unregistered = manager.unregisterRuntime(&error);
+        if (target)
+        {
+            QMetaObject::invokeMethod(target, [target, unregistered, error]() {
+                if (!target)
+                {
+                    return;
+                }
+                target->runtimeOperationPending_ = false;
+                if (!unregistered)
+                {
+                    target->setErrorMessage("Failed to unregister runtime: " + error);
+                    target->refreshRuntimeStatus();
+                    return;
+                }
+                target->refreshRuntimeStatus();
+                target->setStatusMessage("Unregistered the OpenXR runtime.");
+            }, Qt::QueuedConnection);
+        }
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
 }
 
 void HomeModel::reloadLauncherApps()

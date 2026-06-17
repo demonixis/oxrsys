@@ -15,6 +15,7 @@
 #include "GraphicsTypes.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -24,6 +25,11 @@
 struct SwapchainStagingSlotState
 {
     std::atomic_bool inUse{false};
+};
+
+struct SwapchainSnapshotPoolState
+{
+    std::atomic_uint32_t inUse{0};
 };
 
 class Swapchain
@@ -61,6 +67,7 @@ public:
     XrResult AcquireImage(const XrSwapchainImageAcquireInfo* acquireInfo, uint32_t* index);
     XrResult WaitImage(const XrSwapchainImageWaitInfo* waitInfo);
     XrResult ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo);
+    XrResult InitializationResult() const { return initializationResult_; }
 
     uint32_t GetWidth() const { return width_; }
     uint32_t GetHeight() const { return height_; }
@@ -85,40 +92,56 @@ public:
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     struct VulkanFrameSource
     {
-        Swapchain* owner = nullptr;
-        const VulkanGraphicsContext* context = nullptr;
-        VkImage image = VK_NULL_HANDLE;
+        std::shared_ptr<void> lifetime = {};
+        VulkanGraphicsContext context = {};
         VkFormat format = VK_FORMAT_UNDEFINED;
         uint32_t width = 0;
         uint32_t height = 0;
-        uint32_t arrayLayer = 0;
-        uint32_t imageIndex = 0;
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        size_t stagingSize = 0;
+        VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool fenceSubmitted = false;
+        PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
+        PFN_vkDestroyBuffer destroyBuffer = nullptr;
+        PFN_vkFreeMemory freeMemory = nullptr;
+        PFN_vkDestroyFence destroyFence = nullptr;
+        PFN_vkWaitForFences waitForFences = nullptr;
+        PFN_vkGetFenceStatus getFenceStatus = nullptr;
+        PFN_vkMapMemory mapMemory = nullptr;
+        PFN_vkUnmapMemory unmapMemory = nullptr;
+        PFN_vkInvalidateMappedMemoryRanges invalidateMappedMemoryRanges = nullptr;
     };
 #endif
 
 #if defined(_WIN32)
     struct D3D11FrameSource
     {
-        Swapchain* owner = nullptr;
-        const D3D11GraphicsContext* context = nullptr;
-        ID3D11Texture2D* texture = nullptr;
+        std::shared_ptr<void> lifetime = {};
+        ID3D11DeviceContext* immediateContext = nullptr;
+        ID3D11Texture2D* stagingTexture = nullptr;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         uint32_t width = 0;
         uint32_t height = 0;
-        uint32_t arrayLayer = 0;
-        uint32_t imageIndex = 0;
     };
 
     struct D3D12FrameSource
     {
-        Swapchain* owner = nullptr;
-        const D3D12GraphicsContext* context = nullptr;
-        ID3D12Resource* texture = nullptr;
+        std::shared_ptr<void> lifetime = {};
+        ID3D12Resource* sourceTexture = nullptr;
+        ID3D12Resource* readbackBuffer = nullptr;
+        ID3D12Fence* fence = nullptr;
+        HANDLE fenceEvent = nullptr;
+        uint64_t fenceValue = 0;
+        bool fenceSubmitted = false;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
+        UINT64 totalBytes = 0;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         uint32_t width = 0;
         uint32_t height = 0;
-        uint32_t arrayLayer = 0;
-        uint32_t imageIndex = 0;
+        ID3D12CommandAllocator* commandAllocator = nullptr;
+        ID3D12GraphicsCommandList* commandList = nullptr;
     };
 #endif
 
@@ -134,26 +157,28 @@ private:
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     void InitVulkan(void* metalDevice, const VulkanGraphicsContext* vulkanContext,
                     const XrSwapchainCreateInfo* createInfo);
+    FrameImageSource SnapshotVulkanFrameImageSource(uint32_t arrayIndex) const;
 #endif
 #if defined(_WIN32)
     void InitD3D11(const D3D11GraphicsContext* d3d11Context,
                    const XrSwapchainCreateInfo* createInfo);
     void InitD3D12(const D3D12GraphicsContext* d3d12Context,
                    const XrSwapchainCreateInfo* createInfo);
+    FrameImageSource SnapshotD3D11FrameImageSource(uint32_t arrayIndex) const;
+    FrameImageSource SnapshotD3D12FrameImageSource(uint32_t arrayIndex) const;
 #endif
     void InitMetalStaging(void* metalDevice);
-    void RetainImage(uint32_t imageIndex);
-    void ReleaseImageRetention(uint32_t imageIndex);
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
-    static bool TryReleaseVulkanFrameSource(void* textureSlice);
+    static void ReleaseVulkanFrameSource(VulkanFrameSource* source);
 #endif
 #if defined(_WIN32)
-    static bool TryReleaseD3D11FrameSource(void* textureSlice);
-    static bool TryReleaseD3D12FrameSource(void* textureSlice);
+    static void ReleaseD3D11FrameSource(D3D11FrameSource* source);
+    static void ReleaseD3D12FrameSource(D3D12FrameSource* source);
 #endif
 
     uint64_t handle_ = 0;
+    XrResult initializationResult_ = XR_SUCCESS;
     GraphicsApi graphicsApi_ = GraphicsApi::Metal;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
@@ -178,6 +203,8 @@ private:
     uint64_t lastSnapshotValue_ = 0;
     bool hasSnapshot_ = false;
     std::shared_ptr<void> lastSnapshotLease_ = {};
+    std::shared_ptr<SwapchainSnapshotPoolState> backendSnapshotPool_ =
+        std::make_shared<SwapchainSnapshotPoolState>();
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     const VulkanGraphicsContext* vulkanContext_ = nullptr;
@@ -191,8 +218,6 @@ private:
     std::vector<void*> d3d11Textures_;
     std::vector<void*> d3d12Resources_;
 #endif
-
-    std::vector<uint32_t> imageRetainCounts_;
 
     uint32_t nextAcquireIndex_ = 0;
     uint32_t lastReleasedIndex_ = 0;

@@ -689,6 +689,16 @@ void testTerminalLaunchScript()
     expect(script.contains("godot"), "Expected executable in terminal script");
 }
 
+void testElevatedRuntimeCommandRejectsInvalidArguments()
+{
+    QString error;
+    expect(RuntimeManager::handleElevatedWindowsCommand({"oxrsys-home"}, &error) == -1,
+           "Expected elevated command without verb to be ignored");
+    expect(RuntimeManager::handleElevatedWindowsCommand(
+               {"oxrsys-home", "--oxrsys-not-a-runtime-command"}, &error) == -1,
+           "Expected unknown elevated command to be ignored");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -715,6 +725,7 @@ int main(int argc, char** argv)
         testLauncherStore();
         testShellSplitting();
         testTerminalLaunchScript();
+        testElevatedRuntimeCommandRejectsInvalidArguments();
     }
     catch (const std::exception& error)
     {
