@@ -69,6 +69,11 @@ VideoEncoder::~VideoEncoder()
     Shutdown();
 }
 
+bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& /*graphicsContext*/)
+{
+    return false;
+}
+
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {

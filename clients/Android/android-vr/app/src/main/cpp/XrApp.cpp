@@ -1233,23 +1233,48 @@ bool XrApp::CreateSwapchains()
         LOGE("Failed to create blit shader program with external OES sampler");
         return false;
     }
+    blitTextureUniform_ = glGetUniformLocation(blitProgram_, "uTexture");
+    blitEyeSourceMinUniform_ = glGetUniformLocation(blitProgram_, "uEyeSourceMin");
+    blitEyeSourceMaxUniform_ = glGetUniformLocation(blitProgram_, "uEyeSourceMax");
+    blitLogicalTexelSizeUniform_ = glGetUniformLocation(blitProgram_, "uLogicalTexelSize");
+    blitFoveatedEncodingEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveatedEncodingEnabled");
+    blitClientUpscalingEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uClientUpscalingEnabled");
+    blitUpscaleEdgeThresholdUniform_ =
+        glGetUniformLocation(blitProgram_, "uUpscaleEdgeThreshold");
+    blitUpscaleSharpnessUniform_ = glGetUniformLocation(blitProgram_, "uUpscaleSharpness");
+    blitFoveationCenterSizeUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationCenterSize");
+    blitFoveationCenterShiftUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationCenterShift");
+    blitFoveationEdgeRatioUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationEdgeRatio");
+    blitFoveationEyeSizeRatioUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationEyeSizeRatio");
+
+    glUseProgram(blitProgram_);
+    glUniform1i(blitTextureUniform_, 0);
+    glUniform1f(blitUpscaleEdgeThresholdUniform_, 4.0f / 255.0f);
+    glUniform1f(blitUpscaleSharpnessUniform_, 2.0f);
+    glUseProgram(0);
 
     // Full-screen quad
     float quadVertices[] = {
         // pos x,y    uv u,v
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f, -1.0f,  1.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f,  0.0f, 1.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f,
+         1.0f, -1.0f,  1.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 0.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 0.0f,
+        -1.0f,  1.0f,  0.0f, 0.0f,
     };
 
     glGenVertexArrays(1, &blitVao_);
     glGenBuffers(1, &blitVbo_);
     glBindVertexArray(blitVao_);
     glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
@@ -2567,43 +2592,21 @@ void XrApp::BlitVideoToSwapchain(int eye)
     float uMin = (eye == 0) ? contentUMin : contentMidU;
     float uMax = (eye == 0) ? contentMidU : contentUMax;
 
-    float quadVertices[] = {
-        -1.0f, -1.0f,  0.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 1.0f,
-         1.0f,  1.0f,  1.0f, 0.0f,
-        -1.0f, -1.0f,  0.0f, 1.0f,
-         1.0f,  1.0f,  1.0f, 0.0f,
-        -1.0f,  1.0f,  0.0f, 0.0f,
-    };
-
-    glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quadVertices), quadVertices);
-
     glUseProgram(blitProgram_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, videoTexture_);
-    glUniform1i(glGetUniformLocation(blitProgram_, "uTexture"), 0);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uEyeSourceMin"),
-                uMin, contentVMin);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uEyeSourceMax"),
-                uMax, contentVMax);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uLogicalTexelSize"),
-                decodedTexelWidth_ * 2.0f, decodedTexelHeight_);
-    glUniform1i(glGetUniformLocation(blitProgram_, "uFoveatedEncodingEnabled"),
-                serverFoveatedEncodingEnabled_ ? 1 : 0);
-    glUniform1i(glGetUniformLocation(blitProgram_, "uClientUpscalingEnabled"),
-                clientUpscalingEnabled_ ? 1 : 0);
-    glUniform1f(glGetUniformLocation(blitProgram_, "uUpscaleEdgeThreshold"),
-                4.0f / 255.0f);
-    glUniform1f(glGetUniformLocation(blitProgram_, "uUpscaleSharpness"),
-                2.0f);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uFoveationCenterSize"),
+    glUniform2f(blitEyeSourceMinUniform_, uMin, contentVMin);
+    glUniform2f(blitEyeSourceMaxUniform_, uMax, contentVMax);
+    glUniform2f(blitLogicalTexelSizeUniform_, decodedTexelWidth_ * 2.0f, decodedTexelHeight_);
+    glUniform1i(blitFoveatedEncodingEnabledUniform_, serverFoveatedEncodingEnabled_ ? 1 : 0);
+    glUniform1i(blitClientUpscalingEnabledUniform_, clientUpscalingEnabled_ ? 1 : 0);
+    glUniform2f(blitFoveationCenterSizeUniform_,
                 foveationCenterSizeX_, foveationCenterSizeY_);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uFoveationCenterShift"),
+    glUniform2f(blitFoveationCenterShiftUniform_,
                 foveationCenterShiftX_, foveationCenterShiftY_);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uFoveationEdgeRatio"),
+    glUniform2f(blitFoveationEdgeRatioUniform_,
                 foveationEdgeRatioX_, foveationEdgeRatioY_);
-    glUniform2f(glGetUniformLocation(blitProgram_, "uFoveationEyeSizeRatio"),
+    glUniform2f(blitFoveationEyeSizeRatioUniform_,
                 foveationEyeWidthRatio_, foveationEyeHeightRatio_);
 
     glBindVertexArray(blitVao_);
@@ -3096,6 +3099,18 @@ void XrApp::Shutdown()
     {
         glDeleteProgram(blitProgram_);
         blitProgram_ = 0;
+        blitTextureUniform_ = -1;
+        blitEyeSourceMinUniform_ = -1;
+        blitEyeSourceMaxUniform_ = -1;
+        blitLogicalTexelSizeUniform_ = -1;
+        blitFoveatedEncodingEnabledUniform_ = -1;
+        blitClientUpscalingEnabledUniform_ = -1;
+        blitUpscaleEdgeThresholdUniform_ = -1;
+        blitUpscaleSharpnessUniform_ = -1;
+        blitFoveationCenterSizeUniform_ = -1;
+        blitFoveationCenterShiftUniform_ = -1;
+        blitFoveationEdgeRatioUniform_ = -1;
+        blitFoveationEyeSizeRatioUniform_ = -1;
     }
     if (blitVao_ != 0)
     {

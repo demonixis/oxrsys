@@ -177,6 +177,18 @@ private:
     GLuint blitVao_ = 0;
     GLuint blitVbo_ = 0;
     GLuint fbo_ = 0;               // Framebuffer for blit-to-swapchain
+    GLint blitTextureUniform_ = -1;
+    GLint blitEyeSourceMinUniform_ = -1;
+    GLint blitEyeSourceMaxUniform_ = -1;
+    GLint blitLogicalTexelSizeUniform_ = -1;
+    GLint blitFoveatedEncodingEnabledUniform_ = -1;
+    GLint blitClientUpscalingEnabledUniform_ = -1;
+    GLint blitUpscaleEdgeThresholdUniform_ = -1;
+    GLint blitUpscaleSharpnessUniform_ = -1;
+    GLint blitFoveationCenterSizeUniform_ = -1;
+    GLint blitFoveationCenterShiftUniform_ = -1;
+    GLint blitFoveationEdgeRatioUniform_ = -1;
+    GLint blitFoveationEyeSizeRatioUniform_ = -1;
 
     // Networking
     std::unique_ptr<NetworkReceiver> networkReceiver_;

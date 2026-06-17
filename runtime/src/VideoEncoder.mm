@@ -362,6 +362,22 @@ VideoEncoder::~VideoEncoder()
     Shutdown();
 }
 
+bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsContext)
+{
+    id<MTLDevice> device = (__bridge id<MTLDevice>)graphicsContext.metalDevice;
+    if (device == nil)
+    {
+        return false;
+    }
+
+    id<MTLRenderPipelineState> pipeline = CreateFoveationPipeline(device);
+    id<MTLSamplerState> sampler = CreateLinearClampSampler(device);
+    const bool supported = pipeline != nil && sampler != nil;
+    [pipeline release];
+    [sampler release];
+    return supported;
+}
+
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                                uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {
@@ -395,12 +411,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         videoToolbox_.foveationSampler = (void*)CreateLinearClampSampler(device);
         if (videoToolbox_.foveationPipeline == nullptr || videoToolbox_.foveationSampler == nullptr)
         {
-            spdlog::warn("VideoEncoder: Foveated encoding shader unavailable; falling back to normal scaling");
-            [(id<MTLRenderPipelineState>)videoToolbox_.foveationPipeline release];
-            [(id<MTLSamplerState>)videoToolbox_.foveationSampler release];
-            videoToolbox_.foveationPipeline = nullptr;
-            videoToolbox_.foveationSampler = nullptr;
-            foveationSettings_.enabled = false;
+            spdlog::error("VideoEncoder: Foveated encoding was negotiated but the shader is unavailable");
+            Shutdown();
+            return false;
         }
     }
 

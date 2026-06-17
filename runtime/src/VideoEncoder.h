@@ -63,6 +63,7 @@ public:
                     uint32_t bitrateMbps, const GraphicsContext& graphicsContext);
     void Shutdown();
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
+    static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
 
     // Encode one backend-native texture/image source.
     // The callback is invoked for each NAL unit produced

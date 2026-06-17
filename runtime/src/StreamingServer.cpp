@@ -381,7 +381,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     const oxr::protocol::FoveationPreset foveationPreset =
         ParseFoveationPreset(config.foveatedEncodingPreset);
     if (foveationPreset != oxr::protocol::FoveationPreset::Off &&
-        PlatformSupportsFoveatedEncoding())
+        PlatformSupportsFoveatedEncoding() &&
+        IsGraphicsContextValid(graphicsContext_) &&
+        VideoEncoder::SupportsFoveatedEncoding(graphicsContext_))
     {
         const oxr::protocol::FoveationLayout layout =
             oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
@@ -392,7 +394,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     }
     else if (foveationPreset != oxr::protocol::FoveationPreset::Off)
     {
-        spdlog::warn("StreamingServer: foveated encoding preset '{}' is configured but disabled on this platform",
+        spdlog::warn("StreamingServer: foveated encoding preset '{}' is configured but unavailable; advertising normal video",
                      config.foveatedEncodingPreset);
     }
 
