@@ -18,6 +18,7 @@ The WiFi transport uses UDP with dedicated ports:
 - Video: `9944`
 - Tracking: `9945`
 - Control: `9946`
+- Audio: `9947` (reserved for headset speaker audio; not advertised until an audio stream is active)
 
 Discovery announces the server and its stream settings. Video carries encoded frame fragments. Tracking carries headset and controller state back to the runtime. Control carries latency reports, keyframe requests, and haptics.
 
@@ -38,6 +39,7 @@ TCP payloads are framed with `TcpRecordHeader`, which contains the record magic,
 - `Tracking`
 - `Control`
 - `Disconnect`
+- `Audio`
 
 ## Discovery
 
@@ -52,11 +54,38 @@ The handshake exposes:
 - server and device names; Android clients send the OpenXR `systemName` in
   `ClientConnect.deviceName`
 - preferred codec and bitrate limits
+- server feature flags for foveated encoding, client foveation, client upscaling, and headset audio
+- client capability flags for foveated encoding, client foveation, client upscaling, and audio output
+- foveated encoding preset and aligned AADT parameters
+- client foveation preset and client upscaling mode
+- audio port and sample rate fields reserved for headset speaker audio
+
+`ServerAnnounce` is versioned as a 92-byte v1.0 base followed by v1.1 trailing fields. `ClientConnect`
+is versioned as an 80-byte v1.0 base followed by v1.1 trailing fields. Receivers accept either the
+base size or the full struct size and zero-initialize missing trailing fields.
 
 `ClientConnect.maxBitrateMbps` is a client-side ceiling. A value of `0`
 (`CLIENT_MAX_BITRATE_USE_SERVER_CONFIG`) means the client does not impose a
 bitrate cap, so the runtime uses `streaming.bitrate_mbps` from its config. The
 runtime accepts configured bitrates from `1` to `200` Mbps.
+
+The runtime announces the configured preferred headset refresh rate. Current Home-supported values
+are `60`, `72`, `80`, `90`, and `120` Hz. Quest clients request the announced value through
+`XR_FB_display_refresh_rate` when available and report the active rate back in
+`ClientConnect.refreshRateHz`; the runtime uses that reported value for encode cadence and pose
+prediction.
+
+Foveated encoding uses an ALVR-style axis-aligned distortion transform before video encode on
+supported server paths. The announced presets currently map to:
+
+- `Light`: center `0.60 x 0.55`, edge ratio `2 x 3`
+- `Medium`: center `0.45 x 0.40`, edge ratio `4 x 5`
+- `High`: center `0.35 x 0.32`, edge ratio `6 x 7`
+
+The server aligns the active foveated area to encoder-friendly dimensions and announces the encoded
+resolution. A client must advertise `CLIENT_CAPABILITY_FOVEATED_ENCODING` before the server applies
+the AADT compression shader. Clients that do not advertise the capability can still receive the
+reduced encoded resolution as a normal downscaled stream.
 
 ## Video Stream
 
@@ -124,6 +153,13 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 Latency reports allow the runtime to keep prediction bounded. Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from the runtime to the client.
 
 `NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
+
+## Audio Stream
+
+The protocol reserves stereo 48 kHz float PCM speaker audio over UDP `AUDIO_PORT` or TCP `Audio`
+records. The wire structs are present so clients and frontends can parse the protocol safely, but the
+runtime does not advertise `SERVER_FEATURE_HEADSET_AUDIO` until a real capture/playback path is
+attached. Microphone input is out of scope for this speaker-only path.
 
 ## Session Lifecycle
 

@@ -200,5 +200,6 @@ private:
     bool hasReleasedImage_ = false;
     std::vector<ImageState> imageStates_;
     std::deque<uint32_t> acquiredImageOrder_;
+    std::deque<bool> acquiredImageWaitEligible_;
     mutable std::mutex stateMutex_;
 };

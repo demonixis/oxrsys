@@ -570,8 +570,15 @@ XrResult Swapchain::AcquireImage(const XrSwapchainImageAcquireInfo* acquireInfo,
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
+    const bool waitEligible = std::all_of(acquiredImageOrder_.begin(),
+                                          acquiredImageOrder_.end(),
+                                          [this](uint32_t imageIndex) {
+                                              return imageIndex < imageStates_.size() &&
+                                                     imageStates_[imageIndex] == ImageState::Waited;
+                                          });
     imageStates_[acquiredIndex] = ImageState::Acquired;
     acquiredImageOrder_.push_back(acquiredIndex);
+    acquiredImageWaitEligible_.push_back(waitEligible);
     nextAcquireIndex_ = (acquiredIndex + 1) % imageCount_;
     staticImageAcquired_ = (imageCount_ == 1);
     *index = acquiredIndex;
@@ -591,19 +598,19 @@ XrResult Swapchain::WaitImage(const XrSwapchainImageWaitInfo* waitInfo)
         return XR_ERROR_CALL_ORDER_INVALID;
     }
 
-    auto waitIt = std::find_if(acquiredImageOrder_.begin(), acquiredImageOrder_.end(),
-                               [this](uint32_t imageIndex) {
-                                   return imageIndex < imageStates_.size() &&
-                                          imageStates_[imageIndex] == ImageState::Acquired;
-                               });
-    if (waitIt == acquiredImageOrder_.end())
+    for (size_t i = 0; i < acquiredImageOrder_.size() && i < acquiredImageWaitEligible_.size(); ++i)
     {
-        return XR_ERROR_CALL_ORDER_INVALID;
+        const uint32_t waitIndex = acquiredImageOrder_[i];
+        if (acquiredImageWaitEligible_[i] && waitIndex < imageStates_.size() &&
+            imageStates_[waitIndex] == ImageState::Acquired)
+        {
+            imageStates_[waitIndex] = ImageState::Waited;
+            acquiredImageWaitEligible_[i] = false;
+            return XR_SUCCESS;
+        }
     }
 
-    uint32_t waitIndex = *waitIt;
-    imageStates_[waitIndex] = ImageState::Waited;
-    return XR_SUCCESS;
+    return XR_ERROR_CALL_ORDER_INVALID;
 }
 
 XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
@@ -629,6 +636,11 @@ XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
     imageStates_[releaseIndex] = ImageState::Available;
     hasReleasedImage_ = true;
     acquiredImageOrder_.pop_front();
+    acquiredImageWaitEligible_.pop_front();
+    if (!acquiredImageWaitEligible_.empty())
+    {
+        acquiredImageWaitEligible_.front() = true;
+    }
 
     hasSnapshot_ = false;
     lastSnapshotValue_ = 0;

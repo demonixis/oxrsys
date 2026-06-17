@@ -232,11 +232,26 @@ struct HomeLauncherTests {
         let parsed = OXRSysServerConfig.parse(from: """
         [streaming]
         transport = "usb_adb"
+        refresh_rate_hz = 120
+        foveated_encoding_preset = "medium"
+        client_foveation_preset = "high"
+        client_upscaling = true
+        headset_audio = true
         """)
         try expect(parsed.transport == .usbAdb, "Expected USB ADB transport parse")
+        try expect(parsed.refreshRateHz == 120, "Expected refresh parse")
+        try expect(parsed.foveatedEncodingPreset == .medium, "Expected foveated encoding parse")
+        try expect(parsed.clientFoveationPreset == .high, "Expected client foveation parse")
+        try expect(parsed.clientUpscaling == true, "Expected client upscaling parse")
+        try expect(parsed.headsetAudio == true, "Expected headset audio parse")
 
         let merged = parsed.merged(into: OXRSysServerConfig.defaultText)
         try expect(merged.contains("transport = \"usb_adb\""), "Expected USB ADB transport serialization")
+        try expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization")
+        try expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization")
+        try expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization")
+        try expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization")
+        try expect(merged.contains("headset_audio = true"), "Expected audio serialization")
     }
 
     private static func testServerConfigDefaultSerialization() throws {
@@ -256,6 +271,11 @@ struct HomeLauncherTests {
         try expect(merged.contains("runtime_enabled = true"), "Expected default runtime serialization")
         try expect(merged.contains("bitrate_mbps = 50"), "Expected default bitrate serialization")
         try expect(merged.contains("transport = \"auto\""), "Expected default transport serialization")
+        try expect(merged.contains("refresh_rate_hz = 72"), "Expected default refresh serialization")
+        try expect(merged.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization")
+        try expect(merged.contains("client_foveation_preset = \"medium\""), "Expected default FFR serialization")
+        try expect(merged.contains("client_upscaling = false"), "Expected default upscaling serialization")
+        try expect(merged.contains("headset_audio = false"), "Expected default audio serialization")
         try expect(merged.contains("file_logging = true"), "Expected default file logging serialization")
         try expect(merged.contains("quest_logcat = false"), "Expected default quest logcat serialization")
     }
@@ -299,6 +319,11 @@ struct HomeLauncherTests {
             "render_height": 1920,
             "encoded_width": 2752,
             "encoded_height": 1440,
+            "encoder_preset": "quality",
+            "foveated_encoding_preset": "medium",
+            "client_foveation_preset": "high",
+            "client_upscaling": true,
+            "headset_audio": false,
             "latency_ms": {
               "server_pipeline": 12.5,
               "client_pipeline": 18.25,
@@ -334,6 +359,11 @@ struct HomeLauncherTests {
         try expect(stats?.refreshRateHz == 90, "Expected runtime stats refresh rate")
         try expect(stats?.currentBitrateMbps == 42, "Expected runtime stats bitrate")
         try expect(stats?.encodedWidth == 2752, "Expected runtime stats encoded width")
+        try expect(stats?.encoderPreset == "quality", "Expected runtime stats encoder preset")
+        try expect(stats?.foveatedEncodingPreset == "medium", "Expected runtime stats FFE preset")
+        try expect(stats?.clientFoveationPreset == "high", "Expected runtime stats FFR preset")
+        try expect(stats?.clientUpscaling == true, "Expected runtime stats upscaling")
+        try expect(stats?.headsetAudio == false, "Expected runtime stats audio")
         try expect(stats?.latency.serverPipelineMs == 12.5, "Expected server latency parse")
         try expect(stats?.latency.predictionHorizonMs == 30.75, "Expected prediction horizon parse")
         try expect(stats?.encode.totalP95Ms == 9.5, "Expected encode p95 parse")

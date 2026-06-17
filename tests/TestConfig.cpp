@@ -17,8 +17,13 @@ runtime_enabled = false
 bitrate_mbps = 85
 fov_degrees = 30
 resolution_scale = 0.8
+refresh_rate_hz = 120
 keyframe_interval_sec = 4
 encoder_preset = "quality"
+foveated_encoding_preset = "medium"
+client_foveation_preset = "high"
+client_upscaling = true
+headset_audio = true
 
 [logging]
 file_logging = false
@@ -31,8 +36,13 @@ quest_logcat = yes
     CHECK(values.bitrateMbps == 85);
     CHECK(values.fovDegrees == 100);
     CHECK(values.resolutionScale == 0.8f);
+    CHECK(values.refreshRateHz == 120);
     CHECK(values.keyframeIntervalSec == 4);
     CHECK(values.encoderPreset == "quality");
+    CHECK(values.foveatedEncodingPreset == "medium");
+    CHECK(values.clientFoveationPreset == "high");
+    CHECK(values.clientUpscaling == true);
+    CHECK(values.headsetAudio == true);
     CHECK(values.streamingTransport == "auto");
     CHECK(values.fileLogging == false);
     CHECK(values.questLogcat == true);
@@ -44,24 +54,35 @@ TEST_CASE("Config parser preserves provided defaults when values are malformed",
 [streaming]
 bitrate_mbps = nope
 resolution_scale = 2.0
+refresh_rate_hz = 144
 keyframe_interval_sec = 0
 encoder_preset = "turbo"
+foveated_encoding_preset = "extreme"
+client_foveation_preset = "ultra"
 )TOML");
 
     ConfigValues defaults;
     defaults.runtimeEnabled = false;
     defaults.bitrateMbps = 64;
     defaults.resolutionScale = 0.5f;
+    defaults.refreshRateHz = 80;
     defaults.keyframeIntervalSec = 3;
     defaults.encoderPreset = "speed";
+    defaults.foveatedEncodingPreset = "light";
+    defaults.clientFoveationPreset = "medium";
+    defaults.clientUpscaling = true;
 
     const ConfigValues values = ParseConfigToml(input, defaults);
 
     CHECK(values.runtimeEnabled == false);
     CHECK(values.bitrateMbps == 64);
     CHECK(values.resolutionScale == 0.5f);
+    CHECK(values.refreshRateHz == 80);
     CHECK(values.keyframeIntervalSec == 3);
     CHECK(values.encoderPreset == "speed");
+    CHECK(values.foveatedEncodingPreset == "light");
+    CHECK(values.clientFoveationPreset == "medium");
+    CHECK(values.clientUpscaling == true);
 }
 
 TEST_CASE("Config parser accepts streaming transport", "[config]")

@@ -32,6 +32,28 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
     }
 }
 
+enum FoveationPresetSetting: String, CaseIterable, Identifiable {
+    case off
+    case light
+    case medium
+    case high
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .off:
+            return "Off"
+        case .light:
+            return "Light"
+        case .medium:
+            return "Medium"
+        case .high:
+            return "High"
+        }
+    }
+}
+
 struct HomePaths {
     static let appSupportDirectory = NSString(string: "~/Library/Application Support/OXRSys").expandingTildeInPath
     static let configFilePath = (appSupportDirectory as NSString).appendingPathComponent("oxrsys-runtime.toml")
@@ -122,6 +144,11 @@ struct HomeRuntimeStreamingStats: Equatable {
     var renderHeight: Int = 0
     var encodedWidth: Int = 0
     var encodedHeight: Int = 0
+    var encoderPreset: String = ""
+    var foveatedEncodingPreset: String = ""
+    var clientFoveationPreset: String = ""
+    var clientUpscaling = false
+    var headsetAudio = false
     var latency = Latency()
     var encode = Encode()
     var counters = Counters()
@@ -144,6 +171,11 @@ struct HomeRuntimeStreamingStats: Equatable {
             renderHeight: intValue(object["render_height"]) ?? 0,
             encodedWidth: intValue(object["encoded_width"]) ?? 0,
             encodedHeight: intValue(object["encoded_height"]) ?? 0,
+            encoderPreset: stringValue(object["encoder_preset"]) ?? "",
+            foveatedEncodingPreset: stringValue(object["foveated_encoding_preset"]) ?? "",
+            clientFoveationPreset: stringValue(object["client_foveation_preset"]) ?? "",
+            clientUpscaling: boolValue(object["client_upscaling"]) ?? false,
+            headsetAudio: boolValue(object["headset_audio"]) ?? false,
             latency: Latency(
                 serverPipelineMs: doubleValue(latencyObject["server_pipeline"]),
                 clientPipelineMs: doubleValue(latencyObject["client_pipeline"]),
@@ -180,6 +212,20 @@ struct HomeRuntimeStreamingStats: Equatable {
         }
         if let number = value as? NSNumber {
             return number.intValue
+        }
+        return nil
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        value as? String
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        if let value = value as? Bool {
+            return value
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
         }
         return nil
     }

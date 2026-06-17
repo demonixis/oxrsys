@@ -20,6 +20,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added macOS package and distribution helpers: `scripts/macos_build_package.sh` and `scripts/macos_sign_notarize.sh`.
 - Added the `net.demonixis.oxrsys-unity` Unity Package Manager package with editor runtime selection and a macOS Player OpenXR loader postprocessor.
 - Added runtime tests for portable platform behavior, streaming frame queue replacement, Vulkan dispatch, expanded input handling, protocol layout, runtime status, and loader-backed API behavior.
+- Added server-selected headset refresh controls, foveated encoding presets, headset foveation presets, Quest shader upscaling controls, and reserved headset-audio configuration to SwiftUI Home and Qt Home.
+- Added protocol v1.1 trailing fields for server feature flags, client capability flags, foveated encoding parameters, client foveation, client upscaling, and reserved headset speaker audio.
+- Added ALVR-style AADT foveated encoding math, a Metal encoder preprocessing shader, and Quest shader-side foveated-encoding decompression.
+- Added a Quest edge-aware shader upscaling path without requiring the proprietary Snapdragon SDK.
 
 ### Changed
 
@@ -32,7 +36,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated Apple and Qt simulator clients to avoid imposing their own bitrate cap.
 - Updated the streaming protocol to carry render-pose metadata per frame and to store the final FEC group packet payload size in the existing video header padding.
 - Updated Quest/PICO controller profile handling to stay profile-aware instead of falling back globally to `KHR simple_controller`.
-- Updated the Android VR client to request the build-configured display refresh rate, advertise the headset OpenXR system name, prefer USB ADB reverse TCP when available, and fall back to WiFi UDP discovery.
+- Reworked Android VR client transport handling to prefer USB ADB reverse TCP when available, fall back to WiFi UDP discovery, request the build-configured display refresh rate before discovery, and advertise the headset OpenXR system name.
+- Updated the Android VR client to request the server-announced refresh rate after discovery, report the active headset rate, advertise streaming capabilities, and apply server-selected client foveation/upscaling options.
+- Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
 - Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
 - Updated Windows CMake dependency resolution so Vulkan headers can come from the Vulkan SDK or a FetchContent `Vulkan-Headers` fallback without linking the Vulkan loader.
@@ -68,6 +74,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Linux video streaming still needs real Vulkan image readback before it can be treated as feature-complete.
 - Windows video streaming currently supports common RGBA/BGRA 8-bit Vulkan or DXGI color swapchains for video.
 - PICO and headset-specific controller/hand tracking behavior still needs regular hardware validation.
+- Headset speaker audio has protocol/config scaffolding but no active runtime capture/playback pipeline yet.
 
 ## 1.1.0 - 2026-05-26
 

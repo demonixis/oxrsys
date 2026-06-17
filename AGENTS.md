@@ -22,8 +22,9 @@ real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with
 keeps hand-interaction bindings available alongside active controllers with controller-first priority,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, recenters incoming streaming poses around the first headset pose for each
-client session, enables a first-pass dynamic `XR_FB_foveation` path when the headset supports it,
-and can request a build-configured display refresh rate. The visionOS
+client session, requests the server-selected display refresh rate, enables preset-driven dynamic
+`XR_FB_foveation` when the headset supports it, and supports the Quest shader path for
+foveated-encoding decompression plus edge-aware upscaling. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
 while the immersive space is open. The macOS SwiftUI Home app now targets direct notarized
@@ -32,9 +33,11 @@ distribution so it can scan known apps, launch compatible apps with the user-sel
 The Home app shows a main-window runtime activity summary from
 `~/Library/Application Support/OXRSys/runtime_status.json`, including idle/streaming state,
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
-per-app custom ADB path selection for USB setup. Home streaming bitrate controls use the shared
-runtime 1-200 Mbps bounds, and clients can send `ClientConnect.maxBitrateMbps = 0` to use the
-server-configured bitrate without adding a client-side cap.
+per-app custom ADB path selection for USB setup. Home streaming controls include the shared
+runtime 1-200 Mbps bitrate bounds, server-selected refresh rate, encoder preset, foveated encoding
+preset, headset foveation preset, Quest shader upscaling, and reserved headset-audio configuration;
+clients can send `ClientConnect.maxBitrateMbps = 0` to use the server-configured bitrate without
+adding a client-side cap.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
 same-process window backed by the shared `OXRSysSimulator` Swift package, and show live runtime
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
@@ -83,15 +86,18 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Streaming encoders must honor each projection view's submitted `XrSwapchainSubImage.imageRect`
   before packing the side-by-side headset video frame.
 - Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
-- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices/accessories and are not required for ADB reverse streaming. Home must keep a previously verified reverse setup usable if a later ADB poll temporarily stops reporting the headset after the VR app enters immersive mode.
+- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices and are not required for ADB reverse streaming. Home must keep a previously verified reverse setup usable if a later ADB poll temporarily stops reporting the headset after the VR app enters immersive mode.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encode callback or `Session::EndFrame()`.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
-- Headset refresh rate is negotiated from the client.
-- The Quest Android client requests its preferred display refresh rate from the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value.
+- Headset refresh rate is selected by the server config/Home, requested by the Quest client through `XR_FB_display_refresh_rate`, and negotiated back from the active client rate.
+- The Quest Android client still uses the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value as a fallback before a server is discovered.
 - Latency reports feed bounded pose prediction.
 - Runtime-consumed streaming poses are relative to the first valid headset pose of each streaming
   client session; do not apply absolute headset room-space poses directly to OpenXR app spaces.
 - Headset clients must match `VIDEO_FLAG_RENDER_POSE` metadata to the decoded frame before projection submission.
+- Server-side foveated encoding uses the ALVR-style AADT transform on the async Metal encode path only; clients without `CLIENT_CAPABILITY_FOVEATED_ENCODING` must not receive distorted video.
+- Quest shader upscaling and foveated-encoding decompression must preserve render-pose matching and keep the plain bilinear path working when the server flags are off.
+- Headset speaker audio has protocol/config scaffolding only until a real capture/playback path is attached; do not advertise `SERVER_FEATURE_HEADSET_AUDIO` without that pipeline.
 - UDP FEC uses the existing 24-byte `VideoPacketHeader` padding to carry the final data packet size for each FEC group; clients must use it only when recovering the last packet in that group.
 - Quest hand tracking depends on the Android manifest permission `com.oculus.permission.HAND_TRACKING` and the optional `oculus.software.handtracking` feature.
 - Streaming controller poses are valid only when `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE` is present; missing controller flags must not overwrite the last valid runtime pose.

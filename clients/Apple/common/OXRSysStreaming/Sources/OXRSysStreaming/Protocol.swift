@@ -10,10 +10,13 @@ public enum OXRProtocol {
     public static let videoPort: UInt16 = 9944
     public static let trackingPort: UInt16 = 9945
     public static let controlPort: UInt16 = 9946
+    public static let audioPort: UInt16 = 9947
     public static let handJointCount: Int = 26
     public static let streamingMinBitrateMbps: UInt32 = 1
     public static let streamingMaxBitrateMbps: UInt32 = 200
     public static let clientMaxBitrateUseServerConfig: UInt32 = 0
+    public static let serverAnnounceBaseSize: Int = 92
+    public static let clientConnectBaseSize: Int = 80
     public static let maxPacketPayload: Int = 1400
     public static let tcpRecordMagic: UInt32 = 0x4f585255
     public static let tcpRecordVersion: UInt16 = 1
@@ -34,6 +37,7 @@ public enum TcpRecordType: UInt16, Sendable {
     case tracking = 0x0005
     case control = 0x0006
     case disconnect = 0x0007
+    case audio = 0x0008
 }
 
 public struct TcpRecordHeader: Sendable {
@@ -68,12 +72,60 @@ public struct TcpRenderPose: Sendable {
     public init() {}
 }
 
+public struct TcpAudioHeader: Sendable {
+    public var presentationTimeNs: Int64 = 0
+    public var frameCount: UInt32 = 0
+    public var payloadSize: UInt32 = 0
+    public var sampleRateHz: UInt32 = 48000
+    public var channels: UInt16 = 2
+    public var format: UInt16 = AudioSampleFormat.float32.rawValue
+
+    public init() {}
+}
+
 // MARK: - Discovery
 
 public enum MessageType: UInt8, Sendable {
     case serverAnnounce = 0x01
     case clientConnect = 0x02
     case serverDisconnect = 0x03
+}
+
+public struct ServerFeatureFlags {
+    public static let foveatedEncoding: UInt32 = 0x00000001
+    public static let clientFoveation: UInt32 = 0x00000002
+    public static let clientUpscaling: UInt32 = 0x00000004
+    public static let headsetAudio: UInt32 = 0x00000008
+}
+
+public struct ClientCapabilityFlags {
+    public static let foveatedEncoding: UInt32 = 0x00000001
+    public static let clientFoveation: UInt32 = 0x00000002
+    public static let clientUpscaling: UInt32 = 0x00000004
+    public static let audioOutput: UInt32 = 0x00000008
+}
+
+public enum FoveationPreset: UInt32, Sendable {
+    case off = 0
+    case light = 1
+    case medium = 2
+    case high = 3
+}
+
+public enum ClientFoveationPreset: UInt32, Sendable {
+    case off = 0
+    case light = 1
+    case medium = 2
+    case high = 3
+}
+
+public enum ClientUpscalingMode: UInt32, Sendable {
+    case off = 0
+    case snapdragonGsr = 1
+}
+
+public enum AudioSampleFormat: UInt16, Sendable {
+    case float32 = 1
 }
 
 public struct ServerAnnounce: Sendable {
@@ -103,6 +155,19 @@ public struct ServerAnnounce: Sendable {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     )
+
+    public var serverFeatures: UInt32 = 0
+    public var audioPort: UInt32 = UInt32(OXRProtocol.audioPort)
+    public var foveatedEncodingPreset: UInt32 = FoveationPreset.off.rawValue
+    public var clientFoveationPreset: UInt32 = ClientFoveationPreset.off.rawValue
+    public var clientUpscalingMode: UInt32 = ClientUpscalingMode.off.rawValue
+    public var audioSampleRateHz: UInt32 = 48000
+    public var foveationCenterSizeX: Float = 0
+    public var foveationCenterSizeY: Float = 0
+    public var foveationCenterShiftX: Float = 0
+    public var foveationCenterShiftY: Float = 0
+    public var foveationEdgeRatioX: Float = 1
+    public var foveationEdgeRatioY: Float = 1
 
     public init() {}
 
@@ -138,6 +203,10 @@ public struct ClientConnect: Sendable {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     )
+    public var clientCapabilities: UInt32 = 0
+    public var audioSampleRateHz: UInt32 = 48000
+    public var reserved2: UInt32 = 0
+    public var reserved3: UInt32 = 0
 
     public init() {}
 
@@ -183,6 +252,19 @@ public struct VideoFlags {
     public static let stereo: UInt8 = 0x0C
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
+}
+
+public struct AudioPacketHeader: Sendable {
+    public var presentationTimeNs: Int64 = 0
+    public var frameIndex: UInt32 = 0
+    public var frameCount: UInt32 = 0
+    public var payloadSize: UInt32 = 0
+    public var sampleRateHz: UInt32 = 48000
+    public var channels: UInt16 = 2
+    public var format: UInt16 = AudioSampleFormat.float32.rawValue
+    public var reserved: UInt32 = 0
+
+    public init() {}
 }
 
 public enum FEC {

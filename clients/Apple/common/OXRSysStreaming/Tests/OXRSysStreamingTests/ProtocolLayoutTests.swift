@@ -5,8 +5,12 @@ import XCTest
 
 final class ProtocolLayoutTests: XCTestCase {
     func testDiscoveryLayoutsMatchCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<ServerAnnounce>.size, 92)
-        XCTAssertEqual(MemoryLayout<ClientConnect>.size, 80)
+        XCTAssertEqual(OXRProtocol.serverAnnounceBaseSize, 92)
+        XCTAssertEqual(OXRProtocol.clientConnectBaseSize, 80)
+        XCTAssertEqual(MemoryLayout<ServerAnnounce>.size, 140)
+        XCTAssertEqual(MemoryLayout<ServerAnnounce>.offset(of: \.serverFeatures), OXRProtocol.serverAnnounceBaseSize)
+        XCTAssertEqual(MemoryLayout<ClientConnect>.size, 96)
+        XCTAssertEqual(MemoryLayout<ClientConnect>.offset(of: \.clientCapabilities), OXRProtocol.clientConnectBaseSize)
         XCTAssertEqual(OXRProtocol.streamingMinBitrateMbps, 1)
         XCTAssertEqual(OXRProtocol.streamingMaxBitrateMbps, 200)
         XCTAssertEqual(OXRProtocol.clientMaxBitrateUseServerConfig, 0)
@@ -21,7 +25,9 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TcpRecordHeader>.size, 12)
         XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.size, 24)
         XCTAssertEqual(MemoryLayout<TcpRenderPose>.size, 48)
+        XCTAssertEqual(MemoryLayout<TcpAudioHeader>.size, 24)
         XCTAssertEqual(OXRProtocol.tcpRecordMagic, 0x4f585255)
+        XCTAssertEqual(MemoryLayout<AudioPacketHeader>.size, 32)
         XCTAssertEqual(MemoryLayout<LatencyReport>.size, 20)
         XCTAssertEqual(MemoryLayout<RequestKeyframe>.size, 12)
         XCTAssertEqual(MemoryLayout<HapticsCommand>.size, 16)

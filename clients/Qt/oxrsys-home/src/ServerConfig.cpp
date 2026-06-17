@@ -42,6 +42,16 @@ bool boolValue(const QString& key, const QString& text, bool* ok)
     return false;
 }
 
+bool isSupportedRefreshRate(int value)
+{
+    return value == 60 || value == 72 || value == 80 || value == 90 || value == 120;
+}
+
+bool isFoveationPreset(const QString& value)
+{
+    return value == "off" || value == "light" || value == "medium" || value == "high";
+}
+
 QString stringValue(const QString& key, const QString& text)
 {
     QString value = rawValue(key, text);
@@ -168,10 +178,15 @@ QString ServerConfig::defaultText()
         "[streaming]\n"
         "bitrate_mbps = 50\n"
         "fov_degrees = 100\n"
+        "refresh_rate_hz = 72\n"
         "resolution_scale = 0.75\n"
         "keyframe_interval_sec = 2\n"
         "encoder_preset = \"balanced\"\n"
         "transport = \"auto\"\n"
+        "foveated_encoding_preset = \"off\"\n"
+        "client_foveation_preset = \"medium\"\n"
+        "client_upscaling = false\n"
+        "headset_audio = false\n"
         "\n"
         "[logging]\n"
         "file_logging = true\n"
@@ -202,6 +217,12 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.fovDegrees = fov;
     }
 
+    const int refreshRate = rawValue("refresh_rate_hz", text).toInt(&ok);
+    if (ok && isSupportedRefreshRate(refreshRate))
+    {
+        config.refreshRateHz = refreshRate;
+    }
+
     const double resolutionScale = rawValue("resolution_scale", text).toDouble(&ok);
     if (ok && resolutionScale >= 0.25 && resolutionScale <= 1.0)
     {
@@ -224,6 +245,30 @@ ServerConfig ServerConfig::parse(const QString& text)
     if (transportValue == "auto" || transportValue == "wifi" || transportValue == "usb_adb")
     {
         config.transport = transportValue;
+    }
+
+    const QString foveatedEncodingPreset = stringValue("foveated_encoding_preset", text);
+    if (isFoveationPreset(foveatedEncodingPreset))
+    {
+        config.foveatedEncodingPreset = foveatedEncodingPreset;
+    }
+
+    const QString clientFoveationPreset = stringValue("client_foveation_preset", text);
+    if (isFoveationPreset(clientFoveationPreset))
+    {
+        config.clientFoveationPreset = clientFoveationPreset;
+    }
+
+    const bool clientUpscaling = boolValue("client_upscaling", text, &ok);
+    if (ok)
+    {
+        config.clientUpscaling = clientUpscaling;
+    }
+
+    const bool headsetAudio = boolValue("headset_audio", text, &ok);
+    if (ok)
+    {
+        config.headsetAudio = headsetAudio;
     }
 
     const bool fileLogging = boolValue("file_logging", text, &ok);
@@ -255,10 +300,15 @@ QString ServerConfig::mergedInto(const QString& currentText) const
     text = upsertSection(text, "streaming", {
         {"bitrate_mbps", QString::number(bitrateMbps)},
         {"fov_degrees", QString::number(fovDegrees)},
+        {"refresh_rate_hz", QString::number(refreshRateHz)},
         {"resolution_scale", decimalString(resolutionScale)},
         {"keyframe_interval_sec", QString::number(keyframeIntervalSec)},
         {"encoder_preset", QString("\"%1\"").arg(encoderPreset)},
         {"transport", QString("\"%1\"").arg(transport)},
+        {"foveated_encoding_preset", QString("\"%1\"").arg(foveatedEncodingPreset)},
+        {"client_foveation_preset", QString("\"%1\"").arg(clientFoveationPreset)},
+        {"client_upscaling", boolString(clientUpscaling)},
+        {"headset_audio", boolString(headsetAudio)},
     });
     text = upsertSection(text, "logging", {
         {"file_logging", boolString(fileLogging)},
@@ -292,4 +342,21 @@ QString transportDisplayName(const QString& value)
         return "USB ADB";
     }
     return "Auto";
+}
+
+QString foveationPresetDisplayName(const QString& value)
+{
+    if (value == "light")
+    {
+        return "Light";
+    }
+    if (value == "medium")
+    {
+        return "Medium";
+    }
+    if (value == "high")
+    {
+        return "High";
+    }
+    return "Off";
 }

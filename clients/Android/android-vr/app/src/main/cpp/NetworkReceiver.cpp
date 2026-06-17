@@ -4,6 +4,7 @@
 #include <oxrsys/protocol/FecCodec.h>
 
 #include <android/log.h>
+#include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
 #include <cstring>
@@ -138,18 +139,19 @@ void NetworkReceiver::DiscoveryThread(OnServerFoundCallback callback)
         socklen_t addrLen = sizeof(senderAddr);
         ssize_t received = recvfrom(discoverySocket_, buffer, sizeof(buffer), 0,
                                      (sockaddr*)&senderAddr, &addrLen);
-        if (received >= (ssize_t)sizeof(protocol::ServerAnnounce))
+        if (received >= (ssize_t)protocol::SERVER_ANNOUNCE_BASE_SIZE)
         {
-            auto* hello = reinterpret_cast<protocol::ServerAnnounce*>(buffer);
-            if (hello->type == protocol::MessageType::ServerAnnounce)
+            protocol::ServerAnnounce hello = {};
+            memcpy(&hello, buffer, std::min<size_t>(static_cast<size_t>(received), sizeof(hello)));
+            if (hello.type == protocol::MessageType::ServerAnnounce)
             {
                 char ipStr[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &senderAddr.sin_addr, ipStr, sizeof(ipStr));
 
                 LOGI("Server found: %s at %s (%ux%u @ %uHz)",
-                     hello->serverName, ipStr, hello->renderWidth,
-                     hello->renderHeight, hello->refreshRateHz);
-                callback(*hello, ipStr);
+                     hello.serverName, ipStr, hello.renderWidth,
+                     hello.renderHeight, hello.refreshRateHz);
+                callback(hello, ipStr);
             }
         }
     }

@@ -90,7 +90,12 @@ void testServerConfigRoundTrip()
         bitrate_mbps = 85
         transport = "usb_adb"
         resolution_scale = 0.50
+        refresh_rate_hz = 120
         encoder_preset = "speed"
+        foveated_encoding_preset = "medium"
+        client_foveation_preset = "high"
+        client_upscaling = true
+        headset_audio = true
 
         [logging]
         quest_logcat = yes
@@ -99,12 +104,22 @@ void testServerConfigRoundTrip()
     expect(parsed.bitrateMbps == 85, "Expected bitrate parse");
     expect(parsed.transport == "usb_adb", "Expected transport parse");
     expect(parsed.resolutionScale == 0.50, "Expected resolution parse");
+    expect(parsed.refreshRateHz == 120, "Expected refresh parse");
     expect(parsed.encoderPreset == "speed", "Expected preset parse");
+    expect(parsed.foveatedEncodingPreset == "medium", "Expected FFE parse");
+    expect(parsed.clientFoveationPreset == "high", "Expected client foveation parse");
+    expect(parsed.clientUpscaling, "Expected upscaling parse");
+    expect(parsed.headsetAudio, "Expected audio parse");
     expect(parsed.questLogcat, "Expected quest_logcat parse");
 
     const QString merged = parsed.mergedInto(ServerConfig::defaultText());
     expect(merged.contains("transport = \"usb_adb\""), "Expected transport serialization");
     expect(merged.contains("bitrate_mbps = 85"), "Expected bitrate serialization");
+    expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization");
+    expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization");
+    expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization");
+    expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization");
+    expect(merged.contains("headset_audio = true"), "Expected audio serialization");
 }
 
 void testHomeModelResetsStreamingConfigToDefaults()
@@ -153,6 +168,11 @@ quest_logcat = true
     const QString text = QString::fromUtf8(file.readAll());
     expect(text.contains("bitrate_mbps = 50"), "Expected default bitrate serialization");
     expect(text.contains("transport = \"auto\""), "Expected default transport serialization");
+    expect(text.contains("refresh_rate_hz = 72"), "Expected default refresh serialization");
+    expect(text.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization");
+    expect(text.contains("client_foveation_preset = \"medium\""), "Expected default FFR serialization");
+    expect(text.contains("client_upscaling = false"), "Expected default upscaling serialization");
+    expect(text.contains("headset_audio = false"), "Expected default audio serialization");
 
     settings.clear();
 }
@@ -512,6 +532,11 @@ void testRuntimeActivityParsing()
         "render_height": 1920,
         "encoded_width": 2752,
         "encoded_height": 1440,
+        "encoder_preset": "quality",
+        "foveated_encoding_preset": "medium",
+        "client_foveation_preset": "high",
+        "client_upscaling": true,
+        "headset_audio": false,
         "latency_ms": {
           "server_pipeline": 12.5,
           "client_pipeline": 18.25,
@@ -531,6 +556,11 @@ void testRuntimeActivityParsing()
     expect(activity.deviceDisplayName() == "Quest", "Expected Quest device display");
     expect(activity.hasStreamingStats, "Expected stats");
     expect(activity.streamingStats.refreshRateHz == 90, "Expected refresh stats");
+    expect(activity.streamingStats.encoderPreset == "quality", "Expected encoder preset stats");
+    expect(activity.streamingStats.foveatedEncodingPreset == "medium", "Expected FFE stats");
+    expect(activity.streamingStats.clientFoveationPreset == "high", "Expected FFR stats");
+    expect(activity.streamingStats.clientUpscaling, "Expected upscaling stats");
+    expect(!activity.streamingStats.headsetAudio, "Expected audio stats");
     expect(activity.streamingStats.encodeTotalP95Ms == 9.5, "Expected encode stats");
 }
 

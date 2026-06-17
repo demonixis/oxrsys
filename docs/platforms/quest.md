@@ -33,12 +33,17 @@ Quest hand tracking requires the Android manifest to declare:
 If these entries are missing, the runtime can still operate, but headset-side hand joints will not be available.
 PICO runtimes expose hand tracking through their OpenXR runtime support; validate this per headset with the log matrix below because Android manifest requirements differ from Meta's Quest permission model.
 
-USB diagnostics use Android's official `UsbManager` host/accessory intents and filters. The app requests app-level USB permission when Android exposes a real USB device or accessory to the headset. ADB reverse streaming itself does not require or produce that app permission dialog; it may instead trigger the headset's USB debugging authorization prompt when the Mac is first authorized for ADB.
+USB diagnostics use Android's official `UsbManager` host-device intents and filters. The app requests app-level USB permission only when Android exposes a real USB device to the headset. ADB reverse streaming itself does not require or produce that app permission dialog; it may instead trigger the headset's USB debugging authorization prompt when the Mac is first authorized for ADB.
 
-## Preferred Display Refresh
+## Display Refresh
 
-The Android client's preferred display refresh request is build-configured. The default repository value
-is `72`, and you can override it per build with a Gradle property:
+The runtime announces the preferred display refresh selected in Home/config. The Android client
+requests that value through `XR_FB_display_refresh_rate` when the extension is available, then reports
+the active headset rate back in `ClientConnect.refreshRateHz`. Home exposes `60`, `72`, `80`, `90`,
+and `120` Hz.
+
+The repository still keeps a build-configured fallback used before a server is discovered. The
+default value is `72`, and you can override it per build with a Gradle property:
 
 ```bash
 ./gradlew assembleDebug -PoxrsysAndroidDisplayRefreshRateHz=72
@@ -46,8 +51,8 @@ is `72`, and you can override it per build with a Gradle property:
 
 The property is passed through Gradle into CMake as
 `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ`. Set it to a headset-supported rate such as `72`,
-`80`, `90`, or `120`. If the runtime does not advertise the requested rate, the client logs the
-mismatch and keeps the current headset refresh.
+`80`, `90`, or `120`. If the headset runtime does not advertise the server-requested rate, the client
+logs the mismatch and keeps the current headset refresh.
 
 ## Runtime Interaction
 
@@ -55,14 +60,25 @@ The Android client:
 
 - tries USB ADB reverse TCP first, then falls back to local-network UDP discovery when USB is unavailable
 - returns to discovery/retry automatically when the runtime or OpenXR app session stops
-- connects and advertises codec, refresh-rate preferences, and the headset OpenXR `systemName`
-- requests the build-configured display refresh rate when `XR_FB_display_refresh_rate` is available
+- connects and advertises codec, active refresh rate, streaming capabilities, and the headset OpenXR `systemName`
+- requests the server-announced display refresh rate when `XR_FB_display_refresh_rate` is available
 - receives encoded video frames and matches render-pose metadata to each decoded frame before projection submission
 - sends head, controller, and optional hand-tracking data back to the runtime
 - reports latency measurements
 - requests keyframes when recovery is needed
 
-When supported by the headset, the client also enables a first-pass `XR_FB_foveation` path.
+When supported by the headset, the client can enable `XR_FB_foveation` from the server-announced
+client foveation preset. `off` disables the profile, while `light`, `medium`, and `high` map to the
+runtime's FB foveation levels with dynamic foveation enabled.
+
+The video blit shader supports two server-announced post-processing modes:
+
+- foveated-encoding decompression for the runtime's ALVR-style AADT encoded stream
+- optional edge-aware shader upscaling with ALVR defaults: edge threshold `4.0`, sharpness `2.0`,
+  and an intended source factor of `1.5`
+
+The shader path does not depend on the proprietary Snapdragon SDK. It keeps the plain bilinear path
+when the server does not announce upscaling or foveated encoding.
 
 ## Controller Profiles And Tracking Flags
 
@@ -132,10 +148,11 @@ USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NAC
 - Real `XR_EXT_hand_tracking` joints are fed from the Android client into the runtime.
 - Quest and PICO controller profiles are suggested on the Android client, and the runtime gates controller poses and controller actions with explicit active flags while keeping hand tracking available through separate hand-interaction bindings.
 - USB ADB reverse TCP streaming is available alongside WiFi UDP streaming.
-- Refresh rate is negotiated from the client.
+- Refresh rate is selected by the server/Home, requested by the client, and negotiated back from the active headset rate.
 - Latency reporting and keyframe requests are wired into the control path.
 - The client applies frame-exact render poses for projection submission so headset compositor reprojection has the pose used to render the displayed frame.
-- Dynamic foveation support is present as a first pass and should still be treated as an evolving path.
+- Dynamic client foveation, shader upscaling, and foveated-encoding decompression are present as evolving paths and should be validated regularly on hardware.
+- Headset speaker audio has protocol fields reserved, but the Quest client does not yet play a runtime audio stream.
 
 ## Known Limits
 

@@ -18,6 +18,11 @@ public:
         uint32_t renderHeight = 0;
         uint32_t encodedWidth = 0;
         uint32_t encodedHeight = 0;
+        std::string encoderPreset;
+        std::string foveatedEncodingPreset;
+        std::string clientFoveationPreset;
+        bool clientUpscaling = false;
+        bool headsetAudio = false;
 
         double serverPipelineLatencyMs = 0.0;
         double clientPipelineLatencyMs = 0.0;

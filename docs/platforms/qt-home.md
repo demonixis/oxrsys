@@ -10,7 +10,8 @@ Current responsibilities:
   `.exe`/`.bat`/`.cmd`/`.lnk` launchers for Godot/Unity candidates
 - create terminal launch scripts for app cards on macOS and Linux without changing the runtime
   manifest selection model
-- edit the shared runtime TOML keys for streaming, logging, encoder preset, and transport
+- edit the shared runtime TOML keys for streaming, logging, encoder preset, transport, refresh
+  rate, foveation, upscaling, and reserved headset-audio configuration
 - detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, and `9946`
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - run WiFi readiness, ADB status, device listing, reverse mapping reads, and reverse mapping
@@ -60,6 +61,12 @@ immediately. `Reveal Runtime Logs` opens the platform state directory that conta
 The bitrate slider uses the shared runtime range, `1` to `200` Mbps. The Qt simulator sends
 `ClientConnect.maxBitrateMbps = 0`, so it does not add a client-side bitrate cap and the runtime
 status `max_bitrate_mbps` follows the server config when the simulator connects.
+
+The Streaming tab also exposes the shared refresh-rate choices `60`, `72`, `80`, `90`, and `120`
+Hz, encoder presets `speed`, `balanced`, and `quality`, server-side foveated encoding presets
+`off`, `light`, `medium`, and `high`, headset `XR_FB_foveation` presets with the same names,
+Quest shader upscaling, and the reserved headset-audio toggle. Audio is not reported active by the
+runtime until a real capture/playback stream is implemented.
 
 Transport readiness work is asynchronous. Qt Home shows checking/configuring status while the
 worker is running, ignores stale results after ADB path, selected serial, or transport changes, and

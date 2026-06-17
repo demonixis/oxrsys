@@ -16,6 +16,11 @@ struct RuntimeStreamingStats
     int renderHeight = 0;
     int encodedWidth = 0;
     int encodedHeight = 0;
+    QString encoderPreset;
+    QString foveatedEncodingPreset;
+    QString clientFoveationPreset;
+    bool clientUpscaling = false;
+    bool headsetAudio = false;
 
     double serverPipelineMs = 0.0;
     double clientPipelineMs = 0.0;

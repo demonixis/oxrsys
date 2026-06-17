@@ -4,6 +4,7 @@
 
 #include "GraphicsTypes.h"
 
+#include <oxrsys/protocol/Foveation.h>
 #include <oxrsys/protocol/Protocol.h>
 
 #include <cstddef>
@@ -12,8 +13,12 @@ using namespace oxr::protocol;
 
 TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
 {
-    STATIC_REQUIRE(sizeof(ServerAnnounce) == 92);
-    STATIC_REQUIRE(sizeof(ClientConnect) == 80);
+    STATIC_REQUIRE(SERVER_ANNOUNCE_BASE_SIZE == 92);
+    STATIC_REQUIRE(CLIENT_CONNECT_BASE_SIZE == 80);
+    STATIC_REQUIRE(sizeof(ServerAnnounce) == 140);
+    STATIC_REQUIRE(offsetof(ServerAnnounce, serverFeatures) == SERVER_ANNOUNCE_BASE_SIZE);
+    STATIC_REQUIRE(sizeof(ClientConnect) == 96);
+    STATIC_REQUIRE(offsetof(ClientConnect, clientCapabilities) == CLIENT_CONNECT_BASE_SIZE);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, fecGroupLastPacketPayloadSize) == 12);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, reserved) == 14);
@@ -21,6 +26,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(TcpRecordHeader) == 12);
     STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
     STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);
+    STATIC_REQUIRE(sizeof(TcpAudioHeader) == 24);
+    STATIC_REQUIRE(sizeof(AudioPacketHeader) == 32);
     STATIC_REQUIRE(TCP_RECORD_MAGIC == 0x4f585255);
     STATIC_REQUIRE(STREAMING_MIN_BITRATE_MBPS == 1);
     STATIC_REQUIRE(STREAMING_MAX_BITRATE_MBPS == 200);
@@ -53,4 +60,31 @@ TEST_CASE("Frame image sources default to full-source encoding", "[streaming]")
 
     source.Reset();
     CHECK_FALSE(source.HasSourceRect());
+}
+
+TEST_CASE("Foveated encoding presets calculate ALVR-style optimized eye sizes", "[protocol][foveation]")
+{
+    const FoveationLayout light =
+        CalculateFoveationLayout(2144, 2144, FoveationPreset::Light);
+    CHECK(light.optimizedEyeWidth == 1728);
+    CHECK(light.optimizedEyeHeight == 1504);
+    CHECK(light.parameters.edgeRatioX == 2.0f);
+    CHECK(light.parameters.edgeRatioY == 3.0f);
+
+    const FoveationLayout medium =
+        CalculateFoveationLayout(2144, 2144, FoveationPreset::Medium);
+    CHECK(medium.optimizedEyeWidth == 1280);
+    CHECK(medium.optimizedEyeHeight == 1120);
+    CHECK(medium.eyeWidthRatio > 0.98f);
+    CHECK(medium.eyeHeightRatio > 0.97f);
+
+    const FoveationLayout high =
+        CalculateFoveationLayout(2144, 2144, FoveationPreset::High);
+    CHECK(high.optimizedEyeWidth == 992);
+    CHECK(high.optimizedEyeHeight == 896);
+
+    const FoveationLayout off =
+        CalculateFoveationLayout(2144, 2144, FoveationPreset::Off);
+    CHECK(off.optimizedEyeWidth == 2144);
+    CHECK(off.optimizedEyeHeight == 2144);
 }

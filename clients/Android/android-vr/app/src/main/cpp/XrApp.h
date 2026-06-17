@@ -70,7 +70,8 @@ private:
     bool CreateSwapchains();
     bool InitializeHandTracking();
     bool InitializeFoveation();
-    bool InitializeDisplayRefreshRate();
+    bool InitializeDisplayRefreshRate(float preferredRefreshRateHz);
+    void ApplyClientFoveationPreset(protocol::ClientFoveationPreset preset);
     void ShutdownFoveation();
     void ShutdownHandTracking();
     void HandleSessionStateChange(XrSessionState newState);
@@ -176,6 +177,18 @@ private:
     GLuint blitVao_ = 0;
     GLuint blitVbo_ = 0;
     GLuint fbo_ = 0;               // Framebuffer for blit-to-swapchain
+    GLint blitTextureUniform_ = -1;
+    GLint blitEyeSourceMinUniform_ = -1;
+    GLint blitEyeSourceMaxUniform_ = -1;
+    GLint blitLogicalTexelSizeUniform_ = -1;
+    GLint blitFoveatedEncodingEnabledUniform_ = -1;
+    GLint blitClientUpscalingEnabledUniform_ = -1;
+    GLint blitUpscaleEdgeThresholdUniform_ = -1;
+    GLint blitUpscaleSharpnessUniform_ = -1;
+    GLint blitFoveationCenterSizeUniform_ = -1;
+    GLint blitFoveationCenterShiftUniform_ = -1;
+    GLint blitFoveationEdgeRatioUniform_ = -1;
+    GLint blitFoveationEyeSizeRatioUniform_ = -1;
 
     // Networking
     std::unique_ptr<NetworkReceiver> networkReceiver_;
@@ -211,6 +224,20 @@ private:
     float videoContentVMin_ = 0.0f;
     float videoContentVMax_ = 1.0f;
     uint32_t clientRefreshRateHz_ = 90;
+    protocol::ClientFoveationPreset clientFoveationPreset_ =
+        protocol::ClientFoveationPreset::Medium;
+    bool serverFoveatedEncodingEnabled_ = false;
+    bool clientUpscalingEnabled_ = false;
+    float foveationCenterSizeX_ = 1.0f;
+    float foveationCenterSizeY_ = 1.0f;
+    float foveationCenterShiftX_ = 0.0f;
+    float foveationCenterShiftY_ = 0.0f;
+    float foveationEdgeRatioX_ = 1.0f;
+    float foveationEdgeRatioY_ = 1.0f;
+    float foveationEyeWidthRatio_ = 1.0f;
+    float foveationEyeHeightRatio_ = 1.0f;
+    float decodedTexelWidth_ = 1.0f;
+    float decodedTexelHeight_ = 1.0f;
     int64_t predictedDisplayPeriodNs_ = 11111111;
     int64_t lastFrameReceiveTimeNs_ = 0;
     int64_t lastFrameSubmitTimeNs_ = 0;

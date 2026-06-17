@@ -84,6 +84,11 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.renderHeight = 1920;
     stats.encodedWidth = 2752;
     stats.encodedHeight = 1440;
+    stats.encoderPreset = "quality";
+    stats.foveatedEncodingPreset = "medium";
+    stats.clientFoveationPreset = "high";
+    stats.clientUpscaling = true;
+    stats.headsetAudio = false;
     stats.serverPipelineLatencyMs = 12.5;
     stats.clientPipelineLatencyMs = 18.25;
     stats.clientReceiveToSubmitMs = 1.5;
@@ -116,6 +121,11 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"sample_unix_ms\": 1800000000000"));
     CHECK(Contains(streamingStatus, "\"refresh_rate_hz\": 90"));
     CHECK(Contains(streamingStatus, "\"current_bitrate_mbps\": 42"));
+    CHECK(Contains(streamingStatus, "\"encoder_preset\": \"quality\""));
+    CHECK(Contains(streamingStatus, "\"foveated_encoding_preset\": \"medium\""));
+    CHECK(Contains(streamingStatus, "\"client_foveation_preset\": \"high\""));
+    CHECK(Contains(streamingStatus, "\"client_upscaling\": true"));
+    CHECK(Contains(streamingStatus, "\"headset_audio\": false"));
     CHECK(Contains(streamingStatus, "\"server_pipeline\": 12.5"));
     CHECK(Contains(streamingStatus, "\"total_p95\": 9.5"));
     CHECK(Contains(streamingStatus, "\"encoded_frames_total\": 120"));

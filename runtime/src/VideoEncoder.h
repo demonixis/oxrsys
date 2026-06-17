@@ -32,6 +32,22 @@ public:
         bool keyframe = false;
     };
 
+    struct FoveationSettings
+    {
+        bool enabled = false;
+        uint32_t targetEyeWidth = 0;
+        uint32_t targetEyeHeight = 0;
+        float eyeWidthRatio = 1.0f;
+        float eyeHeightRatio = 1.0f;
+        float centerSizeX = 1.0f;
+        float centerSizeY = 1.0f;
+        float centerShiftX = 0.0f;
+        float centerShiftY = 0.0f;
+        float edgeRatioX = 1.0f;
+        float edgeRatioY = 1.0f;
+    };
+
+    // Callback for each encoded NAL unit
     using OnNalUnitCallback = std::function<void(const uint8_t* data, size_t size,
                                                   bool isKeyframe, int64_t timestampNs)>;
     using OnFrameEncodedCallback = std::function<void(const FrameMetrics& metrics)>;
@@ -45,6 +61,8 @@ public:
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
                     uint32_t bitrateMbps, const GraphicsContext& graphicsContext);
     void Shutdown();
+    void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
+    static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
 
     bool Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
                 OnFrameEncodedCallback frameCallback = {});
@@ -89,6 +107,8 @@ private:
         void* metalDevice = nullptr;      // id<MTLDevice>
         void* commandQueue = nullptr;     // id<MTLCommandQueue>
         void* scaler = nullptr;           // MPSImageBilinearScale*
+        void* foveationPipeline = nullptr; // id<MTLRenderPipelineState>
+        void* foveationSampler = nullptr;  // id<MTLSamplerState>
     };
 
     struct FfmpegState
@@ -108,6 +128,7 @@ private:
     uint32_t eyeWidth_ = 0;
     uint32_t fps_ = 90;
     uint32_t bitrateMbps_ = 50;
+    FoveationSettings foveationSettings_ = {};
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};

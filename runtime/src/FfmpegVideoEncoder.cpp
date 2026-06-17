@@ -1016,6 +1016,11 @@ VideoEncoder::~VideoEncoder()
     Shutdown();
 }
 
+bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& /*graphicsContext*/)
+{
+    return false;
+}
+
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
 {
@@ -1106,6 +1111,17 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     context->max_b_frames = 0;
     context->flags |= AV_CODEC_FLAG_LOW_DELAY;
 
+    const std::string encoderPreset = Config::Get().GetValues().encoderPreset;
+    const char* ffmpegPreset = "superfast";
+    if (encoderPreset == "speed")
+    {
+        ffmpegPreset = "ultrafast";
+    }
+    else if (encoderPreset == "quality")
+    {
+        ffmpegPreset = "veryfast";
+    }
+
     if (IsMediaFoundationEncoder(codec))
     {
         av_opt_set(context->priv_data, "rate_control", "cbr", 0);
@@ -1114,7 +1130,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
     else
     {
-        av_opt_set(context->priv_data, "preset", "ultrafast", 0);
+        av_opt_set(context->priv_data, "preset", ffmpegPreset, 0);
         av_opt_set(context->priv_data, "tune", "zerolatency", 0);
     }
 
@@ -1160,14 +1176,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         graphicsApi == GraphicsApi::Vulkan ? "Vulkan" :
         graphicsApi == GraphicsApi::D3D11 ? "D3D11" :
         graphicsApi == GraphicsApi::D3D12 ? "D3D12" : "unknown";
-    spdlog::info("FFmpegVideoEncoder: initialized {} HEVC encoder {} {}x{} @ {}Hz {}Mbps pix_fmt={}",
+    spdlog::info("FFmpegVideoEncoder: initialized {} HEVC encoder {} {}x{} @ {}Hz {}Mbps pix_fmt={} preset={} ({})",
                  backendName,
                  codec->name,
                  width_,
                  height_,
                  fps_,
                  bitrateMbps_,
-                 av_get_pix_fmt_name(context->pix_fmt));
+                 av_get_pix_fmt_name(context->pix_fmt),
+                 encoderPreset,
+                 IsMediaFoundationEncoder(codec) ? "mediafoundation-cbr" : ffmpegPreset);
     return true;
 }
 

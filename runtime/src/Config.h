@@ -16,10 +16,15 @@ struct ConfigValues
     bool runtimeEnabled = true;     // Allow this runtime to accept xrCreateInstance
     uint32_t bitrateMbps = 50;      // H.265 encoding bitrate in Mbps
     uint32_t fovDegrees = 100;      // Rendering FOV in degrees (symmetric)
+    uint32_t refreshRateHz = 72;    // Preferred headset refresh rate
     float resolutionScale = 0.75f;  // Encode resolution multiplier (0.25-1.0)
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
+    std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
+    std::string clientFoveationPreset = "medium"; // "off", "light", "medium", "high"
+    bool clientUpscaling = false;    // Enable Quest shader upscaling
+    bool headsetAudio = false;       // Stream server audio to the headset
 
     bool fileLogging = true;        // Write logs to oxrsys-runtime.log
     bool questLogcat = false;       // Capture Quest logcat to oxrsys-headset.log

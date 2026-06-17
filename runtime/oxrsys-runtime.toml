@@ -19,6 +19,9 @@ bitrate_mbps = 50
 # Rendering FOV in degrees (symmetric). Must match Quest client's kMacHalfFov.
 fov_degrees = 100
 
+# Preferred headset display refresh rate. Supported values: 60, 72, 80, 90, 120.
+refresh_rate_hz = 72
+
 # Resolution multiplier (0.25 to 1.0). Lower = faster encode, less bandwidth, more blur.
 # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
 resolution_scale = 0.75
@@ -36,6 +39,22 @@ encoder_preset = "balanced"
 # Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
 # listeners, and "usb_adb" disables WiFi discovery fallback.
 transport = "auto"
+
+# Server-side foveated video encoding preset: "off", "light", "medium", or "high".
+# This compresses frame edges before video encoding and asks compatible clients
+# to re-expand the image after decode.
+foveated_encoding_preset = "off"
+
+# Headset runtime foveation preset: "off", "light", "medium", or "high".
+# This maps to XR_FB_foveation on Quest/Pico when supported.
+client_foveation_preset = "medium"
+
+# Enable Quest shader upscaling after video decode.
+client_upscaling = false
+
+# Reserved for headset speaker audio. The runtime does not advertise audio until
+# a platform capture/playback path is attached.
+headset_audio = false
 
 [logging]
 # Write server logs to the platform state directory.

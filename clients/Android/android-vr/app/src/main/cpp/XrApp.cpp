@@ -22,6 +22,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <openxr/openxr_platform.h>
+#include <oxrsys/protocol/Foveation.h>
 
 #define LOG_TAG "OXRSys-Android"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -61,14 +62,101 @@ constexpr uint32_t kUsbAdbRetryLogInterval = 10;
 
 } // namespace
 
+// Foveated decompression follows ALVR's AADT inverse mapping (MIT licensed).
+// The upscaling branch is an OXRSys edge-aware shader path using ALVR's public defaults.
 static const char* BLIT_FRAGMENT_SHADER_OES = R"(#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require
-precision mediump float;
+precision highp float;
 in vec2 vUV;
 out vec4 fragColor;
 uniform samplerExternalOES uTexture;
+uniform vec2 uEyeSourceMin;
+uniform vec2 uEyeSourceMax;
+uniform vec2 uLogicalTexelSize;
+uniform int uFoveatedEncodingEnabled;
+uniform int uClientUpscalingEnabled;
+uniform float uUpscaleEdgeThreshold;
+uniform float uUpscaleSharpness;
+uniform vec2 uFoveationCenterSize;
+uniform vec2 uFoveationCenterShift;
+uniform vec2 uFoveationEdgeRatio;
+uniform vec2 uFoveationEyeSizeRatio;
+
+float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeRatio) {
+    float c0 = (1.0 - centerSize) * 0.5;
+    float c1 = (edgeRatio - 1.0) * c0 * (centerShift + 1.0) / edgeRatio;
+    float c2 = (edgeRatio - 1.0) * centerSize + 1.0;
+    float loBound = c0 * (centerShift + 1.0) / c2;
+    float hiBound = c0 * (centerShift - 1.0) / c2 + 1.0;
+    float center = eyeUv * c2 / edgeRatio + c1;
+    float d2 = eyeUv * c2;
+    float d3 = (eyeUv - 1.0) * c2 + 1.0;
+    float g1 = loBound > 0.0 ? eyeUv / loBound : 1.0;
+    float g2 = (1.0 - hiBound) > 0.0 ? (1.0 - eyeUv) / (1.0 - hiBound) : 1.0;
+    float leftEdge = g1 * center + (1.0 - g1) * d2;
+    float rightEdge = g2 * center + (1.0 - g2) * d3;
+    if (eyeUv < loBound) {
+        return leftEdge;
+    }
+    if (eyeUv > hiBound) {
+        return rightEdge;
+    }
+    return center;
+}
+
+float decompressAxis(float targetUv, float centerSize, float centerShift, float edgeRatio) {
+    float lo = 0.0;
+    float hi = 1.0;
+    for (int i = 0; i < 10; ++i) {
+        float mid = (lo + hi) * 0.5;
+        float mapped = compressAxis(mid, centerSize, centerShift, edgeRatio);
+        if (mapped < targetUv) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return (lo + hi) * 0.5;
+}
+
+vec2 mapEyeUvToSource(vec2 eyeUv) {
+    vec2 corrected = eyeUv;
+    if (uFoveatedEncodingEnabled != 0) {
+        corrected.x = decompressAxis(eyeUv.x, uFoveationCenterSize.x,
+                                     uFoveationCenterShift.x,
+                                     uFoveationEdgeRatio.x) * uFoveationEyeSizeRatio.x;
+        corrected.y = decompressAxis(eyeUv.y, uFoveationCenterSize.y,
+                                     uFoveationCenterShift.y,
+                                     uFoveationEdgeRatio.y) * uFoveationEyeSizeRatio.y;
+    }
+    corrected = clamp(corrected, vec2(0.0), vec2(1.0));
+    return mix(uEyeSourceMin, uEyeSourceMax, corrected);
+}
+
+vec3 sampleVideo(vec2 eyeUv) {
+    return texture(uTexture, mapEyeUvToSource(clamp(eyeUv, vec2(0.0), vec2(1.0)))).rgb;
+}
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
 void main() {
-    fragColor = texture(uTexture, vUV);
+    vec2 eyeUv = clamp(vUV, vec2(0.0), vec2(1.0));
+    vec3 color = sampleVideo(eyeUv);
+    if (uClientUpscalingEnabled != 0) {
+        vec2 stepUv = max(uLogicalTexelSize, vec2(0.00001));
+        vec3 left = sampleVideo(eyeUv + vec2(-stepUv.x, 0.0));
+        vec3 right = sampleVideo(eyeUv + vec2(stepUv.x, 0.0));
+        vec3 up = sampleVideo(eyeUv + vec2(0.0, -stepUv.y));
+        vec3 down = sampleVideo(eyeUv + vec2(0.0, stepUv.y));
+        float edgeVote = abs(luma(left) - luma(right)) + abs(luma(up) - luma(down));
+        if (edgeVote > uUpscaleEdgeThreshold) {
+            vec3 detail = color * 4.0 - left - right - up - down;
+            color = clamp(color + detail * (0.125 * uUpscaleSharpness), vec3(0.0), vec3(1.0));
+        }
+    }
+    fragColor = vec4(color, 1.0);
 }
 )";
 
@@ -295,6 +383,31 @@ static bool IsNearlyFullExtent(uint32_t fullExtent, int32_t croppedExtent)
     }
 
     return static_cast<float>(cropped) >= static_cast<float>(fullExtent) * 0.95f;
+}
+
+static XrFoveationLevelFB ToXrFoveationLevel(protocol::ClientFoveationPreset preset)
+{
+    switch (preset)
+    {
+    case protocol::ClientFoveationPreset::Light:
+        return XR_FOVEATION_LEVEL_LOW_FB;
+    case protocol::ClientFoveationPreset::High:
+        return XR_FOVEATION_LEVEL_HIGH_FB;
+    case protocol::ClientFoveationPreset::Medium:
+    default:
+        return XR_FOVEATION_LEVEL_MEDIUM_FB;
+    }
+}
+
+static float FoveationActiveRatio(float targetEyeSize, float encodedEyeSize,
+                                  float centerSize, float edgeRatio)
+{
+    if (targetEyeSize <= 0.0f || encodedEyeSize <= 0.0f || edgeRatio <= 1.0f)
+    {
+        return 1.0f;
+    }
+    float scale = centerSize + (1.0f - centerSize) / edgeRatio;
+    return std::clamp((scale * targetEyeSize) / encodedEyeSize, 0.0001f, 1.0f);
 }
 
 static XrVector3f Cross(const XrVector3f& a, const XrVector3f& b)
@@ -764,7 +877,7 @@ bool XrApp::CreateSession()
         LOGW("Hand tracking unavailable on headset, continuing without it");
     }
 
-    if (!InitializeDisplayRefreshRate())
+    if (!InitializeDisplayRefreshRate(kPreferredDisplayRefreshRateHz))
     {
         LOGW("Display refresh rate control unavailable, continuing at runtime default");
     }
@@ -772,7 +885,7 @@ bool XrApp::CreateSession()
     return true;
 }
 
-bool XrApp::InitializeDisplayRefreshRate()
+bool XrApp::InitializeDisplayRefreshRate(float preferredRefreshRateHz)
 {
     if (!displayRefreshRateAvailable_ || session_ == XR_NULL_HANDLE)
     {
@@ -815,34 +928,35 @@ bool XrApp::InitializeDisplayRefreshRate()
     LOGI("Supported display refresh rates: [%s]", supported.c_str());
 
     auto hasPreferredRate = std::any_of(refreshRates.begin(), refreshRates.end(),
-                                        [](float rate) {
-                                            return std::fabs(rate - kPreferredDisplayRefreshRateHz) < 0.5f;
+                                        [preferredRefreshRateHz](float rate) {
+                                            return std::fabs(rate - preferredRefreshRateHz) < 0.5f;
                                         });
     if (!hasPreferredRate)
     {
         LOGW("Preferred %.1fHz not advertised by runtime, keeping current refresh rate",
-             kPreferredDisplayRefreshRateHz);
+             preferredRefreshRateHz);
         if (xrGetDisplayRefreshRateFB_ != nullptr)
         {
             float currentRate = 0.0f;
             if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
             {
                 LOGI("Current display refresh rate: %.1fHz", currentRate);
+                clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
             }
         }
         return true;
     }
 
     XrResult requestResult =
-        xrRequestDisplayRefreshRateFB_(session_, kPreferredDisplayRefreshRateHz);
+        xrRequestDisplayRefreshRateFB_(session_, preferredRefreshRateHz);
     if (XR_FAILED(requestResult))
     {
         LOGW("Failed to request %.1fHz display refresh rate: %d",
-             kPreferredDisplayRefreshRateHz, requestResult);
+             preferredRefreshRateHz, requestResult);
         return false;
     }
 
-    LOGI("Requested display refresh rate: %.1fHz", kPreferredDisplayRefreshRateHz);
+    LOGI("Requested display refresh rate: %.1fHz", preferredRefreshRateHz);
 
     if (xrGetDisplayRefreshRateFB_ != nullptr)
     {
@@ -850,7 +964,18 @@ bool XrApp::InitializeDisplayRefreshRate()
         if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
         {
             LOGI("Current display refresh rate after request: %.1fHz", currentRate);
+            clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
         }
+        else
+        {
+            clientRefreshRateHz_ =
+                static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
+        }
+    }
+    else
+    {
+        clientRefreshRateHz_ =
+            static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
     }
 
     return true;
@@ -1108,23 +1233,48 @@ bool XrApp::CreateSwapchains()
         LOGE("Failed to create blit shader program with external OES sampler");
         return false;
     }
+    blitTextureUniform_ = glGetUniformLocation(blitProgram_, "uTexture");
+    blitEyeSourceMinUniform_ = glGetUniformLocation(blitProgram_, "uEyeSourceMin");
+    blitEyeSourceMaxUniform_ = glGetUniformLocation(blitProgram_, "uEyeSourceMax");
+    blitLogicalTexelSizeUniform_ = glGetUniformLocation(blitProgram_, "uLogicalTexelSize");
+    blitFoveatedEncodingEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveatedEncodingEnabled");
+    blitClientUpscalingEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uClientUpscalingEnabled");
+    blitUpscaleEdgeThresholdUniform_ =
+        glGetUniformLocation(blitProgram_, "uUpscaleEdgeThreshold");
+    blitUpscaleSharpnessUniform_ = glGetUniformLocation(blitProgram_, "uUpscaleSharpness");
+    blitFoveationCenterSizeUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationCenterSize");
+    blitFoveationCenterShiftUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationCenterShift");
+    blitFoveationEdgeRatioUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationEdgeRatio");
+    blitFoveationEyeSizeRatioUniform_ =
+        glGetUniformLocation(blitProgram_, "uFoveationEyeSizeRatio");
+
+    glUseProgram(blitProgram_);
+    glUniform1i(blitTextureUniform_, 0);
+    glUniform1f(blitUpscaleEdgeThresholdUniform_, 4.0f / 255.0f);
+    glUniform1f(blitUpscaleSharpnessUniform_, 2.0f);
+    glUseProgram(0);
 
     // Full-screen quad
     float quadVertices[] = {
         // pos x,y    uv u,v
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f, -1.0f,  1.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f,  0.0f, 1.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f,
+         1.0f, -1.0f,  1.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 0.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f,
+         1.0f,  1.0f,  1.0f, 0.0f,
+        -1.0f,  1.0f,  0.0f, 0.0f,
     };
 
     glGenVertexArrays(1, &blitVao_);
     glGenBuffers(1, &blitVbo_);
     glBindVertexArray(blitVao_);
     glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
@@ -1158,15 +1308,24 @@ bool XrApp::CreateSwapchains()
 
 bool XrApp::InitializeFoveation()
 {
+    if (clientFoveationPreset_ == protocol::ClientFoveationPreset::Off)
+    {
+        ShutdownFoveation();
+        LOGI("Dynamic FFR disabled by server preset");
+        return false;
+    }
+
     if (!foveationAvailable_ || !foveationConfigurationAvailable_ || !swapchainUpdateAvailable_ ||
         !xrCreateFoveationProfileFB_ || !xrDestroyFoveationProfileFB_ || !xrUpdateSwapchainFB_)
     {
         return false;
     }
 
+    ShutdownFoveation();
+
     XrFoveationLevelProfileCreateInfoFB levelProfile = {
         XR_TYPE_FOVEATION_LEVEL_PROFILE_CREATE_INFO_FB};
-    levelProfile.level = XR_FOVEATION_LEVEL_MEDIUM_FB;
+    levelProfile.level = ToXrFoveationLevel(clientFoveationPreset_);
     levelProfile.verticalOffset = 0.0f;
     levelProfile.dynamic = XR_FOVEATION_DYNAMIC_LEVEL_ENABLED_FB;
 
@@ -1201,8 +1360,23 @@ bool XrApp::InitializeFoveation()
         }
     }
 
-    LOGI("Dynamic FFR enabled via XR_FB_foveation");
+    LOGI("Dynamic FFR enabled via XR_FB_foveation preset=%u",
+         static_cast<uint32_t>(clientFoveationPreset_));
     return true;
+}
+
+void XrApp::ApplyClientFoveationPreset(protocol::ClientFoveationPreset preset)
+{
+    clientFoveationPreset_ = preset;
+    if (swapchains_[0] == XR_NULL_HANDLE && swapchains_[1] == XR_NULL_HANDLE)
+    {
+        return;
+    }
+    if (!InitializeFoveation() && preset != protocol::ClientFoveationPreset::Off)
+    {
+        LOGW("Requested client foveation preset %u could not be applied",
+             static_cast<uint32_t>(preset));
+    }
 }
 
 void XrApp::ShutdownFoveation()
@@ -1310,6 +1484,18 @@ void XrApp::ResetConnection(const char* reason)
     videoContentUMax_ = 1.0f;
     videoContentVMin_ = 0.0f;
     videoContentVMax_ = 1.0f;
+    serverFoveatedEncodingEnabled_ = false;
+    clientUpscalingEnabled_ = false;
+    foveationCenterSizeX_ = 1.0f;
+    foveationCenterSizeY_ = 1.0f;
+    foveationCenterShiftX_ = 0.0f;
+    foveationCenterShiftY_ = 0.0f;
+    foveationEdgeRatioX_ = 1.0f;
+    foveationEdgeRatioY_ = 1.0f;
+    foveationEyeWidthRatio_ = 1.0f;
+    foveationEyeHeightRatio_ = 1.0f;
+    decodedTexelWidth_ = 1.0f;
+    decodedTexelHeight_ = 1.0f;
     lastFrameReceiveTimeNs_ = 0;
     lastFrameSubmitTimeNs_ = 0;
     lastFrameAcquireTimeNs_ = 0;
@@ -1443,7 +1629,7 @@ bool XrApp::TryStartUsbAdbTransport(bool logUnavailable)
     std::vector<uint8_t> payload;
     if (!ReadTcpRecord(controlTcpSocket_, header, payload) ||
         header.type != protocol::TcpRecordType::ServerAnnounce ||
-        payload.size() < sizeof(protocol::ServerAnnounce))
+        payload.size() < protocol::SERVER_ANNOUNCE_BASE_SIZE)
     {
         if (logUnavailable)
         {
@@ -1455,7 +1641,8 @@ bool XrApp::TryStartUsbAdbTransport(bool logUnavailable)
         return false;
     }
 
-    auto server = *reinterpret_cast<const protocol::ServerAnnounce*>(payload.data());
+    protocol::ServerAnnounce server = {};
+    memcpy(&server, payload.data(), std::min(payload.size(), sizeof(server)));
     ConfigureServerConnection(server, "127.0.0.1", TransportMode::UsbAdbTcp);
     return IsConnected();
 }
@@ -1543,6 +1730,29 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     serverIp_[sizeof(serverIp_) - 1] = '\0';
     connectionTime_ = std::chrono::steady_clock::now();
 
+    serverFoveatedEncodingEnabled_ =
+        (server.serverFeatures & protocol::SERVER_FEATURE_FOVEATED_ENCODING) != 0 &&
+        server.foveatedEncodingPreset != protocol::FoveationPreset::Off;
+    clientUpscalingEnabled_ =
+        (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
+        server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
+    foveationCenterSizeX_ = server.foveationCenterSizeX > 0.0f ? server.foveationCenterSizeX : 1.0f;
+    foveationCenterSizeY_ = server.foveationCenterSizeY > 0.0f ? server.foveationCenterSizeY : 1.0f;
+    foveationCenterShiftX_ = server.foveationCenterShiftX;
+    foveationCenterShiftY_ = server.foveationCenterShiftY;
+    foveationEdgeRatioX_ = std::max(server.foveationEdgeRatioX, 1.0f);
+    foveationEdgeRatioY_ = std::max(server.foveationEdgeRatioY, 1.0f);
+    ApplyClientFoveationPreset(server.clientFoveationPreset);
+
+    if (server.refreshRateHz > 0)
+    {
+        if (!InitializeDisplayRefreshRate(static_cast<float>(server.refreshRateHz)))
+        {
+            LOGW("Server-requested %.1fHz refresh unavailable; reporting active refresh",
+                 static_cast<float>(server.refreshRateHz));
+        }
+    }
+
     // Compute aspect-ratio-correct blit viewport within the Quest swapchain.
     // Mac renders stereo side-by-side: per-eye width = renderWidth / 2.
     macEyeAspect_ = static_cast<float>(server.renderWidth / 2) /
@@ -1576,6 +1786,34 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     // Fallback to render resolution if encodedWidth is 0 (old server without this field)
     uint32_t decoderWidth = server.encodedWidth > 0 ? server.encodedWidth : server.renderWidth;
     uint32_t decoderHeight = server.encodedHeight > 0 ? server.encodedHeight : server.renderHeight;
+    decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(decoderWidth, 1u));
+    decodedTexelHeight_ = 1.0f / static_cast<float>(std::max(decoderHeight, 1u));
+    if (serverFoveatedEncodingEnabled_)
+    {
+        foveationEyeWidthRatio_ = FoveationActiveRatio(
+            static_cast<float>(std::max(server.renderWidth / 2, 1u)),
+            static_cast<float>(std::max(decoderWidth / 2, 1u)),
+            foveationCenterSizeX_,
+            foveationEdgeRatioX_);
+        foveationEyeHeightRatio_ = FoveationActiveRatio(
+            static_cast<float>(std::max(server.renderHeight, 1u)),
+            static_cast<float>(std::max(decoderHeight, 1u)),
+            foveationCenterSizeY_,
+            foveationEdgeRatioY_);
+    }
+    else
+    {
+        foveationEyeWidthRatio_ = 1.0f;
+        foveationEyeHeightRatio_ = 1.0f;
+    }
+
+    LOGI("Server stream options: features=0x%x ffe=%d ffr=%u upscaling=%d activeRatio=%.4fx%.4f",
+         server.serverFeatures,
+         serverFoveatedEncodingEnabled_ ? 1 : 0,
+         static_cast<uint32_t>(server.clientFoveationPreset),
+         clientUpscalingEnabled_ ? 1 : 0,
+         foveationEyeWidthRatio_,
+         foveationEyeHeightRatio_);
 
     // CRITICAL: Start video receiver and decoder BEFORE sending ClientConnect.
     // The server starts encoding immediately upon receiving ClientConnect.
@@ -1685,10 +1923,18 @@ void XrApp::SendClientConnect(const char* serverIp)
     protocol::ClientConnect connect = {};
     connect.type = protocol::MessageType::ClientConnect;
     connect.versionMajor = 1;
-    connect.versionMinor = 0;
+    connect.versionMinor = 1;
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
     connect.maxBitrateMbps = 100;
     connect.refreshRateHz = clientRefreshRateHz_;
+    connect.clientCapabilities =
+        protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
+        protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING;
+    if (foveationAvailable_ && foveationConfigurationAvailable_ && swapchainUpdateAvailable_)
+    {
+        connect.clientCapabilities |= protocol::CLIENT_CAPABILITY_CLIENT_FOVEATION;
+    }
+    connect.audioSampleRateHz = 48000;
     strncpy(connect.deviceName, headsetSystemName_, sizeof(connect.deviceName) - 1);
     connect.deviceName[sizeof(connect.deviceName) - 1] = '\0';
 
@@ -2346,22 +2592,22 @@ void XrApp::BlitVideoToSwapchain(int eye)
     float uMin = (eye == 0) ? contentUMin : contentMidU;
     float uMax = (eye == 0) ? contentMidU : contentUMax;
 
-    float quadVertices[] = {
-        -1.0f, -1.0f,  uMin, contentVMax,
-         1.0f, -1.0f,  uMax, contentVMax,
-         1.0f,  1.0f,  uMax, contentVMin,
-        -1.0f, -1.0f,  uMin, contentVMax,
-         1.0f,  1.0f,  uMax, contentVMin,
-        -1.0f,  1.0f,  uMin, contentVMin,
-    };
-
-    glBindBuffer(GL_ARRAY_BUFFER, blitVbo_);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quadVertices), quadVertices);
-
     glUseProgram(blitProgram_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, videoTexture_);
-    glUniform1i(glGetUniformLocation(blitProgram_, "uTexture"), 0);
+    glUniform2f(blitEyeSourceMinUniform_, uMin, contentVMin);
+    glUniform2f(blitEyeSourceMaxUniform_, uMax, contentVMax);
+    glUniform2f(blitLogicalTexelSizeUniform_, decodedTexelWidth_ * 2.0f, decodedTexelHeight_);
+    glUniform1i(blitFoveatedEncodingEnabledUniform_, serverFoveatedEncodingEnabled_ ? 1 : 0);
+    glUniform1i(blitClientUpscalingEnabledUniform_, clientUpscalingEnabled_ ? 1 : 0);
+    glUniform2f(blitFoveationCenterSizeUniform_,
+                foveationCenterSizeX_, foveationCenterSizeY_);
+    glUniform2f(blitFoveationCenterShiftUniform_,
+                foveationCenterShiftX_, foveationCenterShiftY_);
+    glUniform2f(blitFoveationEdgeRatioUniform_,
+                foveationEdgeRatioX_, foveationEdgeRatioY_);
+    glUniform2f(blitFoveationEyeSizeRatioUniform_,
+                foveationEyeWidthRatio_, foveationEyeHeightRatio_);
 
     glBindVertexArray(blitVao_);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -2853,6 +3099,18 @@ void XrApp::Shutdown()
     {
         glDeleteProgram(blitProgram_);
         blitProgram_ = 0;
+        blitTextureUniform_ = -1;
+        blitEyeSourceMinUniform_ = -1;
+        blitEyeSourceMaxUniform_ = -1;
+        blitLogicalTexelSizeUniform_ = -1;
+        blitFoveatedEncodingEnabledUniform_ = -1;
+        blitClientUpscalingEnabledUniform_ = -1;
+        blitUpscaleEdgeThresholdUniform_ = -1;
+        blitUpscaleSharpnessUniform_ = -1;
+        blitFoveationCenterSizeUniform_ = -1;
+        blitFoveationCenterShiftUniform_ = -1;
+        blitFoveationEdgeRatioUniform_ = -1;
+        blitFoveationEyeSizeRatioUniform_ = -1;
     }
     if (blitVao_ != 0)
     {

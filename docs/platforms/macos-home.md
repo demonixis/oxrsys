@@ -123,6 +123,8 @@ idle. The fields are:
 - `sample_unix_ms`
 - `refresh_rate_hz`, `current_bitrate_mbps`, `max_bitrate_mbps`
 - `render_width`, `render_height`, `encoded_width`, `encoded_height`
+- `encoder_preset`, `foveated_encoding_preset`, `client_foveation_preset`,
+  `client_upscaling`, `headset_audio`
 - `latency_ms.server_pipeline`, `latency_ms.client_pipeline`,
   `latency_ms.client_receive_to_submit`, `latency_ms.client_decode`,
   `latency_ms.client_compositor`, `latency_ms.prediction_horizon`
@@ -165,9 +167,14 @@ The structured editor covers the current runtime keys:
 - `streaming.bitrate_mbps`
 - `streaming.fov_degrees`
 - `streaming.resolution_scale`
+- `streaming.refresh_rate_hz`
 - `streaming.keyframe_interval_sec`
 - `streaming.encoder_preset`
 - `streaming.transport`
+- `streaming.foveated_encoding_preset`
+- `streaming.client_foveation_preset`
+- `streaming.client_upscaling`
+- `streaming.headset_audio`
 - `logging.file_logging`
 - `logging.quest_logcat`
 
@@ -175,6 +182,17 @@ The bitrate control accepts the shared runtime range, `1` to `200` Mbps. Apple
 and Qt simulator clients do not add their own bitrate ceiling, so the runtime
 status `max_bitrate_mbps` should reflect the configured value when those
 clients connect.
+
+The refresh control writes one of `60`, `72`, `80`, `90`, or `120` Hz. The
+runtime announces that value, and Quest clients request it through
+`XR_FB_display_refresh_rate` before reporting the active display rate back.
+
+`foveated_encoding_preset` controls the server-side ALVR-style AADT video
+compression path on supported server/client combinations. `client_foveation_preset`
+controls headset-side `XR_FB_foveation`; this is separate from foveated encoding.
+`client_upscaling` enables the Quest shader upscaling path. `headset_audio` is
+reserved in config and protocol, but the runtime does not advertise audio as
+active until a real capture/playback path is attached.
 
 Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
 discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,
@@ -190,7 +208,9 @@ The runtime reloads config file changes opportunistically:
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails
-- `bitrate_mbps`, `resolution_scale`, `encoder_preset`, and `transport` apply when streaming or the encoder is recreated
+- `bitrate_mbps`, `resolution_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
+  `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`, and
+  `headset_audio` apply when streaming or the encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
 The Quest USB ADB section detects authorized `adb` devices, applies reverse mappings for ports `9944`, `9945`, and `9946`, then verifies them with `adb reverse --list`. This prepares the USB TCP transport; it is separate from Android `UsbManager` app permission prompts.

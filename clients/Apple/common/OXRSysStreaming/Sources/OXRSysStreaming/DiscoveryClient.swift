@@ -98,10 +98,13 @@ public final class DiscoveryClient: @unchecked Sendable {
 
                 guard n > 0 else { continue }
                 guard buf[0] == MessageType.serverAnnounce.rawValue else { continue }
-                guard n >= MemoryLayout<ServerAnnounce>.size else { continue }
+                guard n >= OXRProtocol.serverAnnounceBaseSize else { continue }
 
-                let announce = buf.withUnsafeBytes { raw in
-                    raw.loadUnaligned(as: ServerAnnounce.self)
+                var announce = ServerAnnounce()
+                withUnsafeMutableBytes(of: &announce) { announceBytes in
+                    buf.withUnsafeBytes { raw in
+                        announceBytes.copyBytes(from: raw.prefix(min(n, announceBytes.count)))
+                    }
                 }
 
                 let ip = withUnsafePointer(to: senderAddr.sin_addr) { ptr in

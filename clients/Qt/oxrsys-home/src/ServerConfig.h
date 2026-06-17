@@ -16,10 +16,15 @@ struct ServerConfig
     bool runtimeEnabled = true;
     int bitrateMbps = 50;
     int fovDegrees = 100;
+    int refreshRateHz = 72;
     double resolutionScale = 0.75;
     int keyframeIntervalSec = 2;
     QString encoderPreset = "balanced";
     QString transport = "auto";
+    QString foveatedEncodingPreset = "off";
+    QString clientFoveationPreset = "medium";
+    bool clientUpscaling = false;
+    bool headsetAudio = false;
     bool fileLogging = true;
     bool questLogcat = false;
 
@@ -30,3 +35,4 @@ struct ServerConfig
 
 QString encoderPresetDisplayName(const QString& value);
 QString transportDisplayName(const QString& value);
+QString foveationPresetDisplayName(const QString& value);
