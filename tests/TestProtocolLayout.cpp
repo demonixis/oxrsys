@@ -13,7 +13,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
 {
     STATIC_REQUIRE(SERVER_ANNOUNCE_BASE_SIZE == 92);
     STATIC_REQUIRE(CLIENT_CONNECT_BASE_SIZE == 80);
-    STATIC_REQUIRE(sizeof(ServerAnnounce) == 140);
+    STATIC_REQUIRE(LATENCY_REPORT_BASE_SIZE == 20);
+    STATIC_REQUIRE(sizeof(ServerAnnounce) == 144);
     STATIC_REQUIRE(offsetof(ServerAnnounce, serverFeatures) == SERVER_ANNOUNCE_BASE_SIZE);
     STATIC_REQUIRE(sizeof(ClientConnect) == 96);
     STATIC_REQUIRE(offsetof(ClientConnect, clientCapabilities) == CLIENT_CONNECT_BASE_SIZE);
@@ -31,7 +32,7 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(STREAMING_MAX_BITRATE_MBPS == 200);
     STATIC_REQUIRE(CLIENT_MAX_BITRATE_USE_SERVER_CONFIG == 0);
 
-    STATIC_REQUIRE(sizeof(LatencyReport) == 20);
+    STATIC_REQUIRE(sizeof(LatencyReport) == 40);
     STATIC_REQUIRE(sizeof(RequestKeyframe) == 12);
     STATIC_REQUIRE(sizeof(HapticsCommand) == 16);
     STATIC_REQUIRE(sizeof(NackRequest) == 24);

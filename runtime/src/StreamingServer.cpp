@@ -96,6 +96,33 @@ oxr::protocol::ClientFoveationPreset ParseClientFoveationPreset(const std::strin
     return oxr::protocol::ClientFoveationPreset::Off;
 }
 
+oxr::protocol::ClientReprojectionMode ParseClientReprojectionMode(const std::string& value)
+{
+    if (value == "off")
+    {
+        return oxr::protocol::ClientReprojectionMode::Off;
+    }
+    if (value == "pose_warp")
+    {
+        return oxr::protocol::ClientReprojectionMode::PoseWarp;
+    }
+    return oxr::protocol::ClientReprojectionMode::Pose;
+}
+
+const char* ClientReprojectionModeName(oxr::protocol::ClientReprojectionMode mode)
+{
+    switch (mode)
+    {
+        case oxr::protocol::ClientReprojectionMode::Off:
+            return "off";
+        case oxr::protocol::ClientReprojectionMode::PoseWarp:
+            return "pose_warp";
+        case oxr::protocol::ClientReprojectionMode::Pose:
+        default:
+            return "pose";
+    }
+}
+
 bool HasClientFoveationOverride(const std::string& value)
 {
     return value == "off" || value == "light" || value == "medium" || value == "high";
@@ -661,6 +688,7 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce() const
     announce.clientUpscalingMode = config.clientUpscaling
         ? oxr::protocol::ClientUpscalingMode::SnapdragonGsr
         : oxr::protocol::ClientUpscalingMode::Off;
+    announce.clientReprojectionMode = ParseClientReprojectionMode(config.clientReprojectionMode);
     announce.audioSampleRateHz = 48000;
     announce.foveationCenterSizeX = layout.parameters.centerSizeX;
     announce.foveationCenterSizeY = layout.parameters.centerSizeY;
@@ -1046,6 +1074,10 @@ void StreamingServer::EncodeThread()
                 {
                     QueueEncodedVideoFrame(std::move(*encodedFrame));
                 }
+                else if (metrics.frameDropped)
+                {
+                    encoderDroppedFramesTotalForAbr_.fetch_add(1);
+                }
 
                 telemetry->gpuCopyMs.Add(metrics.gpuCopyMs);
                 telemetry->encodeSubmitMs.Add(metrics.encodeSubmitMs);
@@ -1078,6 +1110,15 @@ void StreamingServer::EncodeThread()
                     const uint32_t videoSendDrops = videoSendDroppedFrames_.exchange(0);
                     const uint32_t videoTcpFailures = videoTcpSendFailures_.exchange(0);
                     const uint32_t udpRetransmits = videoUdpRetransmittedPackets_.exchange(0);
+                    std::string abrModeName;
+                    std::string abrStateName;
+                    std::string abrProfileName;
+                    {
+                        std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+                        abrModeName = abrModeName_;
+                        abrStateName = abrStateName_;
+                        abrProfileName = abrProfileName_;
+                    }
 
                     RuntimeStatus::StreamingStats stats = {};
                     stats.refreshRateHz = targetRefreshRateHz_.load();
@@ -1093,6 +1134,11 @@ void StreamingServer::EncodeThread()
                         : "off";
                     stats.clientFoveationPreset = config.clientFoveationPreset;
                     stats.clientUpscaling = config.clientUpscaling;
+                    stats.clientReprojectionMode =
+                        ClientReprojectionModeName(clientReprojectionMode_.load());
+                    stats.abrMode = abrModeName;
+                    stats.abrState = abrStateName;
+                    stats.abrProfile = abrProfileName;
                     stats.headsetAudio = false;
                     stats.serverPipelineLatencyMs = serverPipelineLatencyMs_.load();
                     stats.clientPipelineLatencyMs = clientPipelineLatencyMs_.load();
@@ -1101,6 +1147,7 @@ void StreamingServer::EncodeThread()
                     stats.clientCompositorMs = clientCompositorLatencyMs_.load();
                     stats.predictionHorizonMs = trackingReceiver_ ?
                         trackingReceiver_->GetPredictionHorizonMs() : 0.0f;
+                    stats.displayedFrameAgeMs = clientDisplayedFrameAgeMs_.load();
                     stats.encodeQueueAverageMs = queueSummary.average;
                     stats.encodeQueueP95Ms = queueSummary.p95;
                     stats.encodeGpuAverageMs = gpuSummary.average;
@@ -1120,13 +1167,16 @@ void StreamingServer::EncodeThread()
                     stats.videoSendDroppedFramesDelta = videoSendDrops;
                     stats.videoTcpSendFailuresDelta = videoTcpFailures;
                     stats.videoUdpRetransmittedPacketsDelta = udpRetransmits;
+                    stats.reprojectedFramesDelta = clientReprojectedFramesDelta_.load();
+                    stats.staleFrameReusesDelta = clientStaleFrameReusesDelta_.load();
+                    stats.renderPoseFallbacksDelta = clientRenderPoseFallbacksDelta_.load();
                     RuntimeStatus::SetStreamingStats(stats);
 
                     spdlog::info(
                         "StreamingServer: encode queue(avg/p95={:.2f}/{:.2f}ms) gpu({:.2f}/{:.2f}) "
                         "submit({:.3f}/{:.3f}) callback({:.2f}/{:.2f}) total({:.2f}/{:.2f}) "
                         "replaced={} encDrops={} keyframeReq={} depthMax={} sendDepth={} sendDrops={} "
-                        "tcpFail={} udpRetrans={}",
+                        "tcpFail={} udpRetrans={} abr={}/{} profile={} displayedAge={:.2f}ms reproj={} stale={} poseFallbacks={}",
                         queueSummary.average, queueSummary.p95,
                         gpuSummary.average, gpuSummary.p95,
                         submitSummary.average, submitSummary.p95,
@@ -1139,7 +1189,14 @@ void StreamingServer::EncodeThread()
                         videoSendDepthMax,
                         videoSendDrops,
                         videoTcpFailures,
-                        udpRetransmits);
+                        udpRetransmits,
+                        abrModeName,
+                        abrStateName,
+                        abrProfileName,
+                        clientDisplayedFrameAgeMs_.load(),
+                        clientReprojectedFramesDelta_.load(),
+                        clientStaleFrameReusesDelta_.load(),
+                        clientRenderPoseFallbacksDelta_.load());
 
                     telemetry->lastLogTime = now;
                 }
@@ -1212,8 +1269,22 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 : config.bitrateMbps;
             configMaxBitrateMbps_.store(bitrateMbps);
             currentBitrateMbps_.store(bitrateMbps);
-            lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
             lastKeyframeRequestCountForAbr_ = 0;
+            lastVideoSendDroppedFrameCountForAbr_ = 0;
+            lastEncoderDroppedFrameCountForAbr_ = 0;
+            requestKeyframeTotalForAbr_.store(0);
+            videoSendDroppedFramesTotalForAbr_.store(0);
+            encoderDroppedFramesTotalForAbr_.store(0);
+            abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
+                                 bitrateMbps,
+                                 bitrateMbps);
+            {
+                std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+                abrModeName_ = oxrsys::streaming_abr::ToString(
+                    oxrsys::streaming_abr::ParseMode(config.abrMode));
+                abrStateName_ = "stable";
+                abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
+            }
             const oxr::protocol::FoveationPreset foveationPreset =
                 foveatedEncodingActive_
                     ? ParseFoveationPreset(config.foveatedEncodingPreset)
@@ -1312,8 +1383,22 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 : config.bitrateMbps;
             configMaxBitrateMbps_.store(bitrateMbps);
             currentBitrateMbps_.store(bitrateMbps);
-            lastBitrateIncreaseTimeNs_ = SteadyClockNowNs();
             lastKeyframeRequestCountForAbr_ = 0;
+            lastVideoSendDroppedFrameCountForAbr_ = 0;
+            lastEncoderDroppedFrameCountForAbr_ = 0;
+            requestKeyframeTotalForAbr_.store(0);
+            videoSendDroppedFramesTotalForAbr_.store(0);
+            encoderDroppedFramesTotalForAbr_.store(0);
+            abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
+                                 bitrateMbps,
+                                 bitrateMbps);
+            {
+                std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+                abrModeName_ = oxrsys::streaming_abr::ToString(
+                    oxrsys::streaming_abr::ParseMode(config.abrMode));
+                abrStateName_ = "stable";
+                abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
+            }
             const oxr::protocol::FoveationPreset foveationPreset =
                 foveatedEncodingActive_
                     ? ParseFoveationPreset(config.foveatedEncodingPreset)
@@ -1420,6 +1505,17 @@ void StreamingServer::HandleClientDisconnect()
 
     targetRefreshRateHz_.store(refreshRateHz_);
     clientFoveatedEncodingActive_.store(false);
+    clientDisplayedFrameAgeMs_.store(0.0f);
+    clientReprojectedFramesDelta_.store(0);
+    clientStaleFrameReusesDelta_.store(0);
+    clientRenderPoseFallbacksDelta_.store(0);
+    clientReprojectionMode_.store(oxr::protocol::ClientReprojectionMode::Off);
+    requestKeyframeTotalForAbr_.store(0);
+    videoSendDroppedFramesTotalForAbr_.store(0);
+    encoderDroppedFramesTotalForAbr_.store(0);
+    lastKeyframeRequestCountForAbr_ = 0;
+    lastVideoSendDroppedFrameCountForAbr_ = 0;
+    lastEncoderDroppedFrameCountForAbr_ = 0;
     UpdatePredictionHorizon();
 
     if (previousState == State::Connected && broadcastThread_.joinable())
@@ -1441,50 +1537,57 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
     clientReceiveToSubmitMs_.store(report.receiveToDecoderSubmitMs);
     clientDecodeLatencyMs_.store(report.decodeLatencyMs);
     clientCompositorLatencyMs_.store(report.compositorLatencyMs);
+    clientDisplayedFrameAgeMs_.store(report.displayedFrameAgeMs);
+    clientReprojectedFramesDelta_.store(report.reprojectedFrames);
+    clientStaleFrameReusesDelta_.store(report.staleFrameReuses);
+    clientRenderPoseFallbacksDelta_.store(report.renderPoseFallbacks);
+    clientReprojectionMode_.store(report.reprojectionMode);
 
     float previous = clientPipelineLatencyMs_.load();
     float smoothed = previous * 0.8f + report.totalClientLatencyMs * 0.2f;
     clientPipelineLatencyMs_.store(smoothed);
     UpdatePredictionHorizon();
 
-    // Adaptive bitrate: adjust based on latency trends and keyframe request frequency
+    // Adaptive bitrate: use sliding-window client health signals with fast downshift
+    // and slow recovery to avoid oscillation.
     {
         uint32_t currentBitrate = currentBitrateMbps_.load();
-        int64_t nowNs = SteadyClockNowNs();
-        uint32_t keyframeRequests = requestKeyframeCount_.load();
+        uint32_t keyframeRequests = requestKeyframeTotalForAbr_.load();
         uint32_t newKeyframeRequests = keyframeRequests - lastKeyframeRequestCountForAbr_;
         lastKeyframeRequestCountForAbr_ = keyframeRequests;
+        uint32_t videoSendDroppedFrames = videoSendDroppedFramesTotalForAbr_.load();
+        uint32_t newVideoSendDrops =
+            videoSendDroppedFrames - lastVideoSendDroppedFrameCountForAbr_;
+        lastVideoSendDroppedFrameCountForAbr_ = videoSendDroppedFrames;
+        uint32_t encoderDroppedFrames = encoderDroppedFramesTotalForAbr_.load();
+        uint32_t newEncoderDrops =
+            encoderDroppedFrames - lastEncoderDroppedFrameCountForAbr_;
+        lastEncoderDroppedFrameCountForAbr_ = encoderDroppedFrames;
 
-        // Target: keep total client latency under 30ms with no recent keyframe requests
-        constexpr float kLatencyTargetMs = 30.0f;
-        constexpr float kLatencyHighMs = 45.0f;
-        constexpr uint32_t kMinBitrateMbps = 10;
-        constexpr int64_t kIncreaseIntervalNs = 5LL * 1000000000; // 5 seconds
+        oxrsys::streaming_abr::Sample sample = {};
+        sample.totalClientLatencyMs = smoothed;
+        sample.displayedFrameAgeMs = report.displayedFrameAgeMs;
+        sample.keyframeRequestsDelta = newKeyframeRequests;
+        sample.videoSendDroppedFramesDelta = newVideoSendDrops;
+        sample.encoderDroppedFramesDelta = newEncoderDrops;
+        sample.reprojectedFramesDelta = report.reprojectedFrames;
+        sample.staleFrameReusesDelta = report.staleFrameReuses;
+        sample.renderPoseFallbacksDelta = report.renderPoseFallbacks;
 
-        bool shouldDecrease = (smoothed > kLatencyHighMs) || (newKeyframeRequests > 0);
-        bool canIncrease = (smoothed < kLatencyTargetMs) && (newKeyframeRequests == 0) &&
-                           (nowNs - lastBitrateIncreaseTimeNs_ >= kIncreaseIntervalNs) &&
-                           (currentBitrate < configMaxBitrateMbps_.load());
-
-        uint32_t newBitrate = currentBitrate;
-        if (shouldDecrease && currentBitrate > kMinBitrateMbps)
+        oxrsys::streaming_abr::Decision decision = abrController_.Update(sample);
         {
-            newBitrate = std::max(currentBitrate * 9 / 10, kMinBitrateMbps); // -10%
+            std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+            abrStateName_ = oxrsys::streaming_abr::ToString(decision.state);
+            abrProfileName_ = decision.profile;
         }
-        else if (canIncrease)
-        {
-            newBitrate = std::min(currentBitrate + currentBitrate / 20,
-                                  configMaxBitrateMbps_.load()); // +5%
-            lastBitrateIncreaseTimeNs_ = nowNs;
-        }
 
-        if (newBitrate != currentBitrate)
+        if (decision.bitrateChanged && decision.targetBitrateMbps != currentBitrate)
         {
-            currentBitrateMbps_.store(newBitrate);
+            currentBitrateMbps_.store(decision.targetBitrateMbps);
             std::lock_guard<std::mutex> lock(encoderMutex_);
             if (encoder_ != nullptr)
             {
-                encoder_->SetBitrate(newBitrate);
+                encoder_->SetBitrate(decision.targetBitrateMbps);
             }
         }
     }
@@ -1493,11 +1596,15 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
     auto now = Clock::now();
     if (now - lastLogTime >= std::chrono::seconds(1))
     {
-        spdlog::info("StreamingServer: client latency receive->submit={:.2f}ms decode={:.2f}ms compositor={:.2f}ms total={:.2f}ms horizon={:.2f}ms bitrate={}Mbps",
+        spdlog::info("StreamingServer: client latency receive->submit={:.2f}ms decode={:.2f}ms compositor={:.2f}ms total={:.2f}ms displayedAge={:.2f}ms reproj={} stale={} poseFallbacks={} horizon={:.2f}ms bitrate={}Mbps",
                       report.receiveToDecoderSubmitMs,
                       report.decodeLatencyMs,
                       report.compositorLatencyMs,
                       report.totalClientLatencyMs,
+                      report.displayedFrameAgeMs,
+                      report.reprojectedFrames,
+                      report.staleFrameReuses,
+                      report.renderPoseFallbacks,
                       trackingReceiver_ ? trackingReceiver_->GetPredictionHorizonMs() : 0.0f,
                       currentBitrateMbps_.load());
         lastLogTime = now;
@@ -1507,6 +1614,7 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
 void StreamingServer::HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request)
 {
     requestKeyframeCount_.fetch_add(1);
+    requestKeyframeTotalForAbr_.fetch_add(1);
 
     std::lock_guard<std::mutex> lock(encoderMutex_);
     if (encoder_ != nullptr)
@@ -1527,9 +1635,11 @@ void StreamingServer::HandleControlPayload(const uint8_t* data, size_t size)
 
     uint8_t type = data[0];
     if (type == static_cast<uint8_t>(oxr::protocol::ControlType::LatencyReport) &&
-        size >= sizeof(oxr::protocol::LatencyReport))
+        size >= oxr::protocol::LATENCY_REPORT_BASE_SIZE)
     {
-        HandleLatencyReport(*reinterpret_cast<const oxr::protocol::LatencyReport*>(data));
+        oxr::protocol::LatencyReport report = {};
+        memcpy(&report, data, std::min(size, sizeof(report)));
+        HandleLatencyReport(report);
     }
     else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::RequestKeyframe) &&
              size >= sizeof(oxr::protocol::RequestKeyframe))
@@ -1637,6 +1747,7 @@ void StreamingServer::QueueEncodedVideoFrame(EncodedVideoFrame frame)
                 videoSendQueue_.pop_front();
             }
             videoSendDroppedFrames_.fetch_add(1);
+            videoSendDroppedFramesTotalForAbr_.fetch_add(1);
         }
         videoSendQueue_.push_back(std::move(frame));
         videoSendQueueDepthMax_.store(std::max(
@@ -1685,6 +1796,7 @@ void StreamingServer::VideoSendThread()
         if (dropStaleFrame)
         {
             videoSendDroppedFrames_.fetch_add(1);
+            videoSendDroppedFramesTotalForAbr_.fetch_add(1);
             continue;
         }
 

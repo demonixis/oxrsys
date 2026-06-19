@@ -151,6 +151,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestConfig.cpp
     tests/TestInputManager.cpp
     tests/TestRuntimePlatform.cpp
+    tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
     tests/TestVulkanDispatch.cpp
     tests/TestProtocolLayout.cpp

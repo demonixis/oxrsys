@@ -23,6 +23,8 @@ struct ServerConfig
     QString foveatedEncodingPreset = "off";
     QString clientFoveationPreset = "auto";
     bool clientUpscaling = false;
+    QString clientReprojection = "pose";
+    QString abrMode = "bitrate";
     bool headsetAudio = false;
     bool fileLogging = true;
     bool questLogcat = false;
@@ -35,3 +37,5 @@ struct ServerConfig
 QString encoderPresetDisplayName(const QString& value);
 QString transportDisplayName(const QString& value);
 QString foveationPresetDisplayName(const QString& value);
+QString clientReprojectionDisplayName(const QString& value);
+QString abrModeDisplayName(const QString& value);

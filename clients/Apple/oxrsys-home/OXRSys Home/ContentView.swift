@@ -443,6 +443,12 @@ struct ContentView: View {
                             }
                         }
 
+                        Picker("ABR mode", selection: streamingBinding(\.abrMode)) {
+                            ForEach(AbrModeSetting.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+
                         HStack {
                             Button("Default") {
                                 model.resetStreamingConfigToDefaults()
@@ -474,6 +480,11 @@ struct ContentView: View {
                         }
 
                         Toggle("Quest shader upscaling", isOn: streamingBinding(\.clientUpscaling))
+                        Picker("Client reprojection", selection: streamingBinding(\.clientReprojection)) {
+                            ForEach(ClientReprojectionSetting.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
                         Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -636,6 +647,27 @@ struct ContentView: View {
                             subtitle: "Prediction",
                             systemImage: "scope",
                             color: .indigo
+                        )
+                        RuntimeStatsMetric(
+                            title: "Frame Age",
+                            value: formatMilliseconds(latest.latency.displayedFrameAgeMs),
+                            subtitle: "Displayed",
+                            systemImage: "clock.arrow.circlepath",
+                            color: latest.latency.displayedFrameAgeMs > 55 ? .red : .cyan
+                        )
+                        RuntimeStatsMetric(
+                            title: "ABR",
+                            value: latest.abrState.isEmpty ? "Off" : latest.abrState.capitalized,
+                            subtitle: latest.abrProfile.isEmpty ? latest.abrMode : latest.abrProfile,
+                            systemImage: "arrow.up.arrow.down.circle",
+                            color: latest.abrState == "recovery" ? .red : .green
+                        )
+                        RuntimeStatsMetric(
+                            title: "Reprojection",
+                            value: "\(latest.counters.reprojectedFramesDelta)",
+                            subtitle: "\(latest.counters.staleFrameReusesDelta) stale",
+                            systemImage: "rectangle.on.rectangle.angled",
+                            color: latest.counters.staleFrameReusesDelta > 0 ? .orange : .green
                         )
                         RuntimeStatsMetric(
                             title: "Drops",

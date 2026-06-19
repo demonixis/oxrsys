@@ -16,11 +16,14 @@ are in place. Windows is scaffolded in layout/docs only for this pass. The Andro
 real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with explicit active flags,
 keeps hand-interaction bindings available alongside active controllers with controller-first priority,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
-compositor reprojection, requests the server-selected display refresh rate, enables preset-driven
+compositor reprojection, reuses short decode/network gaps through configurable client reprojection
+with conservative optional pose warp, requests the server-selected display refresh rate, enables preset-driven
 dynamic `XR_FB_foveation` when the headset supports it, and supports the Quest shader path for
 foveated-encoding decompression plus edge-aware upscaling. Runtime video sends now run behind a
 bounded encoded-frame sender queue so socket backpressure does not run inside VideoToolbox callbacks,
-and the Quest client drains MediaCodec output off the XR frame loop. The visionOS
+the Quest client drains MediaCodec output off the XR frame loop, and the runtime ABR controller
+uses client latency, displayed frame age, keyframe requests, send/encoder drops, and reprojection
+pressure to adjust bitrate with sliding windows and hysteresis. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
 while the immersive space is open. The macOS SwiftUI Home app now targets direct notarized
@@ -31,8 +34,8 @@ The Home app shows a main-window runtime activity summary from
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
 per-app custom ADB path selection for USB setup. Home streaming controls include the shared
 runtime 1-200 Mbps bitrate bounds, server-selected refresh rate, encoder preset, foveated encoding
-preset, and a separate Headset Client section for client foveation override, Quest shader upscaling,
-and reserved headset-audio configuration;
+preset, ABR mode, and a separate Headset Client section for client foveation override,
+Quest shader upscaling, client reprojection, and reserved headset-audio configuration;
 clients can send `ClientConnect.maxBitrateMbps = 0` to use the server-configured bitrate without
 adding a client-side cap.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
@@ -90,6 +93,8 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - The Quest Android client still uses the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value as a fallback before a server is discovered.
 - Latency reports feed bounded pose prediction.
 - Headset clients must match `VIDEO_FLAG_RENDER_POSE` metadata to the decoded frame before projection submission.
+- Quest client reprojection must stay bounded: use exact render-pose matches first, only fall back to recent monotone render poses, disable image-space pose warp on old frames, strong translation, missing pose, recovery, or repeated stale reuse, and keep all work on the GLES/EGL GPU path.
+- ABR must avoid oscillation: lower bitrate quickly on latency/loss/reprojection pressure, recover slowly through hysteresis, and do not raise bitrate/resolution while displayed frame age or reprojection pressure is high.
 - Server-side foveated encoding uses the ALVR-style AADT transform on the async Metal encode path only; clients without `CLIENT_CAPABILITY_FOVEATED_ENCODING` must not receive distorted video.
 - Quest shader upscaling and foveated-encoding decompression must preserve render-pose matching and keep the plain bilinear path working when the server flags are off.
 - Quest decoder input buffers must keep bounded headroom above `encodedWidth * encodedHeight`; foveated encoding can shrink encoded dimensions while high-bitrate IDR frames remain large.

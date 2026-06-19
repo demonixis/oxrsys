@@ -814,10 +814,15 @@ QWidget* MainWindow::buildStreamingTab()
     configTransportCombo_->addItem("Auto", "auto");
     configTransportCombo_->addItem("WiFi", "wifi");
     configTransportCombo_->addItem("USB ADB", "usb_adb");
+    abrModeCombo_ = new QComboBox(configBox);
+    abrModeCombo_->addItem("Off", "off");
+    abrModeCombo_->addItem("Bitrate", "bitrate");
+    abrModeCombo_->addItem("Full", "full");
     form->addRow("Refresh rate", refreshRateCombo_);
     form->addRow("Encoder preset", encoderPresetCombo_);
     form->addRow("Foveated encoding", foveatedEncodingPresetCombo_);
     form->addRow("Transport", configTransportCombo_);
+    form->addRow("ABR mode", abrModeCombo_);
     configLayout->addLayout(form);
 
     auto* headsetBox = new QGroupBox("Headset Client", content);
@@ -830,6 +835,11 @@ QWidget* MainWindow::buildStreamingTab()
     clientFoveationPresetCombo_->addItem("Medium", "medium");
     clientFoveationPresetCombo_->addItem("High", "high");
     headsetForm->addRow("Client foveation", clientFoveationPresetCombo_);
+    clientReprojectionCombo_ = new QComboBox(headsetBox);
+    clientReprojectionCombo_->addItem("Off", "off");
+    clientReprojectionCombo_->addItem("Pose", "pose");
+    clientReprojectionCombo_->addItem("Pose Warp", "pose_warp");
+    headsetForm->addRow("Client reprojection", clientReprojectionCombo_);
     headsetLayout->addLayout(headsetForm);
     clientUpscalingCheckBox_ = new QCheckBox("Quest shader upscaling", headsetBox);
     headsetAudioCheckBox_ = new QCheckBox("Headset audio", headsetBox);
@@ -851,6 +861,8 @@ QWidget* MainWindow::buildStreamingTab()
     connect(encoderPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(foveatedEncodingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(clientFoveationPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(clientReprojectionCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(abrModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(configTransportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
 
     auto* configButtons = new QHBoxLayout();
@@ -961,6 +973,9 @@ QWidget* MainWindow::buildDeveloperTab()
     metricsGrid->addWidget(buildMetric("Client", &clientMetricLabel_, "Pipeline"), 1, 1);
     metricsGrid->addWidget(buildMetric("Horizon", &horizonMetricLabel_, "Prediction"), 1, 2);
     metricsGrid->addWidget(buildMetric("Drops", &dropsMetricLabel_, "Encoder total"), 1, 3);
+    metricsGrid->addWidget(buildMetric("Frame Age", &frameAgeMetricLabel_, "Displayed"), 2, 0);
+    metricsGrid->addWidget(buildMetric("ABR", &abrMetricLabel_, "State / profile"), 2, 1);
+    metricsGrid->addWidget(buildMetric("Reprojection", &reprojectionMetricLabel_, "Frames / stale"), 2, 2);
     statsLayout->addLayout(metricsGrid);
     auto* chartsLayout = new QHBoxLayout();
     pipelineChart_ = new RuntimeStatsChart(RuntimeStatsChart::Kind::Pipeline, statsBox);
@@ -1169,7 +1184,8 @@ void MainWindow::refreshStreaming()
         clientUpscalingCheckBox_, headsetAudioCheckBox_,
         bitrateSlider_, resolutionSlider_, keyframeSlider_,
         refreshRateCombo_, encoderPresetCombo_, foveatedEncodingPresetCombo_,
-        clientFoveationPresetCombo_, configTransportCombo_, usbDeviceCombo_,
+        clientFoveationPresetCombo_, clientReprojectionCombo_, abrModeCombo_,
+        configTransportCombo_, usbDeviceCombo_,
     };
     for (QWidget* control : controls)
     {
@@ -1190,6 +1206,9 @@ void MainWindow::refreshStreaming()
         std::max(foveatedEncodingPresetCombo_->findData(config.foveatedEncodingPreset), 0));
     clientFoveationPresetCombo_->setCurrentIndex(
         std::max(clientFoveationPresetCombo_->findData(config.clientFoveationPreset), 0));
+    clientReprojectionCombo_->setCurrentIndex(
+        std::max(clientReprojectionCombo_->findData(config.clientReprojection), 0));
+    abrModeCombo_->setCurrentIndex(std::max(abrModeCombo_->findData(config.abrMode), 0));
     configTransportCombo_->setCurrentIndex(std::max(configTransportCombo_->findData(config.transport), 0));
 
     usbDeviceCombo_->clear();
@@ -1234,6 +1253,16 @@ void MainWindow::refreshDeveloper()
     serverMetricLabel_->setText(millisecondsText(stats.serverPipelineMs));
     clientMetricLabel_->setText(millisecondsText(stats.clientPipelineMs));
     horizonMetricLabel_->setText(millisecondsText(stats.predictionHorizonMs));
+    frameAgeMetricLabel_->setText(millisecondsText(stats.displayedFrameAgeMs));
+    abrMetricLabel_->setText(stats.abrState.isEmpty()
+                                 ? QStringLiteral("Off")
+                                 : QString("%1 / %2")
+                                       .arg(stats.abrState, stats.abrProfile.isEmpty()
+                                           ? stats.abrMode
+                                           : stats.abrProfile));
+    reprojectionMetricLabel_->setText(QString("%1 / %2")
+                                          .arg(stats.reprojectedFramesDelta)
+                                          .arg(stats.staleFrameReusesDelta));
     dropsMetricLabel_->setText(QString::number(stats.encoderDroppedFramesTotal));
     runtimeStatsEmptyLabel_->setText(hasStats ? QString() :
         (activity.isStreaming() ? "Waiting for the first telemetry sample." : "Runtime is idle."));
@@ -1370,6 +1399,8 @@ void MainWindow::updateConfigFromControls()
     config.encoderPreset = encoderPresetCombo_->currentData().toString();
     config.foveatedEncodingPreset = foveatedEncodingPresetCombo_->currentData().toString();
     config.clientFoveationPreset = clientFoveationPresetCombo_->currentData().toString();
+    config.clientReprojection = clientReprojectionCombo_->currentData().toString();
+    config.abrMode = abrModeCombo_->currentData().toString();
     config.transport = configTransportCombo_->currentData().toString();
 
     bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));

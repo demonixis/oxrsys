@@ -49,6 +49,13 @@ client_foveation_preset = "auto"
 # Enable Quest shader upscaling after video decode.
 client_upscaling = false
 
+# Quest client reprojection for short decode/network gaps: "off", "pose", or "pose_warp".
+client_reprojection = "pose"
+
+# Adaptive bitrate mode: "off", "bitrate", or "full".
+# "full" may select resolution/foveation/upscaling profiles after session-safe transitions.
+abr_mode = "bitrate"
+
 # Reserved for headset speaker audio. The runtime does not advertise audio until
 # a platform capture/playback path is attached.
 headset_audio = false

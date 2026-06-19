@@ -154,6 +154,10 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "    \"foveated_encoding_preset\": \"" << JsonEscape(stats.foveatedEncodingPreset) << "\",\n";
     file << "    \"client_foveation_preset\": \"" << JsonEscape(stats.clientFoveationPreset) << "\",\n";
     file << "    \"client_upscaling\": " << (stats.clientUpscaling ? "true" : "false") << ",\n";
+    file << "    \"client_reprojection_mode\": \"" << JsonEscape(stats.clientReprojectionMode) << "\",\n";
+    file << "    \"abr_mode\": \"" << JsonEscape(stats.abrMode) << "\",\n";
+    file << "    \"abr_state\": \"" << JsonEscape(stats.abrState) << "\",\n";
+    file << "    \"abr_profile\": \"" << JsonEscape(stats.abrProfile) << "\",\n";
     file << "    \"headset_audio\": " << (stats.headsetAudio ? "true" : "false") << ",\n";
     file << "    \"latency_ms\": {\n";
     file << "      \"server_pipeline\": " << stats.serverPipelineLatencyMs << ",\n";
@@ -161,7 +165,8 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "      \"client_receive_to_submit\": " << stats.clientReceiveToSubmitMs << ",\n";
     file << "      \"client_decode\": " << stats.clientDecodeMs << ",\n";
     file << "      \"client_compositor\": " << stats.clientCompositorMs << ",\n";
-    file << "      \"prediction_horizon\": " << stats.predictionHorizonMs << "\n";
+    file << "      \"prediction_horizon\": " << stats.predictionHorizonMs << ",\n";
+    file << "      \"displayed_frame_age\": " << stats.displayedFrameAgeMs << "\n";
     file << "    },\n";
     file << "    \"encode_ms\": {\n";
     file << "      \"queue_avg\": " << stats.encodeQueueAverageMs << ",\n";
@@ -187,7 +192,10 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "      \"video_tcp_send_failures_delta\": "
          << stats.videoTcpSendFailuresDelta << ",\n";
     file << "      \"video_udp_retransmitted_packets_delta\": "
-         << stats.videoUdpRetransmittedPacketsDelta << "\n";
+         << stats.videoUdpRetransmittedPacketsDelta << ",\n";
+    file << "      \"reprojected_frames_delta\": " << stats.reprojectedFramesDelta << ",\n";
+    file << "      \"stale_frame_reuses_delta\": " << stats.staleFrameReusesDelta << ",\n";
+    file << "      \"render_pose_fallbacks_delta\": " << stats.renderPoseFallbacksDelta << "\n";
     file << "    }\n";
     file << "  }\n";
 }

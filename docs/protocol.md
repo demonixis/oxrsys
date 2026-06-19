@@ -58,11 +58,22 @@ The handshake exposes:
 - client capability flags for foveated encoding, client foveation, client upscaling, and audio output
 - foveated encoding preset and aligned AADT parameters
 - client foveation override preset and client upscaling mode
+- client reprojection mode
 - audio port and sample rate fields reserved for headset speaker audio
 
 `ServerAnnounce` is versioned as a 92-byte v1.0 base followed by v1.1 trailing fields. `ClientConnect`
 is versioned as an 80-byte v1.0 base followed by v1.1 trailing fields. Receivers accept either the
 base size or the full struct size and zero-initialize missing trailing fields.
+
+`ServerAnnounce.clientReprojectionMode` lets the runtime choose the Quest/PICO fallback behavior when
+no newly decoded video frame is ready:
+
+- `Off`: display only the available video path without stale-frame pose reprojection.
+- `Pose`: reuse the last decoded texture for short gaps and submit the layer using the matched
+  render pose when it is available.
+- `PoseWarp`: allow the client to add a conservative GLES image-space orientation correction on top
+  of `Pose`; clients must disable it on stale frames that are too old, missing pose data, large
+  translation, recovery conditions, or repeated reuse.
 
 `ClientConnect.maxBitrateMbps` is a client-side ceiling. A value of `0`
 (`CLIENT_MAX_BITRATE_USE_SERVER_CONFIG`) means the client does not impose a
@@ -144,7 +155,21 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 - `HapticsCommand`
 - `NackRequest`
 
-Latency reports allow the runtime to keep prediction bounded. Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from the runtime to the client.
+Latency reports allow the runtime to keep prediction bounded. The first 20 bytes are the historical
+base report: receive-to-submit, decode, compositor, and total client latency. Newer clients append
+displayed frame age, reprojected-frame count, stale-frame reuse count, render-pose fallback count,
+and the active client reprojection mode. The runtime accepts the base report size for older clients
+and treats missing trailing metrics as zero.
+
+The runtime ABR controller consumes the latency report, displayed frame age, keyframe request
+deltas, video-send drops, encoder drops, and reprojection pressure. `streaming.abr_mode = "bitrate"`
+adjusts encoder bitrate only. `full` currently selects named quality profiles in status and is the
+entry point for session-safe resolution/foveation/upscaling changes once profile transitions are
+validated. ABR lowers quickly on loss or high frame age and recovers slowly after stable windows to
+avoid oscillation.
+
+Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from
+the runtime to the client.
 
 `NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
 

@@ -17,6 +17,7 @@ public enum OXRProtocol {
     public static let clientMaxBitrateUseServerConfig: UInt32 = 0
     public static let serverAnnounceBaseSize: Int = 92
     public static let clientConnectBaseSize: Int = 80
+    public static let latencyReportBaseSize: Int = 20
     public static let maxPacketPayload: Int = 1400
     public static let tcpRecordMagic: UInt32 = 0x4f585255
     public static let tcpRecordVersion: UInt16 = 1
@@ -125,6 +126,12 @@ public enum ClientUpscalingMode: UInt32, Sendable {
     case snapdragonGsr = 1
 }
 
+public enum ClientReprojectionMode: UInt32, Sendable {
+    case off = 0
+    case pose = 1
+    case poseWarp = 2
+}
+
 public enum AudioSampleFormat: UInt16, Sendable {
     case float32 = 1
 }
@@ -162,6 +169,7 @@ public struct ServerAnnounce: Sendable {
     public var foveatedEncodingPreset: UInt32 = FoveationPreset.off.rawValue
     public var clientFoveationPreset: UInt32 = ClientFoveationPreset.off.rawValue
     public var clientUpscalingMode: UInt32 = ClientUpscalingMode.off.rawValue
+    public var clientReprojectionMode: UInt32 = ClientReprojectionMode.pose.rawValue
     public var audioSampleRateHz: UInt32 = 48000
     public var foveationCenterSizeX: Float = 0
     public var foveationCenterSizeY: Float = 0
@@ -401,6 +409,11 @@ public struct LatencyReport: Sendable {
     public var decodeLatencyMs: Float = 0
     public var compositorLatencyMs: Float = 0
     public var totalClientLatencyMs: Float = 0
+    public var displayedFrameAgeMs: Float = 0
+    public var reprojectedFrames: UInt32 = 0
+    public var staleFrameReuses: UInt32 = 0
+    public var renderPoseFallbacks: UInt32 = 0
+    public var reprojectionMode: UInt32 = ClientReprojectionMode.off.rawValue
 
     public init() {}
 }

@@ -23,6 +23,8 @@ encoder_preset = "quality"
 foveated_encoding_preset = "medium"
 client_foveation_preset = "high"
 client_upscaling = true
+client_reprojection = "pose_warp"
+abr_mode = "full"
 headset_audio = true
 
 [logging]
@@ -42,6 +44,8 @@ quest_logcat = yes
     CHECK(values.foveatedEncodingPreset == "medium");
     CHECK(values.clientFoveationPreset == "high");
     CHECK(values.clientUpscaling == true);
+    CHECK(values.clientReprojectionMode == "pose_warp");
+    CHECK(values.abrMode == "full");
     CHECK(values.headsetAudio == true);
     CHECK(values.streamingTransport == "auto");
     CHECK(values.fileLogging == false);
@@ -59,6 +63,8 @@ keyframe_interval_sec = 0
 encoder_preset = "turbo"
 foveated_encoding_preset = "extreme"
 client_foveation_preset = "ultra"
+client_reprojection = "warp_all_the_time"
+abr_mode = "turbo"
 )TOML");
 
     ConfigValues defaults;
@@ -71,6 +77,8 @@ client_foveation_preset = "ultra"
     defaults.foveatedEncodingPreset = "light";
     defaults.clientFoveationPreset = "medium";
     defaults.clientUpscaling = true;
+    defaults.clientReprojectionMode = "pose";
+    defaults.abrMode = "bitrate";
 
     const ConfigValues values = ParseConfigToml(input, defaults);
 
@@ -83,6 +91,8 @@ client_foveation_preset = "ultra"
     CHECK(values.foveatedEncodingPreset == "light");
     CHECK(values.clientFoveationPreset == "medium");
     CHECK(values.clientUpscaling == true);
+    CHECK(values.clientReprojectionMode == "pose");
+    CHECK(values.abrMode == "bitrate");
 }
 
 TEST_CASE("Config parser accepts streaming transport", "[config]")

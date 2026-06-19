@@ -23,6 +23,7 @@ constexpr uint32_t STREAMING_MAX_BITRATE_MBPS = 200;
 constexpr uint32_t CLIENT_MAX_BITRATE_USE_SERVER_CONFIG = 0;
 constexpr uint32_t SERVER_ANNOUNCE_BASE_SIZE = 92;
 constexpr uint32_t CLIENT_CONNECT_BASE_SIZE = 80;
+constexpr uint32_t LATENCY_REPORT_BASE_SIZE = 20;
 
 enum class StreamingTransport : uint8_t
 {
@@ -135,6 +136,13 @@ enum class ClientUpscalingMode : uint32_t
     SnapdragonGsr = 1,
 };
 
+enum class ClientReprojectionMode : uint32_t
+{
+    Off = 0,
+    Pose = 1,
+    PoseWarp = 2,
+};
+
 enum class AudioSampleFormat : uint16_t
 {
     Float32 = 1,
@@ -162,6 +170,7 @@ struct ServerAnnounce
     FoveationPreset foveatedEncodingPreset = FoveationPreset::Off;
     ClientFoveationPreset clientFoveationPreset = ClientFoveationPreset::Off;
     ClientUpscalingMode clientUpscalingMode = ClientUpscalingMode::Off;
+    ClientReprojectionMode clientReprojectionMode = ClientReprojectionMode::Pose;
     uint32_t audioSampleRateHz = 48000;
     float foveationCenterSizeX = 0.0f;
     float foveationCenterSizeY = 0.0f;
@@ -330,6 +339,11 @@ struct LatencyReport
     float decodeLatencyMs;
     float compositorLatencyMs;
     float totalClientLatencyMs;
+    float displayedFrameAgeMs = 0.0f;
+    uint32_t reprojectedFrames = 0;
+    uint32_t staleFrameReuses = 0;
+    uint32_t renderPoseFallbacks = 0;
+    ClientReprojectionMode reprojectionMode = ClientReprojectionMode::Off;
 };
 
 enum KeyframeReasonFlags : uint32_t

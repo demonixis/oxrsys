@@ -64,6 +64,10 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.foveatedEncodingPreset = "medium";
     stats.clientFoveationPreset = "high";
     stats.clientUpscaling = true;
+    stats.clientReprojectionMode = "pose_warp";
+    stats.abrMode = "full";
+    stats.abrState = "constrained";
+    stats.abrProfile = "smooth";
     stats.headsetAudio = false;
     stats.serverPipelineLatencyMs = 12.5;
     stats.clientPipelineLatencyMs = 18.25;
@@ -71,6 +75,7 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.clientDecodeMs = 6.75;
     stats.clientCompositorMs = 11.0;
     stats.predictionHorizonMs = 30.75;
+    stats.displayedFrameAgeMs = 24.5;
     stats.encodeQueueAverageMs = 0.5;
     stats.encodeQueueP95Ms = 1.25;
     stats.encodeGpuAverageMs = 2.0;
@@ -90,6 +95,9 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.videoSendDroppedFramesDelta = 4;
     stats.videoTcpSendFailuresDelta = 1;
     stats.videoUdpRetransmittedPacketsDelta = 7;
+    stats.reprojectedFramesDelta = 5;
+    stats.staleFrameReusesDelta = 6;
+    stats.renderPoseFallbacksDelta = 2;
     RuntimeStatus::SetStreamingStats(stats);
 
     const auto statusPath = RuntimeStatusPathForHome(home);
@@ -105,8 +113,13 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"foveated_encoding_preset\": \"medium\""));
     CHECK(Contains(streamingStatus, "\"client_foveation_preset\": \"high\""));
     CHECK(Contains(streamingStatus, "\"client_upscaling\": true"));
+    CHECK(Contains(streamingStatus, "\"client_reprojection_mode\": \"pose_warp\""));
+    CHECK(Contains(streamingStatus, "\"abr_mode\": \"full\""));
+    CHECK(Contains(streamingStatus, "\"abr_state\": \"constrained\""));
+    CHECK(Contains(streamingStatus, "\"abr_profile\": \"smooth\""));
     CHECK(Contains(streamingStatus, "\"headset_audio\": false"));
     CHECK(Contains(streamingStatus, "\"server_pipeline\": 12.5"));
+    CHECK(Contains(streamingStatus, "\"displayed_frame_age\": 24.5"));
     CHECK(Contains(streamingStatus, "\"total_p95\": 9.5"));
     CHECK(Contains(streamingStatus, "\"encoded_frames_total\": 120"));
     CHECK(Contains(streamingStatus, "\"keyframe_requests_delta\": 1"));
@@ -114,6 +127,9 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"video_send_dropped_frames_delta\": 4"));
     CHECK(Contains(streamingStatus, "\"video_tcp_send_failures_delta\": 1"));
     CHECK(Contains(streamingStatus, "\"video_udp_retransmitted_packets_delta\": 7"));
+    CHECK(Contains(streamingStatus, "\"reprojected_frames_delta\": 5"));
+    CHECK(Contains(streamingStatus, "\"stale_frame_reuses_delta\": 6"));
+    CHECK(Contains(streamingStatus, "\"render_pose_fallbacks_delta\": 2"));
 
     RuntimeStatus::SetIdle();
     const std::string idleStatus = ReadFile(statusPath);

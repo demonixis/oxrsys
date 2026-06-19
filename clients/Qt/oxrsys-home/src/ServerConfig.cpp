@@ -57,6 +57,16 @@ bool isClientFoveationPreset(const QString& value)
     return value == "auto" || isFoveationPreset(value);
 }
 
+bool isClientReprojection(const QString& value)
+{
+    return value == "off" || value == "pose" || value == "pose_warp";
+}
+
+bool isAbrMode(const QString& value)
+{
+    return value == "off" || value == "bitrate" || value == "full";
+}
+
 QString stringValue(const QString& key, const QString& text)
 {
     QString value = rawValue(key, text);
@@ -237,6 +247,8 @@ QString ServerConfig::defaultText()
         "foveated_encoding_preset = \"off\"\n"
         "client_foveation_preset = \"auto\"\n"
         "client_upscaling = false\n"
+        "client_reprojection = \"pose\"\n"
+        "abr_mode = \"bitrate\"\n"
         "headset_audio = false\n"
         "\n"
         "[logging]\n"
@@ -310,6 +322,18 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.clientUpscaling = clientUpscaling;
     }
 
+    const QString clientReprojection = stringValue("client_reprojection", text);
+    if (isClientReprojection(clientReprojection))
+    {
+        config.clientReprojection = clientReprojection;
+    }
+
+    const QString abrMode = stringValue("abr_mode", text);
+    if (isAbrMode(abrMode))
+    {
+        config.abrMode = abrMode;
+    }
+
     const bool headsetAudio = boolValue("headset_audio", text, &ok);
     if (ok)
     {
@@ -353,6 +377,8 @@ QString ServerConfig::mergedInto(const QString& currentText) const
         {"foveated_encoding_preset", QString("\"%1\"").arg(foveatedEncodingPreset)},
         {"client_foveation_preset", QString("\"%1\"").arg(clientFoveationPreset)},
         {"client_upscaling", boolString(clientUpscaling)},
+        {"client_reprojection", QString("\"%1\"").arg(clientReprojection)},
+        {"abr_mode", QString("\"%1\"").arg(abrMode)},
         {"headset_audio", boolString(headsetAudio)},
     });
     text = upsertSection(text, "logging", {
@@ -408,4 +434,30 @@ QString foveationPresetDisplayName(const QString& value)
         return "High";
     }
     return "Off";
+}
+
+QString clientReprojectionDisplayName(const QString& value)
+{
+    if (value == "off")
+    {
+        return "Off";
+    }
+    if (value == "pose_warp")
+    {
+        return "Pose Warp";
+    }
+    return "Pose";
+}
+
+QString abrModeDisplayName(const QString& value)
+{
+    if (value == "off")
+    {
+        return "Off";
+    }
+    if (value == "full")
+    {
+        return "Full";
+    }
+    return "Bitrate";
 }

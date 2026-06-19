@@ -22,6 +22,10 @@ public:
         std::string foveatedEncodingPreset;
         std::string clientFoveationPreset;
         bool clientUpscaling = false;
+        std::string clientReprojectionMode;
+        std::string abrMode;
+        std::string abrState;
+        std::string abrProfile;
         bool headsetAudio = false;
 
         double serverPipelineLatencyMs = 0.0;
@@ -30,6 +34,7 @@ public:
         double clientDecodeMs = 0.0;
         double clientCompositorMs = 0.0;
         double predictionHorizonMs = 0.0;
+        double displayedFrameAgeMs = 0.0;
 
         double encodeQueueAverageMs = 0.0;
         double encodeQueueP95Ms = 0.0;
@@ -51,6 +56,9 @@ public:
         uint32_t videoSendDroppedFramesDelta = 0;
         uint32_t videoTcpSendFailuresDelta = 0;
         uint32_t videoUdpRetransmittedPacketsDelta = 0;
+        uint32_t reprojectedFramesDelta = 0;
+        uint32_t staleFrameReusesDelta = 0;
+        uint32_t renderPoseFallbacksDelta = 0;
     };
 
     static void SetApplicationName(const std::string& applicationName);

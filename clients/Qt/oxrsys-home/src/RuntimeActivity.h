@@ -20,6 +20,10 @@ struct RuntimeStreamingStats
     QString foveatedEncodingPreset;
     QString clientFoveationPreset;
     bool clientUpscaling = false;
+    QString clientReprojectionMode;
+    QString abrMode;
+    QString abrState;
+    QString abrProfile;
     bool headsetAudio = false;
 
     double serverPipelineMs = 0.0;
@@ -28,6 +32,7 @@ struct RuntimeStreamingStats
     double clientDecodeMs = 0.0;
     double clientCompositorMs = 0.0;
     double predictionHorizonMs = 0.0;
+    double displayedFrameAgeMs = 0.0;
 
     double encodeQueueAverageMs = 0.0;
     double encodeQueueP95Ms = 0.0;
@@ -45,6 +50,9 @@ struct RuntimeStreamingStats
     int replacedFramesDelta = 0;
     int keyframeRequestsDelta = 0;
     int pendingDepthMax = 0;
+    int reprojectedFramesDelta = 0;
+    int staleFrameReusesDelta = 0;
+    int renderPoseFallbacksDelta = 0;
 
     static RuntimeStreamingStats parse(const QJsonObject& object);
 };

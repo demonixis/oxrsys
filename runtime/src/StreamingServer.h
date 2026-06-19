@@ -16,6 +16,7 @@
 
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
+#include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
 
 // Shared protocol definitions
@@ -174,8 +175,20 @@ private:
     // Adaptive bitrate state
     std::atomic<uint32_t> configMaxBitrateMbps_{50};
     std::atomic<uint32_t> currentBitrateMbps_{50};
-    int64_t lastBitrateIncreaseTimeNs_ = 0;
     uint32_t lastKeyframeRequestCountForAbr_ = 0;
+    uint32_t lastVideoSendDroppedFrameCountForAbr_ = 0;
+    uint32_t lastEncoderDroppedFrameCountForAbr_ = 0;
+    oxrsys::streaming_abr::Controller abrController_;
+    std::mutex abrStateMutex_;
+    std::string abrModeName_ = "bitrate";
+    std::string abrStateName_ = "stable";
+    std::string abrProfileName_ = "bitrate";
+    std::atomic<float> clientDisplayedFrameAgeMs_{0.0f};
+    std::atomic<uint32_t> clientReprojectedFramesDelta_{0};
+    std::atomic<uint32_t> clientStaleFrameReusesDelta_{0};
+    std::atomic<uint32_t> clientRenderPoseFallbacksDelta_{0};
+    std::atomic<oxr::protocol::ClientReprojectionMode> clientReprojectionMode_{
+        oxr::protocol::ClientReprojectionMode::Off};
 
     // Sockets
     SocketHandle broadcastSocket_ = oxrsys::runtime_socket::InvalidSocket;
@@ -213,8 +226,11 @@ private:
     std::atomic<uint32_t> pendingFrameDepthMax_{0};
     std::atomic<uint32_t> replacedFrameCount_{0};
     std::atomic<uint32_t> requestKeyframeCount_{0};
+    std::atomic<uint32_t> requestKeyframeTotalForAbr_{0};
+    std::atomic<uint32_t> encoderDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoSendQueueDepthMax_{0};
     std::atomic<uint32_t> videoSendDroppedFrames_{0};
+    std::atomic<uint32_t> videoSendDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoTcpSendFailures_{0};
     std::atomic<uint32_t> videoUdpRetransmittedPackets_{0};
     std::mutex videoSendMutex_;

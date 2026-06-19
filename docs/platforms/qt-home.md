@@ -53,11 +53,13 @@ status `max_bitrate_mbps` follows the server config when the simulator connects.
 
 The Streaming tab also exposes the shared refresh-rate choices `60`, `72`, `80`, `90`, and `120`
 Hz, encoder presets `speed`, `balanced`, and `quality`, and server-side foveated encoding presets
-`off`, `light`, `medium`, and `high`. The Headset Client section owns headset-side options:
+`off`, `light`, `medium`, and `high`. It also exposes `abr_mode` with `off`, `bitrate`, and `full`.
+The Headset Client section owns headset-side options:
 `auto` leaves Quest/PICO `XR_FB_foveation` unmanaged by Home, while `off`, `light`, `medium`,
 and `high` explicitly override the viewer swapchains. Quest shader upscaling and the reserved
-headset-audio toggle live there as well. Audio is not reported active by the runtime until a real
-capture/playback stream is implemented.
+headset-audio toggle live there as well. `client_reprojection` controls Quest/PICO missing-frame
+smoothing with `off`, `pose`, and `pose_warp`. Audio is not reported active by the runtime until a
+real capture/playback stream is implemented.
 
 Transport readiness work is asynchronous. Qt Home shows checking/configuring status while the
 worker is running, ignores stale results after ADB path, selected serial, or transport changes, and

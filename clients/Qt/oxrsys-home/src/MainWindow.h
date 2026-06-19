@@ -101,6 +101,8 @@ private:
     QComboBox* encoderPresetCombo_ = nullptr;
     QComboBox* foveatedEncodingPresetCombo_ = nullptr;
     QComboBox* clientFoveationPresetCombo_ = nullptr;
+    QComboBox* clientReprojectionCombo_ = nullptr;
+    QComboBox* abrModeCombo_ = nullptr;
     QComboBox* configTransportCombo_ = nullptr;
     QComboBox* usbDeviceCombo_ = nullptr;
     QLabel* adbStatusLabel_ = nullptr;
@@ -115,6 +117,9 @@ private:
     QLabel* serverMetricLabel_ = nullptr;
     QLabel* clientMetricLabel_ = nullptr;
     QLabel* horizonMetricLabel_ = nullptr;
+    QLabel* frameAgeMetricLabel_ = nullptr;
+    QLabel* abrMetricLabel_ = nullptr;
+    QLabel* reprojectionMetricLabel_ = nullptr;
     QLabel* dropsMetricLabel_ = nullptr;
     QLabel* runtimeStatsEmptyLabel_ = nullptr;
     RuntimeStatsChart* pipelineChart_ = nullptr;

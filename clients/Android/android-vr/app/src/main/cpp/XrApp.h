@@ -107,6 +107,11 @@ private:
     void ClearSwapchain(int eye, float r, float g, float b);
     XrPosef BuildEyePoseFromRenderPose(const NetworkReceiver::RenderPose& renderPose,
                                        int eye) const;
+    XrPosef BuildCurrentHeadPose() const;
+    bool ResolveRenderPoseForFrame(int64_t presentationTimeUs,
+                                   NetworkReceiver::RenderPose* renderPose,
+                                   bool* usedFallback);
+    void UpdateReprojectionWarp(bool reusingFrame);
     void SendTracking(XrTime predictedDisplayTime);
 
     bool SetupActions();
@@ -189,6 +194,8 @@ private:
     GLint blitFoveationCenterShiftUniform_ = -1;
     GLint blitFoveationEdgeRatioUniform_ = -1;
     GLint blitFoveationEyeSizeRatioUniform_ = -1;
+    GLint blitReprojectionWarpEnabledUniform_ = -1;
+    GLint blitReprojectionWarpOffsetUniform_ = -1;
 
     // Networking
     std::unique_ptr<NetworkReceiver> networkReceiver_;
@@ -226,6 +233,8 @@ private:
     uint32_t clientRefreshRateHz_ = 90;
     protocol::ClientFoveationPreset clientFoveationPreset_ =
         protocol::ClientFoveationPreset::Off;
+    protocol::ClientReprojectionMode clientReprojectionMode_ =
+        protocol::ClientReprojectionMode::Pose;
     bool serverFoveatedEncodingEnabled_ = false;
     bool clientUpscalingEnabled_ = false;
     float foveationCenterSizeX_ = 1.0f;
@@ -244,8 +253,31 @@ private:
     int64_t lastFrameAcquireTimeNs_ = 0;
     int64_t lastReportedAcquireTimeNs_ = 0;
     uint32_t skippedDecodedFrames_ = 0;
+    struct PresentedVideoFrame
+    {
+        bool valid = false;
+        GLuint texture = 0;
+        int64_t presentationTimeUs = 0;
+        int64_t localReceiveTimeNs = 0;
+        int64_t localSubmitTimeNs = 0;
+        int64_t localAcquireTimeNs = 0;
+        NetworkReceiver::RenderPose renderPose = {};
+        bool hasRenderPose = false;
+        XrPosef headsetPoseAtPresentation = {
+            {0.0f, 0.0f, 0.0f, 1.0f},
+            {0.0f, 0.0f, 0.0f}
+        };
+        uint32_t consecutiveReuses = 0;
+    };
+    PresentedVideoFrame presentedVideoFrame_;
     NetworkReceiver::RenderPose currentRenderPose_;
     bool hasCurrentRenderPose_ = false;
+    bool reprojectionWarpEnabled_ = false;
+    float reprojectionWarpOffsetX_ = 0.0f;
+    float reprojectionWarpOffsetY_ = 0.0f;
+    uint32_t reprojectedFramesSinceLastReport_ = 0;
+    uint32_t renderPoseFallbacksSinceLastReport_ = 0;
+    uint32_t staleFrameReusesSinceLastReport_ = 0;
     uint32_t renderPoseHitCount_ = 0;
     uint32_t renderPoseMissCount_ = 0;
     std::chrono::steady_clock::time_point lastRenderPoseLogTime_;

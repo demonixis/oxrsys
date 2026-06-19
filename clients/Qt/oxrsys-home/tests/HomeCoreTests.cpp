@@ -73,6 +73,8 @@ void testServerConfigRoundTrip()
         foveated_encoding_preset = "medium"
         client_foveation_preset = "high"
         client_upscaling = true
+        client_reprojection = "pose_warp"
+        abr_mode = "full"
         headset_audio = true
 
         [logging]
@@ -87,6 +89,8 @@ void testServerConfigRoundTrip()
     expect(parsed.foveatedEncodingPreset == "medium", "Expected FFE parse");
     expect(parsed.clientFoveationPreset == "high", "Expected client foveation parse");
     expect(parsed.clientUpscaling, "Expected upscaling parse");
+    expect(parsed.clientReprojection == "pose_warp", "Expected reprojection parse");
+    expect(parsed.abrMode == "full", "Expected ABR parse");
     expect(parsed.headsetAudio, "Expected audio parse");
     expect(parsed.questLogcat, "Expected quest_logcat parse");
 
@@ -98,6 +102,8 @@ void testServerConfigRoundTrip()
     expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization");
     expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization");
     expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization");
+    expect(merged.contains("client_reprojection = \"pose_warp\""), "Expected reprojection serialization");
+    expect(merged.contains("abr_mode = \"full\""), "Expected ABR serialization");
     expect(merged.contains("headset_audio = true"), "Expected audio serialization");
 }
 
@@ -164,6 +170,9 @@ quest_logcat = true
     expect(text.contains("client_foveation_preset = \"auto\""),
            "Expected default client foveation serialization");
     expect(text.contains("client_upscaling = false"), "Expected default upscaling serialization");
+    expect(text.contains("client_reprojection = \"pose\""),
+           "Expected default reprojection serialization");
+    expect(text.contains("abr_mode = \"bitrate\""), "Expected default ABR serialization");
     expect(text.contains("headset_audio = false"), "Expected default audio serialization");
 
     settings.clear();
@@ -420,17 +429,25 @@ void testRuntimeActivityParsing()
         "foveated_encoding_preset": "medium",
         "client_foveation_preset": "high",
         "client_upscaling": true,
+        "client_reprojection_mode": "pose_warp",
+        "abr_mode": "full",
+        "abr_state": "constrained",
+        "abr_profile": "smooth",
         "headset_audio": false,
         "latency_ms": {
           "server_pipeline": 12.5,
           "client_pipeline": 18.25,
-          "prediction_horizon": 30.75
+          "prediction_horizon": 30.75,
+          "displayed_frame_age": 24.5
         },
         "encode_ms": {
           "total_p95": 9.5
         },
         "counters": {
-          "encoder_dropped_frames_total": 2
+          "encoder_dropped_frames_total": 2,
+          "reprojected_frames_delta": 5,
+          "stale_frame_reuses_delta": 6,
+          "render_pose_fallbacks_delta": 2
         }
       }
     })", false);
@@ -444,7 +461,14 @@ void testRuntimeActivityParsing()
     expect(activity.streamingStats.foveatedEncodingPreset == "medium", "Expected FFE stats");
     expect(activity.streamingStats.clientFoveationPreset == "high", "Expected FFR stats");
     expect(activity.streamingStats.clientUpscaling, "Expected upscaling stats");
+    expect(activity.streamingStats.clientReprojectionMode == "pose_warp",
+           "Expected reprojection stats");
+    expect(activity.streamingStats.abrState == "constrained", "Expected ABR state stats");
+    expect(activity.streamingStats.abrProfile == "smooth", "Expected ABR profile stats");
     expect(!activity.streamingStats.headsetAudio, "Expected audio stats");
+    expect(activity.streamingStats.displayedFrameAgeMs == 24.5, "Expected frame age stats");
+    expect(activity.streamingStats.reprojectedFramesDelta == 5, "Expected reprojection counter");
+    expect(activity.streamingStats.staleFrameReusesDelta == 6, "Expected stale reuse counter");
     expect(activity.streamingStats.encodeTotalP95Ms == 9.5, "Expected encode stats");
 }
 

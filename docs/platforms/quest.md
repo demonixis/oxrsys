@@ -63,6 +63,7 @@ The Android client:
 - connects and advertises codec, active refresh rate, streaming capabilities, and the headset OpenXR `systemName`
 - requests the server-announced display refresh rate when `XR_FB_display_refresh_rate` is available
 - receives encoded video frames and matches render-pose metadata to each decoded frame before projection submission
+- reuses short decode/network gaps with the configured client reprojection mode
 - drains MediaCodec output on a decoder thread so the XR frame loop only acquires the latest ready image
 - sends head, controller, and optional hand-tracking data back to the runtime
 - reports latency measurements
@@ -82,6 +83,42 @@ The video blit shader supports two server-announced post-processing modes:
 
 The shader path does not depend on the proprietary Snapdragon SDK. It keeps the plain bilinear path
 when the server does not announce upscaling or foveated encoding.
+
+## Client Reprojection
+
+`streaming.client_reprojection` is announced by the server and controls how the Quest client handles
+short gaps where the decoder has no new image ready:
+
+- `off`: keep the normal video path and do not apply stale-frame pose reprojection.
+- `pose`: default. Reuse the last decoded texture for short gaps and submit the projection layer with
+  the matched server render pose when available. If an exact presentation timestamp match is missing,
+  the client may use the latest render pose only when it is recent and monotone.
+- `pose_warp`: adds a conservative GLES shader correction based on the current headset orientation
+  delta from the render pose. The warp is intentionally small and disables on missing pose, old
+  frames, strong translation, recovery, or more than a few consecutive stale reuses.
+
+The first implementation does not use depth, motion vectors, Vulkan, or `XR_FB_space_warp`. All work
+stays on the existing GLES/EGL texture path, and the plain bilinear/upscaling path remains active
+when the server disables reprojection or when safety checks fail.
+
+Latency reports now include displayed frame age, stale-frame reuse count, reprojected-frame count,
+render-pose fallback count, and the active reprojection mode. The runtime writes these fields to
+`runtime_status.json` so Home can show whether smoothness problems are network/decode gaps or
+server-side pipeline latency.
+
+## ABR Signals
+
+`streaming.abr_mode` controls server-side adaptive bitrate:
+
+- `off`: no adaptive bitrate changes.
+- `bitrate`: default. Adjusts encoder bitrate only.
+- `full`: reports profile selection for `quality`, `balanced`, `smooth`, and `wifi_smooth`; changing
+  resolution/foveated-encoding/upscaling profiles remains session-safe and should be validated before
+  enabling mid-session decoder recreation.
+
+The ABR controller consumes client latency, displayed frame age, keyframe requests, video-send drops,
+encoder drops, and reprojection pressure. It lowers bitrate quickly on constrained/recovery signals
+and increases slowly after stable windows so WiFi does not oscillate between quality and recovery.
 
 Foveated encoding can reduce the encoded dimensions substantially without reducing the configured
 bitrate by the same ratio. The Android decoder therefore keeps a bounded input-buffer margin instead
@@ -153,8 +190,8 @@ USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NAC
 - USB ADB reverse TCP streaming is available alongside WiFi UDP streaming.
 - Runtime encoded-video dispatch is bounded and latest-frame-oriented, with queue/drop counters exposed in runtime status.
 - Refresh rate is selected by the server/Home, requested by the client, and negotiated back from the active headset rate.
-- Latency reporting and keyframe requests are wired into the control path.
-- The client applies frame-exact render poses for projection submission so headset compositor reprojection has the pose used to render the displayed frame.
+- Latency reporting, displayed-frame-age reporting, reprojection counters, and keyframe requests are wired into the control path.
+- The client applies frame-exact render poses for projection submission so headset compositor reprojection has the pose used to render the displayed frame, and can reuse short missing-frame gaps with bounded client reprojection.
 - Dynamic client foveation, shader upscaling, and foveated-encoding decompression are present as evolving paths and should be validated regularly on hardware.
 - Headset speaker audio has protocol fields reserved, but the Quest client does not yet play a runtime audio stream.
 
@@ -162,5 +199,5 @@ USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NAC
 
 - Regular on-headset validation is still required.
 - The current path is optimized for low-latency iteration, not for wide-network robustness.
-- Rotation smoothness depends on render-pose match rate staying near 100%; misses should be investigated alongside dropped frames, NACKs, and keyframe requests.
+- Rotation smoothness depends on render-pose match rate staying near 100%; misses should be investigated alongside displayed frame age, stale-frame reuse, dropped frames, NACKs, and keyframe requests.
 - Regular PICO validation is newer than Quest validation and should be kept in the log matrix when controller or hand tracking changes.

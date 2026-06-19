@@ -391,6 +391,22 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.clientUpscaling = ParseBool(value);
             }
+            else if (key == "client_reprojection")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "pose" || value == "pose_warp")
+                {
+                    values.clientReprojectionMode = value;
+                }
+            }
+            else if (key == "abr_mode")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "bitrate" || value == "full")
+                {
+                    values.abrMode = value;
+                }
+            }
             else if (key == "headset_audio")
             {
                 values.headsetAudio = ParseBool(value);
@@ -492,7 +508,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
@@ -505,6 +521,8 @@ bool Config::ReloadIfChangedLocked(bool force)
             newValues.foveatedEncodingPreset,
             newValues.clientFoveationPreset,
             newValues.clientUpscaling,
+            newValues.clientReprojectionMode,
+            newValues.abrMode,
             newValues.headsetAudio,
             newValues.questLogcat);
     }
@@ -572,12 +590,13 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
                   values_.resolutionScale, values_.keyframeIntervalSec,
                   values_.encoderPreset, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
-                  values_.clientUpscaling, values_.headsetAudio);
+                  values_.clientUpscaling, values_.clientReprojectionMode,
+                  values_.abrMode, values_.headsetAudio);
 }
 
 // ─── Quest logcat capture ────────────────────────────────────────────────────

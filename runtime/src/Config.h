@@ -24,6 +24,8 @@ struct ConfigValues
     std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling
+    std::string clientReprojectionMode = "pose"; // "off", "pose", "pose_warp"
+    std::string abrMode = "bitrate"; // "off", "bitrate", "full"
     bool headsetAudio = false;       // Stream server audio to the headset
 
     bool fileLogging = true;        // Write logs to oxrsys-runtime.log

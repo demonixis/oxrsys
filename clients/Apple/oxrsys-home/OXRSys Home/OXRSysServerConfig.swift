@@ -17,6 +17,8 @@ struct OXRSysServerConfig: Equatable {
     var foveatedEncodingPreset: FoveationPresetSetting = .off
     var clientFoveationPreset: ClientFoveationPresetSetting = .auto
     var clientUpscaling = false
+    var clientReprojection: ClientReprojectionSetting = .pose
+    var abrMode: AbrModeSetting = .bitrate
     var headsetAudio = false
     var fileLogging = true
     var questLogcat = false
@@ -65,6 +67,13 @@ struct OXRSysServerConfig: Equatable {
     # Enable Quest shader upscaling after video decode.
     client_upscaling = false
 
+    # Quest client reprojection for short decode/network gaps: "off", "pose", or "pose_warp".
+    client_reprojection = "pose"
+
+    # Adaptive bitrate mode: "off", "bitrate", or "full".
+    # "full" may select resolution/foveation/upscaling profiles after session-safe transitions.
+    abr_mode = "bitrate"
+
     # Reserved for headset speaker audio. The runtime does not advertise audio until
     # a platform capture/playback path is attached.
     headset_audio = false
@@ -112,6 +121,12 @@ struct OXRSysServerConfig: Equatable {
         if let value = boolValue("client_upscaling", in: text) {
             config.clientUpscaling = value
         }
+        if let value = stringValue("client_reprojection", in: text), let mode = ClientReprojectionSetting(rawValue: value) {
+            config.clientReprojection = mode
+        }
+        if let value = stringValue("abr_mode", in: text), let mode = AbrModeSetting(rawValue: value) {
+            config.abrMode = mode
+        }
         if let value = boolValue("headset_audio", in: text) {
             config.headsetAudio = value
         }
@@ -146,6 +161,8 @@ struct OXRSysServerConfig: Equatable {
                 ("foveated_encoding_preset", "\"\(foveatedEncodingPreset.rawValue)\""),
                 ("client_foveation_preset", "\"\(clientFoveationPreset.rawValue)\""),
                 ("client_upscaling", boolString(clientUpscaling)),
+                ("client_reprojection", "\"\(clientReprojection.rawValue)\""),
+                ("abr_mode", "\"\(abrMode.rawValue)\""),
                 ("headset_audio", boolString(headsetAudio)),
             ]),
             ("logging", [

@@ -81,6 +81,8 @@ uniform vec2 uFoveationCenterSize;
 uniform vec2 uFoveationCenterShift;
 uniform vec2 uFoveationEdgeRatio;
 uniform vec2 uFoveationEyeSizeRatio;
+uniform int uReprojectionWarpEnabled;
+uniform vec2 uReprojectionWarpOffset;
 
 float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeRatio) {
     float c0 = (1.0 - centerSize) * 0.5;
@@ -143,6 +145,12 @@ float luma(vec3 color) {
 
 void main() {
     vec2 eyeUv = clamp(vUV, vec2(0.0), vec2(1.0));
+    if (uReprojectionWarpEnabled != 0) {
+        vec2 centered = eyeUv - vec2(0.5);
+        float edgeWeight = 1.0 + dot(centered, centered);
+        eyeUv = clamp(eyeUv + uReprojectionWarpOffset * edgeWeight,
+                      vec2(0.0), vec2(1.0));
+    }
     vec3 color = sampleVideo(eyeUv);
     if (uClientUpscalingEnabled != 0) {
         vec2 stepUv = max(uLogicalTexelSize, vec2(0.00001));
@@ -445,6 +453,43 @@ static XrVector3f RotateVector(const XrQuaternionf& q, const XrVector3f& v)
         v.y + q.w * t.y + qCrossT.y,
         v.z + q.w * t.z + qCrossT.z,
     };
+}
+
+static XrQuaternionf ConjugateQuaternion(const XrQuaternionf& q)
+{
+    return {-q.x, -q.y, -q.z, q.w};
+}
+
+static XrQuaternionf MultiplyQuaternion(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+    return NormalizeQuaternion({
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    });
+}
+
+static float VectorDistance(const XrVector3f& a, const XrVector3f& b)
+{
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    const float dz = a.z - b.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+static const char* ReprojectionModeName(protocol::ClientReprojectionMode mode)
+{
+    switch (mode)
+    {
+        case protocol::ClientReprojectionMode::Off:
+            return "off";
+        case protocol::ClientReprojectionMode::PoseWarp:
+            return "pose_warp";
+        case protocol::ClientReprojectionMode::Pose:
+        default:
+            return "pose";
+    }
 }
 
 struct MetricSummary
@@ -1252,11 +1297,17 @@ bool XrApp::CreateSwapchains()
         glGetUniformLocation(blitProgram_, "uFoveationEdgeRatio");
     blitFoveationEyeSizeRatioUniform_ =
         glGetUniformLocation(blitProgram_, "uFoveationEyeSizeRatio");
+    blitReprojectionWarpEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uReprojectionWarpEnabled");
+    blitReprojectionWarpOffsetUniform_ =
+        glGetUniformLocation(blitProgram_, "uReprojectionWarpOffset");
 
     glUseProgram(blitProgram_);
     glUniform1i(blitTextureUniform_, 0);
     glUniform1f(blitUpscaleEdgeThresholdUniform_, 4.0f / 255.0f);
     glUniform1f(blitUpscaleSharpnessUniform_, 2.0f);
+    glUniform1i(blitReprojectionWarpEnabledUniform_, 0);
+    glUniform2f(blitReprojectionWarpOffsetUniform_, 0.0f, 0.0f);
     glUseProgram(0);
 
     // Full-screen quad
@@ -1425,6 +1476,13 @@ void XrApp::StartNetworking()
     lastFrameAcquireTimeNs_ = 0;
     lastReportedAcquireTimeNs_ = 0;
     skippedDecodedFrames_ = 0;
+    presentedVideoFrame_ = {};
+    reprojectedFramesSinceLastReport_ = 0;
+    renderPoseFallbacksSinceLastReport_ = 0;
+    staleFrameReusesSinceLastReport_ = 0;
+    reprojectionWarpEnabled_ = false;
+    reprojectionWarpOffsetX_ = 0.0f;
+    reprojectionWarpOffsetY_ = 0.0f;
     transportMode_ = TransportMode::WifiUdp;
     lastUsbAdbRetryTime_ = {};
     usbAdbRetryAttempts_ = 0;
@@ -1494,7 +1552,11 @@ void XrApp::ResetConnection(const char* reason)
     macEyeAspect_ = 0.0f;
     hasVideoTexture_ = false;
     hasCurrentRenderPose_ = false;
+    presentedVideoFrame_ = {};
     currentRenderPose_ = {};
+    reprojectionWarpEnabled_ = false;
+    reprojectionWarpOffsetX_ = 0.0f;
+    reprojectionWarpOffsetY_ = 0.0f;
     lastVideoFrameTime_ = {};
     videoContentUMin_ = 0.0f;
     videoContentUMax_ = 1.0f;
@@ -1502,6 +1564,7 @@ void XrApp::ResetConnection(const char* reason)
     videoContentVMax_ = 1.0f;
     serverFoveatedEncodingEnabled_ = false;
     clientUpscalingEnabled_ = false;
+    clientReprojectionMode_ = protocol::ClientReprojectionMode::Pose;
     foveationCenterSizeX_ = 1.0f;
     foveationCenterSizeY_ = 1.0f;
     foveationCenterShiftX_ = 0.0f;
@@ -1517,6 +1580,9 @@ void XrApp::ResetConnection(const char* reason)
     lastFrameAcquireTimeNs_ = 0;
     lastReportedAcquireTimeNs_ = 0;
     skippedDecodedFrames_ = 0;
+    reprojectedFramesSinceLastReport_ = 0;
+    renderPoseFallbacksSinceLastReport_ = 0;
+    staleFrameReusesSinceLastReport_ = 0;
     renderPoseHitCount_ = 0;
     renderPoseMissCount_ = 0;
     lastRenderPoseLogTime_ = {};
@@ -1752,6 +1818,17 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     clientUpscalingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
         server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
+    switch (server.clientReprojectionMode)
+    {
+        case protocol::ClientReprojectionMode::Off:
+        case protocol::ClientReprojectionMode::Pose:
+        case protocol::ClientReprojectionMode::PoseWarp:
+            clientReprojectionMode_ = server.clientReprojectionMode;
+            break;
+        default:
+            clientReprojectionMode_ = protocol::ClientReprojectionMode::Pose;
+            break;
+    }
     foveationCenterSizeX_ = server.foveationCenterSizeX > 0.0f ? server.foveationCenterSizeX : 1.0f;
     foveationCenterSizeY_ = server.foveationCenterSizeY > 0.0f ? server.foveationCenterSizeY : 1.0f;
     foveationCenterShiftX_ = server.foveationCenterShiftX;
@@ -1833,12 +1910,13 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
         foveationEyeHeightRatio_ = 1.0f;
     }
 
-    LOGI("Server stream options: features=0x%x ffe=%d ffr=%s(%u) upscaling=%d activeRatio=%.4fx%.4f",
+    LOGI("Server stream options: features=0x%x ffe=%d ffr=%s(%u) upscaling=%d reprojection=%s activeRatio=%.4fx%.4f",
          server.serverFeatures,
          serverFoveatedEncodingEnabled_ ? 1 : 0,
          clientFoveationOverride ? "override" : "auto",
          static_cast<uint32_t>(server.clientFoveationPreset),
          clientUpscalingEnabled_ ? 1 : 0,
+         ReprojectionModeName(clientReprojectionMode_),
          foveationEyeWidthRatio_,
          foveationEyeHeightRatio_);
 
@@ -2004,7 +2082,11 @@ void XrApp::SendLatencyReport()
     MetricSummary ageSummary = Summarize(&latencySamples_.frameAgeMs);
 
     if (receiveSummary.count == 0 && decodeSummary.count == 0 &&
-        compositorSummary.count == 0 && totalSummary.count == 0)
+        compositorSummary.count == 0 && totalSummary.count == 0 &&
+        ageSummary.count == 0 &&
+        reprojectedFramesSinceLastReport_ == 0 &&
+        staleFrameReusesSinceLastReport_ == 0 &&
+        renderPoseFallbacksSinceLastReport_ == 0)
     {
         return;
     }
@@ -2015,6 +2097,11 @@ void XrApp::SendLatencyReport()
     report.decodeLatencyMs = static_cast<float>(decodeSummary.average);
     report.compositorLatencyMs = static_cast<float>(compositorSummary.average);
     report.totalClientLatencyMs = static_cast<float>(totalSummary.average);
+    report.displayedFrameAgeMs = static_cast<float>(ageSummary.average);
+    report.reprojectedFrames = reprojectedFramesSinceLastReport_;
+    report.staleFrameReuses = staleFrameReusesSinceLastReport_;
+    report.renderPoseFallbacks = renderPoseFallbacksSinceLastReport_;
+    report.reprojectionMode = clientReprojectionMode_;
     if (usbAdb)
     {
         SendTcpRecord(controlTcpSocket_, protocol::TcpRecordType::Control,
@@ -2025,12 +2112,16 @@ void XrApp::SendLatencyReport()
         send(controlSocket_, &report, sizeof(report), MSG_DONTWAIT);
     }
 
-    LOGI("Latency report: recv->submit avg/p95=%.2f/%.2fms decode=%.2f/%.2f compositor=%.2f/%.2f total=%.2f/%.2f age=%.2f/%.2f skipped=%u",
+    LOGI("Latency report: recv->submit avg/p95=%.2f/%.2fms decode=%.2f/%.2f compositor=%.2f/%.2f total=%.2f/%.2f age=%.2f/%.2f reproj=%u stale=%u poseFallbacks=%u mode=%s skipped=%u",
          receiveSummary.average, receiveSummary.p95,
          decodeSummary.average, decodeSummary.p95,
          compositorSummary.average, compositorSummary.p95,
          totalSummary.average, totalSummary.p95,
          ageSummary.average, ageSummary.p95,
+         reprojectedFramesSinceLastReport_,
+         staleFrameReusesSinceLastReport_,
+         renderPoseFallbacksSinceLastReport_,
+         ReprojectionModeName(clientReprojectionMode_),
          skippedDecodedFrames_);
 
     latencySamples_.receiveToSubmitMs.clear();
@@ -2039,6 +2130,9 @@ void XrApp::SendLatencyReport()
     latencySamples_.totalClientMs.clear();
     latencySamples_.frameAgeMs.clear();
     skippedDecodedFrames_ = 0;
+    reprojectedFramesSinceLastReport_ = 0;
+    staleFrameReusesSinceLastReport_ = 0;
+    renderPoseFallbacksSinceLastReport_ = 0;
     lastLatencyReportTime_ = now;
 }
 
@@ -2078,6 +2172,150 @@ void XrApp::RequestKeyframe(uint32_t reasonFlags, uint32_t detail)
 float XrApp::GetCurrentRefreshRateHz() const
 {
     return static_cast<float>(clientRefreshRateHz_);
+}
+
+XrPosef XrApp::BuildCurrentHeadPose() const
+{
+    XrPosef pose = {};
+    pose.orientation = NormalizeQuaternion(views_[0].pose.orientation);
+    pose.position = {
+        (views_[0].pose.position.x + views_[1].pose.position.x) * 0.5f,
+        (views_[0].pose.position.y + views_[1].pose.position.y) * 0.5f,
+        (views_[0].pose.position.z + views_[1].pose.position.z) * 0.5f,
+    };
+    return pose;
+}
+
+bool XrApp::ResolveRenderPoseForFrame(int64_t presentationTimeUs,
+                                      NetworkReceiver::RenderPose* renderPose,
+                                      bool* usedFallback)
+{
+    if (renderPose == nullptr || usedFallback == nullptr || networkReceiver_ == nullptr)
+    {
+        return false;
+    }
+
+    *usedFallback = false;
+    NetworkReceiver::RenderPose matchedRenderPose = {};
+    if (networkReceiver_->TakeRenderPoseForPresentationTimeUs(
+        presentationTimeUs, &matchedRenderPose))
+    {
+        *renderPose = matchedRenderPose;
+        renderPoseHitCount_++;
+        return true;
+    }
+
+    renderPoseMissCount_++;
+    if (clientReprojectionMode_ == protocol::ClientReprojectionMode::Off)
+    {
+        return false;
+    }
+
+    NetworkReceiver::RenderPose latestRenderPose = networkReceiver_->GetLatestRenderPose();
+    if (!latestRenderPose.valid || latestRenderPose.presentationTimeUs <= 0)
+    {
+        return false;
+    }
+    if (latestRenderPose.presentationTimeUs > presentationTimeUs)
+    {
+        return false;
+    }
+    if (presentedVideoFrame_.hasRenderPose &&
+        latestRenderPose.presentationTimeUs < presentedVideoFrame_.renderPose.presentationTimeUs)
+    {
+        return false;
+    }
+
+    const int64_t maxFallbackAgeUs =
+        std::max<int64_t>((predictedDisplayPeriodNs_ / 1000) * 2, 50000);
+    if (presentationTimeUs - latestRenderPose.presentationTimeUs > maxFallbackAgeUs)
+    {
+        return false;
+    }
+
+    *renderPose = latestRenderPose;
+    *usedFallback = true;
+    renderPoseFallbacksSinceLastReport_++;
+    return true;
+}
+
+void XrApp::UpdateReprojectionWarp(bool reusingFrame)
+{
+    reprojectionWarpEnabled_ = false;
+    reprojectionWarpOffsetX_ = 0.0f;
+    reprojectionWarpOffsetY_ = 0.0f;
+
+    if (clientReprojectionMode_ != protocol::ClientReprojectionMode::PoseWarp ||
+        !reusingFrame ||
+        !presentedVideoFrame_.valid ||
+        !presentedVideoFrame_.hasRenderPose ||
+        presentedVideoFrame_.consecutiveReuses > 3 ||
+        presentedVideoFrame_.localReceiveTimeNs <= 0)
+    {
+        return;
+    }
+
+    const int64_t nowNs = SteadyClockNowNs();
+    if (nowNs < presentedVideoFrame_.localReceiveTimeNs)
+    {
+        return;
+    }
+    const double ageMs =
+        static_cast<double>(nowNs - presentedVideoFrame_.localReceiveTimeNs) / 1.0e6;
+    if (ageMs > 75.0)
+    {
+        return;
+    }
+    const auto nowSteady = std::chrono::steady_clock::now();
+    if (lastKeyframeRequestTime_.time_since_epoch().count() != 0 &&
+        nowSteady - lastKeyframeRequestTime_ < std::chrono::milliseconds(300))
+    {
+        return;
+    }
+
+    XrPosef currentHeadPose = BuildCurrentHeadPose();
+    XrPosef renderHeadPose = {};
+    renderHeadPose.orientation = NormalizeQuaternion({
+        presentedVideoFrame_.renderPose.orientation[0],
+        presentedVideoFrame_.renderPose.orientation[1],
+        presentedVideoFrame_.renderPose.orientation[2],
+        presentedVideoFrame_.renderPose.orientation[3],
+    });
+    renderHeadPose.position = {
+        presentedVideoFrame_.renderPose.position[0],
+        presentedVideoFrame_.renderPose.position[1],
+        presentedVideoFrame_.renderPose.position[2],
+    };
+
+    if (VectorDistance(currentHeadPose.position, renderHeadPose.position) > 0.08f)
+    {
+        return;
+    }
+
+    XrQuaternionf delta = MultiplyQuaternion(
+        currentHeadPose.orientation, ConjugateQuaternion(renderHeadPose.orientation));
+    if (delta.w < 0.0f)
+    {
+        delta = {-delta.x, -delta.y, -delta.z, -delta.w};
+    }
+
+    const float vectorLength =
+        std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    const float angle = 2.0f * std::atan2(vectorLength, std::max(delta.w, 0.0001f));
+    if (!std::isfinite(angle) || angle > 0.12f)
+    {
+        return;
+    }
+
+    reprojectionWarpOffsetX_ = std::clamp(-delta.y * 0.07f, -0.012f, 0.012f);
+    reprojectionWarpOffsetY_ = std::clamp(delta.x * 0.07f, -0.012f, 0.012f);
+    if (std::abs(reprojectionWarpOffsetX_) < 0.0001f &&
+        std::abs(reprojectionWarpOffsetY_) < 0.0001f)
+    {
+        return;
+    }
+
+    reprojectionWarpEnabled_ = true;
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
@@ -2321,7 +2559,6 @@ void XrApp::RunFrame()
         {
             double totalClientMs = (double)(nowNs - lastFrameReceiveTimeNs_) / 1.0e6;
             latencySamples_.totalClientMs.push_back(totalClientMs);
-            latencySamples_.frameAgeMs.push_back(totalClientMs);
         }
         lastReportedAcquireTimeNs_ = lastFrameAcquireTimeNs_;
     }
@@ -2356,6 +2593,7 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
 {
     // Try to get a decoded frame from the video decoder
     bool hasVideo = false;
+    bool reusingPresentedFrame = false;
     if (videoDecoder_ && videoDecoder_->IsInitialized())
     {
         VideoDecoder::DecodedFrame frame;
@@ -2376,20 +2614,11 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
             skippedDecodedFrames_ += frame.skippedFramesBeforeAcquire;
 
             NetworkReceiver::RenderPose matchedRenderPose = {};
-            if (networkReceiver_ != nullptr &&
-                networkReceiver_->TakeRenderPoseForPresentationTimeUs(
-                    frame.presentationTimeUs, &matchedRenderPose))
-            {
-                currentRenderPose_ = matchedRenderPose;
-                hasCurrentRenderPose_ = true;
-                renderPoseHitCount_++;
-            }
-            else
-            {
-                currentRenderPose_ = {};
-                hasCurrentRenderPose_ = false;
-                renderPoseMissCount_++;
-            }
+            bool usedRenderPoseFallback = false;
+            const bool hasMatchedRenderPose = ResolveRenderPoseForFrame(
+                frame.presentationTimeUs, &matchedRenderPose, &usedRenderPoseFallback);
+            currentRenderPose_ = hasMatchedRenderPose ? matchedRenderPose : NetworkReceiver::RenderPose{};
+            hasCurrentRenderPose_ = hasMatchedRenderPose;
 
             auto renderPoseLogNow = std::chrono::steady_clock::now();
             if (lastRenderPoseLogTime_.time_since_epoch().count() == 0)
@@ -2403,8 +2632,9 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
                 {
                     float hitRate = 100.0f * static_cast<float>(renderPoseHitCount_) /
                                     static_cast<float>(total);
-                    LOGI("Render pose match: hit=%u miss=%u rate=%.1f%%",
-                         renderPoseHitCount_, renderPoseMissCount_, hitRate);
+                    LOGI("Render pose match: hit=%u miss=%u rate=%.1f%% fallbacks=%u",
+                         renderPoseHitCount_, renderPoseMissCount_, hitRate,
+                         renderPoseFallbacksSinceLastReport_);
                 }
                 renderPoseHitCount_ = 0;
                 renderPoseMissCount_ = 0;
@@ -2497,6 +2727,17 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
                         hasVideo = true;
                         hasVideoTexture_ = true;
                         lastVideoFrameTime_ = std::chrono::steady_clock::now();
+                        presentedVideoFrame_.valid = true;
+                        presentedVideoFrame_.texture = videoTexture_;
+                        presentedVideoFrame_.presentationTimeUs = frame.presentationTimeUs;
+                        presentedVideoFrame_.localReceiveTimeNs = frame.localReceiveTimeNs;
+                        presentedVideoFrame_.localSubmitTimeNs = frame.localSubmitTimeNs;
+                        presentedVideoFrame_.localAcquireTimeNs = frame.localAcquireTimeNs;
+                        presentedVideoFrame_.renderPose = matchedRenderPose;
+                        presentedVideoFrame_.hasRenderPose = hasMatchedRenderPose;
+                        presentedVideoFrame_.headsetPoseAtPresentation = BuildCurrentHeadPose();
+                        presentedVideoFrame_.consecutiveReuses = 0;
+                        (void)usedRenderPoseFallback;
 
                         if (decodedFrameCount_ <= 5 || decodedFrameCount_ % 300 == 0)
                         {
@@ -2536,15 +2777,60 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
                 // Stream lost (Godot closed, Mac disconnected, etc.)
                 hasVideoTexture_ = false;
                 hasCurrentRenderPose_ = false;
+                presentedVideoFrame_ = {};
                 OnConnectionLost("no video frames for 2 seconds");
             }
             else
             {
                 // Reuse the last frame — the AHardwareBuffer is still alive (not released).
-                hasVideo = true;
+                if (presentedVideoFrame_.valid)
+                {
+                    hasVideo = true;
+                    reusingPresentedFrame = true;
+                    presentedVideoFrame_.consecutiveReuses++;
+                    staleFrameReusesSinceLastReport_++;
+
+                    const int64_t nowNs = SteadyClockNowNs();
+                    const double ageMs =
+                        presentedVideoFrame_.localReceiveTimeNs > 0 && nowNs >= presentedVideoFrame_.localReceiveTimeNs
+                            ? static_cast<double>(nowNs - presentedVideoFrame_.localReceiveTimeNs) / 1.0e6
+                            : 0.0;
+                    const bool canUseReprojectedPose =
+                        clientReprojectionMode_ != protocol::ClientReprojectionMode::Off &&
+                        presentedVideoFrame_.hasRenderPose &&
+                        ageMs <= 120.0;
+                    if (canUseReprojectedPose)
+                    {
+                        currentRenderPose_ = presentedVideoFrame_.renderPose;
+                        hasCurrentRenderPose_ = true;
+                        reprojectedFramesSinceLastReport_++;
+                    }
+                    else
+                    {
+                        currentRenderPose_ = {};
+                        hasCurrentRenderPose_ = false;
+                    }
+                }
             }
         }
     }
+
+    if (hasVideo && presentedVideoFrame_.valid && presentedVideoFrame_.localReceiveTimeNs > 0)
+    {
+        const int64_t nowNs = SteadyClockNowNs();
+        if (nowNs >= presentedVideoFrame_.localReceiveTimeNs)
+        {
+            latencySamples_.frameAgeMs.push_back(
+                static_cast<double>(nowNs - presentedVideoFrame_.localReceiveTimeNs) / 1.0e6);
+        }
+    }
+    if (!hasVideo)
+    {
+        currentRenderPose_ = {};
+        hasCurrentRenderPose_ = false;
+        reusingPresentedFrame = false;
+    }
+    UpdateReprojectionWarp(reusingPresentedFrame && hasCurrentRenderPose_);
 
     for (int eye = 0; eye < 2; eye++)
     {
@@ -2637,6 +2923,9 @@ void XrApp::BlitVideoToSwapchain(int eye)
                 foveationEdgeRatioX_, foveationEdgeRatioY_);
     glUniform2f(blitFoveationEyeSizeRatioUniform_,
                 foveationEyeWidthRatio_, foveationEyeHeightRatio_);
+    glUniform1i(blitReprojectionWarpEnabledUniform_, reprojectionWarpEnabled_ ? 1 : 0);
+    glUniform2f(blitReprojectionWarpOffsetUniform_,
+                reprojectionWarpOffsetX_, reprojectionWarpOffsetY_);
 
     glBindVertexArray(blitVao_);
     glDrawArrays(GL_TRIANGLES, 0, 6);

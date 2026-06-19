@@ -253,6 +253,8 @@ struct HomeLauncherTests {
         foveated_encoding_preset = "medium"
         client_foveation_preset = "high"
         client_upscaling = true
+        client_reprojection = "pose_warp"
+        abr_mode = "full"
         headset_audio = true
         """)
         try expect(parsed.transport == .usbAdb, "Expected USB ADB transport parse")
@@ -260,6 +262,8 @@ struct HomeLauncherTests {
         try expect(parsed.foveatedEncodingPreset == .medium, "Expected foveated encoding parse")
         try expect(parsed.clientFoveationPreset == .high, "Expected client foveation parse")
         try expect(parsed.clientUpscaling == true, "Expected client upscaling parse")
+        try expect(parsed.clientReprojection == .poseWarp, "Expected client reprojection parse")
+        try expect(parsed.abrMode == .full, "Expected ABR parse")
         try expect(parsed.headsetAudio == true, "Expected headset audio parse")
 
         let merged = parsed.merged(into: OXRSysServerConfig.defaultText)
@@ -268,6 +272,8 @@ struct HomeLauncherTests {
         try expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization")
         try expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization")
         try expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization")
+        try expect(merged.contains("client_reprojection = \"pose_warp\""), "Expected reprojection serialization")
+        try expect(merged.contains("abr_mode = \"full\""), "Expected ABR serialization")
         try expect(merged.contains("headset_audio = true"), "Expected audio serialization")
     }
 
@@ -296,6 +302,8 @@ struct HomeLauncherTests {
         try expect(merged.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization")
         try expect(merged.contains("client_foveation_preset = \"auto\""), "Expected default client foveation serialization")
         try expect(merged.contains("client_upscaling = false"), "Expected default upscaling serialization")
+        try expect(merged.contains("client_reprojection = \"pose\""), "Expected default reprojection serialization")
+        try expect(merged.contains("abr_mode = \"bitrate\""), "Expected default ABR serialization")
         try expect(merged.contains("headset_audio = false"), "Expected default audio serialization")
         try expect(merged.contains("file_logging = true"), "Expected default file logging serialization")
         try expect(merged.contains("quest_logcat = false"), "Expected default quest logcat serialization")
@@ -344,6 +352,10 @@ struct HomeLauncherTests {
             "foveated_encoding_preset": "medium",
             "client_foveation_preset": "high",
             "client_upscaling": true,
+            "client_reprojection_mode": "pose_warp",
+            "abr_mode": "full",
+            "abr_state": "constrained",
+            "abr_profile": "smooth",
             "headset_audio": false,
             "latency_ms": {
               "server_pipeline": 12.5,
@@ -351,7 +363,8 @@ struct HomeLauncherTests {
               "client_receive_to_submit": 1.5,
               "client_decode": 6.75,
               "client_compositor": 11.0,
-              "prediction_horizon": 30.75
+              "prediction_horizon": 30.75,
+              "displayed_frame_age": 24.5
             },
             "encode_ms": {
               "queue_avg": 0.5,
@@ -370,7 +383,10 @@ struct HomeLauncherTests {
               "encoder_dropped_frames_total": 2,
               "replaced_frames_delta": 3,
               "keyframe_requests_delta": 1,
-              "pending_depth_max": 1
+              "pending_depth_max": 1,
+              "reprojected_frames_delta": 5,
+              "stale_frame_reuses_delta": 6,
+              "render_pose_fallbacks_delta": 2
             }
           }
         }
@@ -384,12 +400,18 @@ struct HomeLauncherTests {
         try expect(stats?.foveatedEncodingPreset == "medium", "Expected runtime stats FFE preset")
         try expect(stats?.clientFoveationPreset == "high", "Expected runtime stats FFR preset")
         try expect(stats?.clientUpscaling == true, "Expected runtime stats upscaling")
+        try expect(stats?.clientReprojectionMode == "pose_warp", "Expected runtime stats reprojection")
+        try expect(stats?.abrState == "constrained", "Expected runtime stats ABR state")
+        try expect(stats?.abrProfile == "smooth", "Expected runtime stats ABR profile")
         try expect(stats?.headsetAudio == false, "Expected runtime stats audio")
         try expect(stats?.latency.serverPipelineMs == 12.5, "Expected server latency parse")
         try expect(stats?.latency.predictionHorizonMs == 30.75, "Expected prediction horizon parse")
+        try expect(stats?.latency.displayedFrameAgeMs == 24.5, "Expected displayed frame age parse")
         try expect(stats?.encode.totalP95Ms == 9.5, "Expected encode p95 parse")
         try expect(stats?.counters.encodedFramesTotal == 120, "Expected encoded frame counter parse")
         try expect(stats?.counters.keyframeRequestsDelta == 1, "Expected keyframe counter parse")
+        try expect(stats?.counters.reprojectedFramesDelta == 5, "Expected reprojection counter parse")
+        try expect(stats?.counters.staleFrameReusesDelta == 6, "Expected stale reuse counter parse")
     }
 
     private static func testMacWifiParsing() throws {
