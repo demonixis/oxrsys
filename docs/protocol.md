@@ -54,10 +54,10 @@ The handshake exposes:
 - server and device names; Android clients send the OpenXR `systemName` in
   `ClientConnect.deviceName`
 - preferred codec and bitrate limits
-- server feature flags for foveated encoding, client foveation, client upscaling, and headset audio
+- server feature flags for foveated encoding, client foveation override, client upscaling, and headset audio
 - client capability flags for foveated encoding, client foveation, client upscaling, and audio output
 - foveated encoding preset and aligned AADT parameters
-- client foveation preset and client upscaling mode
+- client foveation override preset and client upscaling mode
 - audio port and sample rate fields reserved for headset speaker audio
 
 `ServerAnnounce` is versioned as a 92-byte v1.0 base followed by v1.1 trailing fields. `ClientConnect`
@@ -107,7 +107,10 @@ Current codec identifiers:
 
 USB TCP video sends complete encoded NAL units as `VideoNal` records. It does not use UDP fragmentation, FEC, or NACK recovery.
 
-The runtime currently targets low-latency headset streaming. The queue is latest-frame-only rather than fully reliable.
+The runtime currently targets low-latency headset streaming. Frame submission and encoded-video
+dispatch are bounded and latest-frame-oriented rather than fully reliable; if the transport cannot
+keep up, stale encoded frames may be dropped so socket backpressure does not block the encoder
+callback or `Session::EndFrame()`.
 
 The current stream also includes two recovery and timing helpers:
 

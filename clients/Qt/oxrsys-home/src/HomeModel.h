@@ -18,6 +18,8 @@
 class QProcess;
 class QThread;
 
+QString filteredApplicationLogText(const QString& text);
+
 struct TransportReadiness
 {
     bool isReady = false;

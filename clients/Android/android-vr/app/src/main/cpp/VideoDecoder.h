@@ -9,6 +9,7 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 #include <mutex>
+#include <thread>
 
 struct ANativeWindow;
 struct AHardwareBuffer;
@@ -81,7 +82,8 @@ private:
     };
 
     // Dequeue all available output buffers and render them to the surface
-    uint32_t FlushOutputToSurface();
+    uint32_t FlushOutputToSurface(int64_t timeoutUs);
+    void OutputThreadMain();
     void RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs, int64_t submitTimeNs);
     bool ConsumeSubmittedFrameMetadata(int64_t presentationTimeUs, PendingFrameMetadata* outMetadata);
 
@@ -89,6 +91,9 @@ private:
     AImageReader* imageReader_ = nullptr;
     ANativeWindow* outputWindow_ = nullptr;     // Owned by AImageReader, do not release
     AImage* currentImage_ = nullptr;
+    std::thread outputThread_;
+    std::atomic<bool> outputThreadRunning_{false};
+    std::atomic<uint32_t> outputFramesReleasedSinceAcquire_{0};
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;

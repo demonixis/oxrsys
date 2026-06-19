@@ -210,12 +210,15 @@ void testTrackingFlagsAndMovementTargets()
            "Expected right-shift movement to move right controller");
 
     oxr::protocol::TrackingPacket packet = {};
-    fillSimulatorTrackingPacket(shiftedPose, shiftedKeys, 42, packet);
+    fillSimulatorTrackingPacket(shiftedPose, shiftedKeys, 42, 100.0f, 1.0f, packet);
     expect((packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0,
            "Expected left controller active flag");
     expect((packet.trackingFlags & oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE) != 0,
            "Expected right controller active flag");
     expect(packet.timestampNs == 42, "Expected caller-provided monotonic timestamp");
+    expect(packet.eyeFov[0] < 0.0f && packet.eyeFov[1] > 0.0f &&
+               packet.eyeFov[2] > 0.0f && packet.eyeFov[3] < 0.0f,
+           "Expected simulator tracking packet to include eye FOV");
 }
 
 } // namespace

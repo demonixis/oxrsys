@@ -768,7 +768,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func appendLog(_ text: String, for appID: String) {
-        let combined = (appLogs[appID] ?? "") + text
+        let filteredText = HomeApplicationLogFilter.filtered(text)
+        guard !filteredText.isEmpty else {
+            return
+        }
+
+        let combined = (appLogs[appID] ?? "") + filteredText
         if combined.count > maxLogCharacters {
             appLogs[appID] = String(combined.suffix(maxLogCharacters))
         } else {

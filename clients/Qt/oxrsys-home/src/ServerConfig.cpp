@@ -52,6 +52,11 @@ bool isFoveationPreset(const QString& value)
     return value == "off" || value == "light" || value == "medium" || value == "high";
 }
 
+bool isClientFoveationPreset(const QString& value)
+{
+    return value == "auto" || isFoveationPreset(value);
+}
+
 QString stringValue(const QString& key, const QString& text)
 {
     QString value = rawValue(key, text);
@@ -161,6 +166,53 @@ QString upsertSection(QString text,
     return lines.join('\n');
 }
 
+QString removeSectionKeys(QString text, const QString& sectionName, const QStringList& keys)
+{
+    QStringList lines = text.split('\n');
+    const QString sectionHeader = QString("[%1]").arg(sectionName);
+
+    int sectionIndex = -1;
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        if (lines.at(i).trimmed() == sectionHeader)
+        {
+            sectionIndex = i;
+            break;
+        }
+    }
+    if (sectionIndex < 0)
+    {
+        return text;
+    }
+
+    int sectionEnd = lines.size();
+    for (int i = sectionIndex + 1; i < lines.size(); ++i)
+    {
+        if (isSectionHeader(lines.at(i)))
+        {
+            sectionEnd = i;
+            break;
+        }
+    }
+
+    for (int i = sectionEnd - 1; i > sectionIndex; --i)
+    {
+        for (const QString& key : keys)
+        {
+            if (matchesKey(key, lines.at(i)))
+            {
+                lines.removeAt(i);
+                if (i - 1 > sectionIndex && lines.at(i - 1).contains("Rendering FOV"))
+                {
+                    lines.removeAt(i - 1);
+                }
+                break;
+            }
+        }
+    }
+    return lines.join('\n');
+}
+
 } // namespace
 
 QString ServerConfig::defaultText()
@@ -177,14 +229,13 @@ QString ServerConfig::defaultText()
         "\n"
         "[streaming]\n"
         "bitrate_mbps = 50\n"
-        "fov_degrees = 100\n"
         "refresh_rate_hz = 72\n"
         "resolution_scale = 0.75\n"
         "keyframe_interval_sec = 2\n"
         "encoder_preset = \"balanced\"\n"
         "transport = \"auto\"\n"
         "foveated_encoding_preset = \"off\"\n"
-        "client_foveation_preset = \"medium\"\n"
+        "client_foveation_preset = \"auto\"\n"
         "client_upscaling = false\n"
         "headset_audio = false\n"
         "\n"
@@ -209,12 +260,6 @@ ServerConfig ServerConfig::parse(const QString& text)
         bitrate <= ServerConfig::MaxBitrateMbps)
     {
         config.bitrateMbps = bitrate;
-    }
-
-    const int fov = rawValue("fov_degrees", text).toInt(&ok);
-    if (ok && fov >= 60 && fov <= 150)
-    {
-        config.fovDegrees = fov;
     }
 
     const int refreshRate = rawValue("refresh_rate_hz", text).toInt(&ok);
@@ -254,7 +299,7 @@ ServerConfig ServerConfig::parse(const QString& text)
     }
 
     const QString clientFoveationPreset = stringValue("client_foveation_preset", text);
-    if (isFoveationPreset(clientFoveationPreset))
+    if (isClientFoveationPreset(clientFoveationPreset))
     {
         config.clientFoveationPreset = clientFoveationPreset;
     }
@@ -293,13 +338,13 @@ QString ServerConfig::mergedInto(const QString& currentText) const
     {
         text = defaultText().trimmed();
     }
+    text = removeSectionKeys(text, "streaming", QStringList{QStringLiteral("fov_degrees")});
 
     text = upsertSection(text, "general", {
         {"runtime_enabled", boolString(runtimeEnabled)},
     });
     text = upsertSection(text, "streaming", {
         {"bitrate_mbps", QString::number(bitrateMbps)},
-        {"fov_degrees", QString::number(fovDegrees)},
         {"refresh_rate_hz", QString::number(refreshRateHz)},
         {"resolution_scale", decimalString(resolutionScale)},
         {"keyframe_interval_sec", QString::number(keyframeIntervalSec)},
@@ -346,6 +391,10 @@ QString transportDisplayName(const QString& value)
 
 QString foveationPresetDisplayName(const QString& value)
 {
+    if (value == "auto")
+    {
+        return "Auto";
+    }
     if (value == "light")
     {
         return "Light";

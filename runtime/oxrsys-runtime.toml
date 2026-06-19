@@ -16,9 +16,6 @@ runtime_enabled = true
 # Try 20-30 for lower latency, 50+ for quality.
 bitrate_mbps = 50
 
-# Rendering FOV in degrees (symmetric). Must match Quest client's kMacHalfFov.
-fov_degrees = 100
-
 # Preferred headset display refresh rate. Supported values: 60, 72, 80, 90, 120.
 refresh_rate_hz = 72
 
@@ -45,9 +42,9 @@ transport = "auto"
 # to re-expand the image after decode.
 foveated_encoding_preset = "off"
 
-# Headset runtime foveation preset: "off", "light", "medium", or "high".
-# This maps to XR_FB_foveation on Quest/Pico when supported.
-client_foveation_preset = "medium"
+# Headset client foveation override: "auto", "off", "light", "medium", or "high".
+# "auto" leaves the headset client unmanaged by Home/runtime config.
+client_foveation_preset = "auto"
 
 # Enable Quest shader upscaling after video decode.
 client_upscaling = false

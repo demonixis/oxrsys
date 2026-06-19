@@ -63,13 +63,16 @@ The Android client:
 - connects and advertises codec, active refresh rate, streaming capabilities, and the headset OpenXR `systemName`
 - requests the server-announced display refresh rate when `XR_FB_display_refresh_rate` is available
 - receives encoded video frames and matches render-pose metadata to each decoded frame before projection submission
+- drains MediaCodec output on a decoder thread so the XR frame loop only acquires the latest ready image
 - sends head, controller, and optional hand-tracking data back to the runtime
 - reports latency measurements
 - requests keyframes when recovery is needed
 
-When supported by the headset, the client can enable `XR_FB_foveation` from the server-announced
-client foveation preset. `off` disables the profile, while `light`, `medium`, and `high` map to the
-runtime's FB foveation levels with dynamic foveation enabled.
+When supported by the headset, the Android viewer app can enable `XR_FB_foveation` from the
+server-announced client foveation override. This applies to the Quest/PICO viewer swapchains, not to
+the desktop OpenXR application rendered by the runtime. `auto` leaves headset foveation unmanaged
+by Home/runtime config, `off` explicitly detaches the profile, and `light`, `medium`, and `high`
+map to the runtime's FB foveation levels with dynamic foveation enabled.
 
 The video blit shader supports two server-announced post-processing modes:
 
@@ -79,6 +82,11 @@ The video blit shader supports two server-announced post-processing modes:
 
 The shader path does not depend on the proprietary Snapdragon SDK. It keeps the plain bilinear path
 when the server does not announce upscaling or foveated encoding.
+
+Foveated encoding can reduce the encoded dimensions substantially without reducing the configured
+bitrate by the same ratio. The Android decoder therefore keeps a bounded input-buffer margin instead
+of sizing MediaCodec input buffers only from `encodedWidth * encodedHeight`, so high-bitrate IDR
+frames still fit when foveated encoding is active.
 
 ## Controller Profiles And Tracking Flags
 
@@ -132,7 +140,9 @@ adb -s <serial> reverse tcp:9946 tcp:9946
 
 With `streaming.transport = "auto"`, the Quest app connects to `127.0.0.1:9946` first. If the ADB reverse control channel answers, the client receives `ServerAnnounce`, opens TCP video and tracking channels, and sends `ClientConnect`. If USB is unavailable, it falls back to WiFi UDP discovery while continuing to retry USB periodically so launch order is not critical. When the runtime closes the USB control/video sockets or video stalls after an app exits, the Quest client resets connection state and returns to the same retry loop without requiring the Android app to be relaunched. With `streaming.transport = "usb_adb"`, the runtime disables WiFi discovery fallback.
 
-The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIPE` where available, and a bounded send timeout. If a TCP video send fails or times out, the runtime disables the stale TCP video dispatch path so the encode callback can keep releasing frames and the Android client can reconnect through its existing retry loop.
+The Quest client sends `ClientConnect.maxBitrateMbps = 0` on USB ADB, so USB quality is controlled by the server/Home bitrate setting rather than an extra headset-side cap. WiFi keeps its client-side ceiling.
+
+The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIPE` where available, and a bounded send timeout. Encoded video is handed to a bounded sender queue before TCP writes, so socket backpressure cannot run inside the VideoToolbox callback. If a TCP video send fails or times out, the runtime disables the stale TCP video dispatch path and the Android client can reconnect through its existing retry loop. The client also keeps USB tracking TCP sends best-effort/non-blocking so tracking backpressure does not stall the XR frame.
 
 USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NACK recovery are disabled on this path.
 
@@ -141,6 +151,7 @@ USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NAC
 - Real `XR_EXT_hand_tracking` joints are fed from the Android client into the runtime.
 - Quest and PICO controller profiles are suggested on the Android client, and the runtime gates controller poses and controller actions with explicit active flags while keeping hand tracking available through separate hand-interaction bindings.
 - USB ADB reverse TCP streaming is available alongside WiFi UDP streaming.
+- Runtime encoded-video dispatch is bounded and latest-frame-oriented, with queue/drop counters exposed in runtime status.
 - Refresh rate is selected by the server/Home, requested by the client, and negotiated back from the active headset rate.
 - Latency reporting and keyframe requests are wired into the control path.
 - The client applies frame-exact render poses for projection submission so headset compositor reprojection has the pose used to render the displayed frame.

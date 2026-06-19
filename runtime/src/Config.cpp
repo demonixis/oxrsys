@@ -381,7 +381,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             else if (key == "client_foveation_preset")
             {
                 value = ParseString(value);
-                if (value == "off" || value == "light" || value == "medium" || value == "high")
+                if (value == "auto" || value == "off" || value == "light" ||
+                    value == "medium" || value == "high")
                 {
                     values.clientFoveationPreset = value;
                 }

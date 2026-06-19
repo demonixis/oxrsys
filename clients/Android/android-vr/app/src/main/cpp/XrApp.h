@@ -225,7 +225,7 @@ private:
     float videoContentVMax_ = 1.0f;
     uint32_t clientRefreshRateHz_ = 90;
     protocol::ClientFoveationPreset clientFoveationPreset_ =
-        protocol::ClientFoveationPreset::Medium;
+        protocol::ClientFoveationPreset::Off;
     bool serverFoveatedEncodingEnabled_ = false;
     bool clientUpscalingEnabled_ = false;
     float foveationCenterSizeX_ = 1.0f;

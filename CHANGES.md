@@ -16,7 +16,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added macOS package and distribution helpers: `scripts/macos_build_package.sh` and `scripts/macos_sign_notarize.sh`.
 - Added the `net.demonixis.oxrsys-unity` Unity Package Manager package with editor runtime selection and a macOS Player OpenXR loader postprocessor.
 - Added runtime tests for portable platform behavior, streaming frame queue replacement, Vulkan dispatch, expanded input handling, protocol layout, runtime status, and loader-backed API behavior.
-- Added server-selected headset refresh controls, foveated encoding presets, headset foveation presets, Quest shader upscaling controls, and reserved headset-audio configuration to SwiftUI Home and Qt Home.
+- Added server-selected headset refresh controls, foveated encoding presets, headset client foveation override presets, Quest shader upscaling controls, and reserved headset-audio configuration to SwiftUI Home and Qt Home.
 - Added protocol v1.1 trailing fields for server feature flags, client capability flags, foveated encoding parameters, client foveation, client upscaling, and reserved headset speaker audio.
 - Added ALVR-style AADT foveated encoding math, a Metal encoder preprocessing shader, and Quest shader-side foveated-encoding decompression.
 - Added a Quest edge-aware shader upscaling path without requiring the proprietary Snapdragon SDK.
@@ -30,10 +30,16 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Expanded runtime configuration reload behavior for dynamic streaming values while keeping initialization-time resources restart-bound.
 - Raised the shared streaming bitrate range to `1` through `200` Mbps and allowed clients to send `ClientConnect.maxBitrateMbps = 0` to defer to the server-configured bitrate.
 - Updated Apple and Qt simulator clients to avoid imposing their own bitrate cap.
+- Updated Apple and Qt simulator clients to own simulator vertical FOV and send it through tracking eye-FOV metadata instead of exposing it through Home runtime config.
+- Updated headset client foveation to default to `auto`, moved headset-side options into dedicated Home sections, and made Quest/PICO `XR_FB_foveation` apply only when Home sends an explicit override.
 - Updated the streaming protocol to carry render-pose metadata per frame and to store the final FEC group packet payload size in the existing video header padding.
 - Updated Quest/PICO controller profile handling to stay profile-aware instead of falling back globally to `KHR simple_controller`.
 - Reworked Android VR client transport handling to prefer USB ADB reverse TCP when available, fall back to WiFi UDP discovery, request the build-configured display refresh rate before discovery, and advertise the headset OpenXR system name.
 - Updated the Android VR client to request the server-announced refresh rate after discovery, report the active headset rate, advertise streaming capabilities, and apply server-selected client foveation/upscaling options.
+- Updated runtime video dispatch so encoded frames pass through a bounded sender queue before WiFi/USB transport writes, keeping socket backpressure out of encoder callbacks.
+- Updated the Quest USB ADB client to defer bitrate limits to the server/Home configuration instead of imposing an extra 100 Mbps cap.
+- Updated the Quest decoder path to drain MediaCodec output on a decoder thread instead of the XR frame loop.
+- Updated the Quest MediaCodec input sizing to keep bounded headroom for high-bitrate foveated-encoding IDR frames.
 - Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
 - Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
@@ -46,8 +52,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed Quest hand tracking ingestion by feeding real `XR_EXT_hand_tracking` joints from the Android client into the runtime.
 - Fixed USB ADB reverse TCP reconnect behavior so closed control/video sockets or video stalls return the Android client to discovery/retry without relaunching the client.
 - Hardened Quest USB TCP sends with bounded socket behavior and stale video dispatch cleanup so failed sends do not block encoder callbacks or `Session::EndFrame()`.
+- Hardened Quest receive hot paths by reusing TCP/UDP reassembly buffers, avoiding per-packet receive timeout updates, and making USB tracking sends best-effort/non-blocking.
+- Hardened Quest headset foveation shutdown by detaching the foveation profile from swapchains before destroying it.
 - Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
 - Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
+- Filtered known macOS `linkd.autoShortcut` App Intents diagnostics from Home captured app logs.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 
 ### Documentation

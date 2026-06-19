@@ -385,9 +385,9 @@ void InputManager::GetEyeViews(XrView* views, uint32_t viewCount) const
         views[i].pose.position.y = eyePos.y;
         views[i].pose.position.z = eyePos.z;
 
-        // Compute aspect-ratio-correct FOV. fov_degrees is the vertical FOV;
-        // horizontal FOV is derived from the texture aspect ratio so angular
-        // pixels are square, matching what the Quest compositor expects.
+        // Legacy fallback for clients that do not send TrackingPacket.eyeFov.
+        // fov_degrees is the vertical FOV; horizontal FOV is derived from the
+        // texture aspect ratio so angular pixels are square.
         if (hasStreamingFov)
         {
             if (i == 0)

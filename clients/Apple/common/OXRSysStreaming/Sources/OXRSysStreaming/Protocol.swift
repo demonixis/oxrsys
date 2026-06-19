@@ -93,6 +93,7 @@ public enum MessageType: UInt8, Sendable {
 
 public struct ServerFeatureFlags {
     public static let foveatedEncoding: UInt32 = 0x00000001
+    // clientFoveationPreset is an explicit headset-client override.
     public static let clientFoveation: UInt32 = 0x00000002
     public static let clientUpscaling: UInt32 = 0x00000004
     public static let headsetAudio: UInt32 = 0x00000008

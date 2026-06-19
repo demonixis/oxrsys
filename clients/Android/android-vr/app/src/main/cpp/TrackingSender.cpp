@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -21,28 +22,41 @@ namespace oxr
 namespace
 {
 
-bool SendAll(int socket, const void* data, size_t size)
+enum class SendResult
+{
+    Complete,
+    WouldBlockBeforeWrite,
+    Failed,
+};
+
+SendResult SendAll(int socket, const void* data, size_t size, bool& wroteAny)
 {
     const auto* bytes = static_cast<const uint8_t*>(data);
     size_t sentTotal = 0;
     while (sentTotal < size)
     {
-        ssize_t sent = send(socket, bytes + sentTotal, size - sentTotal, MSG_NOSIGNAL);
+        ssize_t sent = send(socket, bytes + sentTotal, size - sentTotal,
+                            MSG_NOSIGNAL | MSG_DONTWAIT);
         if (sent < 0)
         {
             if (errno == EINTR)
             {
                 continue;
             }
-            return false;
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                return wroteAny ? SendResult::Failed : SendResult::WouldBlockBeforeWrite;
+            }
+            return SendResult::Failed;
         }
         if (sent == 0)
         {
-            return false;
+            return SendResult::Failed;
         }
+        wroteAny = true;
         sentTotal += static_cast<size_t>(sent);
     }
-    return true;
+    return SendResult::Complete;
 }
 
 } // namespace
@@ -117,6 +131,11 @@ bool TrackingSender::ConnectTcp(uint16_t trackingPort)
     // Disable Nagle's for low-latency tracking
     int nodelay = 1;
     setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+    int flags = fcntl(socket_, F_GETFL, 0);
+    if (flags >= 0)
+    {
+        fcntl(socket_, F_SETFL, flags | O_NONBLOCK);
+    }
 
     usbMode_ = true;
     LOGI("USB tracking sender connected via TCP to localhost:%d", trackingPort);
@@ -135,8 +154,31 @@ bool TrackingSender::Send(const protocol::TrackingPacket& packet)
         protocol::TcpRecordHeader header = {};
         header.type = protocol::TcpRecordType::Tracking;
         header.payloadSize = sizeof(packet);
-        return SendAll(socket_, &header, sizeof(header)) &&
-               SendAll(socket_, &packet, sizeof(packet));
+        bool wroteAny = false;
+        const SendResult headerResult = SendAll(socket_, &header, sizeof(header), wroteAny);
+        if (headerResult == SendResult::WouldBlockBeforeWrite)
+        {
+            return false;
+        }
+        if (headerResult == SendResult::Complete)
+        {
+            const SendResult packetResult = SendAll(socket_, &packet, sizeof(packet), wroteAny);
+            if (packetResult == SendResult::Complete)
+            {
+                return true;
+            }
+        }
+
+        if (wroteAny)
+        {
+            LOGE("USB tracking send failed after partial TCP record; closing socket");
+        }
+        else
+        {
+            LOGE("USB tracking send failed; closing TCP tracking socket");
+        }
+        Disconnect();
+        return false;
     }
     else
     {

@@ -86,6 +86,10 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.replacedFramesDelta = 3;
     stats.keyframeRequestsDelta = 1;
     stats.pendingDepthMax = 1;
+    stats.videoSendQueueDepthMax = 2;
+    stats.videoSendDroppedFramesDelta = 4;
+    stats.videoTcpSendFailuresDelta = 1;
+    stats.videoUdpRetransmittedPacketsDelta = 7;
     RuntimeStatus::SetStreamingStats(stats);
 
     const auto statusPath = RuntimeStatusPathForHome(home);
@@ -106,6 +110,10 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"total_p95\": 9.5"));
     CHECK(Contains(streamingStatus, "\"encoded_frames_total\": 120"));
     CHECK(Contains(streamingStatus, "\"keyframe_requests_delta\": 1"));
+    CHECK(Contains(streamingStatus, "\"video_send_queue_depth_max\": 2"));
+    CHECK(Contains(streamingStatus, "\"video_send_dropped_frames_delta\": 4"));
+    CHECK(Contains(streamingStatus, "\"video_tcp_send_failures_delta\": 1"));
+    CHECK(Contains(streamingStatus, "\"video_udp_retransmitted_packets_delta\": 7"));
 
     RuntimeStatus::SetIdle();
     const std::string idleStatus = ReadFile(statusPath);

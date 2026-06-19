@@ -18,6 +18,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QSlider>
 #include <QTimer>
 #include <QUdpSocket>
 #include <QVBoxLayout>
@@ -329,6 +330,11 @@ SimulatorWidget::SimulatorWidget(QWidget* parent)
     connect(searchButton_, &QPushButton::clicked, this, &SimulatorWidget::startDiscovery);
     connect(connectButton_, &QPushButton::clicked, this, &SimulatorWidget::connectToDiscoveredRuntime);
     connect(disconnectButton_, &QPushButton::clicked, this, &SimulatorWidget::disconnectFromRuntime);
+    connect(simulatorFovSlider_, &QSlider::valueChanged, this, [this](int value) {
+        simulatorFovDegrees_ = value;
+        simulatorFovValueLabel_->setText(QString("%1 deg").arg(value));
+        updateTelemetrySummary();
+    });
     connect(discoverySocket_, &QUdpSocket::readyRead, this, &SimulatorWidget::readPendingDiscoveryDatagrams);
     connect(videoSocket_, &QUdpSocket::readyRead, this, &SimulatorWidget::readPendingVideoDatagrams);
     connect(trackingTimer_, &QTimer::timeout, this, &SimulatorWidget::sendTrackingSample);
@@ -584,6 +590,23 @@ void SimulatorWidget::buildUi()
     telemetryLabel_->setWordWrap(true);
     telemetryLayout->addWidget(telemetryLabel_);
     detailsLayout->addWidget(telemetryPanel, 1);
+
+    auto* simulatorPanel = makePanel(this);
+    auto* simulatorLayout = new QVBoxLayout(simulatorPanel);
+    simulatorLayout->addWidget(makeSecondaryLabel("Simulator", simulatorPanel));
+    auto* fovRow = new QHBoxLayout();
+    auto* fovLabel = new QLabel("Vertical FOV", simulatorPanel);
+    simulatorFovSlider_ = new QSlider(Qt::Horizontal, simulatorPanel);
+    simulatorFovSlider_->setRange(60, 150);
+    simulatorFovSlider_->setValue(simulatorFovDegrees_);
+    simulatorFovValueLabel_ = new QLabel(QString("%1 deg").arg(simulatorFovDegrees_), simulatorPanel);
+    simulatorFovValueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    simulatorFovValueLabel_->setMinimumWidth(56);
+    fovRow->addWidget(fovLabel);
+    fovRow->addWidget(simulatorFovSlider_, 1);
+    fovRow->addWidget(simulatorFovValueLabel_);
+    simulatorLayout->addLayout(fovRow);
+    detailsLayout->addWidget(simulatorPanel, 1);
     rootLayout->addLayout(detailsLayout, 1);
 
     auto* buttonLayout = new QHBoxLayout();
@@ -795,7 +818,26 @@ void SimulatorWidget::fillTrackingPacket(oxr::protocol::TrackingPacket& packet) 
         trackingPose_,
         pressedKeys_,
         monotonicNowNs(),
+        static_cast<float>(simulatorFovDegrees_),
+        simulatorPerEyeAspect(),
         packet);
+}
+
+float SimulatorWidget::simulatorPerEyeAspect() const
+{
+    if (discoveredServer_.renderWidth > 0 && discoveredServer_.renderHeight > 0)
+    {
+        return std::max(0.1f,
+                        static_cast<float>(discoveredServer_.renderWidth) * 0.5f /
+                            static_cast<float>(discoveredServer_.renderHeight));
+    }
+    if (discoveredServer_.encodedWidth > 0 && discoveredServer_.encodedHeight > 0)
+    {
+        return std::max(0.1f,
+                        static_cast<float>(discoveredServer_.encodedWidth) * 0.5f /
+                            static_cast<float>(discoveredServer_.encodedHeight));
+    }
+    return 1.0f;
 }
 
 bool SimulatorWidget::startVideoReceiver()
@@ -1171,7 +1213,7 @@ void SimulatorWidget::updateTelemetrySummary()
         return;
     }
 
-    telemetryLabel_->setText(QString("%1 tracking packets sent\n%2 video packets, %3 frames, %4 drops, %5 fec, %6 decode errors\nHead pose: %7, %8, %9\nYaw/pitch: %10 / %11 deg\nIPD: 0.064 m")
+    telemetryLabel_->setText(QString("%1 tracking packets sent\n%2 video packets, %3 frames, %4 drops, %5 fec, %6 decode errors\nHead pose: %7, %8, %9\nYaw/pitch: %10 / %11 deg\nIPD: 0.064 m  FOV: %12 deg")
                                  .arg(trackingPacketsSent_)
                                  .arg(videoPacketsReceived_)
                                  .arg(videoFramesDecoded_)
@@ -1182,7 +1224,8 @@ void SimulatorWidget::updateTelemetrySummary()
                                  .arg(trackingPose_.headPosition[1], 0, 'f', 2)
                                  .arg(trackingPose_.headPosition[2], 0, 'f', 2)
                                  .arg(radiansToDegrees(trackingPose_.yaw), 0, 'f', 1)
-                                 .arg(radiansToDegrees(trackingPose_.pitch), 0, 'f', 1));
+                                 .arg(radiansToDegrees(trackingPose_.pitch), 0, 'f', 1)
+                                 .arg(simulatorFovDegrees_));
 }
 
 QString SimulatorWidget::discoveredServerName() const

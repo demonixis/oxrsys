@@ -18,7 +18,9 @@ keeps hand-interaction bindings available alongside active controllers with cont
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, requests the server-selected display refresh rate, enables preset-driven
 dynamic `XR_FB_foveation` when the headset supports it, and supports the Quest shader path for
-foveated-encoding decompression plus edge-aware upscaling. The visionOS
+foveated-encoding decompression plus edge-aware upscaling. Runtime video sends now run behind a
+bounded encoded-frame sender queue so socket backpressure does not run inside VideoToolbox callbacks,
+and the Quest client drains MediaCodec output off the XR frame loop. The visionOS
 viewer now starts from a minimal floating search window, enters immersive VR automatically when the
 stream connects, and sends head pose, hand joints, and first-pass tracked accessory controller data
 while the immersive space is open. The macOS SwiftUI Home app now targets direct notarized
@@ -29,14 +31,16 @@ The Home app shows a main-window runtime activity summary from
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
 per-app custom ADB path selection for USB setup. Home streaming controls include the shared
 runtime 1-200 Mbps bitrate bounds, server-selected refresh rate, encoder preset, foveated encoding
-preset, headset foveation preset, Quest shader upscaling, and reserved headset-audio configuration;
+preset, and a separate Headset Client section for client foveation override, Quest shader upscaling,
+and reserved headset-audio configuration;
 clients can send `ClientConnect.maxBitrateMbps = 0` to use the server-configured bitrate without
 adding a client-side cap.
 The Home app can enable a Developer tab from its Settings tab, open the macOS simulator in a
 same-process window backed by the shared `OXRSysSimulator` Swift package, and show live runtime
 streaming statistics from the existing telemetry path. The Qt Home Developer tab opens the shared
 Qt simulator widget in a dedicated window with UDP video preview, mouse-driven synthetic head
-tracking, explicit FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe recovery requests.
+tracking, simulator-owned vertical FOV sent through tracking eye-FOV metadata, explicit
+FFmpeg-disabled fallback, frame-loss/FEC status, and keyframe recovery requests.
 The macOS package helper builds the runtime dylib and Home app into one local folder with a complete
 `runtime/` directory; the distribution helper signs that package, creates a combined archive, and can
 submit that archive for notarization with Apple Developer account credentials.
@@ -79,7 +83,8 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
 - Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
 - Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices and are not required for ADB reverse streaming.
-- Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encode callback or `Session::EndFrame()`.
+- Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encoded-frame sender, VideoToolbox callback, or `Session::EndFrame()`.
+- Encoded video dispatch is latest-frame-oriented and bounded; stale queued frames may be dropped instead of building latency when the transport cannot keep up.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
 - Headset refresh rate is selected by the server config/Home, requested by the Quest client through `XR_FB_display_refresh_rate`, and negotiated back from the active client rate.
 - The Quest Android client still uses the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value as a fallback before a server is discovered.
@@ -87,6 +92,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Headset clients must match `VIDEO_FLAG_RENDER_POSE` metadata to the decoded frame before projection submission.
 - Server-side foveated encoding uses the ALVR-style AADT transform on the async Metal encode path only; clients without `CLIENT_CAPABILITY_FOVEATED_ENCODING` must not receive distorted video.
 - Quest shader upscaling and foveated-encoding decompression must preserve render-pose matching and keep the plain bilinear path working when the server flags are off.
+- Quest decoder input buffers must keep bounded headroom above `encodedWidth * encodedHeight`; foveated encoding can shrink encoded dimensions while high-bitrate IDR frames remain large.
 - Headset speaker audio has protocol/config scaffolding only until a real capture/playback path is attached; do not advertise `SERVER_FEATURE_HEADSET_AUDIO` without that pipeline.
 - UDP FEC uses the existing 24-byte `VideoPacketHeader` padding to carry the final data packet size for each FEC group; clients must use it only when recovering the last packet in that group.
 - Quest hand tracking depends on the Android manifest permission `com.oculus.permission.HAND_TRACKING` and the optional `oculus.software.handtracking` feature.

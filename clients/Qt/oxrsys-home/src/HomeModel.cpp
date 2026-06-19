@@ -10,6 +10,7 @@
 #include <QProcessEnvironment>
 #include <QPointer>
 #include <QThread>
+#include <QStringList>
 
 #include <algorithm>
 #include <utility>
@@ -19,6 +20,31 @@ namespace
 
 constexpr int MaxLogCharacters = 30000;
 constexpr int MaxRuntimeStatsSamples = 60;
+
+bool shouldDropApplicationLogLine(const QString& line)
+{
+    static const QStringList ignoredSystemNoiseMarkers = {
+        QStringLiteral("com.apple.linkd.autoShortcut"),
+        QStringLiteral("Error registering app with intents framework"),
+    };
+    static const QSet<QString> ignoredSystemNoiseLines = {
+        QStringLiteral("Will NOT re-try to establish the connection"),
+    };
+
+    if (ignoredSystemNoiseLines.contains(line.trimmed()))
+    {
+        return true;
+    }
+
+    for (const QString& marker : ignoredSystemNoiseMarkers)
+    {
+        if (line.contains(marker))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 QDateTime modificationDate(const QString& path)
 {
@@ -307,6 +333,27 @@ UsbConfigureResult collectUsbConfigure(int requestId,
 }
 
 } // namespace
+
+QString filteredApplicationLogText(const QString& text)
+{
+    const QStringList lines = text.split('\n', Qt::KeepEmptyParts);
+    QStringList filtered;
+    filtered.reserve(lines.size());
+    for (int index = 0; index < lines.size(); ++index)
+    {
+        const QString& line = lines[index];
+        if (index == lines.size() - 1 && line.isEmpty())
+        {
+            filtered.append(line);
+            continue;
+        }
+        if (!shouldDropApplicationLogLine(line))
+        {
+            filtered.append(line);
+        }
+    }
+    return filtered.join('\n');
+}
 
 HomeModel::HomeModel(QObject* parent,
                      const QString& settingsOrganization,
@@ -991,7 +1038,13 @@ void HomeModel::loadConfigFromDisk()
 
 void HomeModel::appendLog(const QString& appId, const QString& text)
 {
-    QString combined = appLogs_.value(appId) + text;
+    const QString filteredText = filteredApplicationLogText(text);
+    if (filteredText.isEmpty())
+    {
+        return;
+    }
+
+    QString combined = appLogs_.value(appId) + filteredText;
     if (combined.size() > MaxLogCharacters)
     {
         combined = combined.right(MaxLogCharacters);

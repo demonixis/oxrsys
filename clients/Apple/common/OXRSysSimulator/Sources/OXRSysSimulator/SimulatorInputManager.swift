@@ -39,6 +39,8 @@ final class SimulatorInputManager {
     private var mouseLock = os_unfair_lock()
     private var pendingMouseDX: Float = 0
     private var pendingMouseDY: Float = 0
+    private var projectionVerticalFovDegrees: Float = 100
+    private var projectionEyeAspect: Float = 1
 
     // Input mode
     enum InputMode { case controller, handTracking }
@@ -56,6 +58,13 @@ final class SimulatorInputManager {
     private let rollSensitivity: Float = 1.5
     private let moveSpeed: Float = 2.0
     private let joystickLookSensitivity: Float = 2.5  // rad/s at full deflection
+
+    func setProjection(verticalFovDegrees: Float, eyeAspect: Float) {
+        os_unfair_lock_lock(&mouseLock)
+        projectionVerticalFovDegrees = min(150, max(60, verticalFovDegrees))
+        projectionEyeAspect = max(0.1, eyeAspect)
+        os_unfair_lock_unlock(&mouseLock)
+    }
 
     // MARK: - Mobile joystick (iOS/iPadOS)
 
@@ -225,7 +234,21 @@ final class SimulatorInputManager {
             packet.buttonState |= ButtonFlags.menu
         }
 
+        packet.ipd = 0.064
+        packet.eyeFov = currentEyeFov()
+
         return packet
+    }
+
+    private func currentEyeFov() -> (Float, Float, Float, Float) {
+        os_unfair_lock_lock(&mouseLock)
+        let verticalFovDegrees = projectionVerticalFovDegrees
+        let eyeAspect = projectionEyeAspect
+        os_unfair_lock_unlock(&mouseLock)
+
+        let halfAngleV = verticalFovDegrees * 0.5 * Float.pi / 180
+        let halfAngleH = atanf(tanf(halfAngleV) * eyeAspect)
+        return (-halfAngleH, halfAngleH, halfAngleV, -halfAngleV)
     }
 
     private func buildHeadQuaternion() -> simd_quatf {

@@ -5,9 +5,11 @@
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <android/native_window.h>
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <media/NdkMediaFormat.h>
+#include <oxrsys/protocol/Protocol.h>
 
 #define LOG_TAG "OXRSys-Decoder"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -44,7 +46,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
     media_status_t imgStatus = AImageReader_new(
         width, height,
         AIMAGE_FORMAT_YUV_420_888,
-        2,  // maxImages — minimal queue for lowest latency
+        3,  // maxImages — allows a decoder output thread plus one held render image
         &imageReader_);
 
     if (imgStatus != AMEDIA_OK || imageReader_ == nullptr)
@@ -81,7 +83,13 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/hevc");
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
-    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, width * height);
+    const uint64_t pixelCount = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    const uint64_t maxInputSize = std::clamp<uint64_t>(
+        pixelCount * 4u,
+        2u * 1024u * 1024u,
+        protocol::TCP_MAX_RECORD_PAYLOAD);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE,
+                          static_cast<int32_t>(maxInputSize));
 
     // Low latency mode (Android 11+)
     AMediaFormat_setInt32(format, "low-latency", 1);
@@ -114,12 +122,22 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
         return false;
     }
 
-    LOGI("H.265 decoder initialized with AImageReader surface: %ux%u", width, height);
+    outputThreadRunning_.store(true);
+    outputThread_ = std::thread(&VideoDecoder::OutputThreadMain, this);
+
+    LOGI("H.265 decoder initialized with AImageReader surface: %ux%u maxInput=%llu",
+         width, height, (unsigned long long)maxInputSize);
     return true;
 }
 
 void VideoDecoder::Shutdown()
 {
+    outputThreadRunning_.store(false);
+    if (outputThread_.joinable())
+    {
+        outputThread_.join();
+    }
+
     if (currentImage_ != nullptr)
     {
         AImage_delete(currentImage_);
@@ -163,6 +181,7 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
     if (buffer == nullptr || bufferSize < size)
     {
         LOGE("Input buffer too small: %zu < %zu", bufferSize, size);
+        AMediaCodec_queueInputBuffer(codec_, bufferIndex, 0, 0, presentationTimeUs, 0);
         return false;
     }
 
@@ -173,7 +192,7 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
     return true;
 }
 
-uint32_t VideoDecoder::FlushOutputToSurface()
+uint32_t VideoDecoder::FlushOutputToSurface(int64_t timeoutUs)
 {
     // Dequeue all available output buffers and render them to the AImageReader surface.
     // With surface output, we must release buffers with render=true for AImageReader to receive them.
@@ -181,7 +200,8 @@ uint32_t VideoDecoder::FlushOutputToSurface()
     uint32_t releasedCount = 0;
     for (;;)
     {
-        ssize_t bufferIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
+        ssize_t bufferIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, timeoutUs);
+        timeoutUs = 0;
 
         if (bufferIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED)
         {
@@ -208,9 +228,24 @@ uint32_t VideoDecoder::FlushOutputToSurface()
         // Release to surface (render = true) so AImageReader receives the frame
         AMediaCodec_releaseOutputBuffer(codec_, bufferIndex, true);
         releasedCount++;
+        outputFramesReleasedSinceAcquire_.fetch_add(1);
     }
 
     return releasedCount;
+}
+
+void VideoDecoder::OutputThreadMain()
+{
+    LOGI("Decoder output thread started");
+    while (outputThreadRunning_.load())
+    {
+        if (codec_ == nullptr)
+        {
+            break;
+        }
+        FlushOutputToSurface(1000);
+    }
+    LOGI("Decoder output thread ended");
 }
 
 bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
@@ -220,8 +255,7 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
         return false;
     }
 
-    // First, flush any decoded output buffers to the AImageReader surface
-    uint32_t outputFramesReleased = FlushOutputToSurface();
+    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
 
     // Release previous image if still held
     if (currentImage_ != nullptr)

@@ -279,6 +279,28 @@ private struct SettingsSheet: View {
                     Toggle("Show Streaming Stats", isOn: $model.showStats)
                 }
 
+                if model.showsSimulationControls {
+                    Section("Simulator") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Vertical FOV")
+                                Spacer()
+                                Text("\(model.simulatorFovDegrees) degrees")
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { Double(model.simulatorFovDegrees) },
+                                    set: { model.simulatorFovDegrees = Int($0.rounded()) }
+                                ),
+                                in: 60...150,
+                                step: 1
+                            )
+                        }
+                    }
+                }
+
                 Section("Stereo") {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {

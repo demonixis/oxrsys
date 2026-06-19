@@ -93,8 +93,6 @@ private:
     QCheckBox* headsetAudioCheckBox_ = nullptr;
     QSlider* bitrateSlider_ = nullptr;
     QLabel* bitrateValueLabel_ = nullptr;
-    QSlider* fovSlider_ = nullptr;
-    QLabel* fovValueLabel_ = nullptr;
     QSlider* resolutionSlider_ = nullptr;
     QLabel* resolutionValueLabel_ = nullptr;
     QSlider* keyframeSlider_ = nullptr;

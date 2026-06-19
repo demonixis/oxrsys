@@ -94,6 +94,7 @@ void testServerConfigRoundTrip()
     expect(merged.contains("transport = \"usb_adb\""), "Expected transport serialization");
     expect(merged.contains("bitrate_mbps = 85"), "Expected bitrate serialization");
     expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization");
+    expect(!merged.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
     expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization");
     expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization");
     expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization");
@@ -121,6 +122,8 @@ runtime_enabled = false
 
 [streaming]
 bitrate_mbps = 85
+# Rendering FOV in degrees (symmetric). Must match Quest client's kMacHalfFov.
+fov_degrees = 120
 transport = "usb_adb"
 encoder_preset = "speed"
 
@@ -155,8 +158,11 @@ quest_logcat = true
     expect(text.contains("bitrate_mbps = 50"), "Expected default bitrate serialization");
     expect(text.contains("transport = \"auto\""), "Expected default transport serialization");
     expect(text.contains("refresh_rate_hz = 72"), "Expected default refresh serialization");
+    expect(!text.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
+    expect(!text.contains("Rendering FOV"), "Expected legacy simulator FOV comment removal");
     expect(text.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization");
-    expect(text.contains("client_foveation_preset = \"medium\""), "Expected default FFR serialization");
+    expect(text.contains("client_foveation_preset = \"auto\""),
+           "Expected default client foveation serialization");
     expect(text.contains("client_upscaling = false"), "Expected default upscaling serialization");
     expect(text.contains("headset_audio = false"), "Expected default audio serialization");
 
@@ -376,6 +382,22 @@ void testHomeModelTransportRefreshIsAsyncWithSlowAdb()
 #endif
 }
 
+void testApplicationLogFilterDropsAppleShortcutNoise()
+{
+    const QString filtered = filteredApplicationLogText(QString::fromUtf8(R"(boot ok
+Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+Error registering app with intents framework: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+Will NOT re-try to establish the connection
+real runtime error
+)"));
+
+    expect(filtered.contains("boot ok"), "Expected ordinary application log line to remain");
+    expect(filtered.contains("real runtime error"), "Expected real application error to remain");
+    expect(!filtered.contains("autoShortcut"), "Expected Apple shortcut service noise to be dropped");
+    expect(!filtered.contains("intents framework"), "Expected App Intents registration noise to be dropped");
+    expect(!filtered.contains("Will NOT re-try"), "Expected retry footer noise to be dropped");
+}
+
 void testRuntimeActivityParsing()
 {
     const RuntimeActivity activity = RuntimeActivity::parse(R"({
@@ -541,6 +563,7 @@ int main(int argc, char** argv)
         testAdbCustomPathSelection();
         testCustomAdbPreferencePersistence();
         testHomeModelTransportRefreshIsAsyncWithSlowAdb();
+        testApplicationLogFilterDropsAppleShortcutNoise();
         testRuntimeActivityParsing();
         testDesktopInspection();
         testMacAppInspection();

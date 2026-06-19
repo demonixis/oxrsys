@@ -19,6 +19,7 @@ struct HomeLauncherTests {
         try testQuestUsbAdbCustomResolution()
         try testQuestUsbAdbInvalidCustomStatus()
         try testQuestUsbAdbClearRestoresAutoDetection()
+        try testApplicationLogFilterDropsAppleShortcutNoise()
         try testServerConfigTransportRoundTrip()
         try testServerConfigDefaultSerialization()
         try testRuntimeActivityParsing()
@@ -228,6 +229,22 @@ struct HomeLauncherTests {
         try expect(resolved == autoAdb.path, "Expected empty custom adb path to restore automatic detection")
     }
 
+    private static func testApplicationLogFilterDropsAppleShortcutNoise() throws {
+        let filtered = HomeApplicationLogFilter.filtered("""
+        boot ok
+        Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+        Error registering app with intents framework: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+        Will NOT re-try to establish the connection
+        real runtime error
+        """)
+
+        try expect(filtered.contains("boot ok"), "Expected ordinary application log line to remain")
+        try expect(filtered.contains("real runtime error"), "Expected real application error to remain")
+        try expect(!filtered.contains("autoShortcut"), "Expected Apple shortcut service noise to be dropped")
+        try expect(!filtered.contains("intents framework"), "Expected App Intents registration noise to be dropped")
+        try expect(!filtered.contains("Will NOT re-try"), "Expected retry footer noise to be dropped")
+    }
+
     private static func testServerConfigTransportRoundTrip() throws {
         let parsed = OXRSysServerConfig.parse(from: """
         [streaming]
@@ -261,6 +278,8 @@ struct HomeLauncherTests {
 
         [streaming]
         bitrate_mbps = 85
+        # Rendering FOV in degrees (symmetric). Must match Quest client's kMacHalfFov.
+        fov_degrees = 120
         transport = "usb_adb"
 
         [logging]
@@ -272,8 +291,10 @@ struct HomeLauncherTests {
         try expect(merged.contains("bitrate_mbps = 50"), "Expected default bitrate serialization")
         try expect(merged.contains("transport = \"auto\""), "Expected default transport serialization")
         try expect(merged.contains("refresh_rate_hz = 72"), "Expected default refresh serialization")
+        try expect(!merged.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config")
+        try expect(!merged.contains("Rendering FOV"), "Expected legacy simulator FOV comment removal")
         try expect(merged.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization")
-        try expect(merged.contains("client_foveation_preset = \"medium\""), "Expected default FFR serialization")
+        try expect(merged.contains("client_foveation_preset = \"auto\""), "Expected default client foveation serialization")
         try expect(merged.contains("client_upscaling = false"), "Expected default upscaling serialization")
         try expect(merged.contains("headset_audio = false"), "Expected default audio serialization")
         try expect(merged.contains("file_logging = true"), "Expected default file logging serialization")

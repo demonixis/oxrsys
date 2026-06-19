@@ -54,6 +54,31 @@ enum FoveationPresetSetting: String, CaseIterable, Identifiable {
     }
 }
 
+enum ClientFoveationPresetSetting: String, CaseIterable, Identifiable {
+    case auto
+    case off
+    case light
+    case medium
+    case high
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto:
+            return "Auto"
+        case .off:
+            return "Off"
+        case .light:
+            return "Light"
+        case .medium:
+            return "Medium"
+        case .high:
+            return "High"
+        }
+    }
+}
+
 struct HomePaths {
     static let appSupportDirectory = NSString(string: "~/Library/Application Support/OXRSys").expandingTildeInPath
     static let configFilePath = (appSupportDirectory as NSString).appendingPathComponent("oxrsys-runtime.toml")

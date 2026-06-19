@@ -47,6 +47,10 @@ public:
         uint32_t replacedFramesDelta = 0;
         uint32_t keyframeRequestsDelta = 0;
         uint32_t pendingDepthMax = 0;
+        uint32_t videoSendQueueDepthMax = 0;
+        uint32_t videoSendDroppedFramesDelta = 0;
+        uint32_t videoTcpSendFailuresDelta = 0;
+        uint32_t videoUdpRetransmittedPacketsDelta = 0;
     };
 
     static void SetApplicationName(const std::string& applicationName);

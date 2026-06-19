@@ -180,7 +180,14 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "      \"encoder_dropped_frames_total\": " << stats.encoderDroppedFramesTotal << ",\n";
     file << "      \"replaced_frames_delta\": " << stats.replacedFramesDelta << ",\n";
     file << "      \"keyframe_requests_delta\": " << stats.keyframeRequestsDelta << ",\n";
-    file << "      \"pending_depth_max\": " << stats.pendingDepthMax << "\n";
+    file << "      \"pending_depth_max\": " << stats.pendingDepthMax << ",\n";
+    file << "      \"video_send_queue_depth_max\": " << stats.videoSendQueueDepthMax << ",\n";
+    file << "      \"video_send_dropped_frames_delta\": "
+         << stats.videoSendDroppedFramesDelta << ",\n";
+    file << "      \"video_tcp_send_failures_delta\": "
+         << stats.videoTcpSendFailuresDelta << ",\n";
+    file << "      \"video_udp_retransmitted_packets_delta\": "
+         << stats.videoUdpRetransmittedPacketsDelta << "\n";
     file << "    }\n";
     file << "  }\n";
 }

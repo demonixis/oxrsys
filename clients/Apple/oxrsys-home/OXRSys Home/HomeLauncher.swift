@@ -285,3 +285,37 @@ enum TerminalLaunchScriptBuilder {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }
+
+enum HomeApplicationLogFilter {
+    private static let ignoredSystemNoiseMarkers = [
+        "com.apple.linkd.autoShortcut",
+        "Error registering app with intents framework",
+    ]
+
+    private static let ignoredSystemNoiseLines: Set<String> = [
+        "Will NOT re-try to establish the connection",
+    ]
+
+    static func filtered(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        return lines
+            .enumerated()
+            .compactMap { index, line -> String? in
+                if index == lines.count - 1, line.isEmpty {
+                    return line
+                }
+                return shouldDrop(line) ? nil : line
+            }
+            .joined(separator: "\n")
+    }
+
+    private static func shouldDrop(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ignoredSystemNoiseLines.contains(trimmed) {
+            return true
+        }
+        return ignoredSystemNoiseMarkers.contains { marker in
+            line.contains(marker)
+        }
+    }
+}

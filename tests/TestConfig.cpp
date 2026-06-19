@@ -90,11 +90,13 @@ TEST_CASE("Config parser accepts streaming transport", "[config]")
     std::istringstream input(R"TOML(
 [streaming]
 transport = "usb_adb"
+client_foveation_preset = "auto"
 )TOML");
 
     const ConfigValues values = ParseConfigToml(input);
 
     CHECK(values.streamingTransport == "usb_adb");
+    CHECK(values.clientFoveationPreset == "auto");
 }
 
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")

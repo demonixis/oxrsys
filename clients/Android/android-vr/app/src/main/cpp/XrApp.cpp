@@ -1295,7 +1295,8 @@ bool XrApp::CreateSwapchains()
 
     LOGI("GL resources created for video rendering (external OES texture)");
 
-    if (!InitializeFoveation())
+    if (clientFoveationPreset_ != protocol::ClientFoveationPreset::Off &&
+        !InitializeFoveation())
     {
         LOGW("Foveation unavailable on headset, continuing without it");
     }
@@ -1311,7 +1312,7 @@ bool XrApp::InitializeFoveation()
     if (clientFoveationPreset_ == protocol::ClientFoveationPreset::Off)
     {
         ShutdownFoveation();
-        LOGI("Dynamic FFR disabled by server preset");
+        LOGI("Dynamic FFR disabled or unmanaged by server preset");
         return false;
     }
 
@@ -1383,6 +1384,21 @@ void XrApp::ShutdownFoveation()
 {
     if (foveationProfile_ != XR_NULL_HANDLE && xrDestroyFoveationProfileFB_ != nullptr)
     {
+        if (xrUpdateSwapchainFB_ != nullptr)
+        {
+            for (int eye = 0; eye < 2; ++eye)
+            {
+                if (swapchains_[eye] == XR_NULL_HANDLE)
+                {
+                    continue;
+                }
+                XrSwapchainStateFoveationFB state = {XR_TYPE_SWAPCHAIN_STATE_FOVEATION_FB};
+                state.profile = XR_NULL_HANDLE;
+                xrUpdateSwapchainFB_(
+                    swapchains_[eye],
+                    reinterpret_cast<const XrSwapchainStateBaseHeaderFB*>(&state));
+            }
+        }
         xrDestroyFoveationProfileFB_(foveationProfile_);
         foveationProfile_ = XR_NULL_HANDLE;
     }
@@ -1742,7 +1758,17 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     foveationCenterShiftY_ = server.foveationCenterShiftY;
     foveationEdgeRatioX_ = std::max(server.foveationEdgeRatioX, 1.0f);
     foveationEdgeRatioY_ = std::max(server.foveationEdgeRatioY, 1.0f);
-    ApplyClientFoveationPreset(server.clientFoveationPreset);
+    const bool clientFoveationOverride =
+        (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_FOVEATION) != 0;
+    if (clientFoveationOverride)
+    {
+        ApplyClientFoveationPreset(server.clientFoveationPreset);
+    }
+    else
+    {
+        clientFoveationPreset_ = protocol::ClientFoveationPreset::Off;
+        ShutdownFoveation();
+    }
 
     if (server.refreshRateHz > 0)
     {
@@ -1807,9 +1833,10 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
         foveationEyeHeightRatio_ = 1.0f;
     }
 
-    LOGI("Server stream options: features=0x%x ffe=%d ffr=%u upscaling=%d activeRatio=%.4fx%.4f",
+    LOGI("Server stream options: features=0x%x ffe=%d ffr=%s(%u) upscaling=%d activeRatio=%.4fx%.4f",
          server.serverFeatures,
          serverFoveatedEncodingEnabled_ ? 1 : 0,
+         clientFoveationOverride ? "override" : "auto",
          static_cast<uint32_t>(server.clientFoveationPreset),
          clientUpscalingEnabled_ ? 1 : 0,
          foveationEyeWidthRatio_,
@@ -1925,7 +1952,9 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.versionMajor = 1;
     connect.versionMinor = 1;
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
-    connect.maxBitrateMbps = 100;
+    connect.maxBitrateMbps = usbAdb
+        ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
+        : 100;
     connect.refreshRateHz = clientRefreshRateHz_;
     connect.clientCapabilities =
         protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
@@ -1948,9 +1977,9 @@ void XrApp::SendClientConnect(const char* serverIp)
         send(controlSocket_, &connect, sizeof(connect), MSG_DONTWAIT);
     }
 
-    LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz)",
+    LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz maxBitrate=%u)",
          usbAdb ? "USB ADB" : "WiFi", serverIp, protocol::CONTROL_PORT,
-         connect.deviceName, clientRefreshRateHz_);
+         connect.deviceName, clientRefreshRateHz_, connect.maxBitrateMbps);
 }
 
 void XrApp::SendLatencyReport()

@@ -35,6 +35,8 @@ void advanceSimulatorTracking(SimulatorTrackingPose& pose,
 void fillSimulatorTrackingPacket(const SimulatorTrackingPose& pose,
                                  const QSet<int>& pressedKeys,
                                  int64_t timestampNs,
+                                 float verticalFovDegrees,
+                                 float eyeAspect,
                                  oxr::protocol::TrackingPacket& packet);
 
 int simulatorKeyIdentifier(const QKeyEvent& event);

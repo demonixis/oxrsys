@@ -764,13 +764,9 @@ QWidget* MainWindow::buildStreamingTab()
     runtimeEnabledCheckBox_ = new QCheckBox("Runtime enabled", configBox);
     fileLoggingCheckBox_ = new QCheckBox("Write server log file", configBox);
     questLogcatCheckBox_ = new QCheckBox("Capture Quest logcat", configBox);
-    clientUpscalingCheckBox_ = new QCheckBox("Quest shader upscaling", configBox);
-    headsetAudioCheckBox_ = new QCheckBox("Headset audio", configBox);
     configLayout->addWidget(runtimeEnabledCheckBox_);
     configLayout->addWidget(fileLoggingCheckBox_);
     configLayout->addWidget(questLogcatCheckBox_);
-    configLayout->addWidget(clientUpscalingCheckBox_);
-    configLayout->addWidget(headsetAudioCheckBox_);
 
     const auto addSlider = [configBox, configLayout](const QString& title,
                                                      QSlider** slider,
@@ -796,7 +792,6 @@ QWidget* MainWindow::buildStreamingTab()
               &bitrateValueLabel_,
               ServerConfig::MinBitrateMbps,
               ServerConfig::MaxBitrateMbps);
-    addSlider("Vertical FOV", &fovSlider_, &fovValueLabel_, 60, 150);
     addSlider("Resolution Scale", &resolutionSlider_, &resolutionValueLabel_, 25, 100);
     addSlider("Keyframe Interval", &keyframeSlider_, &keyframeValueLabel_, 1, 10);
 
@@ -815,11 +810,6 @@ QWidget* MainWindow::buildStreamingTab()
     foveatedEncodingPresetCombo_->addItem("Light", "light");
     foveatedEncodingPresetCombo_->addItem("Medium", "medium");
     foveatedEncodingPresetCombo_->addItem("High", "high");
-    clientFoveationPresetCombo_ = new QComboBox(configBox);
-    clientFoveationPresetCombo_->addItem("Off", "off");
-    clientFoveationPresetCombo_->addItem("Light", "light");
-    clientFoveationPresetCombo_->addItem("Medium", "medium");
-    clientFoveationPresetCombo_->addItem("High", "high");
     configTransportCombo_ = new QComboBox(configBox);
     configTransportCombo_->addItem("Auto", "auto");
     configTransportCombo_->addItem("WiFi", "wifi");
@@ -827,9 +817,24 @@ QWidget* MainWindow::buildStreamingTab()
     form->addRow("Refresh rate", refreshRateCombo_);
     form->addRow("Encoder preset", encoderPresetCombo_);
     form->addRow("Foveated encoding", foveatedEncodingPresetCombo_);
-    form->addRow("Headset foveation", clientFoveationPresetCombo_);
     form->addRow("Transport", configTransportCombo_);
     configLayout->addLayout(form);
+
+    auto* headsetBox = new QGroupBox("Headset Client", content);
+    auto* headsetLayout = new QVBoxLayout(headsetBox);
+    auto* headsetForm = new QFormLayout();
+    clientFoveationPresetCombo_ = new QComboBox(headsetBox);
+    clientFoveationPresetCombo_->addItem("Auto", "auto");
+    clientFoveationPresetCombo_->addItem("Off", "off");
+    clientFoveationPresetCombo_->addItem("Light", "light");
+    clientFoveationPresetCombo_->addItem("Medium", "medium");
+    clientFoveationPresetCombo_->addItem("High", "high");
+    headsetForm->addRow("Client foveation", clientFoveationPresetCombo_);
+    headsetLayout->addLayout(headsetForm);
+    clientUpscalingCheckBox_ = new QCheckBox("Quest shader upscaling", headsetBox);
+    headsetAudioCheckBox_ = new QCheckBox("Headset audio", headsetBox);
+    headsetLayout->addWidget(clientUpscalingCheckBox_);
+    headsetLayout->addWidget(headsetAudioCheckBox_);
 
     const auto connectConfigChanged = [this]() {
         updateConfigFromControls();
@@ -840,7 +845,6 @@ QWidget* MainWindow::buildStreamingTab()
     connect(clientUpscalingCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(headsetAudioCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(bitrateSlider_, &QSlider::valueChanged, this, connectConfigChanged);
-    connect(fovSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(resolutionSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(keyframeSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(refreshRateCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
@@ -876,6 +880,7 @@ QWidget* MainWindow::buildStreamingTab()
     configButtons->addWidget(revealRuntimeLogsButton);
     configLayout->addLayout(configButtons);
     layout->addWidget(configBox);
+    layout->addWidget(headsetBox);
 
     auto* usbBox = new QGroupBox("Quest USB ADB", content);
     auto* usbLayout = new QVBoxLayout(usbBox);
@@ -1162,7 +1167,7 @@ void MainWindow::refreshStreaming()
     const QList<QWidget*> controls = {
         runtimeEnabledCheckBox_, fileLoggingCheckBox_, questLogcatCheckBox_,
         clientUpscalingCheckBox_, headsetAudioCheckBox_,
-        bitrateSlider_, fovSlider_, resolutionSlider_, keyframeSlider_,
+        bitrateSlider_, resolutionSlider_, keyframeSlider_,
         refreshRateCombo_, encoderPresetCombo_, foveatedEncodingPresetCombo_,
         clientFoveationPresetCombo_, configTransportCombo_, usbDeviceCombo_,
     };
@@ -1177,7 +1182,6 @@ void MainWindow::refreshStreaming()
     clientUpscalingCheckBox_->setChecked(config.clientUpscaling);
     headsetAudioCheckBox_->setChecked(config.headsetAudio);
     bitrateSlider_->setValue(config.bitrateMbps);
-    fovSlider_->setValue(config.fovDegrees);
     resolutionSlider_->setValue(qRound(config.resolutionScale * 100.0));
     keyframeSlider_->setValue(config.keyframeIntervalSec);
     refreshRateCombo_->setCurrentIndex(std::max(refreshRateCombo_->findData(config.refreshRateHz), 0));
@@ -1205,7 +1209,6 @@ void MainWindow::refreshStreaming()
     }
 
     bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
-    fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
     adbStatusLabel_->setText(model_->adbStatus().message);
@@ -1361,7 +1364,6 @@ void MainWindow::updateConfigFromControls()
     config.clientUpscaling = clientUpscalingCheckBox_->isChecked();
     config.headsetAudio = headsetAudioCheckBox_->isChecked();
     config.bitrateMbps = bitrateSlider_->value();
-    config.fovDegrees = fovSlider_->value();
     config.refreshRateHz = refreshRateCombo_->currentData().toInt();
     config.resolutionScale = resolutionSlider_->value() / 100.0;
     config.keyframeIntervalSec = keyframeSlider_->value();
@@ -1371,7 +1373,6 @@ void MainWindow::updateConfigFromControls()
     config.transport = configTransportCombo_->currentData().toString();
 
     bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
-    fovValueLabel_->setText(QString("%1 degrees").arg(config.fovDegrees));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
     model_->scheduleStructuredConfigSave();

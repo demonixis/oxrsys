@@ -9,14 +9,13 @@ struct OXRSysServerConfig: Equatable {
 
     var runtimeEnabled = true
     var bitrateMbps = 50
-    var fovDegrees = 100
     var refreshRateHz = 72
     var resolutionScale = 0.75
     var keyframeIntervalSec = 2
     var encoderPreset: EncoderPreset = .balanced
     var transport: StreamingTransportSetting = .auto
     var foveatedEncodingPreset: FoveationPresetSetting = .off
-    var clientFoveationPreset: FoveationPresetSetting = .medium
+    var clientFoveationPreset: ClientFoveationPresetSetting = .auto
     var clientUpscaling = false
     var headsetAudio = false
     var fileLogging = true
@@ -35,9 +34,6 @@ struct OXRSysServerConfig: Equatable {
     # H.265 encoding bitrate in Mbps. Lower = less latency but more artifacts.
     # Try 20-30 for lower latency, 50+ for quality.
     bitrate_mbps = 50
-
-    # Rendering FOV in degrees (symmetric). Must match Quest client's kMacHalfFov.
-    fov_degrees = 100
 
     # Preferred headset display refresh rate: 60, 72, 80, 90, or 120.
     refresh_rate_hz = 72
@@ -62,8 +58,9 @@ struct OXRSysServerConfig: Equatable {
     # Server-side foveated video encoding preset: "off", "light", "medium", or "high".
     foveated_encoding_preset = "off"
 
-    # Headset runtime foveation preset: "off", "light", "medium", or "high".
-    client_foveation_preset = "medium"
+    # Headset client foveation override: "auto", "off", "light", "medium", or "high".
+    # "auto" leaves the headset client unmanaged by Home.
+    client_foveation_preset = "auto"
 
     # Enable Quest shader upscaling after video decode.
     client_upscaling = false
@@ -91,9 +88,6 @@ struct OXRSysServerConfig: Equatable {
            (Self.minBitrateMbps...Self.maxBitrateMbps).contains(value) {
             config.bitrateMbps = value
         }
-        if let value = intValue("fov_degrees", in: text), (60...150).contains(value) {
-            config.fovDegrees = value
-        }
         if let value = intValue("refresh_rate_hz", in: text), supportedRefreshRates.contains(value) {
             config.refreshRateHz = value
         }
@@ -112,7 +106,7 @@ struct OXRSysServerConfig: Equatable {
         if let value = stringValue("foveated_encoding_preset", in: text), let preset = FoveationPresetSetting(rawValue: value) {
             config.foveatedEncodingPreset = preset
         }
-        if let value = stringValue("client_foveation_preset", in: text), let preset = FoveationPresetSetting(rawValue: value) {
+        if let value = stringValue("client_foveation_preset", in: text), let preset = ClientFoveationPresetSetting(rawValue: value) {
             config.clientFoveationPreset = preset
         }
         if let value = boolValue("client_upscaling", in: text) {
@@ -136,6 +130,7 @@ struct OXRSysServerConfig: Equatable {
         if text.isEmpty {
             text = Self.defaultText
         }
+        text = removingKeys(Set(["fov_degrees"]), fromSection: "streaming", in: text)
 
         let sectionValues: [(name: String, keys: [(key: String, value: String)])] = [
             ("general", [
@@ -143,7 +138,6 @@ struct OXRSysServerConfig: Equatable {
             ]),
             ("streaming", [
                 ("bitrate_mbps", "\(bitrateMbps)"),
-                ("fov_degrees", "\(fovDegrees)"),
                 ("refresh_rate_hz", "\(refreshRateHz)"),
                 ("resolution_scale", decimalString(resolutionScale)),
                 ("keyframe_interval_sec", "\(keyframeIntervalSec)"),
@@ -263,6 +257,34 @@ private func upsertingSection(_ sectionName: String, keys: [(key: String, value:
     }
 
     return lines.joined(separator: "\n")
+}
+
+private func removingKeys(_ keys: Set<String>, fromSection sectionName: String, in text: String) -> String {
+    let lines = text.components(separatedBy: .newlines)
+    let sectionHeader = "[\(sectionName)]"
+    guard let sectionIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == sectionHeader }) else {
+        return text
+    }
+
+    let sectionEnd = ((sectionIndex + 1)..<lines.count).first(where: { isSectionHeader(lines[$0]) }) ?? lines.count
+    var indexesToRemove = Set<Int>()
+    for index in (sectionIndex + 1)..<sectionEnd where keys.contains(where: { matchesKey($0, line: lines[index]) }) {
+        indexesToRemove.insert(index)
+        let previousIndex = index - 1
+        if previousIndex > sectionIndex, lines[previousIndex].contains("Rendering FOV") {
+            indexesToRemove.insert(previousIndex)
+        }
+    }
+
+    var filtered: [String] = []
+    filtered.reserveCapacity(lines.count)
+    for (index, line) in lines.enumerated() {
+        if indexesToRemove.contains(index) {
+            continue
+        }
+        filtered.append(line)
+    }
+    return filtered.joined(separator: "\n")
 }
 
 private func isSectionHeader(_ line: String) -> Bool {

@@ -155,6 +155,8 @@ void advanceSimulatorTracking(SimulatorTrackingPose& pose,
 void fillSimulatorTrackingPacket(const SimulatorTrackingPose& pose,
                                  const QSet<int>& pressedKeys,
                                  int64_t timestampNs,
+                                 float verticalFovDegrees,
+                                 float eyeAspect,
                                  oxr::protocol::TrackingPacket& packet)
 {
     packet = {};
@@ -198,6 +200,16 @@ void fillSimulatorTrackingPacket(const SimulatorTrackingPose& pose,
         packet.rightGrip = 1.0f;
     }
     packet.ipd = 0.064f;
+
+    const float clampedFovDegrees = std::clamp(verticalFovDegrees, 60.0f, 150.0f);
+    const float clampedAspect = std::max(eyeAspect, 0.1f);
+    constexpr float DegreesToRadians = 0.017453292519943295f;
+    const float halfAngleV = clampedFovDegrees * 0.5f * DegreesToRadians;
+    const float halfAngleH = std::atan(std::tan(halfAngleV) * clampedAspect);
+    packet.eyeFov[0] = -halfAngleH;
+    packet.eyeFov[1] = halfAngleH;
+    packet.eyeFov[2] = halfAngleV;
+    packet.eyeFov[3] = -halfAngleV;
 }
 
 int simulatorKeyIdentifier(const QKeyEvent& event)

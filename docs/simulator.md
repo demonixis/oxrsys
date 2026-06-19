@@ -53,6 +53,7 @@ The settings sheet also lets you:
 
 - switch between `Simulator` and `StereoView` where supported
 - toggle streaming stats
+- tune the simulator vertical FOV sent through `TrackingPacket.eyeFov`
 - tune the stereo IPD offset
 - request a keyframe
 - reset device pose in `StereoView` on iOS
@@ -89,6 +90,10 @@ use the streaming protocol.
 | `Escape` | Menu button |
 | `T` | Toggle controller mode or hand tracking mode |
 
+The Apple simulator settings sheet exposes `Vertical FOV` in `Simulator` mode.
+The simulator derives the horizontal FOV from the runtime render aspect when a
+server has been discovered, then sends both angles in each tracking packet.
+
 ## Qt Simulator Controls
 
 | Input | Action |
@@ -103,6 +108,9 @@ use the streaming protocol.
 | `R / E` | Roll head |
 | `F / G` | Left or right grip |
 | `Escape` | Release mouse capture |
+
+The Qt simulator window exposes `Vertical FOV` next to the runtime/tracking
+panels. It uses the same `TrackingPacket.eyeFov` path as the Apple simulator.
 
 ## Limitations
 

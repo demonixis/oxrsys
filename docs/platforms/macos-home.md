@@ -165,7 +165,6 @@ The structured editor covers the current runtime keys:
 
 - `general.runtime_enabled`
 - `streaming.bitrate_mbps`
-- `streaming.fov_degrees`
 - `streaming.resolution_scale`
 - `streaming.refresh_rate_hz`
 - `streaming.keyframe_interval_sec`
@@ -187,12 +186,20 @@ The refresh control writes one of `60`, `72`, `80`, `90`, or `120` Hz. The
 runtime announces that value, and Quest clients request it through
 `XR_FB_display_refresh_rate` before reporting the active display rate back.
 
+Simulator FOV is configured in the simulator window/settings sheet. Home does
+not write `streaming.fov_degrees`; the runtime only keeps that key as a legacy
+fallback for clients that do not send `TrackingPacket.eyeFov`.
+
 `foveated_encoding_preset` controls the server-side ALVR-style AADT video
-compression path on supported server/client combinations. `client_foveation_preset`
-controls headset-side `XR_FB_foveation`; this is separate from foveated encoding.
-`client_upscaling` enables the Quest shader upscaling path. `headset_audio` is
-reserved in config and protocol, but the runtime does not advertise audio as
-active until a real capture/playback path is attached.
+compression path on supported server/client combinations.
+
+The Headset Client section owns client-side headset options. `client_foveation_preset = "auto"`
+does not send an `XR_FB_foveation` override to the headset client; `off`, `light`, `medium`,
+and `high` explicitly override the Quest/PICO viewer swapchains. This is separate from
+foveated encoding and does not change the desktop OpenXR application's rendering work.
+`client_upscaling` enables the Quest shader upscaling path. `headset_audio` is reserved in
+config and protocol, but the runtime does not advertise audio as active until a real
+capture/playback path is attached.
 
 Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
 discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,
@@ -204,7 +211,6 @@ immediately. `Reveal Config` opens the TOML location, and `Reveal Runtime Logs` 
 The runtime reloads config file changes opportunistically:
 
 - `runtime_enabled` is applied to subsequent `xrCreateInstance` calls
-- `fov_degrees` is picked up on subsequent view location work
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails

@@ -377,172 +377,174 @@ struct ContentView: View {
 
     private var streamingTab: some View {
         ScrollView {
-            GroupBox("Streaming Configuration") {
-                VStack(alignment: .leading, spacing: 16) {
-                    Toggle("Runtime enabled", isOn: streamingBinding(\.runtimeEnabled))
-                    Toggle("Write server log file", isOn: streamingBinding(\.fileLogging))
-                    Toggle("Capture Quest logcat", isOn: streamingBinding(\.questLogcat))
-                    Toggle("Quest shader upscaling", isOn: streamingBinding(\.clientUpscaling))
-                    Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
+            VStack(alignment: .leading, spacing: 0) {
+                GroupBox("Streaming Configuration") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Toggle("Runtime enabled", isOn: streamingBinding(\.runtimeEnabled))
+                        Toggle("Write server log file", isOn: streamingBinding(\.fileLogging))
+                        Toggle("Capture Quest logcat", isOn: streamingBinding(\.questLogcat))
 
-                    LabeledSlider(
-                        title: "Bitrate",
-                        value: Binding(
-                            get: { Double(model.serverConfig.bitrateMbps) },
-                            set: { value in
-                                model.updateStreamingConfig {
-                                    $0.bitrateMbps = Int(value.rounded())
+                        LabeledSlider(
+                            title: "Bitrate",
+                            value: Binding(
+                                get: { Double(model.serverConfig.bitrateMbps) },
+                                set: { value in
+                                    model.updateStreamingConfig {
+                                        $0.bitrateMbps = Int(value.rounded())
+                                    }
                                 }
-                            }
-                        ),
-                        range: Double(OXRSysServerConfig.minBitrateMbps)...Double(OXRSysServerConfig.maxBitrateMbps),
-                        displayValue: "\(model.serverConfig.bitrateMbps) Mbps"
-                    )
+                            ),
+                            range: Double(OXRSysServerConfig.minBitrateMbps)...Double(OXRSysServerConfig.maxBitrateMbps),
+                            displayValue: "\(model.serverConfig.bitrateMbps) Mbps"
+                        )
 
-                    LabeledSlider(
-                        title: "Vertical FOV",
-                        value: Binding(
-                            get: { Double(model.serverConfig.fovDegrees) },
-                            set: { value in
-                                model.updateStreamingConfig {
-                                    $0.fovDegrees = Int(value.rounded())
+                        Picker("Refresh rate", selection: streamingBinding(\.refreshRateHz)) {
+                            ForEach(OXRSysServerConfig.supportedRefreshRates, id: \.self) { rate in
+                                Text("\(rate) Hz").tag(rate)
+                            }
+                        }
+
+                        LabeledSlider(
+                            title: "Resolution Scale",
+                            value: streamingBinding(\.resolutionScale),
+                            range: 0.25...1.0,
+                            displayValue: String(format: "%.2f", model.serverConfig.resolutionScale)
+                        )
+
+                        LabeledSlider(
+                            title: "Keyframe Interval",
+                            value: Binding(
+                                get: { Double(model.serverConfig.keyframeIntervalSec) },
+                                set: { value in
+                                    model.updateStreamingConfig {
+                                        $0.keyframeIntervalSec = Int(value.rounded())
+                                    }
                                 }
+                            ),
+                            range: 1...10,
+                            displayValue: "\(model.serverConfig.keyframeIntervalSec) s"
+                        )
+
+                        Picker("Encoder preset", selection: streamingBinding(\.encoderPreset)) {
+                            ForEach(EncoderPreset.allCases) { preset in
+                                Text(preset.rawValue.capitalized).tag(preset)
                             }
-                        ),
-                        range: 60...150,
-                        displayValue: "\(model.serverConfig.fovDegrees) degrees"
-                    )
-
-                    Picker("Refresh rate", selection: streamingBinding(\.refreshRateHz)) {
-                        ForEach(OXRSysServerConfig.supportedRefreshRates, id: \.self) { rate in
-                            Text("\(rate) Hz").tag(rate)
                         }
-                    }
 
-                    LabeledSlider(
-                        title: "Resolution Scale",
-                        value: streamingBinding(\.resolutionScale),
-                        range: 0.25...1.0,
-                        displayValue: String(format: "%.2f", model.serverConfig.resolutionScale)
-                    )
-
-                    LabeledSlider(
-                        title: "Keyframe Interval",
-                        value: Binding(
-                            get: { Double(model.serverConfig.keyframeIntervalSec) },
-                            set: { value in
-                                model.updateStreamingConfig {
-                                    $0.keyframeIntervalSec = Int(value.rounded())
-                                }
+                        Picker("Foveated encoding", selection: streamingBinding(\.foveatedEncodingPreset)) {
+                            ForEach(FoveationPresetSetting.allCases) { preset in
+                                Text(preset.displayName).tag(preset)
                             }
-                        ),
-                        range: 1...10,
-                        displayValue: "\(model.serverConfig.keyframeIntervalSec) s"
-                    )
+                        }
 
-                    Picker("Encoder preset", selection: streamingBinding(\.encoderPreset)) {
-                        ForEach(EncoderPreset.allCases) { preset in
-                            Text(preset.rawValue.capitalized).tag(preset)
+                        Picker("Transport", selection: streamingBinding(\.transport)) {
+                            ForEach(StreamingTransportSetting.allCases) { transport in
+                                Text(transport.displayName).tag(transport)
+                            }
+                        }
+
+                        HStack {
+                            Button("Default") {
+                                model.resetStreamingConfigToDefaults()
+                            }
+                            Button("Reload From Disk") {
+                                model.resetToDisk()
+                            }
+                            Spacer()
+                            Button("Reveal Config") {
+                                model.revealConfigFile()
+                            }
+                            Button("Reveal Runtime Logs") {
+                                model.revealRuntimeLogsDirectory()
+                            }
                         }
                     }
-
-                    Picker("Foveated encoding", selection: streamingBinding(\.foveatedEncodingPreset)) {
-                        ForEach(FoveationPresetSetting.allCases) { preset in
-                            Text(preset.displayName).tag(preset)
-                        }
-                    }
-
-                    Picker("Headset foveation", selection: streamingBinding(\.clientFoveationPreset)) {
-                        ForEach(FoveationPresetSetting.allCases) { preset in
-                            Text(preset.displayName).tag(preset)
-                        }
-                    }
-
-                    Picker("Transport", selection: streamingBinding(\.transport)) {
-                        ForEach(StreamingTransportSetting.allCases) { transport in
-                            Text(transport.displayName).tag(transport)
-                        }
-                    }
-
-                    HStack {
-                        Button("Default") {
-                            model.resetStreamingConfigToDefaults()
-                        }
-                        Button("Reload From Disk") {
-                            model.resetToDisk()
-                        }
-                        Spacer()
-                        Button("Reveal Config") {
-                            model.revealConfigFile()
-                        }
-                        Button("Reveal Runtime Logs") {
-                            model.revealRuntimeLogsDirectory()
-                        }
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
                 }
-                .padding(.top, 8)
-            }
-            .padding(.top, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 14)
 
-            GroupBox("Quest USB ADB") {
-                VStack(alignment: .leading, spacing: 12) {
-                    if model.questUsbDevices.isEmpty {
-                        Text("No adb device found.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Quest device", selection: Binding(
-                            get: { model.selectedQuestUsbSerial ?? "" },
-                            set: { model.selectedQuestUsbSerial = $0.isEmpty ? nil : $0 }
-                        )) {
-                            Text("Select a device").tag("")
-                            ForEach(model.questUsbDevices) { device in
-                                Text(device.displayName).tag(device.serial)
+                GroupBox("Headset Client") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Picker("Client foveation", selection: streamingBinding(\.clientFoveationPreset)) {
+                            ForEach(ClientFoveationPresetSetting.allCases) { preset in
+                                Text(preset.displayName).tag(preset)
                             }
                         }
-                    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(model.adbStatus.message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                        if !model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            Text("Custom ADB: \(model.customAdbPath)")
-                                .font(.caption2)
+                        Toggle("Quest shader upscaling", isOn: streamingBinding(\.clientUpscaling))
+                        Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 14)
+
+                GroupBox("Quest USB ADB") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if model.questUsbDevices.isEmpty {
+                            Text("No adb device found.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Picker("Quest device", selection: Binding(
+                                get: { model.selectedQuestUsbSerial ?? "" },
+                                set: { model.selectedQuestUsbSerial = $0.isEmpty ? nil : $0 }
+                            )) {
+                                Text("Select a device").tag("")
+                                ForEach(model.questUsbDevices) { device in
+                                    Text(device.displayName).tag(device.serial)
+                                }
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(model.adbStatus.message)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
+                            if !model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("Custom ADB: \(model.customAdbPath)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+
+                        Text(model.questUsbStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack {
+                            Button("Select ADB") {
+                                model.chooseCustomAdbExecutable()
+                            }
+                            Button("Auto Detect") {
+                                model.clearCustomAdbPath()
+                            }
+                            .disabled(model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            Divider()
+                            Button("Refresh Devices") {
+                                model.refreshQuestUsbDevices()
+                            }
+                            Button("Configure USB Reverse") {
+                                model.configureQuestUsbReverse()
+                            }
+                            .disabled(model.selectedQuestUsbSerial == nil ||
+                                      !model.questUsbDevices.contains(where: {
+                                          $0.serial == model.selectedQuestUsbSerial && $0.isUsable
+                                      }))
+                            Spacer()
                         }
                     }
-
-                    Text(model.questUsbStatus)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    HStack {
-                        Button("Select ADB") {
-                            model.chooseCustomAdbExecutable()
-                        }
-                        Button("Auto Detect") {
-                            model.clearCustomAdbPath()
-                        }
-                        .disabled(model.customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        Divider()
-                        Button("Refresh Devices") {
-                            model.refreshQuestUsbDevices()
-                        }
-                        Button("Configure USB Reverse") {
-                            model.configureQuestUsbReverse()
-                        }
-                        .disabled(model.selectedQuestUsbSerial == nil ||
-                                  !model.questUsbDevices.contains(where: {
-                                      $0.serial == model.selectedQuestUsbSerial && $0.isUsable
-                                  }))
-                        Spacer()
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
                 }
-                .padding(.top, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 14)
             }
-            .padding(.top, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
