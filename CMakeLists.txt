@@ -155,6 +155,8 @@ add_executable(oxrsys_runtime_tests
     tests/TestStreamingFrameQueue.cpp
     tests/TestVulkanDispatch.cpp
     tests/TestProtocolLayout.cpp
+    tests/TestQuestShellInteraction.cpp
+    clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
     runtime/src/TrackingReceiver.cpp
     runtime/src/Config.cpp
@@ -165,6 +167,7 @@ add_executable(oxrsys_runtime_tests
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
+    clients/Android/android-vr/app/src/main/cpp
     common/protocol/include
     ${openxr_SOURCE_DIR}/include
     ${Vulkan_INCLUDE_DIRS}

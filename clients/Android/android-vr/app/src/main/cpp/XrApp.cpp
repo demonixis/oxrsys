@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <netinet/in.h>
@@ -51,6 +52,26 @@ out vec2 vUV;
 void main() {
     vUV = aUV;
     gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+static const char* SHELL_VERTEX_SHADER = R"(#version 300 es
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec4 aColor;
+uniform mat4 uMvp;
+out vec4 vColor;
+void main() {
+    vColor = aColor;
+    gl_Position = uMvp * vec4(aPos, 1.0);
+}
+)";
+
+static const char* SHELL_FRAGMENT_SHADER = R"(#version 300 es
+precision mediump float;
+in vec4 vColor;
+out vec4 fragColor;
+void main() {
+    fragColor = vColor;
 }
 )";
 
@@ -214,6 +235,15 @@ bool HasValidJointPosition(const XrHandJointLocationEXT& joint)
            std::isfinite(joint.pose.position.y) &&
            std::isfinite(joint.pose.position.z) &&
            std::isfinite(joint.radius);
+}
+
+bool HasValidJointOrientation(const XrHandJointLocationEXT& joint)
+{
+    return (joint.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 &&
+           std::isfinite(joint.pose.orientation.x) &&
+           std::isfinite(joint.pose.orientation.y) &&
+           std::isfinite(joint.pose.orientation.z) &&
+           std::isfinite(joint.pose.orientation.w);
 }
 
 bool HasValidCriticalHandJoints(const XrHandJointLocationEXT* joints)
@@ -500,6 +530,30 @@ struct MetricSummary
     size_t count = 0;
 };
 
+struct Mat4
+{
+    float m[16] = {};
+};
+
+struct ShellColor
+{
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 1.0f;
+};
+
+struct ShellVertex
+{
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float a = 1.0f;
+};
+
 static MetricSummary Summarize(std::vector<double>* samples)
 {
     MetricSummary summary = {};
@@ -514,6 +568,353 @@ static MetricSummary Summarize(std::vector<double>* samples)
     summary.p50 = (*samples)[(samples->size() - 1) / 2];
     summary.p95 = (*samples)[static_cast<size_t>(0.95 * (samples->size() - 1))];
     return summary;
+}
+
+static quest_shell::Vec3 AddVec3(const quest_shell::Vec3& a, const quest_shell::Vec3& b)
+{
+    return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+static quest_shell::Vec3 SubVec3(const quest_shell::Vec3& a, const quest_shell::Vec3& b)
+{
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+static quest_shell::Vec3 ScaleVec3(const quest_shell::Vec3& v, float scale)
+{
+    return {v.x * scale, v.y * scale, v.z * scale};
+}
+
+static float DotVec3(const quest_shell::Vec3& a, const quest_shell::Vec3& b)
+{
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+static quest_shell::Vec3 CrossVec3(const quest_shell::Vec3& a, const quest_shell::Vec3& b)
+{
+    return {
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x,
+    };
+}
+
+static quest_shell::Vec3 NormalizeVec3(const quest_shell::Vec3& v)
+{
+    const float length = std::sqrt(DotVec3(v, v));
+    if (!std::isfinite(length) || length < 0.0001f)
+    {
+        return {0.0f, 0.0f, -1.0f};
+    }
+    return ScaleVec3(v, 1.0f / length);
+}
+
+static float DistanceVec3(const quest_shell::Vec3& a, const quest_shell::Vec3& b)
+{
+    const quest_shell::Vec3 delta = SubVec3(a, b);
+    return std::sqrt(DotVec3(delta, delta));
+}
+
+static quest_shell::Vec3 ToShellVec3(const XrVector3f& v)
+{
+    return {v.x, v.y, v.z};
+}
+
+static Mat4 MultiplyMat4(const Mat4& a, const Mat4& b)
+{
+    Mat4 result = {};
+    for (int col = 0; col < 4; ++col)
+    {
+        for (int row = 0; row < 4; ++row)
+        {
+            float value = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+                value += a.m[k * 4 + row] * b.m[col * 4 + k];
+            }
+            result.m[col * 4 + row] = value;
+        }
+    }
+    return result;
+}
+
+static Mat4 ProjectionFromFov(const XrFovf& fov)
+{
+    constexpr float nearZ = 0.05f;
+    constexpr float farZ = 50.0f;
+    const float tanLeft = std::tan(fov.angleLeft);
+    const float tanRight = std::tan(fov.angleRight);
+    const float tanDown = std::tan(fov.angleDown);
+    const float tanUp = std::tan(fov.angleUp);
+    const float tanWidth = tanRight - tanLeft;
+    const float tanHeight = tanUp - tanDown;
+
+    Mat4 projection = {};
+    projection.m[0] = 2.0f / tanWidth;
+    projection.m[5] = 2.0f / tanHeight;
+    projection.m[8] = (tanRight + tanLeft) / tanWidth;
+    projection.m[9] = (tanUp + tanDown) / tanHeight;
+    projection.m[10] = -(farZ + nearZ) / (farZ - nearZ);
+    projection.m[11] = -1.0f;
+    projection.m[14] = -(2.0f * farZ * nearZ) / (farZ - nearZ);
+    return projection;
+}
+
+static Mat4 ViewFromPose(const XrPosef& pose)
+{
+    const XrQuaternionf q = NormalizeQuaternion(ConjugateQuaternion(pose.orientation));
+    const float x = q.x;
+    const float y = q.y;
+    const float z = q.z;
+    const float w = q.w;
+
+    Mat4 view = {};
+    view.m[0] = 1.0f - 2.0f * (y * y + z * z);
+    view.m[1] = 2.0f * (x * y + z * w);
+    view.m[2] = 2.0f * (x * z - y * w);
+    view.m[4] = 2.0f * (x * y - z * w);
+    view.m[5] = 1.0f - 2.0f * (x * x + z * z);
+    view.m[6] = 2.0f * (y * z + x * w);
+    view.m[8] = 2.0f * (x * z + y * w);
+    view.m[9] = 2.0f * (y * z - x * w);
+    view.m[10] = 1.0f - 2.0f * (x * x + y * y);
+    view.m[15] = 1.0f;
+
+    const XrVector3f& p = pose.position;
+    view.m[12] = -(view.m[0] * p.x + view.m[4] * p.y + view.m[8] * p.z);
+    view.m[13] = -(view.m[1] * p.x + view.m[5] * p.y + view.m[9] * p.z);
+    view.m[14] = -(view.m[2] * p.x + view.m[6] * p.y + view.m[10] * p.z);
+    return view;
+}
+
+static void AppendVertex(std::vector<ShellVertex>& vertices,
+                         const quest_shell::Vec3& p,
+                         const ShellColor& color)
+{
+    vertices.push_back({p.x, p.y, p.z, color.r, color.g, color.b, color.a});
+}
+
+static void AppendLine(std::vector<ShellVertex>& lines,
+                       const quest_shell::Vec3& a,
+                       const quest_shell::Vec3& b,
+                       const ShellColor& color)
+{
+    AppendVertex(lines, a, color);
+    AppendVertex(lines, b, color);
+}
+
+static void AppendQuad(std::vector<ShellVertex>& triangles,
+                       const quest_shell::Vec3& a,
+                       const quest_shell::Vec3& b,
+                       const quest_shell::Vec3& c,
+                       const quest_shell::Vec3& d,
+                       const ShellColor& color)
+{
+    AppendVertex(triangles, a, color);
+    AppendVertex(triangles, b, color);
+    AppendVertex(triangles, c, color);
+    AppendVertex(triangles, a, color);
+    AppendVertex(triangles, c, color);
+    AppendVertex(triangles, d, color);
+}
+
+static void AppendCube(std::vector<ShellVertex>& triangles,
+                       const quest_shell::Vec3& center,
+                       float size,
+                       const ShellColor& color)
+{
+    const float half = size * 0.5f;
+    const quest_shell::Vec3 p000 = {center.x - half, center.y - half, center.z - half};
+    const quest_shell::Vec3 p001 = {center.x - half, center.y - half, center.z + half};
+    const quest_shell::Vec3 p010 = {center.x - half, center.y + half, center.z - half};
+    const quest_shell::Vec3 p011 = {center.x - half, center.y + half, center.z + half};
+    const quest_shell::Vec3 p100 = {center.x + half, center.y - half, center.z - half};
+    const quest_shell::Vec3 p101 = {center.x + half, center.y - half, center.z + half};
+    const quest_shell::Vec3 p110 = {center.x + half, center.y + half, center.z - half};
+    const quest_shell::Vec3 p111 = {center.x + half, center.y + half, center.z + half};
+
+    AppendQuad(triangles, p000, p100, p110, p010, color);
+    AppendQuad(triangles, p101, p001, p011, p111, color);
+    AppendQuad(triangles, p001, p000, p010, p011, color);
+    AppendQuad(triangles, p100, p101, p111, p110, color);
+    AppendQuad(triangles, p010, p110, p111, p011, color);
+    AppendQuad(triangles, p001, p101, p100, p000, color);
+}
+
+static quest_shell::Vec3 PanelPoint(const quest_shell::PanelLayout& panel,
+                                    float localX,
+                                    float localY,
+                                    float normalOffset = 0.0f)
+{
+    return AddVec3(
+        AddVec3(panel.center, ScaleVec3(panel.right, localX)),
+        AddVec3(ScaleVec3(panel.up, localY), ScaleVec3(panel.normal, normalOffset)));
+}
+
+static void AppendPanelQuad(std::vector<ShellVertex>& triangles,
+                            const quest_shell::PanelLayout& panel,
+                            float centerX,
+                            float centerY,
+                            float width,
+                            float height,
+                            float normalOffset,
+                            const ShellColor& color)
+{
+    const float left = centerX - width * 0.5f;
+    const float right = centerX + width * 0.5f;
+    const float bottom = centerY - height * 0.5f;
+    const float top = centerY + height * 0.5f;
+    AppendQuad(triangles,
+               PanelPoint(panel, left, bottom, normalOffset),
+               PanelPoint(panel, right, bottom, normalOffset),
+               PanelPoint(panel, right, top, normalOffset),
+               PanelPoint(panel, left, top, normalOffset),
+               color);
+}
+
+static const std::array<uint8_t, 7>& GlyphRows(char ch)
+{
+    static const std::array<uint8_t, 7> space = {0, 0, 0, 0, 0, 0, 0};
+    static const std::array<uint8_t, 7> unknown = {14, 17, 1, 2, 4, 0, 4};
+    static const std::array<uint8_t, 7> glyphs[36] = {
+        std::array<uint8_t, 7>{14, 17, 17, 31, 17, 17, 17}, // A
+        std::array<uint8_t, 7>{30, 17, 17, 30, 17, 17, 30}, // B
+        std::array<uint8_t, 7>{14, 17, 16, 16, 16, 17, 14}, // C
+        std::array<uint8_t, 7>{30, 17, 17, 17, 17, 17, 30}, // D
+        std::array<uint8_t, 7>{31, 16, 16, 30, 16, 16, 31}, // E
+        std::array<uint8_t, 7>{31, 16, 16, 30, 16, 16, 16}, // F
+        std::array<uint8_t, 7>{14, 17, 16, 23, 17, 17, 15}, // G
+        std::array<uint8_t, 7>{17, 17, 17, 31, 17, 17, 17}, // H
+        std::array<uint8_t, 7>{14, 4, 4, 4, 4, 4, 14},      // I
+        std::array<uint8_t, 7>{7, 2, 2, 2, 18, 18, 12},     // J
+        std::array<uint8_t, 7>{17, 18, 20, 24, 20, 18, 17}, // K
+        std::array<uint8_t, 7>{16, 16, 16, 16, 16, 16, 31}, // L
+        std::array<uint8_t, 7>{17, 27, 21, 21, 17, 17, 17}, // M
+        std::array<uint8_t, 7>{17, 25, 21, 19, 17, 17, 17}, // N
+        std::array<uint8_t, 7>{14, 17, 17, 17, 17, 17, 14}, // O
+        std::array<uint8_t, 7>{30, 17, 17, 30, 16, 16, 16}, // P
+        std::array<uint8_t, 7>{14, 17, 17, 17, 21, 18, 13}, // Q
+        std::array<uint8_t, 7>{30, 17, 17, 30, 20, 18, 17}, // R
+        std::array<uint8_t, 7>{15, 16, 16, 14, 1, 1, 30},   // S
+        std::array<uint8_t, 7>{31, 4, 4, 4, 4, 4, 4},       // T
+        std::array<uint8_t, 7>{17, 17, 17, 17, 17, 17, 14}, // U
+        std::array<uint8_t, 7>{17, 17, 17, 17, 17, 10, 4},  // V
+        std::array<uint8_t, 7>{17, 17, 17, 21, 21, 21, 10}, // W
+        std::array<uint8_t, 7>{17, 17, 10, 4, 10, 17, 17},  // X
+        std::array<uint8_t, 7>{17, 17, 10, 4, 4, 4, 4},     // Y
+        std::array<uint8_t, 7>{31, 1, 2, 4, 8, 16, 31},     // Z
+        std::array<uint8_t, 7>{14, 17, 19, 21, 25, 17, 14}, // 0
+        std::array<uint8_t, 7>{4, 12, 4, 4, 4, 4, 14},      // 1
+        std::array<uint8_t, 7>{14, 17, 1, 2, 4, 8, 31},     // 2
+        std::array<uint8_t, 7>{30, 1, 1, 14, 1, 1, 30},     // 3
+        std::array<uint8_t, 7>{2, 6, 10, 18, 31, 2, 2},     // 4
+        std::array<uint8_t, 7>{31, 16, 16, 30, 1, 1, 30},   // 5
+        std::array<uint8_t, 7>{14, 16, 16, 30, 17, 17, 14}, // 6
+        std::array<uint8_t, 7>{31, 1, 2, 4, 8, 8, 8},       // 7
+        std::array<uint8_t, 7>{14, 17, 17, 14, 17, 17, 14}, // 8
+        std::array<uint8_t, 7>{14, 17, 17, 15, 1, 1, 14},   // 9
+    };
+    static const std::array<uint8_t, 7> dash = {0, 0, 0, 31, 0, 0, 0};
+    static const std::array<uint8_t, 7> colon = {0, 4, 4, 0, 4, 4, 0};
+    static const std::array<uint8_t, 7> dot = {0, 0, 0, 0, 0, 4, 4};
+    static const std::array<uint8_t, 7> slash = {1, 1, 2, 4, 8, 16, 16};
+
+    const unsigned char upper = static_cast<unsigned char>(std::toupper(static_cast<unsigned char>(ch)));
+    if (upper >= 'A' && upper <= 'Z')
+    {
+        return glyphs[upper - 'A'];
+    }
+    if (upper >= '0' && upper <= '9')
+    {
+        return glyphs[26 + upper - '0'];
+    }
+    switch (upper)
+    {
+    case ' ':
+        return space;
+    case '-':
+        return dash;
+    case ':':
+        return colon;
+    case '.':
+        return dot;
+    case '/':
+        return slash;
+    default:
+        return unknown;
+    }
+}
+
+static std::string UppercaseAscii(std::string text, size_t maxChars)
+{
+    if (text.size() > maxChars)
+    {
+        text.resize(maxChars);
+    }
+    for (char& ch : text)
+    {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
+static void AppendPanelText(std::vector<ShellVertex>& triangles,
+                            const quest_shell::PanelLayout& panel,
+                            float left,
+                            float top,
+                            float pixelSize,
+                            const std::string& text,
+                            const ShellColor& color)
+{
+    float cursorX = left;
+    constexpr int glyphWidth = 5;
+    constexpr int glyphHeight = 7;
+    for (char ch : text)
+    {
+        const auto& rows = GlyphRows(ch);
+        for (int row = 0; row < glyphHeight; ++row)
+        {
+            const uint8_t bits = rows[row];
+            for (int col = 0; col < glyphWidth; ++col)
+            {
+                if ((bits & (1u << (glyphWidth - 1 - col))) == 0)
+                {
+                    continue;
+                }
+                const float cellX = cursorX + (static_cast<float>(col) + 0.5f) * pixelSize;
+                const float cellY = top - (static_cast<float>(row) + 0.5f) * pixelSize;
+                AppendPanelQuad(triangles, panel, cellX, cellY,
+                                pixelSize * 0.88f, pixelSize * 0.88f,
+                                0.004f, color);
+            }
+        }
+        cursorX += static_cast<float>(glyphWidth + 1) * pixelSize;
+    }
+}
+
+static void AppendPanelTextCentered(std::vector<ShellVertex>& triangles,
+                                    const quest_shell::PanelLayout& panel,
+                                    float centerX,
+                                    float centerY,
+                                    float pixelSize,
+                                    const std::string& text,
+                                    const ShellColor& color)
+{
+    if (text.empty())
+    {
+        return;
+    }
+
+    constexpr int glyphWidth = 5;
+    constexpr int glyphHeight = 7;
+    constexpr int glyphAdvance = glyphWidth + 1;
+    const float textWidth =
+        static_cast<float>((text.size() - 1) * glyphAdvance + glyphWidth) * pixelSize;
+    const float textHeight = static_cast<float>(glyphHeight) * pixelSize;
+    AppendPanelText(triangles, panel,
+                    centerX - textWidth * 0.5f,
+                    centerY + textHeight * 0.5f,
+                    pixelSize, text, color);
 }
 
 // ─── GL helpers ───────────────────────────────────────────────────────────────
@@ -537,12 +938,20 @@ static GLuint CompileShader(GLenum type, const char* source)
     return shader;
 }
 
-static GLuint CreateBlitProgram(const char* fragmentShaderSource)
+static GLuint CreateProgram(const char* vertexShaderSource, const char* fragmentShaderSource)
 {
-    GLuint vs = CompileShader(GL_VERTEX_SHADER, BLIT_VERTEX_SHADER);
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
     GLuint fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
     if (vs == 0 || fs == 0)
     {
+        if (vs != 0)
+        {
+            glDeleteShader(vs);
+        }
+        if (fs != 0)
+        {
+            glDeleteShader(fs);
+        }
         return 0;
     }
 
@@ -564,6 +973,11 @@ static GLuint CreateBlitProgram(const char* fragmentShaderSource)
         return 0;
     }
     return program;
+}
+
+static GLuint CreateBlitProgram(const char* fragmentShaderSource)
+{
+    return CreateProgram(BLIT_VERTEX_SHADER, fragmentShaderSource);
 }
 
 // ─── Initialization ──────────────────────────────────────────────────────────
@@ -624,6 +1038,7 @@ bool XrApp::CreateInstance(struct android_app* app)
 
     handTrackingExtensionAvailable_ = hasExtension(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
     foveationAvailable_ = hasExtension(XR_FB_FOVEATION_EXTENSION_NAME);
+    passthroughExtensionAvailable_ = hasExtension(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     foveationConfigurationAvailable_ = hasExtension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
     swapchainUpdateAvailable_ = hasExtension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
     displayRefreshRateAvailable_ = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
@@ -642,6 +1057,10 @@ bool XrApp::CreateInstance(struct android_app* app)
     if (foveationAvailable_)
     {
         extensions.push_back(XR_FB_FOVEATION_EXTENSION_NAME);
+    }
+    if (passthroughExtensionAvailable_)
+    {
+        extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     }
     if (foveationConfigurationAvailable_)
     {
@@ -687,11 +1106,21 @@ bool XrApp::CreateInstance(struct android_app* app)
 
     XrSystemHandTrackingPropertiesEXT handTrackingProperties = {
         XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+    XrSystemPassthroughPropertiesFB passthroughProperties = {
+        XR_TYPE_SYSTEM_PASSTHROUGH_PROPERTIES_FB};
     XrSystemProperties systemProperties = {XR_TYPE_SYSTEM_PROPERTIES};
+    void* systemPropertiesNext = nullptr;
+    if (passthroughExtensionAvailable_)
+    {
+        passthroughProperties.next = systemPropertiesNext;
+        systemPropertiesNext = &passthroughProperties;
+    }
     if (handTrackingExtensionAvailable_)
     {
-        systemProperties.next = &handTrackingProperties;
+        handTrackingProperties.next = systemPropertiesNext;
+        systemPropertiesNext = &handTrackingProperties;
     }
+    systemProperties.next = systemPropertiesNext;
     if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &systemProperties)))
     {
         strncpy(headsetSystemName_, systemProperties.systemName, sizeof(headsetSystemName_) - 1);
@@ -700,10 +1129,16 @@ bool XrApp::CreateInstance(struct android_app* app)
         {
             handTrackingSupported_ = handTrackingProperties.supportsHandTracking == XR_TRUE;
         }
-        LOGI("OpenXR system: name='%s' vendor=%u handTracking=%d/%d",
+        if (passthroughExtensionAvailable_)
+        {
+            passthroughSupported_ = passthroughProperties.supportsPassthrough == XR_TRUE;
+        }
+        LOGI("OpenXR system: name='%s' vendor=%u handTracking=%d/%d passthrough=%d/%d",
              headsetSystemName_, systemProperties.vendorId,
              handTrackingExtensionAvailable_ ? 1 : 0,
-             handTrackingSupported_ ? 1 : 0);
+             handTrackingSupported_ ? 1 : 0,
+             passthroughExtensionAvailable_ ? 1 : 0,
+             passthroughSupported_ ? 1 : 0);
     }
 
     if (handTrackingExtensionAvailable_)
@@ -732,6 +1167,33 @@ bool XrApp::CreateInstance(struct android_app* app)
              foveationAvailable_ ? 1 : 0,
              foveationConfigurationAvailable_ ? 1 : 0,
              swapchainUpdateAvailable_ ? 1 : 0);
+    }
+
+    if (passthroughExtensionAvailable_)
+    {
+        xrGetInstanceProcAddr(instance_, "xrCreatePassthroughFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughFB_));
+        xrGetInstanceProcAddr(instance_, "xrDestroyPassthroughFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughFB_));
+        xrGetInstanceProcAddr(instance_, "xrPassthroughStartFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughStartFB_));
+        xrGetInstanceProcAddr(instance_, "xrPassthroughPauseFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughPauseFB_));
+        xrGetInstanceProcAddr(instance_, "xrCreatePassthroughLayerFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrCreatePassthroughLayerFB_));
+        xrGetInstanceProcAddr(instance_, "xrDestroyPassthroughLayerFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrDestroyPassthroughLayerFB_));
+        xrGetInstanceProcAddr(instance_, "xrPassthroughLayerResumeFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughLayerResumeFB_));
+        xrGetInstanceProcAddr(instance_, "xrPassthroughLayerPauseFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughLayerPauseFB_));
+        xrGetInstanceProcAddr(instance_, "xrPassthroughLayerSetStyleFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&xrPassthroughLayerSetStyleFB_));
+        LOGI("Passthrough support: ext=%d runtime=%d create=%d layer=%d",
+             passthroughExtensionAvailable_ ? 1 : 0,
+             passthroughSupported_ ? 1 : 0,
+             xrCreatePassthroughFB_ != nullptr ? 1 : 0,
+             xrCreatePassthroughLayerFB_ != nullptr ? 1 : 0);
     }
 
     if (displayRefreshRateAvailable_)
@@ -889,12 +1351,14 @@ bool XrApp::CreateSession()
     spaceCreateInfo.poseInReferenceSpace.position = {0.0f, 0.0f, 0.0f};
 
     XrResult spaceResult = xrCreateReferenceSpace(session_, &spaceCreateInfo, &appSpace_);
+    appSpaceIsStage_ = XR_SUCCEEDED(spaceResult);
     if (XR_FAILED(spaceResult))
     {
         LOGW("STAGE space not available (%d), falling back to LOCAL", spaceResult);
         spaceCreateInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
         XR_CHECK(xrCreateReferenceSpace(session_, &spaceCreateInfo, &appSpace_),
                  "xrCreateReferenceSpace(LOCAL)");
+        appSpaceIsStage_ = false;
     }
     LOGI("Reference space created");
 
@@ -920,6 +1384,11 @@ bool XrApp::CreateSession()
     if (!InitializeHandTracking())
     {
         LOGW("Hand tracking unavailable on headset, continuing without it");
+    }
+
+    if (!InitializePassthrough())
+    {
+        LOGW("Passthrough unavailable on headset, shell will use the 3D fallback");
     }
 
     if (!InitializeDisplayRefreshRate(kPreferredDisplayRefreshRateHz))
@@ -1080,6 +1549,77 @@ void XrApp::ShutdownHandTracking()
     }
 }
 
+bool XrApp::InitializePassthrough()
+{
+    if (!passthroughExtensionAvailable_ || !passthroughSupported_ ||
+        session_ == XR_NULL_HANDLE ||
+        xrCreatePassthroughFB_ == nullptr ||
+        xrCreatePassthroughLayerFB_ == nullptr ||
+        xrPassthroughStartFB_ == nullptr ||
+        xrPassthroughPauseFB_ == nullptr ||
+        xrPassthroughLayerResumeFB_ == nullptr ||
+        xrPassthroughLayerPauseFB_ == nullptr ||
+        xrDestroyPassthroughFB_ == nullptr ||
+        xrDestroyPassthroughLayerFB_ == nullptr)
+    {
+        return false;
+    }
+
+    if (passthrough_ != XR_NULL_HANDLE && passthroughLayer_ != XR_NULL_HANDLE)
+    {
+        return true;
+    }
+
+    XrPassthroughCreateInfoFB passthroughInfo = {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+    XrResult result = xrCreatePassthroughFB_(session_, &passthroughInfo, &passthrough_);
+    if (XR_FAILED(result))
+    {
+        LOGW("xrCreatePassthroughFB failed: %d", result);
+        passthroughSupported_ = false;
+        return false;
+    }
+
+    XrPassthroughLayerCreateInfoFB layerInfo = {XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+    layerInfo.passthrough = passthrough_;
+    layerInfo.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+    result = xrCreatePassthroughLayerFB_(session_, &layerInfo, &passthroughLayer_);
+    if (XR_FAILED(result))
+    {
+        LOGW("xrCreatePassthroughLayerFB failed: %d", result);
+        ShutdownPassthrough();
+        passthroughSupported_ = false;
+        return false;
+    }
+
+    if (xrPassthroughLayerSetStyleFB_ != nullptr)
+    {
+        XrPassthroughStyleFB style = {XR_TYPE_PASSTHROUGH_STYLE_FB};
+        style.textureOpacityFactor = 1.0f;
+        style.edgeColor = {0.0f, 0.0f, 0.0f, 0.0f};
+        (void)xrPassthroughLayerSetStyleFB_(passthroughLayer_, &style);
+    }
+
+    LOGI("Passthrough objects created for local shell");
+    return true;
+}
+
+void XrApp::ShutdownPassthrough()
+{
+    SetShellPassthroughActive(false);
+    if (passthroughLayer_ != XR_NULL_HANDLE && xrDestroyPassthroughLayerFB_ != nullptr)
+    {
+        xrDestroyPassthroughLayerFB_(passthroughLayer_);
+        passthroughLayer_ = XR_NULL_HANDLE;
+    }
+    if (passthrough_ != XR_NULL_HANDLE && xrDestroyPassthroughFB_ != nullptr)
+    {
+        xrDestroyPassthroughFB_(passthrough_);
+        passthrough_ = XR_NULL_HANDLE;
+    }
+    passthroughRunning_ = false;
+    passthroughLayerRunning_ = false;
+}
+
 bool XrApp::SetupActions()
 {
     // Create action set
@@ -1100,6 +1640,12 @@ bool XrApp::SetupActions()
     actionInfo.countSubactionPaths = 2;
     actionInfo.subactionPaths = handPaths_;
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &gripPoseAction_), "xrCreateAction(gripPose)");
+
+    // Aim pose action for local shell controller lasers. Falls back to grip pose at runtime.
+    actionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    strncpy(actionInfo.actionName, "aim_pose", XR_MAX_ACTION_NAME_SIZE);
+    strncpy(actionInfo.localizedActionName, "Aim Pose", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &aimPoseAction_), "xrCreateAction(aimPose)");
 
     // Trigger action (float, both hands)
     actionInfo.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
@@ -1136,35 +1682,54 @@ bool XrApp::SetupActions()
     strncpy(actionInfo.localizedActionName, "Menu", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &menuAction_), "xrCreateAction(menu)");
 
-    XrPath bindingPaths[13];
+    XrPath bindingPaths[15];
     xrStringToPath(instance_, "/user/hand/left/input/grip/pose", &bindingPaths[0]);
     xrStringToPath(instance_, "/user/hand/right/input/grip/pose", &bindingPaths[1]);
-    xrStringToPath(instance_, "/user/hand/left/input/trigger/value", &bindingPaths[2]);
-    xrStringToPath(instance_, "/user/hand/right/input/trigger/value", &bindingPaths[3]);
-    xrStringToPath(instance_, "/user/hand/left/input/squeeze/value", &bindingPaths[4]);
-    xrStringToPath(instance_, "/user/hand/right/input/squeeze/value", &bindingPaths[5]);
-    xrStringToPath(instance_, "/user/hand/left/input/thumbstick", &bindingPaths[6]);
-    xrStringToPath(instance_, "/user/hand/right/input/thumbstick", &bindingPaths[7]);
-    xrStringToPath(instance_, "/user/hand/left/input/x/click", &bindingPaths[8]);
-    xrStringToPath(instance_, "/user/hand/right/input/a/click", &bindingPaths[9]);
-    xrStringToPath(instance_, "/user/hand/left/input/y/click", &bindingPaths[10]);
-    xrStringToPath(instance_, "/user/hand/right/input/b/click", &bindingPaths[11]);
-    xrStringToPath(instance_, "/user/hand/left/input/menu/click", &bindingPaths[12]);
+    xrStringToPath(instance_, "/user/hand/left/input/aim/pose", &bindingPaths[2]);
+    xrStringToPath(instance_, "/user/hand/right/input/aim/pose", &bindingPaths[3]);
+    xrStringToPath(instance_, "/user/hand/left/input/trigger/value", &bindingPaths[4]);
+    xrStringToPath(instance_, "/user/hand/right/input/trigger/value", &bindingPaths[5]);
+    xrStringToPath(instance_, "/user/hand/left/input/squeeze/value", &bindingPaths[6]);
+    xrStringToPath(instance_, "/user/hand/right/input/squeeze/value", &bindingPaths[7]);
+    xrStringToPath(instance_, "/user/hand/left/input/thumbstick", &bindingPaths[8]);
+    xrStringToPath(instance_, "/user/hand/right/input/thumbstick", &bindingPaths[9]);
+    xrStringToPath(instance_, "/user/hand/left/input/x/click", &bindingPaths[10]);
+    xrStringToPath(instance_, "/user/hand/right/input/a/click", &bindingPaths[11]);
+    xrStringToPath(instance_, "/user/hand/left/input/y/click", &bindingPaths[12]);
+    xrStringToPath(instance_, "/user/hand/right/input/b/click", &bindingPaths[13]);
+    xrStringToPath(instance_, "/user/hand/left/input/menu/click", &bindingPaths[14]);
 
-    XrActionSuggestedBinding bindings[] = {
+    XrActionSuggestedBinding bindingsWithAim[] = {
         {gripPoseAction_, bindingPaths[0]},
         {gripPoseAction_, bindingPaths[1]},
-        {triggerAction_, bindingPaths[2]},
-        {triggerAction_, bindingPaths[3]},
-        {gripAction_, bindingPaths[4]},
-        {gripAction_, bindingPaths[5]},
-        {thumbstickAction_, bindingPaths[6]},
-        {thumbstickAction_, bindingPaths[7]},
-        {aButtonAction_, bindingPaths[8]},
-        {aButtonAction_, bindingPaths[9]},
-        {bButtonAction_, bindingPaths[10]},
-        {bButtonAction_, bindingPaths[11]},
-        {menuAction_, bindingPaths[12]},
+        {aimPoseAction_, bindingPaths[2]},
+        {aimPoseAction_, bindingPaths[3]},
+        {triggerAction_, bindingPaths[4]},
+        {triggerAction_, bindingPaths[5]},
+        {gripAction_, bindingPaths[6]},
+        {gripAction_, bindingPaths[7]},
+        {thumbstickAction_, bindingPaths[8]},
+        {thumbstickAction_, bindingPaths[9]},
+        {aButtonAction_, bindingPaths[10]},
+        {aButtonAction_, bindingPaths[11]},
+        {bButtonAction_, bindingPaths[12]},
+        {bButtonAction_, bindingPaths[13]},
+        {menuAction_, bindingPaths[14]},
+    };
+    XrActionSuggestedBinding bindingsWithoutAim[] = {
+        {gripPoseAction_, bindingPaths[0]},
+        {gripPoseAction_, bindingPaths[1]},
+        {triggerAction_, bindingPaths[4]},
+        {triggerAction_, bindingPaths[5]},
+        {gripAction_, bindingPaths[6]},
+        {gripAction_, bindingPaths[7]},
+        {thumbstickAction_, bindingPaths[8]},
+        {thumbstickAction_, bindingPaths[9]},
+        {aButtonAction_, bindingPaths[10]},
+        {aButtonAction_, bindingPaths[11]},
+        {bButtonAction_, bindingPaths[12]},
+        {bButtonAction_, bindingPaths[13]},
+        {menuAction_, bindingPaths[14]},
     };
 
     const char* controllerProfiles[] = {
@@ -1192,9 +1757,17 @@ bool XrApp::SetupActions()
         XrInteractionProfileSuggestedBinding suggestedBindings = {
             XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         suggestedBindings.interactionProfile = profilePath;
-        suggestedBindings.suggestedBindings = bindings;
-        suggestedBindings.countSuggestedBindings = sizeof(bindings) / sizeof(bindings[0]);
+        suggestedBindings.suggestedBindings = bindingsWithAim;
+        suggestedBindings.countSuggestedBindings =
+            sizeof(bindingsWithAim) / sizeof(bindingsWithAim[0]);
         XrResult suggestResult = xrSuggestInteractionProfileBindings(instance_, &suggestedBindings);
+        if (XR_FAILED(suggestResult))
+        {
+            suggestedBindings.suggestedBindings = bindingsWithoutAim;
+            suggestedBindings.countSuggestedBindings =
+                sizeof(bindingsWithoutAim) / sizeof(bindingsWithoutAim[0]);
+            suggestResult = xrSuggestInteractionProfileBindings(instance_, &suggestedBindings);
+        }
         if (XR_SUCCEEDED(suggestResult))
         {
             ++acceptedProfiles;
@@ -1222,6 +1795,10 @@ bool XrApp::SetupActions()
         spaceInfo.poseInActionSpace.position = {0, 0, 0};
         XR_CHECK(xrCreateActionSpace(session_, &spaceInfo, &gripSpaces_[hand]),
                  "xrCreateActionSpace(grip)");
+
+        spaceInfo.action = aimPoseAction_;
+        XR_CHECK(xrCreateActionSpace(session_, &spaceInfo, &aimSpaces_[hand]),
+                 "xrCreateActionSpace(aim)");
     }
 
     LOGI("Controller actions set up (%u profile suggestions accepted)", acceptedProfiles);
@@ -1345,6 +1922,12 @@ bool XrApp::CreateSwapchains()
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
 
     LOGI("GL resources created for video rendering (external OES texture)");
+
+    if (!CreateShellResources())
+    {
+        LOGE("Failed to create local shell GL resources");
+        return false;
+    }
 
     if (clientFoveationPreset_ != protocol::ClientFoveationPreset::Off &&
         !InitializeFoveation())
@@ -1487,6 +2070,7 @@ void XrApp::StartNetworking()
     lastUsbAdbRetryTime_ = {};
     usbAdbRetryAttempts_ = 0;
     connectionState_.store(ConnectionState::Disconnected);
+    shellStatusText_ = "Preparing network";
     needsReconnect_.store(false);
 
     if (TryStartUsbAdbTransport())
@@ -1498,6 +2082,7 @@ void XrApp::StartNetworking()
 
     LOGI("USB ADB transport unavailable, starting WiFi discovery mode");
     connectionState_.store(ConnectionState::Discovering);
+    shellStatusText_ = "Waiting for server";
 
     networkReceiver_->StartDiscovery(
         [this](const protocol::ServerAnnounce& server, const char* serverIp) {
@@ -1535,6 +2120,7 @@ void XrApp::ResetConnection(const char* reason)
 
     transportMode_ = TransportMode::WifiUdp;
     connectionState_.store(ConnectionState::Disconnected);
+    shellStatusText_ = reason != nullptr ? reason : "Disconnected";
     needsReconnect_.store(false);
     serverIp_[0] = '\0';
     serverVideoPort_ = 0;
@@ -1603,6 +2189,7 @@ void XrApp::OnConnectionLost(const char* reason)
     }
 
     LOGI("Connection lost: %s", reason != nullptr ? reason : "unspecified");
+    shellStatusText_ = reason != nullptr ? reason : "Connection lost";
     connectionState_.store(ConnectionState::Disconnected);
     needsReconnect_.store(true);
 }
@@ -1795,6 +2382,9 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     {
         return;
     }
+    shellStatusText_ = transportMode == TransportMode::UsbAdbTcp
+        ? "Connecting USB"
+        : "Connecting WiFi";
 
     transportMode_ = transportMode;
     const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
@@ -2004,6 +2594,7 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     // NOW send ClientConnect — server will start sending video, and we're already listening
     SendClientConnect(serverIp);
     connectionState_.store(ConnectionState::Connected);
+    shellStatusText_ = "Waiting for video";
     if (networkReceiver_)
     {
         networkReceiver_->StopDiscovery();
@@ -2376,6 +2967,12 @@ void XrApp::RunFrame()
         ResetConnection("connection lost");
         StartNetworking();
     }
+    if (shellPendingNetworkReset_.exchange(false))
+    {
+        shellStatusText_ = "Resetting client";
+        ResetConnection("local shell reset");
+        StartNetworking();
+    }
 
     RetryUsbAdbTransportIfNeeded();
 
@@ -2448,7 +3045,9 @@ void XrApp::RunFrame()
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
     };
-    XrCompositionLayerBaseHeader* layerPtr = nullptr;
+    XrCompositionLayerPassthroughFB passthroughCompositionLayer = {
+        XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+    const XrCompositionLayerBaseHeader* layers[2] = {};
     uint32_t layerCount = 0;
 
     if (frameState.shouldRender == XR_TRUE)
@@ -2491,8 +3090,28 @@ void XrApp::RunFrame()
         uint32_t viewCount = 2;
         xrLocateViews(session_, &viewLocateInfo, &viewState, 2, &viewCount, views_);
 
+        protocol::TrackingPacket trackingPacket =
+            BuildTrackingPacket(frameState.predictedDisplayTime);
+
         // Render to swapchains
-        RenderFrame(frameState.predictedDisplayTime);
+        const bool renderedVideo = RenderFrame(frameState.predictedDisplayTime);
+        bool submitPassthroughLayer = false;
+        if (renderedVideo)
+        {
+            ReleaseShellForStream();
+        }
+        else
+        {
+            submitPassthroughLayer =
+                shellPassthroughMode_ &&
+                CanUseShellPassthrough() &&
+                SetShellPassthroughActive(true);
+            if (!submitPassthroughLayer)
+            {
+                SetShellPassthroughActive(false);
+            }
+            UpdateShellInteractions();
+        }
 
         // Set up projection views.
         // The server now renders using the real headset IPD/FOV we send in
@@ -2512,6 +3131,15 @@ void XrApp::RunFrame()
         }
         bool useRenderPose = hasVideoTexture_ && hasCurrentRenderPose_;
 
+        if (submitPassthroughLayer)
+        {
+            passthroughCompositionLayer.layerHandle = passthroughLayer_;
+            passthroughCompositionLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            passthroughCompositionLayer.space = XR_NULL_HANDLE;
+            layers[layerCount++] =
+                reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughCompositionLayer);
+        }
+
         for (int eye = 0; eye < 2; eye++)
         {
             projectionViews[eye].pose = useRenderPose
@@ -2519,7 +3147,7 @@ void XrApp::RunFrame()
                 : views_[eye].pose;
             projectionViews[eye].fov = views_[eye].fov;
             projectionViews[eye].subImage.swapchain = swapchains_[eye];
-            if (blitWidth_ > 0)
+            if (renderedVideo && blitWidth_ > 0)
             {
                 // Tell compositor exactly where the content is within the swapchain
                 projectionViews[eye].subImage.imageRect.offset = {blitOffsetX_, blitOffsetY_};
@@ -2537,13 +3165,19 @@ void XrApp::RunFrame()
         }
 
         projectionLayer.space = appSpace_;
+        if (submitPassthroughLayer)
+        {
+            projectionLayer.layerFlags =
+                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
+                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+        }
         projectionLayer.viewCount = 2;
         projectionLayer.views = projectionViews;
-        layerPtr = (XrCompositionLayerBaseHeader*)&projectionLayer;
-        layerCount = 1;
+        layers[layerCount++] =
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
 
         // Send tracking data
-        SendTracking(frameState.predictedDisplayTime);
+        SendTracking(trackingPacket);
     }
 
     // xrEndFrame
@@ -2551,7 +3185,7 @@ void XrApp::RunFrame()
     endInfo.displayTime = frameState.predictedDisplayTime;
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     endInfo.layerCount = layerCount;
-    endInfo.layers = (layerCount > 0) ? &layerPtr : nullptr;
+    endInfo.layers = (layerCount > 0) ? layers : nullptr;
 
     XrResult endResult = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(endResult))
@@ -2600,7 +3234,7 @@ void XrApp::RunFrame()
     SendLatencyReport();
 }
 
-void XrApp::RenderFrame(XrTime predictedDisplayTime)
+bool XrApp::RenderFrame(XrTime predictedDisplayTime)
 {
     // Try to get a decoded frame from the video decoder
     bool hasVideo = false;
@@ -2842,6 +3476,10 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
         reusingPresentedFrame = false;
     }
     UpdateReprojectionWarp(reusingPresentedFrame && hasCurrentRenderPose_);
+    if (!hasVideo)
+    {
+        UpdateShellPose();
+    }
 
     for (int eye = 0; eye < 2; eye++)
     {
@@ -2867,6 +3505,7 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
             glViewport(0, 0, swapchainWidth_, swapchainHeight_);
             glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+            glDisable(GL_BLEND);
 
             // Blit video into aspect-ratio-correct viewport
             glViewport(blitOffsetX_, blitOffsetY_, blitWidth_, blitHeight_);
@@ -2876,23 +3515,18 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
         {
             // Fallback before server discovery (blitWidth_ == 0): full swapchain
             glViewport(0, 0, swapchainWidth_, swapchainHeight_);
+            glDisable(GL_BLEND);
             BlitVideoToSwapchain(eye);
         }
         else
         {
-            // No video — show status color
+            // No video — render the local shell instead of a flat status color.
             glViewport(0, 0, swapchainWidth_, swapchainHeight_);
-            if (HasServerConnection())
-            {
-                // Server found, waiting for video stream — dark green
-                glClearColor(0.0f, 0.1f, 0.0f, 1.0f);
-            }
-            else
-            {
-                // Waiting for server discovery — dark blue
-                glClearColor(0.0f, 0.0f, 0.15f, 1.0f);
-            }
+            const bool transparentShell =
+                shellPassthroughMode_ && CanUseShellPassthrough();
+            glClearColor(0.01f, 0.014f, 0.018f, transparentShell ? 0.0f : 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+            RenderShellToSwapchain(eye, transparentShell);
         }
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2901,6 +3535,8 @@ void XrApp::RenderFrame(XrTime predictedDisplayTime)
         XrSwapchainImageReleaseInfo releaseInfo = {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(swapchains_[eye], &releaseInfo);
     }
+
+    return hasVideo;
 }
 
 void XrApp::BlitVideoToSwapchain(int eye)
@@ -2944,6 +3580,273 @@ void XrApp::BlitVideoToSwapchain(int eye)
     glUseProgram(0);
 }
 
+bool XrApp::CreateShellResources()
+{
+    if (shellProgram_ != 0 && shellVao_ != 0 && shellVbo_ != 0)
+    {
+        return true;
+    }
+    DestroyShellResources();
+
+    shellProgram_ = CreateProgram(SHELL_VERTEX_SHADER, SHELL_FRAGMENT_SHADER);
+    if (shellProgram_ == 0)
+    {
+        return false;
+    }
+    shellMvpUniform_ = glGetUniformLocation(shellProgram_, "uMvp");
+
+    glGenVertexArrays(1, &shellVao_);
+    glGenBuffers(1, &shellVbo_);
+    glBindVertexArray(shellVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, shellVbo_);
+    glBufferData(GL_ARRAY_BUFFER, 1, nullptr, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ShellVertex),
+                          reinterpret_cast<void*>(0));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(ShellVertex),
+                          reinterpret_cast<void*>(3 * sizeof(float)));
+    glBindVertexArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    LOGI("GL resources created for local shell");
+    return true;
+}
+
+void XrApp::DestroyShellResources()
+{
+    if (shellProgram_ != 0)
+    {
+        glDeleteProgram(shellProgram_);
+        shellProgram_ = 0;
+    }
+    if (shellVao_ != 0)
+    {
+        glDeleteVertexArrays(1, &shellVao_);
+        shellVao_ = 0;
+    }
+    if (shellVbo_ != 0)
+    {
+        glDeleteBuffers(1, &shellVbo_);
+        shellVbo_ = 0;
+    }
+    shellMvpUniform_ = -1;
+}
+
+void XrApp::ReleaseShellForStream()
+{
+    SetShellPassthroughActive(false);
+    if (shellProgram_ != 0 || shellVao_ != 0 || shellVbo_ != 0)
+    {
+        DestroyShellResources();
+        LOGI("Local shell GL resources released while video stream is active");
+    }
+
+    shellPanelInitialized_ = false;
+    shellHoveredButton_ = quest_shell::ButtonId::None;
+    for (auto& controller : shellControllers_)
+    {
+        controller.clickState.pressed = true;
+    }
+    for (auto& hand : shellHands_)
+    {
+        hand.pinchClickState.pressed = true;
+    }
+}
+
+void XrApp::RenderShellToSwapchain(int eye, bool transparentBackground)
+{
+    if (shellProgram_ == 0 || shellVao_ == 0 || shellVbo_ == 0)
+    {
+        if (!CreateShellResources())
+        {
+            LOGE("Failed to recreate local shell GL resources");
+            return;
+        }
+    }
+
+    std::vector<ShellVertex> triangles;
+    std::vector<ShellVertex> lines;
+    triangles.reserve(8192);
+    lines.reserve(768);
+
+    const ShellColor gridMajor = {0.30f, 0.42f, 0.48f, 0.55f};
+    const ShellColor gridMinor = {0.18f, 0.24f, 0.27f, 0.42f};
+    const ShellColor panel = {0.025f, 0.032f, 0.038f, transparentBackground ? 0.72f : 0.88f};
+    const ShellColor panelEdge = {0.28f, 0.50f, 0.54f, 0.95f};
+    const ShellColor text = {0.86f, 0.94f, 0.90f, 1.0f};
+    const ShellColor dimText = {0.52f, 0.62f, 0.64f, 0.95f};
+    const ShellColor button = {0.12f, 0.18f, 0.20f, 0.94f};
+    const ShellColor buttonHover = {0.18f, 0.42f, 0.45f, 0.98f};
+    const ShellColor buttonDisabled = {0.10f, 0.11f, 0.12f, 0.70f};
+
+    if (!transparentBackground)
+    {
+        constexpr float gridHalfExtent = 4.0f;
+        constexpr int gridSteps = 16;
+        constexpr float gridSpacing = gridHalfExtent * 2.0f / static_cast<float>(gridSteps);
+        for (int i = 0; i <= gridSteps; ++i)
+        {
+            const float offset = -gridHalfExtent + gridSpacing * static_cast<float>(i);
+            const bool major = (i % 4) == 0;
+            AppendLine(lines,
+                       {offset, shellFloorY_, -gridHalfExtent},
+                       {offset, shellFloorY_, gridHalfExtent},
+                       major ? gridMajor : gridMinor);
+            AppendLine(lines,
+                       {-gridHalfExtent, shellFloorY_, offset},
+                       {gridHalfExtent, shellFloorY_, offset},
+                       major ? gridMajor : gridMinor);
+        }
+    }
+
+    AppendPanelQuad(triangles, shellPanelLayout_, 0.0f, 0.0f,
+                    shellPanelLayout_.width, shellPanelLayout_.height,
+                    0.0f, panel);
+    AppendLine(lines,
+               PanelPoint(shellPanelLayout_, -shellPanelLayout_.width * 0.5f,
+                          -shellPanelLayout_.height * 0.5f, 0.006f),
+               PanelPoint(shellPanelLayout_, shellPanelLayout_.width * 0.5f,
+                          -shellPanelLayout_.height * 0.5f, 0.006f),
+               panelEdge);
+    AppendLine(lines,
+               PanelPoint(shellPanelLayout_, shellPanelLayout_.width * 0.5f,
+                          -shellPanelLayout_.height * 0.5f, 0.006f),
+               PanelPoint(shellPanelLayout_, shellPanelLayout_.width * 0.5f,
+                          shellPanelLayout_.height * 0.5f, 0.006f),
+               panelEdge);
+    AppendLine(lines,
+               PanelPoint(shellPanelLayout_, shellPanelLayout_.width * 0.5f,
+                          shellPanelLayout_.height * 0.5f, 0.006f),
+               PanelPoint(shellPanelLayout_, -shellPanelLayout_.width * 0.5f,
+                          shellPanelLayout_.height * 0.5f, 0.006f),
+               panelEdge);
+    AppendLine(lines,
+               PanelPoint(shellPanelLayout_, -shellPanelLayout_.width * 0.5f,
+                          shellPanelLayout_.height * 0.5f, 0.006f),
+               PanelPoint(shellPanelLayout_, -shellPanelLayout_.width * 0.5f,
+                          -shellPanelLayout_.height * 0.5f, 0.006f),
+               panelEdge);
+
+    for (const quest_shell::ButtonRect& shellButton : shellPanelLayout_.buttons)
+    {
+        ShellColor fill = shellButton.enabled ? button : buttonDisabled;
+        if (shellHoveredButton_ == shellButton.id && shellButton.enabled)
+        {
+            fill = buttonHover;
+        }
+        AppendPanelQuad(triangles, shellPanelLayout_,
+                        shellButton.centerX, shellButton.centerY,
+                        shellButton.width, shellButton.height,
+                        0.003f, fill);
+    }
+
+    AppendPanelText(triangles, shellPanelLayout_, -0.335f, 0.160f, 0.0072f,
+                    "OXRSYS CLIENT", text);
+    AppendPanelText(triangles, shellPanelLayout_, -0.335f, 0.075f, 0.0062f,
+                    UppercaseAscii(ShellStatusText(), 27), text);
+    const char* modeText = shellPassthroughMode_ && CanUseShellPassthrough()
+        ? "MODE PASSTHROUGH"
+        : "MODE 3D GRID";
+    AppendPanelText(triangles, shellPanelLayout_, -0.335f, 0.015f, 0.0055f,
+                    modeText, dimText);
+    AppendPanelTextCentered(triangles, shellPanelLayout_,
+                            shellPanelLayout_.buttons[0].centerX,
+                            shellPanelLayout_.buttons[0].centerY,
+                            0.0055f, "RESET", text);
+    const char* toggleText = CanUseShellPassthrough()
+        ? (shellPassthroughMode_ ? "3D" : "PASSTHRU")
+        : "NO PASS";
+    AppendPanelTextCentered(triangles, shellPanelLayout_,
+                            shellPanelLayout_.buttons[1].centerX,
+                            shellPanelLayout_.buttons[1].centerY,
+                            0.0055f, toggleText,
+                            CanUseShellPassthrough() ? text : dimText);
+
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        const ShellColor handColor = hand == 0
+            ? ShellColor{0.92f, 0.58f, 0.30f, 1.0f}
+            : ShellColor{0.30f, 0.70f, 0.94f, 1.0f};
+        if (shellControllers_[hand].active)
+        {
+            const quest_shell::Vec3 origin = shellControllers_[hand].ray.origin;
+            const quest_shell::Vec3 end = AddVec3(
+                origin, ScaleVec3(shellControllers_[hand].ray.direction, 1.45f));
+            AppendLine(lines, origin, end, handColor);
+            constexpr float marker = 0.025f;
+            AppendLine(lines, AddVec3(origin, {-marker, 0.0f, 0.0f}),
+                       AddVec3(origin, {marker, 0.0f, 0.0f}), handColor);
+            AppendLine(lines, AddVec3(origin, {0.0f, -marker, 0.0f}),
+                       AddVec3(origin, {0.0f, marker, 0.0f}), handColor);
+            AppendLine(lines, AddVec3(origin, {0.0f, 0.0f, -marker}),
+                       AddVec3(origin, {0.0f, 0.0f, marker}), handColor);
+        }
+
+        if (shellHands_[hand].active)
+        {
+            const quest_shell::Vec3 origin = shellHands_[hand].ray.origin;
+            const quest_shell::Vec3 end = AddVec3(
+                origin, ScaleVec3(shellHands_[hand].ray.direction, 1.20f));
+            AppendLine(lines, origin, end, handColor);
+
+            const ShellColor jointColor = {
+                handColor.r * 0.80f + 0.20f,
+                handColor.g * 0.80f + 0.20f,
+                handColor.b * 0.80f + 0.20f,
+                0.80f,
+            };
+            const ShellColor pinchColor = {1.0f, 0.92f, 0.22f, 0.95f};
+            for (uint32_t joint = 0; joint < XR_HAND_JOINT_COUNT_EXT; ++joint)
+            {
+                if (!shellHands_[hand].jointActive[joint])
+                {
+                    continue;
+                }
+                const bool pinchJoint =
+                    joint == XR_HAND_JOINT_INDEX_TIP_EXT ||
+                    joint == XR_HAND_JOINT_THUMB_TIP_EXT;
+                const bool pinching = shellHands_[hand].pinchValue >= 0.75f;
+                AppendCube(triangles,
+                           shellHands_[hand].joints[joint],
+                           pinchJoint ? 0.016f : 0.011f,
+                           pinchJoint && pinching ? pinchColor : jointColor);
+            }
+        }
+    }
+
+    Mat4 view = ViewFromPose(views_[eye].pose);
+    Mat4 projection = ProjectionFromFov(views_[eye].fov);
+    Mat4 mvp = MultiplyMat4(projection, view);
+
+    glUseProgram(shellProgram_);
+    glUniformMatrix4fv(shellMvpUniform_, 1, GL_FALSE, mvp.m);
+    glBindVertexArray(shellVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, shellVbo_);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    if (!triangles.empty())
+    {
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(triangles.size() * sizeof(ShellVertex)),
+                     triangles.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(triangles.size()));
+    }
+    if (!lines.empty())
+    {
+        glBufferData(GL_ARRAY_BUFFER,
+                     static_cast<GLsizeiptr>(lines.size() * sizeof(ShellVertex)),
+                     lines.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(lines.size()));
+    }
+
+    glDisable(GL_BLEND);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+    glUseProgram(0);
+}
+
 void XrApp::ClearSwapchain(int eye, float r, float g, float b)
 {
     glClearColor(r, g, b, 1.0f);
@@ -2983,11 +3886,204 @@ XrPosef XrApp::BuildEyePoseFromRenderPose(const NetworkReceiver::RenderPose& ren
     return pose;
 }
 
-void XrApp::SendTracking(XrTime predictedDisplayTime)
+void XrApp::UpdateShellPose()
 {
-    if (!trackingSender_ || !trackingSender_->IsConnected())
+    if (!CanUseShellPassthrough())
     {
-        return;
+        shellPassthroughMode_ = false;
+    }
+
+    if (!shellPanelInitialized_)
+    {
+        const XrPosef& viewPose = views_[0].pose;
+        XrQuaternionf orientation = NormalizeQuaternion(viewPose.orientation);
+        XrVector3f forwardXr = RotateVector(orientation, {0.0f, 0.0f, -1.0f});
+
+        quest_shell::Vec3 headCenter = {
+            (views_[0].pose.position.x + views_[1].pose.position.x) * 0.5f,
+            (views_[0].pose.position.y + views_[1].pose.position.y) * 0.5f,
+            (views_[0].pose.position.z + views_[1].pose.position.z) * 0.5f,
+        };
+        quest_shell::Vec3 forward = ToShellVec3(forwardXr);
+        forward.y = 0.0f;
+        forward = NormalizeVec3(forward);
+        if (DotVec3(forward, forward) < 0.5f)
+        {
+            forward = {0.0f, 0.0f, -1.0f};
+        }
+        quest_shell::Vec3 up = {0.0f, 1.0f, 0.0f};
+        quest_shell::Vec3 right = NormalizeVec3(CrossVec3(forward, up));
+        quest_shell::Vec3 normal = ScaleVec3(forward, -1.0f);
+        quest_shell::Vec3 center = AddVec3(headCenter, ScaleVec3(forward, 1.0f));
+        shellPanelLayout_ = quest_shell::MakeDefaultPanelLayout(
+            center, right, up, normal, CanUseShellPassthrough());
+        shellFloorY_ = appSpaceIsStage_ ? 0.0f : headCenter.y - 1.45f;
+        shellPanelInitialized_ = true;
+    }
+    shellPanelLayout_.buttons[1].enabled = CanUseShellPassthrough();
+}
+
+void XrApp::UpdateShellInteractions()
+{
+    shellHoveredButton_ = quest_shell::ButtonId::None;
+
+    auto handleClick = [this](quest_shell::ButtonId button) {
+        switch (button)
+        {
+        case quest_shell::ButtonId::Reset:
+            shellStatusText_ = "Reset requested";
+            shellPendingNetworkReset_.store(true);
+            break;
+        case quest_shell::ButtonId::TogglePassthrough:
+            if (CanUseShellPassthrough())
+            {
+                shellPassthroughMode_ = !shellPassthroughMode_;
+                shellStatusText_ = shellPassthroughMode_
+                    ? "Passthrough shell"
+                    : "3D shell";
+            }
+            break;
+        case quest_shell::ButtonId::None:
+        default:
+            break;
+        }
+    };
+
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (shellControllers_[hand].active)
+        {
+            quest_shell::ControllerResult result = quest_shell::UpdateController(
+                shellPanelLayout_, shellControllers_[hand].ray,
+                shellControllers_[hand].triggerValue,
+                &shellControllers_[hand].clickState);
+            if (result.hover.id != quest_shell::ButtonId::None)
+            {
+                shellHoveredButton_ = result.hover.id;
+            }
+            if (result.click != quest_shell::ButtonId::None)
+            {
+                handleClick(result.click);
+            }
+        }
+
+        if (shellHands_[hand].active)
+        {
+            quest_shell::ControllerResult result = quest_shell::UpdateController(
+                shellPanelLayout_,
+                shellHands_[hand].ray,
+                shellHands_[hand].pinchValue,
+                &shellHands_[hand].pinchClickState,
+                0.75f,
+                0.25f);
+            if (result.hover.id != quest_shell::ButtonId::None)
+            {
+                shellHoveredButton_ = result.hover.id;
+            }
+            if (result.click != quest_shell::ButtonId::None)
+            {
+                handleClick(result.click);
+            }
+        }
+    }
+}
+
+bool XrApp::CanUseShellPassthrough() const
+{
+    return passthroughExtensionAvailable_ &&
+           passthroughSupported_ &&
+           passthrough_ != XR_NULL_HANDLE &&
+           passthroughLayer_ != XR_NULL_HANDLE;
+}
+
+bool XrApp::SetShellPassthroughActive(bool active)
+{
+    if (active)
+    {
+        if (!CanUseShellPassthrough())
+        {
+            return false;
+        }
+        if (!passthroughRunning_)
+        {
+            XrResult startResult = xrPassthroughStartFB_(passthrough_);
+            if (XR_FAILED(startResult) &&
+                startResult != XR_ERROR_UNEXPECTED_STATE_PASSTHROUGH_FB)
+            {
+                LOGW("xrPassthroughStartFB failed: %d", startResult);
+                passthroughSupported_ = false;
+                shellPassthroughMode_ = false;
+                return false;
+            }
+            passthroughRunning_ = true;
+        }
+        if (!passthroughLayerRunning_)
+        {
+            XrResult resumeResult = xrPassthroughLayerResumeFB_(passthroughLayer_);
+            if (XR_FAILED(resumeResult) &&
+                resumeResult != XR_ERROR_UNEXPECTED_STATE_PASSTHROUGH_FB)
+            {
+                LOGW("xrPassthroughLayerResumeFB failed: %d", resumeResult);
+                passthroughSupported_ = false;
+                shellPassthroughMode_ = false;
+                return false;
+            }
+            passthroughLayerRunning_ = true;
+        }
+        return true;
+    }
+
+    if (passthroughLayerRunning_ && xrPassthroughLayerPauseFB_ != nullptr &&
+        passthroughLayer_ != XR_NULL_HANDLE)
+    {
+        (void)xrPassthroughLayerPauseFB_(passthroughLayer_);
+        passthroughLayerRunning_ = false;
+    }
+    if (passthroughRunning_ && xrPassthroughPauseFB_ != nullptr &&
+        passthrough_ != XR_NULL_HANDLE)
+    {
+        (void)xrPassthroughPauseFB_(passthrough_);
+        passthroughRunning_ = false;
+    }
+    return false;
+}
+
+const char* XrApp::ShellStatusText() const
+{
+    if (!shellStatusText_.empty())
+    {
+        return shellStatusText_.c_str();
+    }
+
+    switch (connectionState_.load())
+    {
+    case ConnectionState::Connecting:
+        return "Connecting";
+    case ConnectionState::Connected:
+        return "Waiting for video";
+    case ConnectionState::Discovering:
+        return "Waiting for server";
+    case ConnectionState::Disconnected:
+    default:
+        return "Disconnected";
+    }
+}
+
+protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
+{
+    for (auto& controller : shellControllers_)
+    {
+        controller.active = false;
+        controller.aimActive = false;
+        controller.triggerValue = 0.0f;
+        controller.ray = {};
+    }
+    for (auto& hand : shellHands_)
+    {
+        hand.active = false;
+        hand.ray = {};
+        hand.pinchValue = 0.0f;
+        hand.jointActive.fill(false);
     }
 
     protocol::TrackingPacket packet = {};
@@ -3116,7 +4212,77 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
                 jointPayload[i][1] = jointLocations[i].pose.position.y;
                 jointPayload[i][2] = jointLocations[i].pose.position.z;
                 jointPayload[i][3] = jointLocations[i].radius;
+                if (HasValidJointPosition(jointLocations[i]))
+                {
+                    shellHands_[hand].jointActive[i] = true;
+                    shellHands_[hand].joints[i] = {
+                        jointLocations[i].pose.position.x,
+                        jointLocations[i].pose.position.y,
+                        jointLocations[i].pose.position.z,
+                    };
+                }
             }
+            quest_shell::Vec3 indexTip = {
+                jointLocations[XR_HAND_JOINT_INDEX_TIP_EXT].pose.position.x,
+                jointLocations[XR_HAND_JOINT_INDEX_TIP_EXT].pose.position.y,
+                jointLocations[XR_HAND_JOINT_INDEX_TIP_EXT].pose.position.z,
+            };
+            quest_shell::Vec3 thumbTip = {
+                jointLocations[XR_HAND_JOINT_THUMB_TIP_EXT].pose.position.x,
+                jointLocations[XR_HAND_JOINT_THUMB_TIP_EXT].pose.position.y,
+                jointLocations[XR_HAND_JOINT_THUMB_TIP_EXT].pose.position.z,
+            };
+            quest_shell::Vec3 palm = {
+                jointLocations[XR_HAND_JOINT_PALM_EXT].pose.position.x,
+                jointLocations[XR_HAND_JOINT_PALM_EXT].pose.position.y,
+                jointLocations[XR_HAND_JOINT_PALM_EXT].pose.position.z,
+            };
+            auto jointPosition = [&jointLocations](XrHandJointEXT joint) {
+                return quest_shell::Vec3{
+                    jointLocations[joint].pose.position.x,
+                    jointLocations[joint].pose.position.y,
+                    jointLocations[joint].pose.position.z,
+                };
+            };
+            quest_shell::Vec3 rayDirection = {0.0f, 0.0f, -1.0f};
+            bool rayDirectionValid = false;
+            auto useDirectionToJoint = [&](XrHandJointEXT joint) {
+                if (!HasValidJointPosition(jointLocations[joint]))
+                {
+                    return false;
+                }
+                const quest_shell::Vec3 candidate = jointPosition(joint);
+                if (DistanceVec3(candidate, palm) < 0.015f)
+                {
+                    return false;
+                }
+                rayDirection = NormalizeVec3(SubVec3(candidate, palm));
+                rayDirectionValid = true;
+                return true;
+            };
+            (void)(useDirectionToJoint(XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT) ||
+                   useDirectionToJoint(XR_HAND_JOINT_MIDDLE_METACARPAL_EXT) ||
+                   useDirectionToJoint(XR_HAND_JOINT_INDEX_METACARPAL_EXT));
+            if (!rayDirectionValid && HasValidJointOrientation(jointLocations[XR_HAND_JOINT_PALM_EXT]))
+            {
+                const XrVector3f palmForward = RotateVector(
+                    NormalizeQuaternion(jointLocations[XR_HAND_JOINT_PALM_EXT].pose.orientation),
+                    {0.0f, 0.0f, -1.0f});
+                rayDirection = NormalizeVec3(ToShellVec3(palmForward));
+                rayDirectionValid = true;
+            }
+            if (!rayDirectionValid)
+            {
+                rayDirection = NormalizeVec3(SubVec3(indexTip, palm));
+            }
+            const float pinchDistance = DistanceVec3(indexTip, thumbTip);
+            const float pinchValue = std::clamp((0.055f - pinchDistance) / 0.030f,
+                                                0.0f, 1.0f);
+            shellHands_[hand].indexTip = indexTip;
+            shellHands_[hand].ray.origin = palm;
+            shellHands_[hand].ray.direction = rayDirection;
+            shellHands_[hand].pinchValue = pinchValue;
+            shellHands_[hand].active = true;
         }
     }
 
@@ -3131,8 +4297,8 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
         return PathToString(instance_, profileState.interactionProfile);
     };
 
-    auto readPoseActionActive = [&](int hand, XrResult* resultOut) {
-        if (gripPoseAction_ == XR_NULL_HANDLE)
+    auto readPoseActionActive = [&](XrAction action, int hand, XrResult* resultOut) {
+        if (action == XR_NULL_HANDLE)
         {
             if (resultOut != nullptr)
             {
@@ -3142,7 +4308,7 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
         }
 
         XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
-        getInfo.action = gripPoseAction_;
+        getInfo.action = action;
         getInfo.subactionPath = handPaths_[hand];
         XrActionStatePose poseState = {XR_TYPE_ACTION_STATE_POSE};
         XrResult result = xrGetActionStatePose(session_, &getInfo, &poseState);
@@ -3216,16 +4382,32 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
         for (int hand = 0; hand < 2; hand++)
         {
             XrResult poseStateResult = XR_ERROR_HANDLE_INVALID;
-            const bool poseActionActive = readPoseActionActive(hand, &poseStateResult);
+            const bool poseActionActive =
+                readPoseActionActive(gripPoseAction_, hand, &poseStateResult);
             XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
             XrResult locResult = xrLocateSpace(gripSpaces_[hand], appSpace_,
                                                 predictedDisplayTime, &loc);
+            XrResult aimPoseStateResult = XR_ERROR_HANDLE_INVALID;
+            const bool aimPoseActionActive =
+                readPoseActionActive(aimPoseAction_, hand, &aimPoseStateResult);
+            XrSpaceLocation aimLoc = {XR_TYPE_SPACE_LOCATION};
+            XrResult aimLocResult = XR_ERROR_HANDLE_INVALID;
+            if (aimSpaces_[hand] != XR_NULL_HANDLE)
+            {
+                aimLocResult = xrLocateSpace(aimSpaces_[hand], appSpace_,
+                                             predictedDisplayTime, &aimLoc);
+            }
 
             const bool controllerActive =
                 poseActionActive &&
                 XR_SUCCEEDED(locResult) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
                 (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+            const bool aimActive =
+                aimPoseActionActive &&
+                XR_SUCCEEDED(aimLocResult) &&
+                (aimLoc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (aimLoc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
             if (controllerActive)
             {
                 packet.trackingFlags |= (hand == 0)
@@ -3274,6 +4456,18 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
                 rot[2] = loc.pose.orientation.z;
                 rot[3] = loc.pose.orientation.w;
             }
+            if (controllerActive || aimActive)
+            {
+                shellControllers_[hand].active = true;
+                shellControllers_[hand].aimActive = aimActive;
+                shellControllers_[hand].gripPose = controllerActive ? loc.pose : aimLoc.pose;
+                shellControllers_[hand].aimPose = aimActive ? aimLoc.pose : shellControllers_[hand].gripPose;
+                const XrPosef& rayPose = shellControllers_[hand].aimPose;
+                const XrVector3f rayForward = RotateVector(
+                    NormalizeQuaternion(rayPose.orientation), {0.0f, 0.0f, -1.0f});
+                shellControllers_[hand].ray.origin = ToShellVec3(rayPose.position);
+                shellControllers_[hand].ray.direction = NormalizeVec3(ToShellVec3(rayForward));
+            }
         }
     }
     else
@@ -3292,6 +4486,8 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
     readFloatAction(triggerAction_, handPaths_[1], &packet.rightTrigger);
     readFloatAction(gripAction_, handPaths_[0], &packet.leftGrip);
     readFloatAction(gripAction_, handPaths_[1], &packet.rightGrip);
+    shellControllers_[0].triggerValue = packet.leftTrigger;
+    shellControllers_[1].triggerValue = packet.rightTrigger;
 
     // Thumbsticks
     readVector2Action(thumbstickAction_, handPaths_[0],
@@ -3340,6 +4536,16 @@ void XrApp::SendTracking(XrTime predictedDisplayTime)
              packet.leftGrip, packet.rightGrip,
              packet.leftThumbstick[0], packet.leftThumbstick[1],
              packet.buttonState, packet.trackingFlags);
+    }
+
+    return packet;
+}
+
+void XrApp::SendTracking(const protocol::TrackingPacket& packet)
+{
+    if (!trackingSender_ || !trackingSender_->IsConnected())
+    {
+        return;
     }
 
     trackingSender_->Send(packet);
@@ -3400,6 +4606,7 @@ void XrApp::HandleSessionStateChange(XrSessionState newState)
     }
     case XR_SESSION_STATE_STOPPING:
         StopNetworking();
+        SetShellPassthroughActive(false);
         ShutdownHandTracking();
         ShutdownFoveation();
         xrEndSession(session_);
@@ -3420,6 +4627,7 @@ void XrApp::HandleSessionStateChange(XrSessionState newState)
 void XrApp::Shutdown()
 {
     StopNetworking();
+    ShutdownPassthrough();
     ShutdownHandTracking();
     ShutdownFoveation();
 
@@ -3451,6 +4659,8 @@ void XrApp::Shutdown()
         glDeleteBuffers(1, &blitVbo_);
         blitVbo_ = 0;
     }
+    DestroyShellResources();
+    shellMvpUniform_ = -1;
     if (fbo_ != 0)
     {
         glDeleteFramebuffers(1, &fbo_);
@@ -3473,6 +4683,19 @@ void XrApp::Shutdown()
     }
 
     // Destroy OpenXR objects
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (aimSpaces_[hand] != XR_NULL_HANDLE)
+        {
+            xrDestroySpace(aimSpaces_[hand]);
+            aimSpaces_[hand] = XR_NULL_HANDLE;
+        }
+        if (gripSpaces_[hand] != XR_NULL_HANDLE)
+        {
+            xrDestroySpace(gripSpaces_[hand]);
+            gripSpaces_[hand] = XR_NULL_HANDLE;
+        }
+    }
     if (viewSpace_ != XR_NULL_HANDLE)
     {
         xrDestroySpace(viewSpace_);

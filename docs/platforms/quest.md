@@ -33,6 +33,11 @@ Quest hand tracking requires the Android manifest to declare:
 If these entries are missing, the runtime can still operate, but headset-side hand joints will not be available.
 PICO runtimes expose hand tracking through their OpenXR runtime support; validate this per headset with the log matrix below because Android manifest requirements differ from Meta's Quest permission model.
 
+Quest passthrough shell mode is optional. The Android manifest declares `com.oculus.feature.PASSTHROUGH`
+with `required="false"` so the APK remains installable on PICO and on devices without passthrough.
+At runtime the client enables `XR_FB_passthrough` only when the headset advertises support and the
+passthrough objects can be created; otherwise the shell keeps the 3D grid fallback.
+
 USB diagnostics use Android's official `UsbManager` host-device intents and filters. The app requests app-level USB permission only when Android exposes a real USB device to the headset. ADB reverse streaming itself does not require or produce that app permission dialog; it may instead trigger the headset's USB debugging authorization prompt when the Mac is first authorized for ADB.
 
 ## Display Refresh
@@ -65,9 +70,29 @@ The Android client:
 - receives encoded video frames and matches render-pose metadata to each decoded frame before projection submission
 - reuses short decode/network gaps with the configured client reprojection mode
 - drains MediaCodec output on a decoder thread so the XR frame loop only acquires the latest ready image
+- shows a local shell before video arrives, with status text, a reset button, a passthrough/3D toggle, controller laser interaction, hand laser/pinch interaction, and simple controller/hand-joint markers
 - sends head, controller, and optional hand-tracking data back to the runtime
 - reports latency measurements
 - requests keyframes when recovery is needed
+
+## Local Shell
+
+When no decoded video frame is ready, the client renders a lightweight local shell instead of the old
+blue/green standby colors. The default shell is a world-locked panel about one meter in front of the
+headset with a simple grid floor. The panel reports discovery, connection, waiting-for-video, reset,
+and connection-lost states.
+
+The `Reset` button clears the current network, decoder, and stream state and restarts the normal
+USB/WiFi discovery loop without recreating the OpenXR session. The passthrough/3D button affects only
+the local shell. Once streaming video is available, the existing video projection path remains primary,
+the passthrough underlay is paused, local shell interactions stop running, and shell GL resources are
+released until video is no longer rendered.
+
+Controller interaction uses an `aim_pose` laser when the runtime provides one and falls back to the
+grip pose otherwise. Hand interaction uses a laser derived from active `XR_EXT_hand_tracking` joints,
+with index-tip/thumb-tip pinch acting as the click. The shell also renders valid hand joints as small
+world-space cube markers so hand tracking can be inspected before video starts. Both controller and
+hand paths share the same ray/button hit-testing code covered by host tests.
 
 When supported by the headset, the Android viewer app can enable `XR_FB_foveation` from the
 server-announced client foveation override. This applies to the Quest/PICO viewer swapchains, not to

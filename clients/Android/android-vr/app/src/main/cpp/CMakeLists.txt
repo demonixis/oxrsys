@@ -47,6 +47,7 @@ set(OXRSYS_PROTOCOL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../.
 add_library(oxrsys_android SHARED
     main.cpp
     XrApp.cpp
+    QuestShellInteraction.cpp
     VideoDecoder.cpp
     NetworkReceiver.cpp
     TrackingSender.cpp

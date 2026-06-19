@@ -24,6 +24,9 @@
         android:name="oculus.software.handtracking"
         android:required="false" />
     <uses-feature
+        android:name="com.oculus.feature.PASSTHROUGH"
+        android:required="false" />
+    <uses-feature
         android:name="android.hardware.usb.host"
         android:required="false" />
 

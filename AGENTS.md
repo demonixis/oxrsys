@@ -17,7 +17,10 @@ real `XR_EXT_hand_tracking` joints into the runtime, gates controller poses with
 keeps hand-interaction bindings available alongside active controllers with controller-first priority,
 supports WiFi UDP and USB ADB reverse TCP streaming, matches per-frame render poses for headset
 compositor reprojection, reuses short decode/network gaps through configurable client reprojection
-with conservative optional pose warp, requests the server-selected display refresh rate, enables preset-driven
+with conservative optional pose warp, shows a local headset shell with status text, reset,
+controller lasers, hand laser/pinch input, visible hand-joint markers, a simple 3D grid, and
+optional `XR_FB_passthrough` while waiting for
+video, requests the server-selected display refresh rate, enables preset-driven
 dynamic `XR_FB_foveation` when the headset supports it, and supports the Quest shader path for
 foveated-encoding decompression plus edge-aware upscaling. Runtime video sends now run behind a
 bounded encoded-frame sender queue so socket backpressure does not run inside VideoToolbox callbacks,
@@ -102,6 +105,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Headset speaker audio has protocol/config scaffolding only until a real capture/playback path is attached; do not advertise `SERVER_FEATURE_HEADSET_AUDIO` without that pipeline.
 - UDP FEC uses the existing 24-byte `VideoPacketHeader` padding to carry the final data packet size for each FEC group; clients must use it only when recovering the last packet in that group.
 - Quest hand tracking depends on the Android manifest permission `com.oculus.permission.HAND_TRACKING` and the optional `oculus.software.handtracking` feature.
+- Quest passthrough shell mode depends on `XR_FB_passthrough` support and the optional Android feature `com.oculus.feature.PASSTHROUGH`; streaming video remains the priority display path and must disable the local passthrough underlay and release local shell GL resources while active.
 - Streaming controller poses are valid only when `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE` is present; missing controller flags must not overwrite the last valid runtime pose.
 - The action system is profile-aware and must not regress to hard-forcing `KHR simple_controller`.
 - `xrLocateSpacesKHR` is accepted as an alias of the OpenXR 1.1 `xrLocateSpaces` entry point.
