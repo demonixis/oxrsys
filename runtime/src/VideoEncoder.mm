@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <thread>
 #include <utility>
 
@@ -45,8 +46,6 @@ struct MetalFoveationUniforms
     vector_float2 centerShift;
     vector_float2 edgeRatio;
     vector_float2 eyeSizeRatio;
-    uint32_t eyeIndex;
-    uint32_t _padding[3];
 };
 
 // Axis-aligned foveated encoding shader logic adapted from ALVR's AADT
@@ -55,38 +54,13 @@ constexpr const char* kFoveationMetalSource = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
-struct VertexOut
-{
-    float4 position [[position]];
-    float2 uv;
-};
-
 struct FoveationUniforms
 {
     float2 centerSize;
     float2 centerShift;
     float2 edgeRatio;
     float2 eyeSizeRatio;
-    uint eyeIndex;
-    uint3 _padding;
 };
-
-vertex VertexOut foveation_vertex(uint vertexId [[vertex_id]])
-{
-    constexpr float2 positions[6] = {
-        {-1.0, -1.0}, { 1.0, -1.0}, { 1.0,  1.0},
-        {-1.0, -1.0}, { 1.0,  1.0}, {-1.0,  1.0},
-    };
-    constexpr float2 uvs[6] = {
-        {0.0, 1.0}, {1.0, 1.0}, {1.0, 0.0},
-        {0.0, 1.0}, {1.0, 0.0}, {0.0, 0.0},
-    };
-
-    VertexOut out;
-    out.position = float4(positions[vertexId], 0.0, 1.0);
-    out.uv = uvs[vertexId];
-    return out;
-}
 
 static float compress_axis(float eyeUv, float centerSize, float centerShift, float edgeRatio)
 {
@@ -115,21 +89,34 @@ static float compress_axis(float eyeUv, float centerSize, float centerShift, flo
     return center;
 }
 
-fragment float4 foveation_fragment(VertexOut in [[stage_in]],
-                                   texture2d<float, access::sample> leftTexture [[texture(0)]],
-                                   texture2d<float, access::sample> rightTexture [[texture(1)]],
-                                   sampler linearSampler [[sampler(0)]],
-                                   constant FoveationUniforms& params [[buffer(0)]])
+kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[texture(0)]],
+                             texture2d<float, access::sample> rightTexture [[texture(1)]],
+                             texture2d<float, access::write> outputTexture [[texture(2)]],
+                             sampler linearSampler [[sampler(0)]],
+                             constant FoveationUniforms& params [[buffer(0)]],
+                             uint2 gid [[thread_position_in_grid]])
 {
-    float2 eyeUv = in.uv / max(params.eyeSizeRatio, float2(0.0001));
+    uint outputWidth = outputTexture.get_width();
+    uint outputHeight = outputTexture.get_height();
+    if (gid.x >= outputWidth || gid.y >= outputHeight)
+    {
+        return;
+    }
+
+    uint eyeWidth = max(outputWidth / 2, 1u);
+    bool rightEye = gid.x >= eyeWidth;
+    uint localX = rightEye ? gid.x - eyeWidth : gid.x;
+    float2 uv = (float2(localX, gid.y) + float2(0.5)) / float2(eyeWidth, outputHeight);
+    float2 eyeUv = uv / max(params.eyeSizeRatio, float2(0.0001));
     float2 compressedUv;
     compressedUv.x = compress_axis(eyeUv.x, params.centerSize.x, params.centerShift.x, params.edgeRatio.x);
     compressedUv.y = compress_axis(eyeUv.y, params.centerSize.y, params.centerShift.y, params.edgeRatio.y);
     compressedUv = clamp(compressedUv, float2(0.0), float2(1.0));
 
-    return params.eyeIndex == 0
-        ? leftTexture.sample(linearSampler, compressedUv)
-        : rightTexture.sample(linearSampler, compressedUv);
+    float4 color = rightEye
+        ? rightTexture.sample(linearSampler, compressedUv)
+        : leftTexture.sample(linearSampler, compressedUv);
+    outputTexture.write(color, gid);
 }
 )METAL";
 
@@ -273,7 +260,47 @@ void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImag
     }
 }
 
-id<MTLRenderPipelineState> CreateFoveationPipeline(id<MTLDevice> device)
+bool IsFiniteRatio(float value)
+{
+    return std::isfinite(value) && value > 0.0f && value <= 1.0f;
+}
+
+bool IsFiniteNormalized(float value)
+{
+    return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+}
+
+bool IsFoveationSettingsValid(const VideoEncoder::FoveationSettings& settings,
+                              uint32_t sourceEyeWidth,
+                              uint32_t sourceEyeHeight)
+{
+    return settings.enabled &&
+           settings.targetEyeWidth == sourceEyeWidth &&
+           settings.targetEyeHeight == sourceEyeHeight &&
+           IsFiniteRatio(settings.eyeWidthRatio) &&
+           IsFiniteRatio(settings.eyeHeightRatio) &&
+           IsFiniteNormalized(settings.centerSizeX) &&
+           IsFiniteNormalized(settings.centerSizeY) &&
+           std::isfinite(settings.centerShiftX) &&
+           std::isfinite(settings.centerShiftY) &&
+           std::isfinite(settings.edgeRatioX) &&
+           std::isfinite(settings.edgeRatioY) &&
+           settings.edgeRatioX > 1.0f &&
+           settings.edgeRatioY > 1.0f;
+}
+
+bool TextureAllowsUsage(id<MTLTexture> texture, MTLTextureUsage requiredUsage)
+{
+    if (texture == nil)
+    {
+        return false;
+    }
+    const MTLTextureUsage declaredUsage = texture.usage;
+    return declaredUsage == MTLTextureUsageUnknown ||
+           (declaredUsage & requiredUsage) == requiredUsage;
+}
+
+id<MTLComputePipelineState> CreateFoveationPipeline(id<MTLDevice> device)
 {
     NSError* error = nil;
     NSString* source = [NSString stringWithUTF8String:kFoveationMetalSource];
@@ -285,34 +312,24 @@ id<MTLRenderPipelineState> CreateFoveationPipeline(id<MTLDevice> device)
         return nil;
     }
 
-    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"foveation_vertex"];
-    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"foveation_fragment"];
-    if (vertexFunction == nil || fragmentFunction == nil)
+    id<MTLFunction> kernelFunction = [library newFunctionWithName:@"foveation_kernel"];
+    if (kernelFunction == nil)
     {
-        spdlog::error("VideoEncoder: Failed to load foveation shader entry points");
-        [vertexFunction release];
-        [fragmentFunction release];
+        spdlog::error("VideoEncoder: Failed to load foveation compute shader entry point");
         [library release];
         return nil;
     }
 
-    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    descriptor.vertexFunction = vertexFunction;
-    descriptor.fragmentFunction = fragmentFunction;
-    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-
     error = nil;
-    id<MTLRenderPipelineState> pipeline =
-        [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    id<MTLComputePipelineState> pipeline =
+        [device newComputePipelineStateWithFunction:kernelFunction error:&error];
     if (pipeline == nil)
     {
-        spdlog::error("VideoEncoder: Failed to create foveation pipeline: {}",
+        spdlog::error("VideoEncoder: Failed to create foveation compute pipeline: {}",
                       error != nil ? error.localizedDescription.UTF8String : "unknown error");
     }
 
-    [descriptor release];
-    [vertexFunction release];
-    [fragmentFunction release];
+    [kernelFunction release];
     [library release];
     return pipeline;
 }
@@ -370,7 +387,7 @@ bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsConte
         return false;
     }
 
-    id<MTLRenderPipelineState> pipeline = CreateFoveationPipeline(device);
+    id<MTLComputePipelineState> pipeline = CreateFoveationPipeline(device);
     id<MTLSamplerState> sampler = CreateLinearClampSampler(device);
     const bool supported = pipeline != nil && sampler != nil;
     [pipeline release];
@@ -391,6 +408,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     graphicsContext_ = graphicsContext;
     videoToolbox_.metalDevice = graphicsContext.metalDevice;
     shuttingDown_.store(false);
+    foveationValidationWarningLogged_.store(false);
     droppedFrameCount_.store(0);
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
@@ -460,6 +478,18 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     tmpDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     tmpDesc.storageMode = MTLStorageModePrivate;
 
+    MTLTextureDescriptor* foveatedScratchDesc = nil;
+    if (foveationSettings_.enabled)
+    {
+        foveatedScratchDesc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:MAX((uint32_t)1, width_)
+                                        height:MAX((uint32_t)1, height_)
+                                     mipmapped:NO];
+        foveatedScratchDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+        foveatedScratchDesc.storageMode = MTLStorageModePrivate;
+    }
+
     for (size_t i = 0; i < SlotCount; i++)
     {
         CVPixelBufferRef pixelBuffer = nullptr;
@@ -495,6 +525,17 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].metalTexture = cvMetalTexture;
         slots_[i].tmpLeftTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
         slots_[i].tmpRightTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
+        if (foveatedScratchDesc != nil)
+        {
+            slots_[i].foveatedScratchTexture =
+                (void*)[device newTextureWithDescriptor:foveatedScratchDesc];
+            if (slots_[i].foveatedScratchTexture == nullptr)
+            {
+                spdlog::error("VideoEncoder: Failed to create foveated compute scratch texture for slot {}", i);
+                Shutdown();
+                return false;
+            }
+        }
         slots_[i].inUse = false;
     }
 
@@ -620,7 +661,7 @@ void VideoEncoder::Shutdown()
     }
     if (videoToolbox_.foveationPipeline != nullptr)
     {
-        [(id<MTLRenderPipelineState>)videoToolbox_.foveationPipeline release];
+        [(id<MTLComputePipelineState>)videoToolbox_.foveationPipeline release];
         videoToolbox_.foveationPipeline = nullptr;
     }
     if (videoToolbox_.foveationSampler != nullptr)
@@ -705,7 +746,34 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
     id<MTLTexture> leftTex = (__bridge id<MTLTexture>)frameSource.left.GetImage();
     id<MTLTexture> rightTex = stereo ? (__bridge id<MTLTexture>)frameSource.right.GetImage() : nil;
+    auto dropAcquiredSlot = [&](const char* reason) {
+        if (reason != nullptr && !foveationValidationWarningLogged_.exchange(true))
+        {
+            spdlog::warn("VideoEncoder: dropping frame before encode: {}", reason);
+        }
+        droppedFrameCount_.fetch_add(1);
+        ReleaseSlot(slotIndex);
+        if (frameCallback)
+        {
+            FrameMetrics metrics = {};
+            metrics.frameNumber = frameNumberCounter_.fetch_add(1);
+            metrics.timestampNs = timestampNs;
+            metrics.frameDropped = true;
+            frameCallback(metrics);
+        }
+        return false;
+    };
+    if (leftTex == nil || (stereo && rightTex == nil))
+    {
+        return dropAcquiredSlot("missing source texture");
+    }
+
     id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)videoToolbox_.commandQueue;
+    if (queue == nil)
+    {
+        ReleaseSlot(slotIndex);
+        return false;
+    }
     id<MTLCommandBuffer> cmdBuf = [queue commandBuffer];
     if (cmdBuf == nil)
     {
@@ -723,7 +791,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     const bool useFoveatedEncoding = stereo &&
         foveationSettings_.enabled &&
         videoToolbox_.foveationPipeline != nullptr &&
-        videoToolbox_.foveationSampler != nullptr;
+        videoToolbox_.foveationSampler != nullptr &&
+        slot.foveatedScratchTexture != nullptr;
     bool needsDownscale = stereo
         ? (leftTex.width != (NSUInteger)eyeWidth_ || leftTex.height != (NSUInteger)height_ ||
            rightTex.width != (NSUInteger)eyeWidth_ || rightTex.height != (NSUInteger)height_)
@@ -738,23 +807,38 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                       stereo ? (uint32_t)rightTex.height : 0,
                       (uint32_t)dstTexture.width, (uint32_t)dstTexture.height,
                       useFoveatedEncoding ? true : needsDownscale);
+        if (useFoveatedEncoding)
+        {
+            spdlog::info("VideoEncoder: foveated path targetEye={}x{} encoded={}x{} ratio={:.4f}x{:.4f} via compute scratch texture",
+                          foveationSettings_.targetEyeWidth,
+                          foveationSettings_.targetEyeHeight,
+                          width_,
+                          height_,
+                          foveationSettings_.eyeWidthRatio,
+                          foveationSettings_.eyeHeightRatio);
+        }
     }
 
     if (useFoveatedEncoding)
     {
-        MTLRenderPassDescriptor* passDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
-        passDescriptor.colorAttachments[0].texture = dstTexture;
-        passDescriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
-        passDescriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
-        passDescriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-
-        id<MTLRenderCommandEncoder> renderEncoder =
-            [cmdBuf renderCommandEncoderWithDescriptor:passDescriptor];
-        [renderEncoder setRenderPipelineState:(id<MTLRenderPipelineState>)videoToolbox_.foveationPipeline];
-        [renderEncoder setFragmentTexture:leftTex atIndex:0];
-        [renderEncoder setFragmentTexture:rightTex atIndex:1];
-        [renderEncoder setFragmentSamplerState:(id<MTLSamplerState>)videoToolbox_.foveationSampler
-                                       atIndex:0];
+        id<MTLTexture> foveatedDstTexture = (id<MTLTexture>)slot.foveatedScratchTexture;
+        if (foveatedDstTexture == nil ||
+            foveatedDstTexture.width != (NSUInteger)width_ ||
+            foveatedDstTexture.height != (NSUInteger)height_ ||
+            rightTex.width != leftTex.width ||
+            rightTex.height != leftTex.height ||
+            !TextureAllowsUsage(leftTex, MTLTextureUsageShaderRead) ||
+            !TextureAllowsUsage(rightTex, MTLTextureUsageShaderRead) ||
+            !TextureAllowsUsage(foveatedDstTexture, MTLTextureUsageShaderWrite) ||
+            (width_ % 2u) != 0 ||
+            eyeWidth_ == 0 ||
+            height_ == 0 ||
+            !IsFoveationSettingsValid(foveationSettings_,
+                                      (uint32_t)leftTex.width,
+                                      (uint32_t)leftTex.height))
+        {
+            return dropAcquiredSlot("invalid foveated texture, dimensions, usage, or settings");
+        }
 
         MetalFoveationUniforms uniforms = {};
         uniforms.centerSize = {foveationSettings_.centerSizeX, foveationSettings_.centerSizeY};
@@ -762,22 +846,48 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         uniforms.edgeRatio = {foveationSettings_.edgeRatioX, foveationSettings_.edgeRatioY};
         uniforms.eyeSizeRatio = {foveationSettings_.eyeWidthRatio, foveationSettings_.eyeHeightRatio};
 
-        for (uint32_t eye = 0; eye < 2; ++eye)
+        id<MTLComputeCommandEncoder> computeEncoder = [cmdBuf computeCommandEncoder];
+        if (computeEncoder == nil)
         {
-            uniforms.eyeIndex = eye;
-            MTLViewport viewport = {
-                static_cast<double>(eye * eyeWidth_),
-                0.0,
-                static_cast<double>(eyeWidth_),
-                static_cast<double>(height_),
-                0.0,
-                1.0,
-            };
-            [renderEncoder setViewport:viewport];
-            [renderEncoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-            [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            return dropAcquiredSlot("failed to create foveated compute encoder");
         }
-        [renderEncoder endEncoding];
+        id<MTLComputePipelineState> pipeline =
+            (id<MTLComputePipelineState>)videoToolbox_.foveationPipeline;
+        [computeEncoder setComputePipelineState:pipeline];
+        [computeEncoder setTexture:leftTex atIndex:0];
+        [computeEncoder setTexture:rightTex atIndex:1];
+        [computeEncoder setTexture:foveatedDstTexture atIndex:2];
+        [computeEncoder setSamplerState:(id<MTLSamplerState>)videoToolbox_.foveationSampler
+                                atIndex:0];
+        [computeEncoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+
+        const NSUInteger threadsX = std::max<NSUInteger>(1, std::min<NSUInteger>(pipeline.threadExecutionWidth, 16));
+        const NSUInteger threadsY = std::max<NSUInteger>(
+            1,
+            std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup / threadsX, 16));
+        const MTLSize threadsPerGroup = MTLSizeMake(threadsX, threadsY, 1);
+        const MTLSize threadgroups = MTLSizeMake(
+            ((NSUInteger)width_ + threadsX - 1) / threadsX,
+            ((NSUInteger)height_ + threadsY - 1) / threadsY,
+            1);
+        [computeEncoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+        [computeEncoder endEncoding];
+
+        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+        if (blit == nil)
+        {
+            return dropAcquiredSlot("failed to create foveated blit encoder");
+        }
+        [blit copyFromTexture:foveatedDstTexture
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(width_, height_, 1)
+                    toTexture:dstTexture
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
     }
     else if (stereo && needsDownscale)
     {
@@ -973,6 +1083,11 @@ void VideoEncoder::DestroySlots()
         {
             [(id<MTLTexture>)slot.tmpRightTexture release];
             slot.tmpRightTexture = nullptr;
+        }
+        if (slot.foveatedScratchTexture != nullptr)
+        {
+            [(id<MTLTexture>)slot.foveatedScratchTexture release];
+            slot.foveatedScratchTexture = nullptr;
         }
         if (slot.metalTexture != nullptr)
         {

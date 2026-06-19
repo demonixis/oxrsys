@@ -2379,6 +2379,17 @@ void XrApp::RunFrame()
 
     RetryUsbAdbTransportIfNeeded();
 
+    if (connectionState_.load() == ConnectionState::Connected &&
+        !hasVideoTexture_ &&
+        connectionTime_ != std::chrono::steady_clock::time_point{})
+    {
+        auto noInitialVideoFor = std::chrono::steady_clock::now() - connectionTime_;
+        if (std::chrono::duration_cast<std::chrono::seconds>(noInitialVideoFor).count() >= 5)
+        {
+            OnConnectionLost("no initial video frames for 5 seconds");
+        }
+    }
+
     // Poll OpenXR events
     XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
     while (xrPollEvent(instance_, &event) == XR_SUCCESS)

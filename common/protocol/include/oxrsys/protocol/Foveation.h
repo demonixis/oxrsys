@@ -131,5 +131,36 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     return layout;
 }
 
+inline bool IsFoveatedEncodingLayoutUsable(const FoveationLayout& layout,
+                                           uint32_t sourceEyeWidth,
+                                           uint32_t sourceEyeHeight)
+{
+    return layout.preset != FoveationPreset::Off &&
+           layout.targetEyeWidth == sourceEyeWidth &&
+           layout.targetEyeHeight == sourceEyeHeight &&
+           layout.optimizedEyeWidth > 0 &&
+           layout.optimizedEyeHeight > 0 &&
+           layout.optimizedEyeWidth <= layout.targetEyeWidth &&
+           layout.optimizedEyeHeight <= layout.targetEyeHeight &&
+           std::isfinite(layout.eyeWidthRatio) &&
+           std::isfinite(layout.eyeHeightRatio) &&
+           layout.eyeWidthRatio > 0.0f &&
+           layout.eyeWidthRatio <= 1.0f &&
+           layout.eyeHeightRatio > 0.0f &&
+           layout.eyeHeightRatio <= 1.0f &&
+           std::isfinite(layout.parameters.centerSizeX) &&
+           std::isfinite(layout.parameters.centerSizeY) &&
+           layout.parameters.centerSizeX >= 0.0f &&
+           layout.parameters.centerSizeX <= 1.0f &&
+           layout.parameters.centerSizeY >= 0.0f &&
+           layout.parameters.centerSizeY <= 1.0f &&
+           std::isfinite(layout.parameters.centerShiftX) &&
+           std::isfinite(layout.parameters.centerShiftY) &&
+           std::isfinite(layout.parameters.edgeRatioX) &&
+           std::isfinite(layout.parameters.edgeRatioY) &&
+           layout.parameters.edgeRatioX > 1.0f &&
+           layout.parameters.edgeRatioY > 1.0f;
+}
+
 } // namespace protocol
 } // namespace oxr

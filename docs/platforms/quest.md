@@ -125,6 +125,9 @@ bitrate by the same ratio. The Android decoder therefore keeps a bounded input-b
 of sizing MediaCodec input buffers only from `encodedWidth * encodedHeight`, so high-bitrate IDR
 frames still fit when foveated encoding is active.
 
+If a server is discovered but no first video frame arrives, the client treats the session as lost and
+returns to the normal discovery/retry loop rather than staying on the standby/loading color screen.
+
 ## Controller Profiles And Tracking Flags
 
 The client suggests bindings for:

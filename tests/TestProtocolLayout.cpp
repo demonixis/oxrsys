@@ -72,3 +72,32 @@ TEST_CASE("Foveated encoding presets calculate ALVR-style optimized eye sizes", 
     CHECK(off.optimizedEyeWidth == 2144);
     CHECK(off.optimizedEyeHeight == 2144);
 }
+
+TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", "[protocol][foveation]")
+{
+    const FoveationPreset presets[] = {
+        FoveationPreset::Light,
+        FoveationPreset::Medium,
+        FoveationPreset::High,
+    };
+
+    for (FoveationPreset preset : presets)
+    {
+        const FoveationLayout layout =
+            CalculateFoveationLayout(1512, 1680, preset);
+        CHECK((layout.optimizedEyeWidth % 32) == 0);
+        CHECK((layout.optimizedEyeHeight % 32) == 0);
+        CHECK(layout.optimizedEyeWidth < layout.targetEyeWidth);
+        CHECK(layout.optimizedEyeHeight < layout.targetEyeHeight);
+        CHECK(layout.eyeWidthRatio > 0.0f);
+        CHECK(layout.eyeWidthRatio <= 1.0f);
+        CHECK(layout.eyeHeightRatio > 0.0f);
+        CHECK(layout.eyeHeightRatio <= 1.0f);
+        CHECK(IsFoveatedEncodingLayoutUsable(layout, 1512, 1680));
+        CHECK_FALSE(IsFoveatedEncodingLayoutUsable(layout, 1520, 1680));
+    }
+
+    const FoveationLayout scaledLayout =
+        CalculateFoveationLayout(1136, 1264, FoveationPreset::Light);
+    CHECK_FALSE(IsFoveatedEncodingLayoutUsable(scaledLayout, 1512, 1680));
+}

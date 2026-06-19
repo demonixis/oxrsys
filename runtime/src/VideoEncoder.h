@@ -99,6 +99,7 @@ private:
         void* metalTexture = nullptr;     // CVMetalTextureRef
         void* tmpLeftTexture = nullptr;   // id<MTLTexture>
         void* tmpRightTexture = nullptr;  // id<MTLTexture>
+        void* foveatedScratchTexture = nullptr; // id<MTLTexture>
         bool inUse = false;
     };
 
@@ -117,7 +118,7 @@ private:
         void* metalDevice = nullptr;      // id<MTLDevice>
         void* commandQueue = nullptr;     // id<MTLCommandQueue>
         void* scaler = nullptr;           // MPSImageBilinearScale*
-        void* foveationPipeline = nullptr; // id<MTLRenderPipelineState>
+        void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
     };
 
@@ -141,6 +142,7 @@ private:
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
+    std::atomic<bool> foveationValidationWarningLogged_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};

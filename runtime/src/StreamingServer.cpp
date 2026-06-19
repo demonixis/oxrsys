@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <limits>
@@ -407,6 +408,8 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     scaledHeight_ = (scaledHeight_ + 15) & ~15u;
     encodedWidth_ = scaledWidth_ * 2;
     encodedHeight_ = scaledHeight_;
+    foveatedTargetEyeWidth_ = scaledWidth_;
+    foveatedTargetEyeHeight_ = scaledHeight_;
     foveatedEncodingActive_ = false;
     clientFoveatedEncodingActive_.store(false);
 
@@ -417,12 +420,30 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
         IsGraphicsContextValid(graphicsContext_) &&
         VideoEncoder::SupportsFoveatedEncoding(graphicsContext_))
     {
+        const bool unscaledFoveationTarget = std::fabs(scale - 1.0f) <= 0.001f;
+        foveatedTargetEyeWidth_ = unscaledFoveationTarget ? renderWidth_ : scaledWidth_;
+        foveatedTargetEyeHeight_ = unscaledFoveationTarget ? renderHeight_ : scaledHeight_;
         const oxr::protocol::FoveationLayout layout =
-            oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
-        encodedWidth_ = layout.optimizedEyeWidth * 2;
-        encodedHeight_ = layout.optimizedEyeHeight;
-        foveatedEncodingActive_ = encodedWidth_ < scaledWidth_ * 2 ||
-                                  encodedHeight_ < scaledHeight_;
+            oxr::protocol::CalculateFoveationLayout(foveatedTargetEyeWidth_,
+                                                    foveatedTargetEyeHeight_,
+                                                    foveationPreset);
+        if (unscaledFoveationTarget &&
+            oxr::protocol::IsFoveatedEncodingLayoutUsable(
+                layout, renderWidth_, renderHeight_))
+        {
+            encodedWidth_ = layout.optimizedEyeWidth * 2;
+            encodedHeight_ = layout.optimizedEyeHeight;
+            foveatedEncodingActive_ = encodedWidth_ < renderWidth_ * 2 ||
+                                      encodedHeight_ < renderHeight_;
+        }
+        else
+        {
+            foveatedTargetEyeWidth_ = scaledWidth_;
+            foveatedTargetEyeHeight_ = scaledHeight_;
+            spdlog::warn("StreamingServer: foveated encoding preset '{}' is configured but resolution_scale={:.2f} cannot be announced coherently; advertising normal video",
+                         config.foveatedEncodingPreset,
+                         scale);
+        }
     }
     else if (foveationPreset != oxr::protocol::FoveationPreset::Off)
     {
@@ -663,7 +684,9 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce() const
             ? ParseFoveationPreset(config.foveatedEncodingPreset)
             : oxr::protocol::FoveationPreset::Off;
     const oxr::protocol::FoveationLayout layout =
-        oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+        oxr::protocol::CalculateFoveationLayout(foveatedTargetEyeWidth_,
+                                                foveatedTargetEyeHeight_,
+                                                foveationPreset);
 
     if (foveatedEncodingActive_)
     {
@@ -1290,7 +1313,9 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                     ? ParseFoveationPreset(config.foveatedEncodingPreset)
                     : oxr::protocol::FoveationPreset::Off;
             const oxr::protocol::FoveationLayout layout =
-                oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+                oxr::protocol::CalculateFoveationLayout(foveatedTargetEyeWidth_,
+                                                        foveatedTargetEyeHeight_,
+                                                        foveationPreset);
             const bool clientSupportsFoveatedEncoding =
                 HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
             const bool useFoveatedEncoding =
@@ -1404,7 +1429,9 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                     ? ParseFoveationPreset(config.foveatedEncodingPreset)
                     : oxr::protocol::FoveationPreset::Off;
             const oxr::protocol::FoveationLayout layout =
-                oxr::protocol::CalculateFoveationLayout(scaledWidth_, scaledHeight_, foveationPreset);
+                oxr::protocol::CalculateFoveationLayout(foveatedTargetEyeWidth_,
+                                                        foveatedTargetEyeHeight_,
+                                                        foveationPreset);
             const bool clientSupportsFoveatedEncoding =
                 HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
             const bool useFoveatedEncoding =

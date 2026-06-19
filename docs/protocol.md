@@ -96,7 +96,9 @@ supported server paths. The announced presets currently map to:
 The server aligns the active foveated area to encoder-friendly dimensions and announces the encoded
 resolution. A client must advertise `CLIENT_CAPABILITY_FOVEATED_ENCODING` before the server applies
 the AADT compression shader. Clients that do not advertise the capability can still receive the
-reduced encoded resolution as a normal downscaled stream.
+reduced encoded resolution as a normal downscaled stream. Until the protocol carries a separate
+foveated target size, the server enables AADT only when the shader target can match the announced
+source dimensions coherently; otherwise it announces a normal stream.
 
 ## Video Stream
 
