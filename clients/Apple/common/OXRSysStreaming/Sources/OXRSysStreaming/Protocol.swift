@@ -11,6 +11,7 @@ public enum OXRProtocol {
     public static let trackingPort: UInt16 = 9945
     public static let controlPort: UInt16 = 9946
     public static let audioPort: UInt16 = 9947
+    public static let spatialPort: UInt16 = 9948
     public static let handJointCount: Int = 26
     public static let streamingMinBitrateMbps: UInt32 = 1
     public static let streamingMaxBitrateMbps: UInt32 = 200
@@ -39,6 +40,7 @@ public enum TcpRecordType: UInt16, Sendable {
     case control = 0x0006
     case disconnect = 0x0007
     case audio = 0x0008
+    case spatial = 0x0009
 }
 
 public struct TcpRecordHeader: Sendable {
@@ -98,6 +100,12 @@ public struct ServerFeatureFlags {
     public static let clientFoveation: UInt32 = 0x00000002
     public static let clientUpscaling: UInt32 = 0x00000004
     public static let headsetAudio: UInt32 = 0x00000008
+    public static let streamReconfigure: UInt32 = 0x00000010
+    public static let mixedRealityPassthrough: UInt32 = 0x00000020
+    public static let mixedRealityAlpha: UInt32 = 0x00000040
+    public static let depthOcclusion: UInt32 = 0x00000080
+    public static let spatialEntity: UInt32 = 0x00000100
+    public static let sceneCapture: UInt32 = 0x00000200
 }
 
 public struct ClientCapabilityFlags {
@@ -105,6 +113,12 @@ public struct ClientCapabilityFlags {
     public static let clientFoveation: UInt32 = 0x00000002
     public static let clientUpscaling: UInt32 = 0x00000004
     public static let audioOutput: UInt32 = 0x00000008
+    public static let streamReconfigure: UInt32 = 0x00000010
+    public static let mixedRealityPassthrough: UInt32 = 0x00000020
+    public static let mixedRealityAlpha: UInt32 = 0x00000040
+    public static let depthOcclusion: UInt32 = 0x00000080
+    public static let spatialEntity: UInt32 = 0x00000100
+    public static let sceneCapture: UInt32 = 0x00000200
 }
 
 public enum FoveationPreset: UInt32, Sendable {
@@ -177,6 +191,8 @@ public struct ServerAnnounce: Sendable {
     public var foveationCenterShiftY: Float = 0
     public var foveationEdgeRatioX: Float = 1
     public var foveationEdgeRatioY: Float = 1
+    public var spatialPort: UInt32 = UInt32(OXRProtocol.spatialPort)
+    public var reserved2: UInt32 = 0
 
     public init() {}
 
@@ -261,6 +277,7 @@ public struct VideoFlags {
     public static let stereo: UInt8 = 0x0C
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
+    public static let alphaBlend: UInt8 = 0x40
 }
 
 public struct AudioPacketHeader: Sendable {
@@ -389,6 +406,20 @@ public enum ControlType: UInt8, Sendable {
     case requestKeyframe = 0x83
     case haptics = 0x84
     case nackRequest = 0x85
+    case streamConfigUpdate = 0x86
+    case streamConfigAck = 0x87
+}
+
+public struct StreamConfigUpdateFlags {
+    public static let reconfigureDecoder: UInt32 = 0x00000001
+    public static let forceKeyframe: UInt32 = 0x00000002
+    public static let foveatedEncoding: UInt32 = 0x00000004
+    public static let clientUpscaling: UInt32 = 0x00000008
+}
+
+public struct StreamConfigAckStatus {
+    public static let ok: UInt8 = 0
+    public static let rejected: UInt8 = 1
 }
 
 public struct NackRequest: Sendable {
@@ -434,6 +465,40 @@ public struct HapticsCommand: Sendable {
     public var amplitude: Float = 0
     public var durationMs: Float = 0
     public var frequency: Float = 0
+
+    public init() {}
+}
+
+public struct StreamConfigUpdate: Sendable {
+    public var type: UInt8 = ControlType.streamConfigUpdate.rawValue
+    public var reserved: (UInt8, UInt8, UInt8) = (0, 0, 0)
+    public var sequence: UInt32 = 0
+    public var renderWidth: UInt32 = 0
+    public var renderHeight: UInt32 = 0
+    public var encodedWidth: UInt32 = 0
+    public var encodedHeight: UInt32 = 0
+    public var targetBitrateMbps: UInt32 = 0
+    public var refreshRateHz: UInt32 = 0
+    public var flags: UInt32 = 0
+    public var foveatedEncodingPreset: UInt32 = FoveationPreset.off.rawValue
+    public var clientUpscalingMode: UInt32 = ClientUpscalingMode.off.rawValue
+    public var foveationCenterSizeX: Float = 0
+    public var foveationCenterSizeY: Float = 0
+    public var foveationCenterShiftX: Float = 0
+    public var foveationCenterShiftY: Float = 0
+    public var foveationEdgeRatioX: Float = 1
+    public var foveationEdgeRatioY: Float = 1
+
+    public init() {}
+}
+
+public struct StreamConfigAck: Sendable {
+    public var type: UInt8 = ControlType.streamConfigAck.rawValue
+    public var status: UInt8 = StreamConfigAckStatus.ok
+    public var reserved: (UInt8, UInt8) = (0, 0)
+    public var sequence: UInt32 = 0
+    public var encodedWidth: UInt32 = 0
+    public var encodedHeight: UInt32 = 0
 
     public init() {}
 }

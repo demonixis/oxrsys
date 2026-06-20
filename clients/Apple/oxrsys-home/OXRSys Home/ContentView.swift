@@ -412,6 +412,13 @@ struct ContentView: View {
                         )
 
                         LabeledSlider(
+                            title: "Dynamic Resolution Min",
+                            value: streamingBinding(\.dynamicResolutionMinScale),
+                            range: 0.25...1.0,
+                            displayValue: String(format: "%.2f", model.serverConfig.dynamicResolutionMinScale)
+                        )
+
+                        LabeledSlider(
                             title: "Keyframe Interval",
                             value: Binding(
                                 get: { Double(model.serverConfig.keyframeIntervalSec) },
@@ -448,6 +455,19 @@ struct ContentView: View {
                                 Text(mode.displayName).tag(mode)
                             }
                         }
+
+                        Toggle("Passthrough", isOn: streamingBinding(\.passthroughEnabled))
+
+                        Picker("Occlusion", selection: streamingBinding(\.occlusionMode)) {
+                            ForEach(OcclusionModeSetting.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+
+                        Toggle("Spatial features", isOn: streamingBinding(\.spatialEnabled))
+                        Toggle("Spatial anchors", isOn: streamingBinding(\.spatialAnchors))
+                        Toggle("Scene scan", isOn: streamingBinding(\.spatialScene))
+                        Toggle("Spatial persistence", isOn: streamingBinding(\.spatialPersistence))
 
                         HStack {
                             Button("Default") {
@@ -626,6 +646,33 @@ struct ContentView: View {
                             subtitle: "H.265 stream",
                             systemImage: "rectangle.compress.vertical",
                             color: .purple
+                        )
+                        RuntimeStatsMetric(
+                            title: "Scale",
+                            value: String(format: "%.2f", latest.resolutionScale),
+                            subtitle: latest.streamReconfigure ? "Dynamic ready" : "Static",
+                            systemImage: "arrow.down.right.and.arrow.up.left",
+                            color: latest.streamReconfigure ? .green : .gray
+                        )
+                        RuntimeStatsMetric(
+                            title: "Passthrough",
+                            value: !latest.passthroughEnabled
+                                ? "Off"
+                                : (latest.passthroughReady ? "Ready" : "Unsupported"),
+                            subtitle: latest.passthroughEnabled && !latest.passthroughSupported
+                                ? "Headset unavailable"
+                                : (latest.occlusionMode.isEmpty ? "Occlusion off" : latest.occlusionMode),
+                            systemImage: "camera.filters",
+                            color: !latest.passthroughEnabled
+                                ? .gray
+                                : (latest.passthroughReady ? .teal : .orange)
+                        )
+                        RuntimeStatsMetric(
+                            title: "Spatial",
+                            value: latest.spatialEnabled ? "On" : "Off",
+                            subtitle: latest.streamConfigSequence > 0 ? "Config #\(latest.streamConfigSequence)" : "No reconfig",
+                            systemImage: "cube.transparent",
+                            color: latest.spatialEnabled ? .indigo : .gray
                         )
                         RuntimeStatsMetric(
                             title: "Server",

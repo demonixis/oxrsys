@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "StreamingAbr.h"
 
 using namespace oxrsys::streaming_abr;
+using Catch::Matchers::WithinAbs;
 
 TEST_CASE("Streaming ABR lowers bitrate quickly under constrained client health", "[streaming][abr]")
 {
@@ -76,7 +78,7 @@ TEST_CASE("Streaming ABR off mode does not change bitrate", "[streaming][abr]")
 TEST_CASE("Streaming ABR full mode selects smooth profiles from reprojection pressure", "[streaming][abr]")
 {
     Controller controller;
-    controller.Reset(Mode::Full, 80, 100);
+    controller.Reset(Mode::Full, 80, 100, 0.8f, 0.5f);
 
     Sample constrained = {};
     constrained.totalClientLatencyMs = 30.0f;
@@ -86,6 +88,7 @@ TEST_CASE("Streaming ABR full mode selects smooth profiles from reprojection pre
     Decision smooth = controller.Update(constrained);
     CHECK(smooth.state == State::Constrained);
     CHECK(smooth.profile == "smooth");
+    CHECK_THAT(smooth.targetResolutionScale, WithinAbs(0.68f, 0.001f));
 
     Sample recovery = {};
     recovery.displayedFrameAgeMs = 90.0f;
@@ -93,4 +96,5 @@ TEST_CASE("Streaming ABR full mode selects smooth profiles from reprojection pre
     Decision wifiSmooth = controller.Update(recovery);
     CHECK(wifiSmooth.state == State::Recovery);
     CHECK(wifiSmooth.profile == "wifi_smooth");
+    CHECK_THAT(wifiSmooth.targetResolutionScale, WithinAbs(0.56f, 0.001f));
 }

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <thread>
 #include <utility>
 
@@ -134,7 +135,18 @@ void FinalizeEncodeFrame(EncodeFrameContext* context, bool frameDropped)
 
     if (context->frameCallback)
     {
-        context->frameCallback(context->metrics);
+        try
+        {
+            context->frameCallback(context->metrics);
+        }
+        catch (const std::exception& error)
+        {
+            spdlog::warn("VideoEncoder: frame callback threw: {}", error.what());
+        }
+        catch (...)
+        {
+            spdlog::warn("VideoEncoder: frame callback threw an unknown exception");
+        }
     }
 
     if (context->releaseSlot)
@@ -368,7 +380,22 @@ static void CompressionOutputCallback(void* /*outputCallbackRefCon*/,
 
     bool isKeyframe = IsKeyframeSample(sampleBuffer);
     context->metrics.keyframe = isKeyframe;
-    EmitSampleNalUnits(sampleBuffer, isKeyframe, context->nalCallback);
+    try
+    {
+        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->nalCallback);
+    }
+    catch (const std::exception& error)
+    {
+        spdlog::warn("VideoEncoder: NAL callback threw: {}", error.what());
+        FinalizeEncodeFrame(context, true);
+        return;
+    }
+    catch (...)
+    {
+        spdlog::warn("VideoEncoder: NAL callback threw an unknown exception");
+        FinalizeEncodeFrame(context, true);
+        return;
+    }
     FinalizeEncodeFrame(context, false);
 }
 

@@ -8,13 +8,17 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(OXRProtocol.serverAnnounceBaseSize, 92)
         XCTAssertEqual(OXRProtocol.clientConnectBaseSize, 80)
         XCTAssertEqual(OXRProtocol.latencyReportBaseSize, 20)
-        XCTAssertEqual(MemoryLayout<ServerAnnounce>.size, 144)
+        XCTAssertEqual(MemoryLayout<ServerAnnounce>.size, 152)
         XCTAssertEqual(MemoryLayout<ServerAnnounce>.offset(of: \.serverFeatures), OXRProtocol.serverAnnounceBaseSize)
+        XCTAssertEqual(MemoryLayout<ServerAnnounce>.offset(of: \.spatialPort), 144)
         XCTAssertEqual(MemoryLayout<ClientConnect>.size, 96)
         XCTAssertEqual(MemoryLayout<ClientConnect>.offset(of: \.clientCapabilities), OXRProtocol.clientConnectBaseSize)
         XCTAssertEqual(OXRProtocol.streamingMinBitrateMbps, 1)
         XCTAssertEqual(OXRProtocol.streamingMaxBitrateMbps, 200)
         XCTAssertEqual(OXRProtocol.clientMaxBitrateUseServerConfig, 0)
+        XCTAssertEqual(OXRProtocol.spatialPort, 9948)
+        XCTAssertEqual(ServerFeatureFlags.streamReconfigure, 0x00000010)
+        XCTAssertEqual(ClientCapabilityFlags.streamReconfigure, 0x00000010)
         XCTAssertEqual(ClientConnect().maxBitrateMbps, OXRProtocol.clientMaxBitrateUseServerConfig)
     }
 
@@ -33,6 +37,8 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<RequestKeyframe>.size, 12)
         XCTAssertEqual(MemoryLayout<HapticsCommand>.size, 16)
         XCTAssertEqual(MemoryLayout<NackRequest>.size, 24)
+        XCTAssertEqual(MemoryLayout<StreamConfigUpdate>.size, 68)
+        XCTAssertEqual(MemoryLayout<StreamConfigAck>.size, 16)
     }
 
     func testTrackingLayoutMatchesCppWireFormat() {

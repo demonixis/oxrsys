@@ -67,6 +67,11 @@ bool isAbrMode(const QString& value)
     return value == "off" || value == "bitrate" || value == "full";
 }
 
+bool isOcclusionMode(const QString& value)
+{
+    return value == "off" || value == "scene_mesh" || value == "environment_depth";
+}
+
 QString stringValue(const QString& key, const QString& text)
 {
     QString value = rawValue(key, text);
@@ -241,6 +246,7 @@ QString ServerConfig::defaultText()
         "bitrate_mbps = 50\n"
         "refresh_rate_hz = 72\n"
         "resolution_scale = 0.75\n"
+        "dynamic_resolution_min_scale = 0.50\n"
         "keyframe_interval_sec = 2\n"
         "encoder_preset = \"balanced\"\n"
         "transport = \"auto\"\n"
@@ -249,7 +255,15 @@ QString ServerConfig::defaultText()
         "client_upscaling = false\n"
         "client_reprojection = \"pose\"\n"
         "abr_mode = \"bitrate\"\n"
+        "passthrough_enabled = false\n"
+        "occlusion_mode = \"off\"\n"
         "headset_audio = false\n"
+        "\n"
+        "[spatial]\n"
+        "enabled = false\n"
+        "anchors = false\n"
+        "scene = false\n"
+        "persistence = false\n"
         "\n"
         "[logging]\n"
         "file_logging = true\n"
@@ -284,6 +298,13 @@ ServerConfig ServerConfig::parse(const QString& text)
     if (ok && resolutionScale >= 0.25 && resolutionScale <= 1.0)
     {
         config.resolutionScale = resolutionScale;
+    }
+
+    const double dynamicResolutionMinScale =
+        rawValue("dynamic_resolution_min_scale", text).toDouble(&ok);
+    if (ok && dynamicResolutionMinScale >= 0.25 && dynamicResolutionMinScale <= 1.0)
+    {
+        config.dynamicResolutionMinScale = dynamicResolutionMinScale;
     }
 
     const int keyframeInterval = rawValue("keyframe_interval_sec", text).toInt(&ok);
@@ -334,10 +355,52 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.abrMode = abrMode;
     }
 
+    ok = false;
+    const bool passthroughEnabled = boolValue("passthrough_enabled", text, &ok);
+    if (ok)
+    {
+        config.passthroughEnabled = passthroughEnabled;
+    }
+    else
+    {
+        const QString mixedRealityMode = stringValue("mixed_reality_mode", text);
+        if (mixedRealityMode == "passthrough" || mixedRealityMode == "alpha")
+        {
+            config.passthroughEnabled = true;
+        }
+    }
+
+    const QString occlusionMode = stringValue("occlusion_mode", text);
+    if (isOcclusionMode(occlusionMode))
+    {
+        config.occlusionMode = occlusionMode;
+    }
+
     const bool headsetAudio = boolValue("headset_audio", text, &ok);
     if (ok)
     {
         config.headsetAudio = headsetAudio;
+    }
+
+    const bool spatialEnabled = boolValue("enabled", text, &ok);
+    if (ok)
+    {
+        config.spatialEnabled = spatialEnabled;
+    }
+    const bool spatialAnchors = boolValue("anchors", text, &ok);
+    if (ok)
+    {
+        config.spatialAnchors = spatialAnchors;
+    }
+    const bool spatialScene = boolValue("scene", text, &ok);
+    if (ok)
+    {
+        config.spatialScene = spatialScene;
+    }
+    const bool spatialPersistence = boolValue("persistence", text, &ok);
+    if (ok)
+    {
+        config.spatialPersistence = spatialPersistence;
     }
 
     const bool fileLogging = boolValue("file_logging", text, &ok);
@@ -371,6 +434,7 @@ QString ServerConfig::mergedInto(const QString& currentText) const
         {"bitrate_mbps", QString::number(bitrateMbps)},
         {"refresh_rate_hz", QString::number(refreshRateHz)},
         {"resolution_scale", decimalString(resolutionScale)},
+        {"dynamic_resolution_min_scale", decimalString(dynamicResolutionMinScale)},
         {"keyframe_interval_sec", QString::number(keyframeIntervalSec)},
         {"encoder_preset", QString("\"%1\"").arg(encoderPreset)},
         {"transport", QString("\"%1\"").arg(transport)},
@@ -379,7 +443,15 @@ QString ServerConfig::mergedInto(const QString& currentText) const
         {"client_upscaling", boolString(clientUpscaling)},
         {"client_reprojection", QString("\"%1\"").arg(clientReprojection)},
         {"abr_mode", QString("\"%1\"").arg(abrMode)},
+        {"passthrough_enabled", boolString(passthroughEnabled)},
+        {"occlusion_mode", QString("\"%1\"").arg(occlusionMode)},
         {"headset_audio", boolString(headsetAudio)},
+    });
+    text = upsertSection(text, "spatial", {
+        {"enabled", boolString(spatialEnabled)},
+        {"anchors", boolString(spatialAnchors)},
+        {"scene", boolString(spatialScene)},
+        {"persistence", boolString(spatialPersistence)},
     });
     text = upsertSection(text, "logging", {
         {"file_logging", boolString(fileLogging)},
@@ -460,4 +532,17 @@ QString abrModeDisplayName(const QString& value)
         return "Full";
     }
     return "Bitrate";
+}
+
+QString occlusionModeDisplayName(const QString& value)
+{
+    if (value == "scene_mesh")
+    {
+        return "Scene Mesh";
+    }
+    if (value == "environment_depth")
+    {
+        return "Environment Depth";
+    }
+    return "Off";
 }

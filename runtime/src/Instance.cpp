@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "Instance.h"
+#include "Config.h"
 #include "Runtime.h"
 #include <algorithm>
 #include <cstring>
@@ -205,17 +206,25 @@ XrResult Instance::EnumerateEnvironmentBlendModes(XrSystemId systemId,
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    *environmentBlendModeCountOutput = 1;
+    const bool alphaBlendEnabled =
+        Config::Get().GetValues().passthroughEnabled;
+    const uint32_t supportedModeCount = alphaBlendEnabled ? 2u : 1u;
+
+    *environmentBlendModeCountOutput = supportedModeCount;
     if (environmentBlendModeCapacityInput == 0)
     {
         return XR_SUCCESS;
     }
-    if (environmentBlendModeCapacityInput < 1)
+    if (environmentBlendModeCapacityInput < supportedModeCount)
     {
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
     environmentBlendModes[0] = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    if (alphaBlendEnabled)
+    {
+        environmentBlendModes[1] = XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+    }
     return XR_SUCCESS;
 }
 

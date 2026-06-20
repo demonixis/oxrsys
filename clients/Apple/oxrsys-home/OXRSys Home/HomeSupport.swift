@@ -117,6 +117,25 @@ enum AbrModeSetting: String, CaseIterable, Identifiable {
     }
 }
 
+enum OcclusionModeSetting: String, CaseIterable, Identifiable {
+    case off
+    case sceneMesh = "scene_mesh"
+    case environmentDepth = "environment_depth"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .off:
+            return "Off"
+        case .sceneMesh:
+            return "Scene Mesh"
+        case .environmentDepth:
+            return "Environment Depth"
+        }
+    }
+}
+
 struct HomePaths {
     static let appSupportDirectory = NSString(string: "~/Library/Application Support/OXRSys").expandingTildeInPath
     static let configFilePath = (appSupportDirectory as NSString).appendingPathComponent("oxrsys-runtime.toml")
@@ -219,6 +238,15 @@ struct HomeRuntimeStreamingStats: Equatable {
     var abrMode: String = ""
     var abrState: String = ""
     var abrProfile: String = ""
+    var resolutionScale = 0.0
+    var dynamicResolutionMinScale = 0.0
+    var streamReconfigure = false
+    var streamConfigSequence: Int = 0
+    var passthroughEnabled = false
+    var passthroughSupported = false
+    var passthroughReady = false
+    var occlusionMode: String = ""
+    var spatialEnabled = false
     var headsetAudio = false
     var latency = Latency()
     var encode = Encode()
@@ -250,6 +278,15 @@ struct HomeRuntimeStreamingStats: Equatable {
             abrMode: stringValue(object["abr_mode"]) ?? "",
             abrState: stringValue(object["abr_state"]) ?? "",
             abrProfile: stringValue(object["abr_profile"]) ?? "",
+            resolutionScale: doubleValue(object["resolution_scale"]),
+            dynamicResolutionMinScale: doubleValue(object["dynamic_resolution_min_scale"]),
+            streamReconfigure: boolValue(object["stream_reconfigure"]) ?? false,
+            streamConfigSequence: intValue(object["stream_config_sequence"]) ?? 0,
+            passthroughEnabled: boolValue(object["passthrough_enabled"]) ?? false,
+            passthroughSupported: boolValue(object["passthrough_supported"]) ?? false,
+            passthroughReady: boolValue(object["passthrough_ready"]) ?? false,
+            occlusionMode: stringValue(object["occlusion_mode"]) ?? "",
+            spatialEnabled: boolValue(object["spatial_enabled"]) ?? false,
             headsetAudio: boolValue(object["headset_audio"]) ?? false,
             latency: Latency(
                 serverPipelineMs: doubleValue(latencyObject["server_pipeline"]),
@@ -631,7 +668,7 @@ struct QuestUsbDevice: Identifiable, Equatable {
 }
 
 enum QuestUsbBridge {
-    static let reversePorts = [9944, 9945, 9946]
+    static let reversePorts = [9944, 9945, 9946, 9948]
 
     static func devices(customAdbPath: String? = nil) throws -> [QuestUsbDevice] {
         let adb = try adbExecutablePath(customPath: customAdbPath)

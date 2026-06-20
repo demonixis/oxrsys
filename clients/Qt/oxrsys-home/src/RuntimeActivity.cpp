@@ -61,6 +61,15 @@ RuntimeStreamingStats RuntimeStreamingStats::parse(const QJsonObject& object)
     stats.abrMode = object.value("abr_mode").toString();
     stats.abrState = object.value("abr_state").toString();
     stats.abrProfile = object.value("abr_profile").toString();
+    stats.resolutionScale = doubleValue(object, "resolution_scale");
+    stats.dynamicResolutionMinScale = doubleValue(object, "dynamic_resolution_min_scale");
+    stats.streamReconfigure = object.value("stream_reconfigure").toBool();
+    stats.streamConfigSequence = intValue(object, "stream_config_sequence");
+    stats.passthroughEnabled = object.value("passthrough_enabled").toBool();
+    stats.passthroughSupported = object.value("passthrough_supported").toBool();
+    stats.passthroughReady = object.value("passthrough_ready").toBool();
+    stats.occlusionMode = object.value("occlusion_mode").toString();
+    stats.spatialEnabled = object.value("spatial_enabled").toBool();
     stats.headsetAudio = object.value("headset_audio").toBool();
 
     stats.serverPipelineMs = doubleValue(latency, "server_pipeline");

@@ -12,11 +12,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <openxr/openxr.h>
 
 #include "NetworkReceiver.h"
+#include "QuestPassthroughAlphaPolicy.h"
 #include "QuestShellInteraction.h"
 #include "TrackingSender.h"
 #include "VideoDecoder.h"
@@ -100,18 +102,27 @@ private:
     bool OpenControlSocket(const char* serverIp);
     bool OpenUsbControlSocket();
     void CloseControlSocket();
+    bool OpenUsbSpatialSocket(uint16_t spatialPort);
+    void CloseSpatialSocket();
     void SendClientConnect(const char* serverIp);
+    void StartControlReceiver();
+    void StopControlReceiver();
+    void ControlReceiveThreadMain();
+    void HandleControlPayload(const uint8_t* data, size_t size);
+    void HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update);
+    void ApplyPendingStreamConfigUpdate();
+    void SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status);
     void SendLatencyReport();
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
     float GetCurrentRefreshRateHz() const;
     void OnNalUnitReceived(const uint8_t* data, size_t size,
-                           int64_t timestampNs, int64_t receiveTimeNs);
+                           int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags);
 
     bool RenderFrame(XrTime predictedDisplayTime);
     void BlitVideoToSwapchain(int eye);
     bool CreateShellResources();
     void DestroyShellResources();
-    void ReleaseShellForStream();
+    void ReleaseShellForStream(bool keepPassthrough);
     void RenderShellToSwapchain(int eye, bool transparentBackground);
     void ClearSwapchain(int eye, float r, float g, float b);
     XrPosef BuildEyePoseFromRenderPose(const NetworkReceiver::RenderPose& renderPose,
@@ -127,6 +138,7 @@ private:
     void UpdateShellInteractions();
     bool SetShellPassthroughActive(bool active);
     bool CanUseShellPassthrough() const;
+    quest_passthrough::AlphaKeyDecision EvaluatePassthroughAlphaKey() const;
     const char* ShellStatusText() const;
 
     bool SetupActions();
@@ -231,14 +243,19 @@ private:
     GLint blitFoveationEyeSizeRatioUniform_ = -1;
     GLint blitReprojectionWarpEnabledUniform_ = -1;
     GLint blitReprojectionWarpOffsetUniform_ = -1;
+    GLint blitPassthroughAlphaEnabledUniform_ = -1;
     GLint shellMvpUniform_ = -1;
 
     // Networking
     std::unique_ptr<NetworkReceiver> networkReceiver_;
     std::unique_ptr<TrackingSender> trackingSender_;
     std::unique_ptr<VideoDecoder> videoDecoder_;
+    std::mutex videoDecoderMutex_;
     int controlSocket_ = -1;
     int controlTcpSocket_ = -1;
+    int spatialTcpSocket_ = -1;
+    std::thread controlReceiveThread_;
+    std::atomic<bool> controlReceiveRunning_{false};
     TransportMode transportMode_ = TransportMode::WifiUdp;
 
     std::atomic<ConnectionState> connectionState_{ConnectionState::Disconnected};
@@ -249,6 +266,7 @@ private:
     char serverIp_[64] = {};
     uint16_t serverVideoPort_ = 0;
     uint16_t serverTrackingPort_ = 0;
+    uint16_t serverSpatialPort_ = 0;
     std::chrono::steady_clock::time_point connectionTime_;
     std::string shellStatusText_ = "Searching for runtime";
 
@@ -275,6 +293,9 @@ private:
         protocol::ClientReprojectionMode::Pose;
     bool serverFoveatedEncodingEnabled_ = false;
     bool clientUpscalingEnabled_ = false;
+    bool serverMixedRealityPassthroughEnabled_ = false;
+    bool hasObservedProtocolAlphaFrame_ = false;
+    bool loggedTransparentClearFallback_ = false;
     float foveationCenterSizeX_ = 1.0f;
     float foveationCenterSizeY_ = 1.0f;
     float foveationCenterShiftX_ = 0.0f;
@@ -285,6 +306,10 @@ private:
     float foveationEyeHeightRatio_ = 1.0f;
     float decodedTexelWidth_ = 1.0f;
     float decodedTexelHeight_ = 1.0f;
+    std::mutex pendingStreamConfigMutex_;
+    protocol::StreamConfigUpdate pendingStreamConfigUpdate_;
+    bool hasPendingStreamConfigUpdate_ = false;
+    std::atomic<uint32_t> streamConfigSequence_{0};
     int64_t predictedDisplayPeriodNs_ = 11111111;
     int64_t lastFrameReceiveTimeNs_ = 0;
     int64_t lastFrameSubmitTimeNs_ = 0;
@@ -301,6 +326,7 @@ private:
         int64_t localAcquireTimeNs = 0;
         NetworkReceiver::RenderPose renderPose = {};
         bool hasRenderPose = false;
+        bool alphaBlend = false;
         XrPosef headsetPoseAtPresentation = {
             {0.0f, 0.0f, 0.0f, 1.0f},
             {0.0f, 0.0f, 0.0f}

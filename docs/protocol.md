@@ -19,14 +19,16 @@ The WiFi transport uses UDP with dedicated ports:
 - Tracking: `9945`
 - Control: `9946`
 - Audio: `9947` (reserved for headset speaker audio; not advertised until an audio stream is active)
+- Spatial: `9948` (reserved reliable channel for anchors, scene capture, meshes, and larger async spatial results)
 
-Discovery announces the server and its stream settings. Video carries encoded frame fragments. Tracking carries headset and controller state back to the runtime. Control carries latency reports, keyframe requests, and haptics.
+Discovery announces the server and its stream settings. Video carries encoded frame fragments. Tracking carries headset and controller state back to the runtime. Control carries latency reports, stream reconfiguration, keyframe requests, and haptics. Spatial is a reliable side channel for future spatial entity and scene data.
 
 The Quest USB path uses ADB reverse TCP on localhost ports:
 
 - Video TCP: `9944`
 - Tracking TCP: `9945`
 - Control TCP: `9946`
+- Spatial TCP: `9948`
 
 The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback.
 
@@ -40,6 +42,7 @@ TCP payloads are framed with `TcpRecordHeader`, which contains the record magic,
 - `Control`
 - `Disconnect`
 - `Audio`
+- `Spatial`
 
 ## Discovery
 
@@ -54,16 +57,18 @@ The handshake exposes:
 - server and device names; Android clients send the OpenXR `systemName` in
   `ClientConnect.deviceName`
 - preferred codec and bitrate limits
-- server feature flags for foveated encoding, client foveation override, client upscaling, and headset audio
-- client capability flags for foveated encoding, client foveation, client upscaling, and audio output
+- server feature flags for foveated encoding, client foveation override, client upscaling, stream
+  reconfiguration, passthrough, occlusion, spatial/scene support, and reserved headset audio
+- client capability flags for foveated encoding, client foveation, client upscaling, stream
+  reconfiguration, passthrough, occlusion, spatial/scene support, and audio output
 - foveated encoding preset and aligned AADT parameters
 - client foveation override preset and client upscaling mode
 - client reprojection mode
 - audio port and sample rate fields reserved for headset speaker audio
 
-`ServerAnnounce` is versioned as a 92-byte v1.0 base followed by v1.1 trailing fields. `ClientConnect`
-is versioned as an 80-byte v1.0 base followed by v1.1 trailing fields. Receivers accept either the
-base size or the full struct size and zero-initialize missing trailing fields.
+`ServerAnnounce` is versioned as a 92-byte v1.0 base followed by v1.1 and v1.2 trailing fields.
+`ClientConnect` is versioned as an 80-byte v1.0 base followed by v1.1 trailing fields. Receivers
+accept either the base size or the full struct size and zero-initialize missing trailing fields.
 
 `ServerAnnounce.clientReprojectionMode` lets the runtime choose the Quest/PICO fallback behavior when
 no newly decoded video frame is ready:
@@ -129,6 +134,13 @@ The current stream also includes two recovery and timing helpers:
 
 - `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
+- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by the app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. If passthrough is active and no alpha flags have appeared in the stream, Quest clients may temporarily use the same black-key fallback for transparent-clear AR demos.
+
+For passthrough, `SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH` means the desktop runtime is configured
+to allow app-requested passthrough. The headset still has to advertise
+`CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH`, which the Android client sets only after its local
+OpenXR runtime exposes `XR_FB_passthrough`, reports `supportsPassthrough`, and successfully creates
+the passthrough objects. Runtime status reports `passthrough_ready` only when both sides are true.
 
 ## Tracking Stream
 
@@ -156,6 +168,8 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 - `RequestKeyframe`
 - `HapticsCommand`
 - `NackRequest`
+- `StreamConfigUpdate`
+- `StreamConfigAck`
 
 Latency reports allow the runtime to keep prediction bounded. The first 20 bytes are the historical
 base report: receive-to-submit, decode, compositor, and total client latency. Newer clients append
@@ -165,10 +179,19 @@ and treats missing trailing metrics as zero.
 
 The runtime ABR controller consumes the latency report, displayed frame age, keyframe request
 deltas, video-send drops, encoder drops, and reprojection pressure. `streaming.abr_mode = "bitrate"`
-adjusts encoder bitrate only. `full` currently selects named quality profiles in status and is the
-entry point for session-safe resolution/foveation/upscaling changes once profile transitions are
-validated. ABR lowers quickly on loss or high frame age and recovers slowly after stable windows to
-avoid oscillation.
+adjusts encoder bitrate only. `full` now selects real encoded-resolution targets when the client
+advertises `CLIENT_CAPABILITY_STREAM_RECONFIGURE`: `quality` and `balanced` use
+`resolution_scale`, `smooth` uses `max(dynamic_resolution_min_scale, resolution_scale * 0.85)`,
+and `wifi_smooth` uses `max(dynamic_resolution_min_scale, resolution_scale * 0.70)`. The runtime
+sends `StreamConfigUpdate` outside `Session::EndFrame()`, the client recreates its decoder on the XR
+frame loop, replies with `StreamConfigAck`, and the runtime swaps encoders, clears queued video, and
+forces an IDR only after the ack. ABR lowers quickly on loss or high frame age and recovers slowly
+after stable windows to avoid oscillation.
+
+Protocol v1.2 extends `ServerAnnounce` with `spatialPort` and adds feature/capability flags for
+stream reconfiguration, passthrough, depth occlusion, spatial entities, and scene capture. Spatial
+OpenXR extensions are still advertised only when there is a coherent runtime
+implementation or fallback for the selected mode.
 
 Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from
 the runtime to the client.
@@ -188,8 +211,8 @@ The expected lifecycle is:
 
 1. The runtime announces itself over UDP, or a USB TCP client connects to control port `9946` and receives `ServerAnnounce`.
 2. A client connects and advertises capabilities.
-3. The runtime starts video and tracking exchange.
-4. The client sends latency feedback and keyframe requests while streaming is active.
+3. The runtime starts video, tracking, and optional spatial-channel exchange.
+4. The client sends latency feedback, stream config acknowledgements, and keyframe requests while streaming is active.
 5. Either side can disconnect and return to idle. USB TCP shutdown uses a best-effort `Disconnect` record on the control channel before sockets are closed; clients also treat closed video/control sockets as a connection loss and resume discovery/retry.
 
 ## Compatibility

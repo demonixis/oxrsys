@@ -105,10 +105,18 @@ private:
     {
         uint32_t frameIndex = 0;
         int64_t timestampNs = 0;
+        bool alphaBlend = false;
         bool hasPose = false;
         float headPosition[3] = {};
         float headOrientation[4] = {0, 0, 0, 1};
         std::vector<EncodedNalUnit> nals;
+    };
+
+    struct CallbackAccess
+    {
+        std::mutex mutex;
+        StreamingServer* server = nullptr;
+        bool accepting = false;
     };
 
     struct PacketDispatchState
@@ -133,6 +141,7 @@ private:
     void TcpControlThread();
     void TcpVideoThread();
     void TcpTrackingThread();
+    void TcpSpatialThread();
     std::string GetLocalIpAddress() const;
     oxr::protocol::ServerAnnounce BuildServerAnnounce() const;
     void ReleaseStreamingFrame(StreamingFrame& frame);
@@ -142,9 +151,17 @@ private:
     void HandleClientDisconnect();
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
+    void HandleStreamConfigAck(const oxr::protocol::StreamConfigAck& ack);
     void HandleNackRequest(const oxr::protocol::NackRequest& request);
     void HandleControlPayload(const uint8_t* data, size_t size);
     void UpdatePredictionHorizon();
+    void MaybeRequestStreamReconfigure(float targetResolutionScale);
+    void ApplyPendingStreamConfigLocked(const oxr::protocol::StreamConfigUpdate& update);
+    std::shared_ptr<CallbackAccess> GetCallbackAccess();
+    std::shared_ptr<CallbackAccess> RenewCallbackAccess();
+    void InvalidateCallbackAccess();
+    static void InvalidateCallbackAccess(const std::shared_ptr<CallbackAccess>& access);
+    bool SendControlPayload(const void* payload, size_t payloadSize);
     void QueueEncodedVideoFrame(EncodedVideoFrame frame);
     void ClearVideoSendQueue();
     void SendEncodedVideoFrame(const EncodedVideoFrame& frame);
@@ -164,9 +181,14 @@ private:
     uint32_t encodedHeight_ = 0;    // Actual encoded height
     uint32_t foveatedTargetEyeWidth_ = 0;
     uint32_t foveatedTargetEyeHeight_ = 0;
+    float activeResolutionScale_ = 0.75f;
     uint32_t refreshRateHz_ = 90;
     bool foveatedEncodingActive_ = false;
     std::atomic_bool clientFoveatedEncodingActive_{false};
+    std::atomic_bool clientSupportsFoveatedEncoding_{false};
+    std::atomic_bool clientSupportsStreamReconfigure_{false};
+    std::atomic_bool clientSupportsMixedRealityPassthrough_{false};
+    std::atomic_bool clientSupportsSpatialEntity_{false};
     std::atomic<uint32_t> targetRefreshRateHz_{90};
     std::atomic<float> clientPipelineLatencyMs_{18.0f};
     std::atomic<float> serverPipelineLatencyMs_{10.0f};
@@ -185,6 +207,11 @@ private:
     std::string abrModeName_ = "bitrate";
     std::string abrStateName_ = "stable";
     std::string abrProfileName_ = "bitrate";
+    std::atomic<uint32_t> streamConfigSequence_{0};
+    std::atomic<uint32_t> pendingStreamConfigSequence_{0};
+    std::atomic<float> pendingResolutionScale_{0.0f};
+    std::mutex streamConfigMutex_;
+    oxr::protocol::StreamConfigUpdate pendingStreamConfigUpdate_ = {};
     std::atomic<float> clientDisplayedFrameAgeMs_{0.0f};
     std::atomic<uint32_t> clientReprojectedFramesDelta_{0};
     std::atomic<uint32_t> clientStaleFrameReusesDelta_{0};
@@ -199,11 +226,17 @@ private:
     SocketHandle tcpControlListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
     SocketHandle tcpVideoListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
     SocketHandle tcpTrackingListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpSpatialListenSocket_ = oxrsys::runtime_socket::InvalidSocket;
     SocketHandle tcpControlClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
     SocketHandle tcpVideoClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
     SocketHandle tcpTrackingClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
+    SocketHandle tcpSpatialClientSocket_ = oxrsys::runtime_socket::InvalidSocket;
     std::mutex tcpSocketMutex_;
     std::mutex disconnectMutex_;
+    std::mutex stopMutex_;
+    std::mutex broadcastThreadMutex_;
+    std::mutex callbackAccessMutex_;
+    std::shared_ptr<CallbackAccess> callbackAccess_;
     bool wifiEnabled_ = true;
     bool usbAdbEnabled_ = true;
     std::atomic_bool clientUsesUsbAdb_{false};
@@ -222,6 +255,7 @@ private:
     std::thread tcpControlThread_;
     std::thread tcpVideoThread_;
     std::thread tcpTrackingThread_;
+    std::thread tcpSpatialThread_;
     std::atomic<bool> running_{false};
     StreamingFrameQueue frameQueue_;
     std::shared_ptr<PacketDispatchState> packetDispatchState_;
@@ -243,7 +277,7 @@ private:
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
-                     bool isKeyframe, int64_t timestampNs);
+                     bool isKeyframe, bool alphaBlend, int64_t timestampNs);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
     static bool SendTcpRecordParts(SocketHandle socket, oxr::protocol::TcpRecordType type,

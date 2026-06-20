@@ -125,7 +125,10 @@ idle. The fields are:
 - `render_width`, `render_height`, `encoded_width`, `encoded_height`
 - `encoder_preset`, `foveated_encoding_preset`, `client_foveation_preset`,
   `client_upscaling`, `client_reprojection_mode`, `abr_mode`, `abr_state`,
-  `abr_profile`, `headset_audio`
+  `abr_profile`, `resolution_scale`, `dynamic_resolution_min_scale`,
+  `stream_reconfigure`, `stream_config_sequence`, `passthrough_enabled`,
+  `passthrough_supported`, `passthrough_ready`, `occlusion_mode`, `spatial_enabled`,
+  `headset_audio`
 - `latency_ms.server_pipeline`, `latency_ms.client_pipeline`,
   `latency_ms.client_receive_to_submit`, `latency_ms.client_decode`,
   `latency_ms.client_compositor`, `latency_ms.prediction_horizon`,
@@ -143,7 +146,7 @@ and shows whether the Mac WiFi interface is powered on. Selecting USB writes
 `streaming.transport = "usb_adb"` only when `adb` is available. If `adb` is missing, the Home app
 keeps the current transport and shows install guidance for `adb-enhanced`, including the Homebrew
 command `brew install adb-enhanced`. When `adb` is present, USB mode checks the
-selected ADB device for reverse mappings on `9944`, `9945`, and `9946`. If any USB reverse mapping
+selected ADB device for reverse mappings on `9944`, `9945`, `9946`, and `9948`. If any USB reverse mapping
 is missing, the header shows an action state and exposes a `Configure` button; once all ports are
 mapped, the button is hidden.
 
@@ -169,6 +172,7 @@ The structured editor covers the current runtime keys:
 - `general.runtime_enabled`
 - `streaming.bitrate_mbps`
 - `streaming.resolution_scale`
+- `streaming.dynamic_resolution_min_scale`
 - `streaming.refresh_rate_hz`
 - `streaming.keyframe_interval_sec`
 - `streaming.encoder_preset`
@@ -178,7 +182,13 @@ The structured editor covers the current runtime keys:
 - `streaming.client_upscaling`
 - `streaming.client_reprojection`
 - `streaming.abr_mode`
+- `streaming.passthrough_enabled`
+- `streaming.occlusion_mode`
 - `streaming.headset_audio`
+- `spatial.enabled`
+- `spatial.anchors`
+- `spatial.scene`
+- `spatial.persistence`
 - `logging.file_logging`
 - `logging.quest_logcat`
 
@@ -212,8 +222,22 @@ allows a small GLES image-space orientation correction when safety checks pass. 
 stale-frame reprojection path.
 
 `abr_mode` controls server-side adaptive bitrate. `bitrate` adjusts bitrate using latency, displayed
-frame age, drops, keyframe requests, and reprojection pressure. `full` currently exposes profile
-selection in runtime status for session-safe resolution/foveation/upscaling transitions.
+frame age, drops, keyframe requests, and reprojection pressure. `full` can also reconfigure the
+encoded stream resolution when the headset client advertises live stream reconfiguration:
+`quality` and `balanced` use `resolution_scale`, `smooth` uses
+`max(dynamic_resolution_min_scale, resolution_scale * 0.85)`, and `wifi_smooth` uses
+`max(dynamic_resolution_min_scale, resolution_scale * 0.70)`.
+
+`passthrough_enabled` controls whether the runtime exposes app-requested passthrough support.
+When enabled, compatible headset clients keep a passthrough underlay active while streaming and
+the runtime can expose `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND`; the application still chooses
+the blend path through OpenXR environment blend mode or source-alpha projection layer flags.
+`passthrough_supported` is the connected headset capability reported by the Android client after
+querying its local OpenXR runtime, and `passthrough_ready` is true only when the global setting
+and headset support are both present.
+`occlusion_mode` selects the intended occlusion source (`off`, `scene_mesh`, or
+`environment_depth`); occlusion remains disabled when there is no coherent app or headset depth
+source. The `[spatial]` toggles gate reserved spatial entity, anchor, scene, and persistence paths.
 
 Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
 discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,
@@ -228,10 +252,11 @@ The runtime reloads config file changes opportunistically:
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails
-- `bitrate_mbps`, `resolution_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
+- `bitrate_mbps`, `resolution_scale`, `dynamic_resolution_min_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
   `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`,
-  `client_reprojection`, `abr_mode`, and `headset_audio` apply when streaming or the
+  `client_reprojection`, `abr_mode`, `passthrough_enabled`, `occlusion_mode`, `[spatial]`,
+  and `headset_audio` apply when streaming or the
   encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
-The Quest USB ADB section detects authorized `adb` devices, applies reverse mappings for ports `9944`, `9945`, and `9946`, then verifies them with `adb reverse --list`. This prepares the USB TCP transport; it is separate from Android `UsbManager` app permission prompts.
+The Quest USB ADB section detects authorized `adb` devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them with `adb reverse --list`. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.

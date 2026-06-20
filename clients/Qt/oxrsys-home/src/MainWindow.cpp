@@ -793,6 +793,11 @@ QWidget* MainWindow::buildStreamingTab()
               ServerConfig::MinBitrateMbps,
               ServerConfig::MaxBitrateMbps);
     addSlider("Resolution Scale", &resolutionSlider_, &resolutionValueLabel_, 25, 100);
+    addSlider("Dynamic Resolution Min",
+              &dynamicResolutionSlider_,
+              &dynamicResolutionValueLabel_,
+              25,
+              100);
     addSlider("Keyframe Interval", &keyframeSlider_, &keyframeValueLabel_, 1, 10);
 
     auto* form = new QFormLayout();
@@ -818,12 +823,28 @@ QWidget* MainWindow::buildStreamingTab()
     abrModeCombo_->addItem("Off", "off");
     abrModeCombo_->addItem("Bitrate", "bitrate");
     abrModeCombo_->addItem("Full", "full");
+    occlusionModeCombo_ = new QComboBox(configBox);
+    occlusionModeCombo_->addItem("Off", "off");
+    occlusionModeCombo_->addItem("Scene Mesh", "scene_mesh");
+    occlusionModeCombo_->addItem("Environment Depth", "environment_depth");
+    passthroughCheckBox_ = new QCheckBox("Passthrough", configBox);
     form->addRow("Refresh rate", refreshRateCombo_);
     form->addRow("Encoder preset", encoderPresetCombo_);
     form->addRow("Foveated encoding", foveatedEncodingPresetCombo_);
     form->addRow("Transport", configTransportCombo_);
     form->addRow("ABR mode", abrModeCombo_);
+    form->addRow("Occlusion", occlusionModeCombo_);
     configLayout->addLayout(form);
+
+    configLayout->addWidget(passthroughCheckBox_);
+    spatialEnabledCheckBox_ = new QCheckBox("Spatial features", configBox);
+    spatialAnchorsCheckBox_ = new QCheckBox("Spatial anchors", configBox);
+    spatialSceneCheckBox_ = new QCheckBox("Scene scan", configBox);
+    spatialPersistenceCheckBox_ = new QCheckBox("Spatial persistence", configBox);
+    configLayout->addWidget(spatialEnabledCheckBox_);
+    configLayout->addWidget(spatialAnchorsCheckBox_);
+    configLayout->addWidget(spatialSceneCheckBox_);
+    configLayout->addWidget(spatialPersistenceCheckBox_);
 
     auto* headsetBox = new QGroupBox("Headset Client", content);
     auto* headsetLayout = new QVBoxLayout(headsetBox);
@@ -854,8 +875,13 @@ QWidget* MainWindow::buildStreamingTab()
     connect(questLogcatCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(clientUpscalingCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(headsetAudioCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(spatialEnabledCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(spatialAnchorsCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(spatialSceneCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
+    connect(spatialPersistenceCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(bitrateSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(resolutionSlider_, &QSlider::valueChanged, this, connectConfigChanged);
+    connect(dynamicResolutionSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(keyframeSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(refreshRateCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(encoderPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
@@ -863,6 +889,8 @@ QWidget* MainWindow::buildStreamingTab()
     connect(clientFoveationPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(clientReprojectionCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(abrModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(occlusionModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(passthroughCheckBox_, &QCheckBox::toggled, this, connectConfigChanged);
     connect(configTransportCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
 
     auto* configButtons = new QHBoxLayout();
@@ -969,13 +997,16 @@ QWidget* MainWindow::buildDeveloperTab()
     metricsGrid->addWidget(buildMetric("Bitrate", &bitrateMetricLabel_, "Current / max"), 0, 1);
     metricsGrid->addWidget(buildMetric("Render", &renderMetricLabel_, "Stereo source"), 0, 2);
     metricsGrid->addWidget(buildMetric("Encoded", &encodedMetricLabel_, "H.265 stream"), 0, 3);
-    metricsGrid->addWidget(buildMetric("Server", &serverMetricLabel_, "Pipeline"), 1, 0);
-    metricsGrid->addWidget(buildMetric("Client", &clientMetricLabel_, "Pipeline"), 1, 1);
-    metricsGrid->addWidget(buildMetric("Horizon", &horizonMetricLabel_, "Prediction"), 1, 2);
-    metricsGrid->addWidget(buildMetric("Drops", &dropsMetricLabel_, "Encoder total"), 1, 3);
-    metricsGrid->addWidget(buildMetric("Frame Age", &frameAgeMetricLabel_, "Displayed"), 2, 0);
-    metricsGrid->addWidget(buildMetric("ABR", &abrMetricLabel_, "State / profile"), 2, 1);
-    metricsGrid->addWidget(buildMetric("Reprojection", &reprojectionMetricLabel_, "Frames / stale"), 2, 2);
+    metricsGrid->addWidget(buildMetric("Scale", &scaleMetricLabel_, "Current / min"), 1, 0);
+    metricsGrid->addWidget(buildMetric("Passthrough", &passthroughMetricLabel_, "State / occlusion"), 1, 1);
+    metricsGrid->addWidget(buildMetric("Spatial", &spatialMetricLabel_, "State / config"), 1, 2);
+    metricsGrid->addWidget(buildMetric("Server", &serverMetricLabel_, "Pipeline"), 1, 3);
+    metricsGrid->addWidget(buildMetric("Client", &clientMetricLabel_, "Pipeline"), 2, 0);
+    metricsGrid->addWidget(buildMetric("Horizon", &horizonMetricLabel_, "Prediction"), 2, 1);
+    metricsGrid->addWidget(buildMetric("Drops", &dropsMetricLabel_, "Encoder total"), 2, 2);
+    metricsGrid->addWidget(buildMetric("Frame Age", &frameAgeMetricLabel_, "Displayed"), 2, 3);
+    metricsGrid->addWidget(buildMetric("ABR", &abrMetricLabel_, "State / profile"), 3, 0);
+    metricsGrid->addWidget(buildMetric("Reprojection", &reprojectionMetricLabel_, "Frames / stale"), 3, 1);
     statsLayout->addLayout(metricsGrid);
     auto* chartsLayout = new QHBoxLayout();
     pipelineChart_ = new RuntimeStatsChart(RuntimeStatsChart::Kind::Pipeline, statsBox);
@@ -1181,11 +1212,12 @@ void MainWindow::refreshStreaming()
     const ServerConfig& config = model_->serverConfig();
     const QList<QWidget*> controls = {
         runtimeEnabledCheckBox_, fileLoggingCheckBox_, questLogcatCheckBox_,
-        clientUpscalingCheckBox_, headsetAudioCheckBox_,
-        bitrateSlider_, resolutionSlider_, keyframeSlider_,
+        clientUpscalingCheckBox_, headsetAudioCheckBox_, passthroughCheckBox_, spatialEnabledCheckBox_,
+        spatialAnchorsCheckBox_, spatialSceneCheckBox_, spatialPersistenceCheckBox_,
+        bitrateSlider_, resolutionSlider_, dynamicResolutionSlider_, keyframeSlider_,
         refreshRateCombo_, encoderPresetCombo_, foveatedEncodingPresetCombo_,
         clientFoveationPresetCombo_, clientReprojectionCombo_, abrModeCombo_,
-        configTransportCombo_, usbDeviceCombo_,
+        occlusionModeCombo_, configTransportCombo_, usbDeviceCombo_,
     };
     for (QWidget* control : controls)
     {
@@ -1197,8 +1229,14 @@ void MainWindow::refreshStreaming()
     questLogcatCheckBox_->setChecked(config.questLogcat);
     clientUpscalingCheckBox_->setChecked(config.clientUpscaling);
     headsetAudioCheckBox_->setChecked(config.headsetAudio);
+    passthroughCheckBox_->setChecked(config.passthroughEnabled);
+    spatialEnabledCheckBox_->setChecked(config.spatialEnabled);
+    spatialAnchorsCheckBox_->setChecked(config.spatialAnchors);
+    spatialSceneCheckBox_->setChecked(config.spatialScene);
+    spatialPersistenceCheckBox_->setChecked(config.spatialPersistence);
     bitrateSlider_->setValue(config.bitrateMbps);
     resolutionSlider_->setValue(qRound(config.resolutionScale * 100.0));
+    dynamicResolutionSlider_->setValue(qRound(config.dynamicResolutionMinScale * 100.0));
     keyframeSlider_->setValue(config.keyframeIntervalSec);
     refreshRateCombo_->setCurrentIndex(std::max(refreshRateCombo_->findData(config.refreshRateHz), 0));
     encoderPresetCombo_->setCurrentIndex(std::max(encoderPresetCombo_->findData(config.encoderPreset), 0));
@@ -1209,6 +1247,8 @@ void MainWindow::refreshStreaming()
     clientReprojectionCombo_->setCurrentIndex(
         std::max(clientReprojectionCombo_->findData(config.clientReprojection), 0));
     abrModeCombo_->setCurrentIndex(std::max(abrModeCombo_->findData(config.abrMode), 0));
+    occlusionModeCombo_->setCurrentIndex(
+        std::max(occlusionModeCombo_->findData(config.occlusionMode), 0));
     configTransportCombo_->setCurrentIndex(std::max(configTransportCombo_->findData(config.transport), 0));
 
     usbDeviceCombo_->clear();
@@ -1229,6 +1269,8 @@ void MainWindow::refreshStreaming()
 
     bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
+    dynamicResolutionValueLabel_->setText(
+        QString::number(config.dynamicResolutionMinScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
     adbStatusLabel_->setText(model_->adbStatus().message);
     clearAdbPathButton_->setEnabled(!model_->customAdbPath().isEmpty());
@@ -1250,6 +1292,21 @@ void MainWindow::refreshDeveloper()
                                      .arg(stats.maxBitrateMbps));
     renderMetricLabel_->setText(dimensionsText(stats.renderWidth, stats.renderHeight));
     encodedMetricLabel_->setText(dimensionsText(stats.encodedWidth, stats.encodedHeight));
+    scaleMetricLabel_->setText(QString("%1 / %2")
+                                   .arg(stats.resolutionScale, 0, 'f', 2)
+                                   .arg(stats.dynamicResolutionMinScale, 0, 'f', 2));
+    const QString passthroughState = !stats.passthroughEnabled
+        ? QStringLiteral("off")
+        : (stats.passthroughReady ? QStringLiteral("ready") : QStringLiteral("unsupported"));
+    const QString passthroughDetail =
+        stats.passthroughEnabled && !stats.passthroughSupported
+            ? QStringLiteral("headset")
+            : (stats.occlusionMode.isEmpty() ? QStringLiteral("off") : stats.occlusionMode);
+    passthroughMetricLabel_->setText(QString("%1 / %2").arg(passthroughState, passthroughDetail));
+    spatialMetricLabel_->setText(QString("%1 / #%2")
+                                     .arg(stats.spatialEnabled ? QStringLiteral("on")
+                                                               : QStringLiteral("off"))
+                                     .arg(stats.streamConfigSequence));
     serverMetricLabel_->setText(millisecondsText(stats.serverPipelineMs));
     clientMetricLabel_->setText(millisecondsText(stats.clientPipelineMs));
     horizonMetricLabel_->setText(millisecondsText(stats.predictionHorizonMs));
@@ -1392,19 +1449,28 @@ void MainWindow::updateConfigFromControls()
     config.questLogcat = questLogcatCheckBox_->isChecked();
     config.clientUpscaling = clientUpscalingCheckBox_->isChecked();
     config.headsetAudio = headsetAudioCheckBox_->isChecked();
+    config.passthroughEnabled = passthroughCheckBox_->isChecked();
+    config.spatialEnabled = spatialEnabledCheckBox_->isChecked();
+    config.spatialAnchors = spatialAnchorsCheckBox_->isChecked();
+    config.spatialScene = spatialSceneCheckBox_->isChecked();
+    config.spatialPersistence = spatialPersistenceCheckBox_->isChecked();
     config.bitrateMbps = bitrateSlider_->value();
     config.refreshRateHz = refreshRateCombo_->currentData().toInt();
     config.resolutionScale = resolutionSlider_->value() / 100.0;
+    config.dynamicResolutionMinScale = dynamicResolutionSlider_->value() / 100.0;
     config.keyframeIntervalSec = keyframeSlider_->value();
     config.encoderPreset = encoderPresetCombo_->currentData().toString();
     config.foveatedEncodingPreset = foveatedEncodingPresetCombo_->currentData().toString();
     config.clientFoveationPreset = clientFoveationPresetCombo_->currentData().toString();
     config.clientReprojection = clientReprojectionCombo_->currentData().toString();
     config.abrMode = abrModeCombo_->currentData().toString();
+    config.occlusionMode = occlusionModeCombo_->currentData().toString();
     config.transport = configTransportCombo_->currentData().toString();
 
     bitrateValueLabel_->setText(QString("%1 Mbps").arg(config.bitrateMbps));
     resolutionValueLabel_->setText(QString::number(config.resolutionScale, 'f', 2));
+    dynamicResolutionValueLabel_->setText(
+        QString::number(config.dynamicResolutionMinScale, 'f', 2));
     keyframeValueLabel_->setText(QString("%1 s").arg(config.keyframeIntervalSec));
     model_->scheduleStructuredConfigSave();
 }

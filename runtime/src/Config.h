@@ -18,6 +18,7 @@ struct ConfigValues
     uint32_t fovDegrees = 100;      // Legacy fallback FOV when a client omits eyeFov
     uint32_t refreshRateHz = 72;    // Preferred headset refresh rate
     float resolutionScale = 0.75f;  // Encode resolution multiplier (0.25-1.0)
+    float dynamicResolutionMinScale = 0.50f; // Lowest ABR full-mode encode scale
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
@@ -26,7 +27,14 @@ struct ConfigValues
     bool clientUpscaling = false;    // Enable Quest shader upscaling
     std::string clientReprojectionMode = "pose"; // "off", "pose", "pose_warp"
     std::string abrMode = "bitrate"; // "off", "bitrate", "full"
+    bool passthroughEnabled = false;  // Allow app-requested alpha blend passthrough
+    std::string occlusionMode = "off"; // "off", "scene_mesh", "environment_depth"
     bool headsetAudio = false;       // Stream server audio to the headset
+
+    bool spatialEnabled = false;
+    bool spatialAnchors = false;
+    bool spatialScene = false;
+    bool spatialPersistence = false;
 
     bool fileLogging = true;        // Write logs to oxrsys-runtime.log
     bool questLogcat = false;       // Capture Quest logcat to oxrsys-headset.log

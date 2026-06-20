@@ -68,6 +68,7 @@ void testServerConfigRoundTrip()
         bitrate_mbps = 85
         transport = "usb_adb"
         resolution_scale = 0.50
+        dynamic_resolution_min_scale = 0.55
         refresh_rate_hz = 120
         encoder_preset = "speed"
         foveated_encoding_preset = "medium"
@@ -75,7 +76,15 @@ void testServerConfigRoundTrip()
         client_upscaling = true
         client_reprojection = "pose_warp"
         abr_mode = "full"
+        passthrough_enabled = true
+        occlusion_mode = "environment_depth"
         headset_audio = true
+
+        [spatial]
+        enabled = true
+        anchors = true
+        scene = true
+        persistence = true
 
         [logging]
         quest_logcat = yes
@@ -84,6 +93,7 @@ void testServerConfigRoundTrip()
     expect(parsed.bitrateMbps == 85, "Expected bitrate parse");
     expect(parsed.transport == "usb_adb", "Expected transport parse");
     expect(parsed.resolutionScale == 0.50, "Expected resolution parse");
+    expect(parsed.dynamicResolutionMinScale == 0.55, "Expected dynamic resolution parse");
     expect(parsed.refreshRateHz == 120, "Expected refresh parse");
     expect(parsed.encoderPreset == "speed", "Expected preset parse");
     expect(parsed.foveatedEncodingPreset == "medium", "Expected FFE parse");
@@ -91,7 +101,13 @@ void testServerConfigRoundTrip()
     expect(parsed.clientUpscaling, "Expected upscaling parse");
     expect(parsed.clientReprojection == "pose_warp", "Expected reprojection parse");
     expect(parsed.abrMode == "full", "Expected ABR parse");
+    expect(parsed.passthroughEnabled, "Expected passthrough parse");
+    expect(parsed.occlusionMode == "environment_depth", "Expected occlusion parse");
     expect(parsed.headsetAudio, "Expected audio parse");
+    expect(parsed.spatialEnabled, "Expected spatial enabled parse");
+    expect(parsed.spatialAnchors, "Expected spatial anchors parse");
+    expect(parsed.spatialScene, "Expected spatial scene parse");
+    expect(parsed.spatialPersistence, "Expected spatial persistence parse");
     expect(parsed.questLogcat, "Expected quest_logcat parse");
 
     const QString merged = parsed.mergedInto(ServerConfig::defaultText());
@@ -104,7 +120,15 @@ void testServerConfigRoundTrip()
     expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization");
     expect(merged.contains("client_reprojection = \"pose_warp\""), "Expected reprojection serialization");
     expect(merged.contains("abr_mode = \"full\""), "Expected ABR serialization");
+    expect(merged.contains("dynamic_resolution_min_scale = 0.55"),
+           "Expected dynamic resolution serialization");
+    expect(merged.contains("passthrough_enabled = true"), "Expected passthrough serialization");
+    expect(!merged.contains("mixed_reality_mode"), "Expected legacy MR mode to be removed");
+    expect(merged.contains("occlusion_mode = \"environment_depth\""),
+           "Expected occlusion serialization");
     expect(merged.contains("headset_audio = true"), "Expected audio serialization");
+    expect(merged.contains("[spatial]"), "Expected spatial section serialization");
+    expect(merged.contains("anchors = true"), "Expected spatial serialization");
 }
 
 void testHomeModelResetsStreamingConfigToDefaults()
@@ -173,7 +197,13 @@ quest_logcat = true
     expect(text.contains("client_reprojection = \"pose\""),
            "Expected default reprojection serialization");
     expect(text.contains("abr_mode = \"bitrate\""), "Expected default ABR serialization");
+    expect(text.contains("dynamic_resolution_min_scale = 0.50"),
+           "Expected default dynamic resolution serialization");
+    expect(text.contains("passthrough_enabled = false"),
+           "Expected default passthrough serialization");
+    expect(text.contains("occlusion_mode = \"off\""), "Expected default occlusion serialization");
     expect(text.contains("headset_audio = false"), "Expected default audio serialization");
+    expect(text.contains("enabled = false"), "Expected default spatial serialization");
 
     settings.clear();
 }
@@ -265,11 +295,13 @@ ABC unauthorized usb:1-1
 UsbFfs tcp:9944 tcp:9944
 UsbFfs tcp:9945 tcp:9945
 UsbFfs tcp:9946 tcp:9946
+UsbFfs tcp:9948 tcp:9948
 )");
     QSet<int> expectedPorts;
     expectedPorts.insert(9944);
     expectedPorts.insert(9945);
     expectedPorts.insert(9946);
+    expectedPorts.insert(9948);
     expect(ports == expectedPorts, "Expected reverse ports");
 }
 
@@ -433,6 +465,15 @@ void testRuntimeActivityParsing()
         "abr_mode": "full",
         "abr_state": "constrained",
         "abr_profile": "smooth",
+        "resolution_scale": 0.68,
+        "dynamic_resolution_min_scale": 0.50,
+        "stream_reconfigure": true,
+        "stream_config_sequence": 7,
+        "passthrough_enabled": true,
+        "passthrough_supported": false,
+        "passthrough_ready": false,
+        "occlusion_mode": "scene_mesh",
+        "spatial_enabled": true,
         "headset_audio": false,
         "latency_ms": {
           "server_pipeline": 12.5,
@@ -465,6 +506,17 @@ void testRuntimeActivityParsing()
            "Expected reprojection stats");
     expect(activity.streamingStats.abrState == "constrained", "Expected ABR state stats");
     expect(activity.streamingStats.abrProfile == "smooth", "Expected ABR profile stats");
+    expect(activity.streamingStats.resolutionScale == 0.68, "Expected resolution scale stats");
+    expect(activity.streamingStats.dynamicResolutionMinScale == 0.50,
+           "Expected dynamic resolution min stats");
+    expect(activity.streamingStats.streamReconfigure, "Expected stream reconfigure stats");
+    expect(activity.streamingStats.streamConfigSequence == 7,
+           "Expected stream config sequence stats");
+    expect(activity.streamingStats.passthroughEnabled, "Expected passthrough stats");
+    expect(!activity.streamingStats.passthroughSupported, "Expected passthrough support stats");
+    expect(!activity.streamingStats.passthroughReady, "Expected passthrough readiness stats");
+    expect(activity.streamingStats.occlusionMode == "scene_mesh", "Expected occlusion stats");
+    expect(activity.streamingStats.spatialEnabled, "Expected spatial stats");
     expect(!activity.streamingStats.headsetAudio, "Expected audio stats");
     expect(activity.streamingStats.displayedFrameAgeMs == 24.5, "Expected frame age stats");
     expect(activity.streamingStats.reprojectedFramesDelta == 5, "Expected reprojection counter");

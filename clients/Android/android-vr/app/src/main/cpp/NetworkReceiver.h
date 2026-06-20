@@ -28,7 +28,8 @@ class NetworkReceiver
 {
 public:
     using OnNalUnitCallback = std::function<void(const uint8_t* data, size_t size,
-                                                 int64_t timestampNs, int64_t receiveTimeNs)>;
+                                                 int64_t timestampNs, int64_t receiveTimeNs,
+                                                 uint8_t flags)>;
     using OnConnectionLostCallback = std::function<void(const char* reason)>;
     // serverIp is the IP address of the broadcasting server (from recvfrom)
     using OnServerFoundCallback = std::function<void(const protocol::ServerAnnounce& server,
@@ -106,6 +107,7 @@ private:
         uint32_t totalPackets = 0;
         uint32_t receivedPackets = 0;
         int64_t timestampNs = 0;
+        uint8_t flags = 0;
         std::vector<uint8_t> data;
         std::vector<uint8_t> packetReceived;
         std::vector<uint16_t> packetSizes;  // Actual size of each packet's payload

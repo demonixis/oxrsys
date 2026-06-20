@@ -17,6 +17,7 @@ runtime_enabled = false
 bitrate_mbps = 85
 fov_degrees = 30
 resolution_scale = 0.8
+dynamic_resolution_min_scale = 0.55
 refresh_rate_hz = 120
 keyframe_interval_sec = 4
 encoder_preset = "quality"
@@ -25,7 +26,15 @@ client_foveation_preset = "high"
 client_upscaling = true
 client_reprojection = "pose_warp"
 abr_mode = "full"
+passthrough_enabled = true
+occlusion_mode = "environment_depth"
 headset_audio = true
+
+[spatial]
+enabled = true
+anchors = true
+scene = true
+persistence = true
 
 [logging]
 file_logging = false
@@ -38,6 +47,7 @@ quest_logcat = yes
     CHECK(values.bitrateMbps == 85);
     CHECK(values.fovDegrees == 100);
     CHECK(values.resolutionScale == 0.8f);
+    CHECK(values.dynamicResolutionMinScale == 0.55f);
     CHECK(values.refreshRateHz == 120);
     CHECK(values.keyframeIntervalSec == 4);
     CHECK(values.encoderPreset == "quality");
@@ -46,7 +56,13 @@ quest_logcat = yes
     CHECK(values.clientUpscaling == true);
     CHECK(values.clientReprojectionMode == "pose_warp");
     CHECK(values.abrMode == "full");
+    CHECK(values.passthroughEnabled == true);
+    CHECK(values.occlusionMode == "environment_depth");
     CHECK(values.headsetAudio == true);
+    CHECK(values.spatialEnabled == true);
+    CHECK(values.spatialAnchors == true);
+    CHECK(values.spatialScene == true);
+    CHECK(values.spatialPersistence == true);
     CHECK(values.streamingTransport == "auto");
     CHECK(values.fileLogging == false);
     CHECK(values.questLogcat == true);
@@ -58,6 +74,7 @@ TEST_CASE("Config parser preserves provided defaults when values are malformed",
 [streaming]
 bitrate_mbps = nope
 resolution_scale = 2.0
+dynamic_resolution_min_scale = 0.1
 refresh_rate_hz = 144
 keyframe_interval_sec = 0
 encoder_preset = "turbo"
@@ -65,12 +82,15 @@ foveated_encoding_preset = "extreme"
 client_foveation_preset = "ultra"
 client_reprojection = "warp_all_the_time"
 abr_mode = "turbo"
+mixed_reality_mode = "portal"
+occlusion_mode = "magic"
 )TOML");
 
     ConfigValues defaults;
     defaults.runtimeEnabled = false;
     defaults.bitrateMbps = 64;
     defaults.resolutionScale = 0.5f;
+    defaults.dynamicResolutionMinScale = 0.45f;
     defaults.refreshRateHz = 80;
     defaults.keyframeIntervalSec = 3;
     defaults.encoderPreset = "speed";
@@ -79,12 +99,15 @@ abr_mode = "turbo"
     defaults.clientUpscaling = true;
     defaults.clientReprojectionMode = "pose";
     defaults.abrMode = "bitrate";
+    defaults.passthroughEnabled = true;
+    defaults.occlusionMode = "scene_mesh";
 
     const ConfigValues values = ParseConfigToml(input, defaults);
 
     CHECK(values.runtimeEnabled == false);
     CHECK(values.bitrateMbps == 64);
     CHECK(values.resolutionScale == 0.5f);
+    CHECK(values.dynamicResolutionMinScale == 0.45f);
     CHECK(values.refreshRateHz == 80);
     CHECK(values.keyframeIntervalSec == 3);
     CHECK(values.encoderPreset == "speed");
@@ -93,6 +116,19 @@ abr_mode = "turbo"
     CHECK(values.clientUpscaling == true);
     CHECK(values.clientReprojectionMode == "pose");
     CHECK(values.abrMode == "bitrate");
+    CHECK(values.passthroughEnabled == true);
+    CHECK(values.occlusionMode == "scene_mesh");
+}
+
+TEST_CASE("Config parser migrates legacy mixed reality mode to passthrough", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+mixed_reality_mode = "alpha"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+    CHECK(values.passthroughEnabled == true);
 }
 
 TEST_CASE("Config parser accepts streaming transport", "[config]")

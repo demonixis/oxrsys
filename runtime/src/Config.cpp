@@ -346,6 +346,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.resolutionScale = val;
                 }
             }
+            else if (key == "dynamic_resolution_min_scale")
+            {
+                float val = std::stof(value);
+                if (val >= 0.25f && val <= 1.0f)
+                {
+                    values.dynamicResolutionMinScale = val;
+                }
+            }
             else if (key == "keyframe_interval_sec")
             {
                 int val = std::stoi(value);
@@ -407,9 +415,45 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.abrMode = value;
                 }
             }
+            else if (key == "passthrough_enabled")
+            {
+                values.passthroughEnabled = ParseBool(value);
+            }
+            else if (key == "mixed_reality_mode")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "passthrough" || value == "alpha")
+                {
+                    values.passthroughEnabled = value != "off";
+                }
+            }
+            else if (key == "occlusion_mode")
+            {
+                value = ParseString(value);
+                if (value == "off" || value == "scene_mesh" || value == "environment_depth")
+                {
+                    values.occlusionMode = value;
+                }
+            }
             else if (key == "headset_audio")
             {
                 values.headsetAudio = ParseBool(value);
+            }
+            else if (key == "enabled")
+            {
+                values.spatialEnabled = ParseBool(value);
+            }
+            else if (key == "anchors")
+            {
+                values.spatialAnchors = ParseBool(value);
+            }
+            else if (key == "scene")
+            {
+                values.spatialScene = ParseBool(value);
+            }
+            else if (key == "persistence")
+            {
+                values.spatialPersistence = ParseBool(value);
             }
         }
         catch (const std::exception&)
@@ -508,13 +552,14 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
             newValues.fovDegrees,
             newValues.refreshRateHz,
             newValues.resolutionScale,
+            newValues.dynamicResolutionMinScale,
             newValues.keyframeIntervalSec,
             newValues.encoderPreset,
             newValues.streamingTransport,
@@ -523,6 +568,12 @@ bool Config::ReloadIfChangedLocked(bool force)
             newValues.clientUpscaling,
             newValues.clientReprojectionMode,
             newValues.abrMode,
+            newValues.passthroughEnabled,
+            newValues.occlusionMode,
+            newValues.spatialEnabled,
+            newValues.spatialAnchors,
+            newValues.spatialScene,
+            newValues.spatialPersistence,
             newValues.headsetAudio,
             newValues.questLogcat);
     }
@@ -590,13 +641,16 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
-                  values_.resolutionScale, values_.keyframeIntervalSec,
+                  values_.resolutionScale, values_.dynamicResolutionMinScale,
+                  values_.keyframeIntervalSec,
                   values_.encoderPreset, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
                   values_.clientUpscaling, values_.clientReprojectionMode,
-                  values_.abrMode, values_.headsetAudio);
+                  values_.abrMode, values_.passthroughEnabled, values_.occlusionMode,
+                  values_.spatialEnabled, values_.spatialAnchors, values_.spatialScene,
+                  values_.spatialPersistence, values_.headsetAudio);
 }
 
 // ─── Quest logcat capture ────────────────────────────────────────────────────

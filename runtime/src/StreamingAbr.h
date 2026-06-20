@@ -42,6 +42,7 @@ struct Decision
     uint32_t targetBitrateMbps = 0;
     bool bitrateChanged = false;
     std::string profile = "balanced";
+    float targetResolutionScale = 1.0f;
 };
 
 inline Mode ParseMode(const std::string& value)
@@ -88,11 +89,15 @@ inline const char* ToString(State state)
 class Controller
 {
 public:
-    void Reset(Mode mode, uint32_t currentBitrateMbps, uint32_t maxBitrateMbps)
+    void Reset(Mode mode, uint32_t currentBitrateMbps, uint32_t maxBitrateMbps,
+               float configuredResolutionScale = 1.0f,
+               float minimumResolutionScale = 0.5f)
     {
         mode_ = mode;
         maxBitrateMbps_ = std::max(maxBitrateMbps, kMinBitrateMbps);
         currentBitrateMbps_ = std::clamp(currentBitrateMbps, kMinBitrateMbps, maxBitrateMbps_);
+        configuredResolutionScale_ = std::clamp(configuredResolutionScale, 0.25f, 1.0f);
+        minimumResolutionScale_ = std::clamp(minimumResolutionScale, 0.25f, configuredResolutionScale_);
         state_ = State::Stable;
         stableWindows_ = 0;
         minimumProfileHoldWindows_ = 0;
@@ -105,11 +110,13 @@ public:
         Decision decision = {};
         decision.targetBitrateMbps = currentBitrateMbps_;
         decision.profile = profile_;
+        decision.targetResolutionScale = ProfileResolutionScale(profile_);
 
         if (mode_ == Mode::Off)
         {
             state_ = State::Stable;
             decision.state = state_;
+            decision.targetResolutionScale = configuredResolutionScale_;
             return decision;
         }
 
@@ -182,6 +189,7 @@ public:
         decision.targetBitrateMbps = currentBitrateMbps_;
         decision.state = state_;
         decision.profile = SelectProfile(averageFrameAgeMs, averageReprojectedFrames);
+        decision.targetResolutionScale = ProfileResolutionScale(decision.profile);
         return decision;
     }
 
@@ -244,10 +252,29 @@ private:
         return profile_;
     }
 
+    float ProfileResolutionScale(const std::string& profile) const
+    {
+        if (mode_ != Mode::Full)
+        {
+            return configuredResolutionScale_;
+        }
+        if (profile == "wifi_smooth")
+        {
+            return std::max(minimumResolutionScale_, configuredResolutionScale_ * 0.70f);
+        }
+        if (profile == "smooth")
+        {
+            return std::max(minimumResolutionScale_, configuredResolutionScale_ * 0.85f);
+        }
+        return configuredResolutionScale_;
+    }
+
     Mode mode_ = Mode::Bitrate;
     State state_ = State::Stable;
     uint32_t currentBitrateMbps_ = 50;
     uint32_t maxBitrateMbps_ = 50;
+    float configuredResolutionScale_ = 1.0f;
+    float minimumResolutionScale_ = 0.5f;
     uint32_t stableWindows_ = 0;
     uint32_t minimumProfileHoldWindows_ = 0;
     std::string profile_ = "balanced";

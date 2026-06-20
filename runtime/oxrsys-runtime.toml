@@ -23,6 +23,10 @@ refresh_rate_hz = 72
 # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
 resolution_scale = 0.75
 
+# Lowest encode scale that ABR "full" may request when the client supports live stream
+# reconfiguration. The OpenXR app's own swapchain/render resolution is unchanged.
+dynamic_resolution_min_scale = 0.50
+
 # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
 # Default 2 is a good balance. Use 1 for lossy WiFi, 5+ for USB.
 keyframe_interval_sec = 2
@@ -53,12 +57,27 @@ client_upscaling = false
 client_reprojection = "pose"
 
 # Adaptive bitrate mode: "off", "bitrate", or "full".
-# "full" may select resolution/foveation/upscaling profiles after session-safe transitions.
+# "full" may select live streaming resolution profiles when the headset client supports it.
 abr_mode = "bitrate"
+
+# Enable headset passthrough as a runtime feature. Apps still choose opaque or
+# alpha blend through OpenXR environment blend modes.
+passthrough_enabled = false
+
+# Occlusion mode: "off", "scene_mesh", or "environment_depth".
+# Occlusion is enabled only when a compatible depth or scene source is available.
+occlusion_mode = "off"
 
 # Reserved for headset speaker audio. The runtime does not advertise audio until
 # a platform capture/playback path is attached.
 headset_audio = false
+
+[spatial]
+# Spatial features are off by default until a headset client reports support.
+enabled = false
+anchors = false
+scene = false
+persistence = false
 
 [logging]
 # Write server logs to the platform state directory.

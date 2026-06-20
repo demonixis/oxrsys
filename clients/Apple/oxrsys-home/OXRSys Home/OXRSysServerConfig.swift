@@ -11,6 +11,7 @@ struct OXRSysServerConfig: Equatable {
     var bitrateMbps = 50
     var refreshRateHz = 72
     var resolutionScale = 0.75
+    var dynamicResolutionMinScale = 0.50
     var keyframeIntervalSec = 2
     var encoderPreset: EncoderPreset = .balanced
     var transport: StreamingTransportSetting = .auto
@@ -19,7 +20,13 @@ struct OXRSysServerConfig: Equatable {
     var clientUpscaling = false
     var clientReprojection: ClientReprojectionSetting = .pose
     var abrMode: AbrModeSetting = .bitrate
+    var passthroughEnabled = false
+    var occlusionMode: OcclusionModeSetting = .off
     var headsetAudio = false
+    var spatialEnabled = false
+    var spatialAnchors = false
+    var spatialScene = false
+    var spatialPersistence = false
     var fileLogging = true
     var questLogcat = false
 
@@ -43,6 +50,10 @@ struct OXRSysServerConfig: Equatable {
     # Resolution multiplier (0.25 to 1.0). Lower = faster encode, less bandwidth, more blur.
     # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
     resolution_scale = 0.75
+
+    # Minimum encoded-resolution multiplier used only when abr_mode = "full"
+    # and the headset client supports live stream reconfiguration.
+    dynamic_resolution_min_scale = 0.50
 
     # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
     # Default 2 is a good balance. Use 1 for lossy WiFi, 5+ for USB.
@@ -74,9 +85,23 @@ struct OXRSysServerConfig: Equatable {
     # "full" may select resolution/foveation/upscaling profiles after session-safe transitions.
     abr_mode = "bitrate"
 
+    # Enable headset passthrough as a runtime feature. Apps still choose opaque
+    # or alpha blend through OpenXR environment blend modes.
+    passthrough_enabled = false
+
+    # Occlusion mode: "off", "scene_mesh", or "environment_depth".
+    occlusion_mode = "off"
+
     # Reserved for headset speaker audio. The runtime does not advertise audio until
     # a platform capture/playback path is attached.
     headset_audio = false
+
+    [spatial]
+    # Spatial features stay disabled unless the headset client and runtime path support them.
+    enabled = false
+    anchors = false
+    scene = false
+    persistence = false
 
     [logging]
     # Write server logs to ~/Library/Application Support/OXRSys/oxrsys-runtime.log.
@@ -103,6 +128,9 @@ struct OXRSysServerConfig: Equatable {
         if let value = doubleValue("resolution_scale", in: text), value >= 0.25, value <= 1.0 {
             config.resolutionScale = value
         }
+        if let value = doubleValue("dynamic_resolution_min_scale", in: text), value >= 0.25, value <= 1.0 {
+            config.dynamicResolutionMinScale = value
+        }
         if let value = intValue("keyframe_interval_sec", in: text), (1...10).contains(value) {
             config.keyframeIntervalSec = value
         }
@@ -127,8 +155,25 @@ struct OXRSysServerConfig: Equatable {
         if let value = stringValue("abr_mode", in: text), let mode = AbrModeSetting(rawValue: value) {
             config.abrMode = mode
         }
+        config.passthroughEnabled = boolValue("passthrough_enabled", in: text) ??
+            (stringValue("mixed_reality_mode", in: text).map { $0 != "off" } ?? config.passthroughEnabled)
+        if let value = stringValue("occlusion_mode", in: text), let mode = OcclusionModeSetting(rawValue: value) {
+            config.occlusionMode = mode
+        }
         if let value = boolValue("headset_audio", in: text) {
             config.headsetAudio = value
+        }
+        if let value = boolValue("enabled", in: text) {
+            config.spatialEnabled = value
+        }
+        if let value = boolValue("anchors", in: text) {
+            config.spatialAnchors = value
+        }
+        if let value = boolValue("scene", in: text) {
+            config.spatialScene = value
+        }
+        if let value = boolValue("persistence", in: text) {
+            config.spatialPersistence = value
         }
         if let value = boolValue("file_logging", in: text) {
             config.fileLogging = value
@@ -155,6 +200,7 @@ struct OXRSysServerConfig: Equatable {
                 ("bitrate_mbps", "\(bitrateMbps)"),
                 ("refresh_rate_hz", "\(refreshRateHz)"),
                 ("resolution_scale", decimalString(resolutionScale)),
+                ("dynamic_resolution_min_scale", decimalString(dynamicResolutionMinScale)),
                 ("keyframe_interval_sec", "\(keyframeIntervalSec)"),
                 ("encoder_preset", "\"\(encoderPreset.rawValue)\""),
                 ("transport", "\"\(transport.rawValue)\""),
@@ -163,7 +209,15 @@ struct OXRSysServerConfig: Equatable {
                 ("client_upscaling", boolString(clientUpscaling)),
                 ("client_reprojection", "\"\(clientReprojection.rawValue)\""),
                 ("abr_mode", "\"\(abrMode.rawValue)\""),
+                ("passthrough_enabled", boolString(passthroughEnabled)),
+                ("occlusion_mode", "\"\(occlusionMode.rawValue)\""),
                 ("headset_audio", boolString(headsetAudio)),
+            ]),
+            ("spatial", [
+                ("enabled", boolString(spatialEnabled)),
+                ("anchors", boolString(spatialAnchors)),
+                ("scene", boolString(spatialScene)),
+                ("persistence", boolString(spatialPersistence)),
             ]),
             ("logging", [
                 ("file_logging", boolString(fileLogging)),

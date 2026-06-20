@@ -154,8 +154,11 @@ add_executable(oxrsys_runtime_tests
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
     tests/TestVulkanDispatch.cpp
+    tests/TestCompositionLayerAlpha.cpp
     tests/TestProtocolLayout.cpp
+    tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
+    clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
     runtime/src/TrackingReceiver.cpp

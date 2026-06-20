@@ -23,6 +23,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added configurable Quest client reprojection modes (`off`, `pose`, `pose_warp`) for short decode/network gaps, with displayed-frame-age and reprojection counters in latency reports and runtime status.
 - Added a local Quest/PICO shell that replaces standby/loading color clears with a 3D grid, upright status panel, reset button, optional `XR_FB_passthrough` mode, controller laser interaction, hand laser/pinch interaction, and visible hand-joint markers.
 - Added a runtime ABR controller with `off`, `bitrate`, and `full` modes, sliding-window hysteresis, fast bitrate downshift, slow recovery, and profile reporting for future session-safe resolution/foveation/upscaling transitions.
+- Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`), dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved reliable spatial TCP channel on `9948`, and matching SwiftUI/Qt Home controls and status display.
 
 ### Changed
 
@@ -43,7 +44,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated the Quest USB ADB client to defer bitrate limits to the server/Home configuration instead of imposing an extra 100 Mbps cap.
 - Updated the Quest decoder path to drain MediaCodec output on a decoder thread instead of the XR frame loop.
 - Updated the Quest MediaCodec input sizing to keep bounded headroom for high-bitrate foveated-encoding IDR frames.
-- Updated the Quest/PICO shell to pause passthrough, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
+- Updated the Quest/PICO shell to pause passthrough during normal streaming, keep passthrough active only when the global passthrough feature is enabled and the headset reports `XR_FB_passthrough` support, key app-requested alpha-blend/source-alpha video backgrounds for current AR demo scenes, use the same black-key fallback when passthrough is active but no alpha flags have arrived yet, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
 - Updated SwiftUI Home and Qt Home with ABR and Quest client reprojection controls plus runtime status display for frame age, ABR state, and reprojection reuse.
 - Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
@@ -63,6 +64,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Hardened Quest headset foveation shutdown by detaching the foveation profile from swapchains before destroying it.
 - Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
 - Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
+- Fixed a Unity editor crash on session shutdown by invalidating stale VideoToolbox encode callbacks before the streaming server is destroyed and by catching callback exceptions inside the encoder.
 - Filtered known macOS `linkd.autoShortcut` App Intents diagnostics from Home captured app logs.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 

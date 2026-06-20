@@ -123,9 +123,10 @@ struct HomeLauncherTests {
         UsbFfs tcp:9944 tcp:9944
         UsbFfs tcp:9945 tcp:9945
         UsbFfs tcp:9946 tcp:9946
+        UsbFfs tcp:9948 tcp:9948
         """)
 
-        try expect(ports == Set([9944, 9945, 9946]), "Expected configured USB reverse ports")
+        try expect(ports == Set([9944, 9945, 9946, 9948]), "Expected configured USB reverse ports")
     }
 
     private static func testQuestUsbAdbCandidatePaths() throws {
@@ -255,7 +256,16 @@ struct HomeLauncherTests {
         client_upscaling = true
         client_reprojection = "pose_warp"
         abr_mode = "full"
+        dynamic_resolution_min_scale = 0.55
+        passthrough_enabled = true
+        occlusion_mode = "environment_depth"
         headset_audio = true
+
+        [spatial]
+        enabled = true
+        anchors = true
+        scene = true
+        persistence = true
         """)
         try expect(parsed.transport == .usbAdb, "Expected USB ADB transport parse")
         try expect(parsed.refreshRateHz == 120, "Expected refresh parse")
@@ -264,7 +274,14 @@ struct HomeLauncherTests {
         try expect(parsed.clientUpscaling == true, "Expected client upscaling parse")
         try expect(parsed.clientReprojection == .poseWarp, "Expected client reprojection parse")
         try expect(parsed.abrMode == .full, "Expected ABR parse")
+        try expect(parsed.dynamicResolutionMinScale == 0.55, "Expected dynamic resolution parse")
+        try expect(parsed.passthroughEnabled == true, "Expected passthrough parse")
+        try expect(parsed.occlusionMode == .environmentDepth, "Expected occlusion parse")
         try expect(parsed.headsetAudio == true, "Expected headset audio parse")
+        try expect(parsed.spatialEnabled == true, "Expected spatial enabled parse")
+        try expect(parsed.spatialAnchors == true, "Expected spatial anchors parse")
+        try expect(parsed.spatialScene == true, "Expected spatial scene parse")
+        try expect(parsed.spatialPersistence == true, "Expected spatial persistence parse")
 
         let merged = parsed.merged(into: OXRSysServerConfig.defaultText)
         try expect(merged.contains("transport = \"usb_adb\""), "Expected USB ADB transport serialization")
@@ -274,7 +291,13 @@ struct HomeLauncherTests {
         try expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization")
         try expect(merged.contains("client_reprojection = \"pose_warp\""), "Expected reprojection serialization")
         try expect(merged.contains("abr_mode = \"full\""), "Expected ABR serialization")
+        try expect(merged.contains("dynamic_resolution_min_scale = 0.55"), "Expected dynamic resolution serialization")
+        try expect(merged.contains("passthrough_enabled = true"), "Expected passthrough serialization")
+        try expect(!merged.contains("mixed_reality_mode"), "Expected legacy MR mode to be removed")
+        try expect(merged.contains("occlusion_mode = \"environment_depth\""), "Expected occlusion serialization")
         try expect(merged.contains("headset_audio = true"), "Expected audio serialization")
+        try expect(merged.contains("[spatial]"), "Expected spatial section serialization")
+        try expect(merged.contains("anchors = true"), "Expected spatial anchor serialization")
     }
 
     private static func testServerConfigDefaultSerialization() throws {
@@ -304,7 +327,11 @@ struct HomeLauncherTests {
         try expect(merged.contains("client_upscaling = false"), "Expected default upscaling serialization")
         try expect(merged.contains("client_reprojection = \"pose\""), "Expected default reprojection serialization")
         try expect(merged.contains("abr_mode = \"bitrate\""), "Expected default ABR serialization")
+        try expect(merged.contains("dynamic_resolution_min_scale = 0.50"), "Expected default dynamic resolution serialization")
+        try expect(merged.contains("passthrough_enabled = false"), "Expected default passthrough serialization")
+        try expect(merged.contains("occlusion_mode = \"off\""), "Expected default occlusion serialization")
         try expect(merged.contains("headset_audio = false"), "Expected default audio serialization")
+        try expect(merged.contains("enabled = false"), "Expected default spatial serialization")
         try expect(merged.contains("file_logging = true"), "Expected default file logging serialization")
         try expect(merged.contains("quest_logcat = false"), "Expected default quest logcat serialization")
     }
@@ -356,6 +383,15 @@ struct HomeLauncherTests {
             "abr_mode": "full",
             "abr_state": "constrained",
             "abr_profile": "smooth",
+            "resolution_scale": 0.68,
+            "dynamic_resolution_min_scale": 0.50,
+            "stream_reconfigure": true,
+            "stream_config_sequence": 7,
+            "passthrough_enabled": true,
+            "passthrough_supported": false,
+            "passthrough_ready": false,
+            "occlusion_mode": "scene_mesh",
+            "spatial_enabled": true,
             "headset_audio": false,
             "latency_ms": {
               "server_pipeline": 12.5,
@@ -403,6 +439,15 @@ struct HomeLauncherTests {
         try expect(stats?.clientReprojectionMode == "pose_warp", "Expected runtime stats reprojection")
         try expect(stats?.abrState == "constrained", "Expected runtime stats ABR state")
         try expect(stats?.abrProfile == "smooth", "Expected runtime stats ABR profile")
+        try expect(stats?.resolutionScale == 0.68, "Expected runtime stats resolution scale")
+        try expect(stats?.dynamicResolutionMinScale == 0.50, "Expected runtime stats dynamic min scale")
+        try expect(stats?.streamReconfigure == true, "Expected runtime stats stream reconfigure")
+        try expect(stats?.streamConfigSequence == 7, "Expected runtime stats stream config sequence")
+        try expect(stats?.passthroughEnabled == true, "Expected runtime stats passthrough flag")
+        try expect(stats?.passthroughSupported == false, "Expected runtime stats passthrough support")
+        try expect(stats?.passthroughReady == false, "Expected runtime stats passthrough readiness")
+        try expect(stats?.occlusionMode == "scene_mesh", "Expected runtime stats occlusion mode")
+        try expect(stats?.spatialEnabled == true, "Expected runtime stats spatial flag")
         try expect(stats?.headsetAudio == false, "Expected runtime stats audio")
         try expect(stats?.latency.serverPipelineMs == 12.5, "Expected server latency parse")
         try expect(stats?.latency.predictionHorizonMs == 30.75, "Expected prediction horizon parse")

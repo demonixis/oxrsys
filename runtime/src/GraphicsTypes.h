@@ -88,6 +88,7 @@ struct FrameSource
 {
     FrameImageSource left = {};
     FrameImageSource right = {};
+    bool alphaBlend = false;
 
     bool IsStereoValid() const
     {
@@ -98,5 +99,6 @@ struct FrameSource
     {
         left.Reset();
         right.Reset();
+        alphaBlend = false;
     }
 };

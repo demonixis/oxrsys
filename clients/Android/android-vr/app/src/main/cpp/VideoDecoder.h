@@ -42,7 +42,7 @@ public:
 
     // Feed an H.265 NAL unit to the decoder
     bool SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
-                       int64_t receiveTimeNs);
+                       int64_t receiveTimeNs, bool alphaBlend);
 
     // Decoded frame providing an AHardwareBuffer for GPU rendering
     struct DecodedFrame
@@ -60,6 +60,7 @@ public:
         int64_t localSubmitTimeNs = 0;
         int64_t localAcquireTimeNs = 0;
         uint32_t skippedFramesBeforeAcquire = 0;
+        bool alphaBlend = false;
     };
 
     // Get the next decoded frame (returns false if no frame ready).
@@ -79,12 +80,14 @@ private:
         int64_t presentationTimeUs = 0;
         int64_t receiveTimeNs = 0;
         int64_t submitTimeNs = 0;
+        bool alphaBlend = false;
     };
 
     // Dequeue all available output buffers and render them to the surface
     uint32_t FlushOutputToSurface(int64_t timeoutUs);
     void OutputThreadMain();
-    void RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs, int64_t submitTimeNs);
+    void RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs, int64_t submitTimeNs,
+                                bool alphaBlend);
     bool ConsumeSubmittedFrameMetadata(int64_t presentationTimeUs, PendingFrameMetadata* outMetadata);
 
     AMediaCodec* codec_ = nullptr;

@@ -24,6 +24,15 @@ struct RuntimeStreamingStats
     QString abrMode;
     QString abrState;
     QString abrProfile;
+    double resolutionScale = 0.0;
+    double dynamicResolutionMinScale = 0.0;
+    bool streamReconfigure = false;
+    int streamConfigSequence = 0;
+    bool passthroughEnabled = false;
+    bool passthroughSupported = false;
+    bool passthroughReady = false;
+    QString occlusionMode;
+    bool spatialEnabled = false;
     bool headsetAudio = false;
 
     double serverPipelineMs = 0.0;

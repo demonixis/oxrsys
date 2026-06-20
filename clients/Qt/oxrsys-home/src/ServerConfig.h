@@ -17,6 +17,7 @@ struct ServerConfig
     int bitrateMbps = 50;
     int refreshRateHz = 72;
     double resolutionScale = 0.75;
+    double dynamicResolutionMinScale = 0.50;
     int keyframeIntervalSec = 2;
     QString encoderPreset = "balanced";
     QString transport = "auto";
@@ -25,7 +26,13 @@ struct ServerConfig
     bool clientUpscaling = false;
     QString clientReprojection = "pose";
     QString abrMode = "bitrate";
+    bool passthroughEnabled = false;
+    QString occlusionMode = "off";
     bool headsetAudio = false;
+    bool spatialEnabled = false;
+    bool spatialAnchors = false;
+    bool spatialScene = false;
+    bool spatialPersistence = false;
     bool fileLogging = true;
     bool questLogcat = false;
 
@@ -39,3 +46,4 @@ QString transportDisplayName(const QString& value);
 QString foveationPresetDisplayName(const QString& value);
 QString clientReprojectionDisplayName(const QString& value);
 QString abrModeDisplayName(const QString& value);
+QString occlusionModeDisplayName(const QString& value);

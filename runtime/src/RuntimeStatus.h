@@ -26,6 +26,15 @@ public:
         std::string abrMode;
         std::string abrState;
         std::string abrProfile;
+        double resolutionScale = 0.0;
+        double dynamicResolutionMinScale = 0.0;
+        bool streamReconfigure = false;
+        uint32_t streamConfigSequence = 0;
+        bool passthroughEnabled = false;
+        bool passthroughSupported = false;
+        bool passthroughReady = false;
+        std::string occlusionMode;
+        bool spatialEnabled = false;
         bool headsetAudio = false;
 
         double serverPipelineLatencyMs = 0.0;

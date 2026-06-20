@@ -162,7 +162,7 @@ void VideoDecoder::Shutdown()
 }
 
 bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
-                                 int64_t receiveTimeNs)
+                                 int64_t receiveTimeNs, bool alphaBlend)
 {
     if (codec_ == nullptr)
     {
@@ -188,7 +188,7 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
     memcpy(buffer, data, size);
     int64_t submitTimeNs = SteadyClockNowNs();
     AMediaCodec_queueInputBuffer(codec_, bufferIndex, 0, size, presentationTimeUs, 0);
-    RememberSubmittedFrame(presentationTimeUs, receiveTimeNs, submitTimeNs);
+    RememberSubmittedFrame(presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend);
     return true;
 }
 
@@ -340,6 +340,7 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
     {
         outFrame->localReceiveTimeNs = metadata.receiveTimeNs;
         outFrame->localSubmitTimeNs = metadata.submitTimeNs;
+        outFrame->alphaBlend = metadata.alphaBlend;
     }
 
     return true;
@@ -354,7 +355,8 @@ void VideoDecoder::ReleaseFrame()
     }
 }
 
-void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs, int64_t submitTimeNs)
+void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs,
+                                          int64_t submitTimeNs, bool alphaBlend)
 {
     std::lock_guard<std::mutex> lock(metadataMutex_);
 
@@ -366,11 +368,12 @@ void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs, int64_t re
                 ? receiveTimeNs
                 : std::min(metadata.receiveTimeNs, receiveTimeNs);
             metadata.submitTimeNs = std::max(metadata.submitTimeNs, submitTimeNs);
+            metadata.alphaBlend = metadata.alphaBlend || alphaBlend;
             return;
         }
     }
 
-    pendingFrames_.push_back({presentationTimeUs, receiveTimeNs, submitTimeNs});
+    pendingFrames_.push_back({presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend});
     while (pendingFrames_.size() > 64)
     {
         pendingFrames_.pop_front();

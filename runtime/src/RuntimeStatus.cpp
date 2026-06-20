@@ -158,6 +158,15 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "    \"abr_mode\": \"" << JsonEscape(stats.abrMode) << "\",\n";
     file << "    \"abr_state\": \"" << JsonEscape(stats.abrState) << "\",\n";
     file << "    \"abr_profile\": \"" << JsonEscape(stats.abrProfile) << "\",\n";
+    file << "    \"resolution_scale\": " << stats.resolutionScale << ",\n";
+    file << "    \"dynamic_resolution_min_scale\": " << stats.dynamicResolutionMinScale << ",\n";
+    file << "    \"stream_reconfigure\": " << (stats.streamReconfigure ? "true" : "false") << ",\n";
+    file << "    \"stream_config_sequence\": " << stats.streamConfigSequence << ",\n";
+    file << "    \"passthrough_enabled\": " << (stats.passthroughEnabled ? "true" : "false") << ",\n";
+    file << "    \"passthrough_supported\": " << (stats.passthroughSupported ? "true" : "false") << ",\n";
+    file << "    \"passthrough_ready\": " << (stats.passthroughReady ? "true" : "false") << ",\n";
+    file << "    \"occlusion_mode\": \"" << JsonEscape(stats.occlusionMode) << "\",\n";
+    file << "    \"spatial_enabled\": " << (stats.spatialEnabled ? "true" : "false") << ",\n";
     file << "    \"headset_audio\": " << (stats.headsetAudio ? "true" : "false") << ",\n";
     file << "    \"latency_ms\": {\n";
     file << "      \"server_pipeline\": " << stats.serverPipelineLatencyMs << ",\n";

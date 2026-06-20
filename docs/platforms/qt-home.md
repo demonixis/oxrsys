@@ -11,8 +11,9 @@ Current responsibilities:
 - create terminal launch scripts for app cards on macOS and Linux without changing the runtime
   manifest selection model
 - edit the shared runtime TOML keys for streaming, logging, encoder preset, transport, refresh
-  rate, foveation, upscaling, and reserved headset-audio configuration
-- detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, and `9946`
+  rate, foveation, upscaling, ABR dynamic resolution, mixed reality, occlusion, spatial toggles,
+  and reserved headset-audio configuration
+- detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, `9946`, and `9948`
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - run WiFi readiness, ADB status, device listing, reverse mapping reads, and reverse mapping
   configuration on a serialized worker thread so slow `adb` or `networksetup` calls do not block
@@ -53,7 +54,14 @@ status `max_bitrate_mbps` follows the server config when the simulator connects.
 
 The Streaming tab also exposes the shared refresh-rate choices `60`, `72`, `80`, `90`, and `120`
 Hz, encoder presets `speed`, `balanced`, and `quality`, and server-side foveated encoding presets
-`off`, `light`, `medium`, and `high`. It also exposes `abr_mode` with `off`, `bitrate`, and `full`.
+`off`, `light`, `medium`, and `high`. It also exposes `abr_mode` with `off`, `bitrate`, and `full`,
+`dynamic_resolution_min_scale`, passthrough enablement, occlusion mode, and the `[spatial]` feature
+toggles.
+The runtime stats view separates the global passthrough setting from headset support: `unsupported`
+means the selected client did not advertise `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` after
+querying its local OpenXR runtime.
+In `abr_mode = "full"`, compatible headset clients can receive `StreamConfigUpdate/Ack` messages so
+the runtime changes encoded stream resolution without resizing the OpenXR application's swapchains.
 The Headset Client section owns headset-side options:
 `auto` leaves Quest/PICO `XR_FB_foveation` unmanaged by Home, while `off`, `light`, `medium`,
 and `high` explicitly override the viewer swapchains. Quest shader upscaling and the reserved

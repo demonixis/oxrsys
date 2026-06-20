@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "Session.h"
+#include "CompositionLayerAlpha.h"
 #include "Config.h"
 #include "Instance.h"
 #include "Runtime.h"
@@ -10,6 +11,7 @@
 #include "StreamingServer.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -48,7 +50,12 @@ SessionMetricSummary SummarizeSessionSamples(std::vector<double>& samples)
 
 bool IsSupportedEnvironmentBlendMode(XrEnvironmentBlendMode blendMode)
 {
-    return blendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    if (blendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE)
+    {
+        return true;
+    }
+    return blendMode == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND &&
+           Config::Get().GetValues().passthroughEnabled;
 }
 
 constexpr uint32_t kMaxSupportedCompositionLayers = XR_MIN_COMPOSITION_LAYERS_SUPPORTED;
@@ -462,6 +469,11 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
 
     // Extract submitted eye sources for streaming. Missing streaming sources do
     // not invalidate the OpenXR frame; they only skip this frame's video encode.
+    const bool passthroughEnabled = Config::Get().GetValues().passthroughEnabled;
+    const bool environmentAlphaBlend =
+        frameEndInfo->environmentBlendMode == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
+    bool sourceAlphaProjectionLayer = false;
+
     FrameSource frameSource = {};
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
@@ -476,8 +488,15 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         {
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
-                XrResult result = ValidateProjectionLayer(
-                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer), frameSource);
+                const auto& projectionLayer =
+                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+                if (oxrsys::runtime::IsSourceAlphaProjectionLayerForStreaming(
+                        projectionLayer.layerFlags, passthroughEnabled))
+                {
+                    sourceAlphaProjectionLayer = true;
+                }
+
+                XrResult result = ValidateProjectionLayer(projectionLayer, frameSource);
                 if (result != XR_SUCCESS)
                 {
                     return result;
@@ -495,6 +514,18 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             }
             default:
                 return XR_ERROR_LAYER_INVALID;
+        }
+    }
+
+    frameSource.alphaBlend = oxrsys::runtime::IsAlphaFrameForStreaming(
+        frameEndInfo->environmentBlendMode, sourceAlphaProjectionLayer);
+
+    if (!environmentAlphaBlend && sourceAlphaProjectionLayer)
+    {
+        static std::atomic_bool loggedSourceAlphaProjection{false};
+        if (!loggedSourceAlphaProjection.exchange(true))
+        {
+            spdlog::info("OXRSys: using projection layer source-alpha flags for passthrough streaming");
         }
     }
 

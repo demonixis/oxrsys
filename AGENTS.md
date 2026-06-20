@@ -22,7 +22,11 @@ controller lasers, hand laser/pinch input, visible hand-joint markers, a simple 
 optional `XR_FB_passthrough` while waiting for
 video, requests the server-selected display refresh rate, enables preset-driven
 dynamic `XR_FB_foveation` when the headset supports it, and supports the Quest shader path for
-foveated-encoding decompression plus edge-aware upscaling. Runtime video sends now run behind a
+foveated-encoding decompression plus edge-aware upscaling. ABR full mode can reconfigure encoded
+stream resolution through protocol v1.2 `StreamConfigUpdate/Ack` when the client supports it, without
+resizing the OpenXR application's swapchains, and the passthrough feature can keep Quest passthrough
+active during negotiated MR streaming while local shell GL resources are released.
+Runtime video sends now run behind a
 bounded encoded-frame sender queue so socket backpressure does not run inside VideoToolbox callbacks,
 the Quest client drains MediaCodec output off the XR frame loop, and the runtime ABR controller
 uses client latency, displayed frame age, keyframe requests, send/encoder drops, and reprojection
@@ -37,7 +41,7 @@ The Home app shows a main-window runtime activity summary from
 transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
 per-app custom ADB path selection for USB setup. Home streaming controls include the shared
 runtime 1-200 Mbps bitrate bounds, server-selected refresh rate, encoder preset, foveated encoding
-preset, ABR mode, and a separate Headset Client section for client foveation override,
+preset, ABR/dynamic-resolution mode, mixed reality, occlusion, spatial toggles, and a separate Headset Client section for client foveation override,
 Quest shader upscaling, client reprojection, and reserved headset-audio configuration;
 clients can send `ClientConnect.maxBitrateMbps = 0` to use the server-configured bitrate without
 adding a client-side cap.
@@ -89,7 +93,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - `Session::EndFrame()` must stay non-blocking.
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
 - Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
-- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, and `9946`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices and are not required for ADB reverse streaming.
+- Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, `9946`, and the reserved reliable spatial port `9948`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices and are not required for ADB reverse streaming.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encoded-frame sender, VideoToolbox callback, or `Session::EndFrame()`.
 - Encoded video dispatch is latest-frame-oriented and bounded; stale queued frames may be dropped instead of building latency when the transport cannot keep up.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
@@ -98,14 +102,14 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Latency reports feed bounded pose prediction.
 - Headset clients must match `VIDEO_FLAG_RENDER_POSE` metadata to the decoded frame before projection submission.
 - Quest client reprojection must stay bounded: use exact render-pose matches first, only fall back to recent monotone render poses, disable image-space pose warp on old frames, strong translation, missing pose, recovery, or repeated stale reuse, and keep all work on the GLES/EGL GPU path.
-- ABR must avoid oscillation: lower bitrate quickly on latency/loss/reprojection pressure, recover slowly through hysteresis, and do not raise bitrate/resolution while displayed frame age or reprojection pressure is high.
+- ABR must avoid oscillation: lower bitrate quickly on latency/loss/reprojection pressure, recover slowly through hysteresis, and do not raise bitrate/resolution while displayed frame age or reprojection pressure is high. Dynamic resolution only changes the encoded streaming size, never the OpenXR application's swapchain size.
 - Server-side foveated encoding uses the ALVR-style AADT transform on the async Metal encode path only; write AADT output through a Metal compute pass into a private GPU scratch texture before blitting into VideoToolbox pixel buffers, keep it fail-closed when layout/source dimensions are not coherent, and do not send distorted video to clients without `CLIENT_CAPABILITY_FOVEATED_ENCODING`.
 - Quest shader upscaling and foveated-encoding decompression must preserve render-pose matching and keep the plain bilinear path working when the server flags are off.
 - Quest decoder input buffers must keep bounded headroom above `encodedWidth * encodedHeight`; foveated encoding can shrink encoded dimensions while high-bitrate IDR frames remain large.
 - Headset speaker audio has protocol/config scaffolding only until a real capture/playback path is attached; do not advertise `SERVER_FEATURE_HEADSET_AUDIO` without that pipeline.
 - UDP FEC uses the existing 24-byte `VideoPacketHeader` padding to carry the final data packet size for each FEC group; clients must use it only when recovering the last packet in that group.
 - Quest hand tracking depends on the Android manifest permission `com.oculus.permission.HAND_TRACKING` and the optional `oculus.software.handtracking` feature.
-- Quest passthrough shell mode depends on `XR_FB_passthrough` support and the optional Android feature `com.oculus.feature.PASSTHROUGH`; streaming video remains the priority display path and must disable the local passthrough underlay and release local shell GL resources while active.
+- Quest passthrough shell mode depends on `XR_FB_passthrough` support and the optional Android feature `com.oculus.feature.PASSTHROUGH`; streaming video remains the priority display path. The Android client must advertise `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` only after the headset runtime reports support and passthrough objects are created, and runtime status must distinguish `passthrough_enabled`, `passthrough_supported`, and `passthrough_ready`. Streaming disables the local passthrough underlay and releases local shell GL resources unless effective passthrough is active; current alpha/depth transport is approximated by the Quest shader black-key policy documented in `docs/platforms/quest.md`.
 - Streaming controller poses are valid only when `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` or `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE` is present; missing controller flags must not overwrite the last valid runtime pose.
 - The action system is profile-aware and must not regress to hard-forcing `KHR simple_controller`.
 - `xrLocateSpacesKHR` is accepted as an alias of the OpenXR 1.1 `xrLocateSpaces` entry point.

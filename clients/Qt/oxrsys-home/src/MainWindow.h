@@ -95,6 +95,8 @@ private:
     QLabel* bitrateValueLabel_ = nullptr;
     QSlider* resolutionSlider_ = nullptr;
     QLabel* resolutionValueLabel_ = nullptr;
+    QSlider* dynamicResolutionSlider_ = nullptr;
+    QLabel* dynamicResolutionValueLabel_ = nullptr;
     QSlider* keyframeSlider_ = nullptr;
     QLabel* keyframeValueLabel_ = nullptr;
     QComboBox* refreshRateCombo_ = nullptr;
@@ -103,7 +105,13 @@ private:
     QComboBox* clientFoveationPresetCombo_ = nullptr;
     QComboBox* clientReprojectionCombo_ = nullptr;
     QComboBox* abrModeCombo_ = nullptr;
+    QComboBox* occlusionModeCombo_ = nullptr;
     QComboBox* configTransportCombo_ = nullptr;
+    QCheckBox* passthroughCheckBox_ = nullptr;
+    QCheckBox* spatialEnabledCheckBox_ = nullptr;
+    QCheckBox* spatialAnchorsCheckBox_ = nullptr;
+    QCheckBox* spatialSceneCheckBox_ = nullptr;
+    QCheckBox* spatialPersistenceCheckBox_ = nullptr;
     QComboBox* usbDeviceCombo_ = nullptr;
     QLabel* adbStatusLabel_ = nullptr;
     QLabel* usbStatusLabel_ = nullptr;
@@ -114,6 +122,9 @@ private:
     QLabel* bitrateMetricLabel_ = nullptr;
     QLabel* renderMetricLabel_ = nullptr;
     QLabel* encodedMetricLabel_ = nullptr;
+    QLabel* scaleMetricLabel_ = nullptr;
+    QLabel* passthroughMetricLabel_ = nullptr;
+    QLabel* spatialMetricLabel_ = nullptr;
     QLabel* serverMetricLabel_ = nullptr;
     QLabel* clientMetricLabel_ = nullptr;
     QLabel* horizonMetricLabel_ = nullptr;

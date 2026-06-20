@@ -17,6 +17,7 @@ constexpr uint16_t VIDEO_PORT = 9944;
 constexpr uint16_t TRACKING_PORT = 9945;
 constexpr uint16_t CONTROL_PORT = 9946;
 constexpr uint16_t AUDIO_PORT = 9947;
+constexpr uint16_t SPATIAL_PORT = 9948;
 constexpr uint32_t HAND_JOINT_COUNT = 26;
 constexpr uint32_t STREAMING_MIN_BITRATE_MBPS = 1;
 constexpr uint32_t STREAMING_MAX_BITRATE_MBPS = 200;
@@ -48,6 +49,7 @@ enum class TcpRecordType : uint16_t
     Control = 0x0006,
     Disconnect = 0x0007,
     Audio = 0x0008,
+    Spatial = 0x0009,
 };
 
 struct TcpRecordHeader
@@ -104,6 +106,12 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_CLIENT_FOVEATION = 0x00000002, // clientFoveationPreset is an explicit override
     SERVER_FEATURE_CLIENT_UPSCALING = 0x00000004,
     SERVER_FEATURE_HEADSET_AUDIO = 0x00000008,
+    SERVER_FEATURE_STREAM_RECONFIGURE = 0x00000010,
+    SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH = 0x00000020,
+    SERVER_FEATURE_MIXED_REALITY_ALPHA = 0x00000040,
+    SERVER_FEATURE_DEPTH_OCCLUSION = 0x00000080,
+    SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
+    SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -112,6 +120,12 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_CLIENT_FOVEATION = 0x00000002,
     CLIENT_CAPABILITY_CLIENT_UPSCALING = 0x00000004,
     CLIENT_CAPABILITY_AUDIO_OUTPUT = 0x00000008,
+    CLIENT_CAPABILITY_STREAM_RECONFIGURE = 0x00000010,
+    CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH = 0x00000020,
+    CLIENT_CAPABILITY_MIXED_REALITY_ALPHA = 0x00000040,
+    CLIENT_CAPABILITY_DEPTH_OCCLUSION = 0x00000080,
+    CLIENT_CAPABILITY_SPATIAL_ENTITY = 0x00000100,
+    CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
 };
 
 enum class FoveationPreset : uint32_t
@@ -178,6 +192,10 @@ struct ServerAnnounce
     float foveationCenterShiftY = 0.0f;
     float foveationEdgeRatioX = 1.0f;
     float foveationEdgeRatioY = 1.0f;
+
+    // Protocol v1.2 trailing fields.
+    uint32_t spatialPort = SPATIAL_PORT;
+    uint32_t reserved2 = 0;
 };
 
 struct ClientConnect
@@ -230,6 +248,7 @@ enum VideoFlags : uint8_t
     VIDEO_FLAG_STEREO = 0x0C,  // Both eyes in one frame
     VIDEO_FLAG_FEC = 0x10,     // Forward Error Correction parity packet
     VIDEO_FLAG_RENDER_POSE = 0x20, // Payload contains the server's render pose for this frame
+    VIDEO_FLAG_ALPHA_BLEND = 0x40, // App submitted alpha-blend environment or source-alpha projection layer
 };
 
 struct AudioPacketHeader
@@ -329,6 +348,22 @@ enum class ControlType : uint8_t
     RequestKeyframe = 0x83,    // Client → Server: force IDR
     Haptics = 0x84,            // Server → Client: vibration feedback
     NackRequest = 0x85,        // Client → Server: retransmit specific packets
+    StreamConfigUpdate = 0x86, // Server → Client: live encoded stream dimensions changed
+    StreamConfigAck = 0x87,    // Client → Server: decoder accepted/rejected the update
+};
+
+enum StreamConfigUpdateFlags : uint32_t
+{
+    STREAM_CONFIG_FLAG_RECONFIGURE_DECODER = 0x00000001,
+    STREAM_CONFIG_FLAG_FORCE_KEYFRAME = 0x00000002,
+    STREAM_CONFIG_FLAG_FOVEATED_ENCODING = 0x00000004,
+    STREAM_CONFIG_FLAG_CLIENT_UPSCALING = 0x00000008,
+};
+
+enum StreamConfigAckStatus : uint8_t
+{
+    STREAM_CONFIG_ACK_OK = 0,
+    STREAM_CONFIG_ACK_REJECTED = 1,
 };
 
 struct LatencyReport
@@ -382,6 +417,38 @@ struct NackRequest
     uint16_t packetIndexStart = 0;  // First packet index this bitmask covers
     uint16_t totalPackets = 0;      // Total packets in the frame (for validation)
     uint64_t missingBitmask = 0;    // Bit i = packet (packetIndexStart + i) is missing
+};
+
+struct StreamConfigUpdate
+{
+    ControlType type = ControlType::StreamConfigUpdate;
+    uint8_t reserved[3] = {};
+    uint32_t sequence = 0;
+    uint32_t renderWidth = 0;       // Stereo side-by-side render width
+    uint32_t renderHeight = 0;
+    uint32_t encodedWidth = 0;
+    uint32_t encodedHeight = 0;
+    uint32_t targetBitrateMbps = 0;
+    uint32_t refreshRateHz = 0;
+    uint32_t flags = 0;             // StreamConfigUpdateFlags
+    FoveationPreset foveatedEncodingPreset = FoveationPreset::Off;
+    ClientUpscalingMode clientUpscalingMode = ClientUpscalingMode::Off;
+    float foveationCenterSizeX = 0.0f;
+    float foveationCenterSizeY = 0.0f;
+    float foveationCenterShiftX = 0.0f;
+    float foveationCenterShiftY = 0.0f;
+    float foveationEdgeRatioX = 1.0f;
+    float foveationEdgeRatioY = 1.0f;
+};
+
+struct StreamConfigAck
+{
+    ControlType type = ControlType::StreamConfigAck;
+    uint8_t status = STREAM_CONFIG_ACK_OK;
+    uint8_t reserved[2] = {};
+    uint32_t sequence = 0;
+    uint32_t encodedWidth = 0;
+    uint32_t encodedHeight = 0;
 };
 
 } // namespace protocol

@@ -17,6 +17,7 @@
 #include <numeric>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -104,6 +105,7 @@ uniform vec2 uFoveationEdgeRatio;
 uniform vec2 uFoveationEyeSizeRatio;
 uniform int uReprojectionWarpEnabled;
 uniform vec2 uReprojectionWarpOffset;
+uniform int uPassthroughAlphaEnabled;
 
 float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeRatio) {
     float c0 = (1.0 - centerSize) * 0.5;
@@ -185,7 +187,12 @@ void main() {
             color = clamp(color + detail * (0.125 * uUpscaleSharpness), vec3(0.0), vec3(1.0));
         }
     }
-    fragColor = vec4(color, 1.0);
+    float alpha = 1.0;
+    if (uPassthroughAlphaEnabled != 0) {
+        float maxChannel = max(max(color.r, color.g), color.b);
+        alpha = smoothstep(0.02, 0.10, maxChannel);
+    }
+    fragColor = vec4(color, alpha);
 }
 )";
 
@@ -1878,6 +1885,8 @@ bool XrApp::CreateSwapchains()
         glGetUniformLocation(blitProgram_, "uReprojectionWarpEnabled");
     blitReprojectionWarpOffsetUniform_ =
         glGetUniformLocation(blitProgram_, "uReprojectionWarpOffset");
+    blitPassthroughAlphaEnabledUniform_ =
+        glGetUniformLocation(blitProgram_, "uPassthroughAlphaEnabled");
 
     glUseProgram(blitProgram_);
     glUniform1i(blitTextureUniform_, 0);
@@ -1885,6 +1894,7 @@ bool XrApp::CreateSwapchains()
     glUniform1f(blitUpscaleSharpnessUniform_, 2.0f);
     glUniform1i(blitReprojectionWarpEnabledUniform_, 0);
     glUniform2f(blitReprojectionWarpOffsetUniform_, 0.0f, 0.0f);
+    glUniform1i(blitPassthroughAlphaEnabledUniform_, 0);
     glUseProgram(0);
 
     // Full-screen quad
@@ -2060,6 +2070,8 @@ void XrApp::StartNetworking()
     lastReportedAcquireTimeNs_ = 0;
     skippedDecodedFrames_ = 0;
     presentedVideoFrame_ = {};
+    hasObservedProtocolAlphaFrame_ = false;
+    loggedTransparentClearFallback_ = false;
     reprojectedFramesSinceLastReport_ = 0;
     renderPoseFallbacksSinceLastReport_ = 0;
     staleFrameReusesSinceLastReport_ = 0;
@@ -2101,7 +2113,9 @@ void XrApp::StopNetworking()
 void XrApp::ResetConnection(const char* reason)
 {
     LOGI("Resetting connection: %s", reason != nullptr ? reason : "unspecified");
+    StopControlReceiver();
     CloseControlSocket();
+    CloseSpatialSocket();
     if (networkReceiver_)
     {
         networkReceiver_->Stop();
@@ -2114,6 +2128,7 @@ void XrApp::ResetConnection(const char* reason)
     }
     if (videoDecoder_)
     {
+        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
         videoDecoder_->Shutdown();
         videoDecoder_.reset();
     }
@@ -2125,6 +2140,7 @@ void XrApp::ResetConnection(const char* reason)
     serverIp_[0] = '\0';
     serverVideoPort_ = 0;
     serverTrackingPort_ = 0;
+    serverSpatialPort_ = 0;
     connectionTime_ = {};
     lastUsbAdbRetryTime_ = {};
     usbAdbRetryAttempts_ = 0;
@@ -2150,6 +2166,9 @@ void XrApp::ResetConnection(const char* reason)
     videoContentVMax_ = 1.0f;
     serverFoveatedEncodingEnabled_ = false;
     clientUpscalingEnabled_ = false;
+    serverMixedRealityPassthroughEnabled_ = false;
+    hasObservedProtocolAlphaFrame_ = false;
+    loggedTransparentClearFallback_ = false;
     clientReprojectionMode_ = protocol::ClientReprojectionMode::Pose;
     foveationCenterSizeX_ = 1.0f;
     foveationCenterSizeY_ = 1.0f;
@@ -2175,6 +2194,12 @@ void XrApp::ResetConnection(const char* reason)
     lastLatencyReportTime_ = {};
     lastKeyframeRequestTime_ = {};
     lastObservedDroppedFrames_ = 0;
+    {
+        std::lock_guard<std::mutex> pendingLock(pendingStreamConfigMutex_);
+        pendingStreamConfigUpdate_ = {};
+        hasPendingStreamConfigUpdate_ = false;
+    }
+    streamConfigSequence_ = 0;
     latencySamples_ = {};
     nalUnitsReceived_ = 0;
     decodedFrameCount_ = 0;
@@ -2218,6 +2243,8 @@ bool XrApp::OpenControlSocket(const char* serverIp)
         return false;
     }
 
+    timeval timeout = {0, 250000};
+    setsockopt(controlSocket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     return true;
 }
 
@@ -2268,6 +2295,49 @@ void XrApp::CloseControlSocket()
         SendTcpRecord(controlTcpSocket_, protocol::TcpRecordType::Disconnect, nullptr, 0);
         close(controlTcpSocket_);
         controlTcpSocket_ = -1;
+    }
+}
+
+bool XrApp::OpenUsbSpatialSocket(uint16_t spatialPort)
+{
+    CloseSpatialSocket();
+    if (spatialPort == 0)
+    {
+        return false;
+    }
+
+    spatialTcpSocket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (spatialTcpSocket_ < 0)
+    {
+        LOGE("Failed to create USB TCP spatial socket");
+        return false;
+    }
+    ConfigureTcpSocket(spatialTcpSocket_);
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(spatialPort);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    if (connect(spatialTcpSocket_, (sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        LOGW("USB TCP spatial socket unavailable on port %u", spatialPort);
+        close(spatialTcpSocket_);
+        spatialTcpSocket_ = -1;
+        return false;
+    }
+
+    LOGI("USB TCP spatial channel connected on port %u", spatialPort);
+    return true;
+}
+
+void XrApp::CloseSpatialSocket()
+{
+    if (spatialTcpSocket_ >= 0)
+    {
+        SendTcpRecord(spatialTcpSocket_, protocol::TcpRecordType::Disconnect, nullptr, 0);
+        close(spatialTcpSocket_);
+        spatialTcpSocket_ = -1;
     }
 }
 
@@ -2396,6 +2466,8 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
 
     serverVideoPort_ = server.videoPort;
     serverTrackingPort_ = server.trackingPort;
+    serverSpatialPort_ = server.spatialPort != 0 ? static_cast<uint16_t>(server.spatialPort)
+                                                  : protocol::SPATIAL_PORT;
     videoWidth_ = server.renderWidth;
     videoHeight_ = server.renderHeight;
     strncpy(serverIp_, serverIp, sizeof(serverIp_) - 1);
@@ -2408,6 +2480,23 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     clientUpscalingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
         server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
+    const bool serverRequestsPassthrough =
+        (server.serverFeatures & protocol::SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH) != 0;
+    serverMixedRealityPassthroughEnabled_ =
+        serverRequestsPassthrough && CanUseShellPassthrough();
+    hasObservedProtocolAlphaFrame_ = false;
+    loggedTransparentClearFallback_ = false;
+    if (serverRequestsPassthrough && !serverMixedRealityPassthroughEnabled_)
+    {
+        LOGW("Server enabled passthrough, but this headset cannot use XR_FB_passthrough "
+             "(extension=%d runtime=%d create=%d layer=%d handles=%d/%d)",
+             passthroughExtensionAvailable_ ? 1 : 0,
+             passthroughSupported_ ? 1 : 0,
+             xrCreatePassthroughFB_ != nullptr ? 1 : 0,
+             xrCreatePassthroughLayerFB_ != nullptr ? 1 : 0,
+             passthrough_ != XR_NULL_HANDLE ? 1 : 0,
+             passthroughLayer_ != XR_NULL_HANDLE ? 1 : 0);
+    }
     switch (server.clientReprojectionMode)
     {
         case protocol::ClientReprojectionMode::Off:
@@ -2500,13 +2589,15 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
         foveationEyeHeightRatio_ = 1.0f;
     }
 
-    LOGI("Server stream options: features=0x%x ffe=%d ffr=%s(%u) upscaling=%d reprojection=%s activeRatio=%.4fx%.4f",
+    LOGI("Server stream options: features=0x%x ffe=%d ffr=%s(%u) upscaling=%d reprojection=%s passthrough=%d spatialPort=%u activeRatio=%.4fx%.4f",
          server.serverFeatures,
          serverFoveatedEncodingEnabled_ ? 1 : 0,
          clientFoveationOverride ? "override" : "auto",
          static_cast<uint32_t>(server.clientFoveationPreset),
          clientUpscalingEnabled_ ? 1 : 0,
          ReprojectionModeName(clientReprojectionMode_),
+         serverMixedRealityPassthroughEnabled_ ? 1 : 0,
+         serverSpatialPort_,
          foveationEyeWidthRatio_,
          foveationEyeHeightRatio_);
 
@@ -2518,6 +2609,7 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     // Initialize video decoder at the actual encoded resolution
     if (videoDecoder_ && !videoDecoder_->IsInitialized())
     {
+        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
         if (videoDecoder_->Initialize(decoderWidth, decoderHeight))
         {
             LOGI("Video decoder initialized: %ux%u (encoded), render %ux%u",
@@ -2534,9 +2626,10 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     if (networkReceiver_)
     {
         auto nalCallback = [this](const uint8_t* data, size_t size,
-                                  int64_t timestampNs, int64_t receiveTimeNs)
+                                  int64_t timestampNs, int64_t receiveTimeNs,
+                                  uint8_t flags)
         {
-            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs);
+            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags);
         };
         if (usbAdb)
         {
@@ -2590,9 +2683,16 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
         // Share control socket with NetworkReceiver for NACK sending
         networkReceiver_->SetControlSocket(controlSocket_, serverIp);
     }
+    if (usbAdb && controlTcpSocket_ >= 0)
+    {
+        timeval timeout = {0, 0};
+        setsockopt(controlTcpSocket_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        OpenUsbSpatialSocket(serverSpatialPort_);
+    }
 
     // NOW send ClientConnect — server will start sending video, and we're already listening
     SendClientConnect(serverIp);
+    StartControlReceiver();
     connectionState_.store(ConnectionState::Connected);
     shellStatusText_ = "Waiting for video";
     if (networkReceiver_)
@@ -2619,7 +2719,7 @@ void XrApp::SendClientConnect(const char* serverIp)
     protocol::ClientConnect connect = {};
     connect.type = protocol::MessageType::ClientConnect;
     connect.versionMajor = 1;
-    connect.versionMinor = 1;
+    connect.versionMinor = 2;
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
     connect.maxBitrateMbps = usbAdb
         ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
@@ -2627,10 +2727,15 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.refreshRateHz = clientRefreshRateHz_;
     connect.clientCapabilities =
         protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
-        protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING;
+        protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING |
+        protocol::CLIENT_CAPABILITY_STREAM_RECONFIGURE;
     if (foveationAvailable_ && foveationConfigurationAvailable_ && swapchainUpdateAvailable_)
     {
         connect.clientCapabilities |= protocol::CLIENT_CAPABILITY_CLIENT_FOVEATION;
+    }
+    if (CanUseShellPassthrough())
+    {
+        connect.clientCapabilities |= protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH;
     }
     connect.audioSampleRateHz = 48000;
     strncpy(connect.deviceName, headsetSystemName_, sizeof(connect.deviceName) - 1);
@@ -2646,9 +2751,280 @@ void XrApp::SendClientConnect(const char* serverIp)
         send(controlSocket_, &connect, sizeof(connect), MSG_DONTWAIT);
     }
 
-    LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz maxBitrate=%u)",
+    LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz maxBitrate=%u capabilities=0x%x passthrough=%d)",
          usbAdb ? "USB ADB" : "WiFi", serverIp, protocol::CONTROL_PORT,
-         connect.deviceName, clientRefreshRateHz_, connect.maxBitrateMbps);
+         connect.deviceName, clientRefreshRateHz_, connect.maxBitrateMbps,
+         connect.clientCapabilities,
+         (connect.clientCapabilities & protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH) != 0
+             ? 1
+             : 0);
+}
+
+void XrApp::StartControlReceiver()
+{
+    if (controlReceiveThread_.joinable())
+    {
+        StopControlReceiver();
+    }
+
+    const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
+    if ((!usbAdb && controlSocket_ < 0) || (usbAdb && controlTcpSocket_ < 0))
+    {
+        return;
+    }
+
+    controlReceiveRunning_.store(true);
+    controlReceiveThread_ = std::thread(&XrApp::ControlReceiveThreadMain, this);
+}
+
+void XrApp::StopControlReceiver()
+{
+    if (!controlReceiveRunning_.load() && !controlReceiveThread_.joinable())
+    {
+        return;
+    }
+
+    controlReceiveRunning_.store(false);
+    if (controlTcpSocket_ >= 0)
+    {
+        shutdown(controlTcpSocket_, SHUT_RDWR);
+    }
+    if (controlSocket_ >= 0)
+    {
+        shutdown(controlSocket_, SHUT_RDWR);
+    }
+    if (controlReceiveThread_.joinable())
+    {
+        if (controlReceiveThread_.get_id() == std::this_thread::get_id())
+        {
+            controlReceiveThread_.detach();
+        }
+        else
+        {
+            controlReceiveThread_.join();
+        }
+    }
+}
+
+void XrApp::ControlReceiveThreadMain()
+{
+    const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
+    uint8_t buffer[512] = {};
+
+    while (controlReceiveRunning_.load())
+    {
+        if (usbAdb)
+        {
+            protocol::TcpRecordHeader header = {};
+            std::vector<uint8_t> payload;
+            if (!ReadTcpRecord(controlTcpSocket_, header, payload))
+            {
+                if (controlReceiveRunning_.load())
+                {
+                    OnConnectionLost("USB control socket closed");
+                }
+                break;
+            }
+            if (header.type == protocol::TcpRecordType::Control)
+            {
+                HandleControlPayload(payload.data(), payload.size());
+            }
+            else if (header.type == protocol::TcpRecordType::Disconnect)
+            {
+                OnConnectionLost("server disconnected");
+                break;
+            }
+            continue;
+        }
+
+        const ssize_t received = recv(controlSocket_, buffer, sizeof(buffer), 0);
+        if (received < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                continue;
+            }
+            if (controlReceiveRunning_.load())
+            {
+                OnConnectionLost("control socket receive failed");
+            }
+            break;
+        }
+        if (received == 0)
+        {
+            continue;
+        }
+        HandleControlPayload(buffer, static_cast<size_t>(received));
+    }
+}
+
+void XrApp::HandleControlPayload(const uint8_t* data, size_t size)
+{
+    if (data == nullptr || size < 1)
+    {
+        return;
+    }
+    const auto type = static_cast<protocol::ControlType>(data[0]);
+    if (type == protocol::ControlType::StreamConfigUpdate &&
+        size >= sizeof(protocol::StreamConfigUpdate))
+    {
+        protocol::StreamConfigUpdate update = {};
+        memcpy(&update, data, sizeof(update));
+        HandleStreamConfigUpdate(update);
+    }
+}
+
+void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
+{
+    if (update.sequence <= streamConfigSequence_.load() ||
+        update.encodedWidth == 0 ||
+        update.encodedHeight == 0 ||
+        update.renderWidth == 0 ||
+        update.renderHeight == 0)
+    {
+        SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pendingStreamConfigMutex_);
+        pendingStreamConfigUpdate_ = update;
+        hasPendingStreamConfigUpdate_ = true;
+    }
+
+    LOGI("Queued stream config update seq=%u render=%ux%u encoded=%ux%u flags=0x%x",
+         update.sequence,
+         update.renderWidth,
+         update.renderHeight,
+         update.encodedWidth,
+         update.encodedHeight,
+         update.flags);
+}
+
+void XrApp::ApplyPendingStreamConfigUpdate()
+{
+    protocol::StreamConfigUpdate update = {};
+    {
+        std::lock_guard<std::mutex> lock(pendingStreamConfigMutex_);
+        if (!hasPendingStreamConfigUpdate_)
+        {
+            return;
+        }
+        update = pendingStreamConfigUpdate_;
+        hasPendingStreamConfigUpdate_ = false;
+    }
+
+    bool accepted = false;
+    {
+        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
+        if (videoDecoder_)
+        {
+            videoDecoder_->Shutdown();
+            accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight);
+        }
+    }
+
+    if (!accepted)
+    {
+        LOGE("Rejected stream config update seq=%u: decoder init failed for %ux%u",
+             update.sequence, update.encodedWidth, update.encodedHeight);
+        SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
+        return;
+    }
+
+    videoWidth_ = update.renderWidth;
+    videoHeight_ = update.renderHeight;
+    decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(update.encodedWidth, 1u));
+    decodedTexelHeight_ = 1.0f / static_cast<float>(std::max(update.encodedHeight, 1u));
+    serverFoveatedEncodingEnabled_ =
+        (update.flags & protocol::STREAM_CONFIG_FLAG_FOVEATED_ENCODING) != 0 &&
+        update.foveatedEncodingPreset != protocol::FoveationPreset::Off;
+    clientUpscalingEnabled_ =
+        (update.flags & protocol::STREAM_CONFIG_FLAG_CLIENT_UPSCALING) != 0 &&
+        update.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
+    foveationCenterSizeX_ = update.foveationCenterSizeX > 0.0f
+        ? update.foveationCenterSizeX
+        : 1.0f;
+    foveationCenterSizeY_ = update.foveationCenterSizeY > 0.0f
+        ? update.foveationCenterSizeY
+        : 1.0f;
+    foveationCenterShiftX_ = update.foveationCenterShiftX;
+    foveationCenterShiftY_ = update.foveationCenterShiftY;
+    foveationEdgeRatioX_ = std::max(update.foveationEdgeRatioX, 1.0f);
+    foveationEdgeRatioY_ = std::max(update.foveationEdgeRatioY, 1.0f);
+    if (serverFoveatedEncodingEnabled_)
+    {
+        foveationEyeWidthRatio_ = FoveationActiveRatio(
+            static_cast<float>(std::max(update.renderWidth / 2, 1u)),
+            static_cast<float>(std::max(update.encodedWidth / 2, 1u)),
+            foveationCenterSizeX_,
+            foveationEdgeRatioX_);
+        foveationEyeHeightRatio_ = FoveationActiveRatio(
+            static_cast<float>(std::max(update.renderHeight, 1u)),
+            static_cast<float>(std::max(update.encodedHeight, 1u)),
+            foveationCenterSizeY_,
+            foveationEdgeRatioY_);
+    }
+    else
+    {
+        foveationEyeWidthRatio_ = 1.0f;
+        foveationEyeHeightRatio_ = 1.0f;
+    }
+
+    hasVideoTexture_ = false;
+    hasCurrentRenderPose_ = false;
+    presentedVideoFrame_ = {};
+    currentRenderPose_ = {};
+    videoContentUMin_ = 0.0f;
+    videoContentUMax_ = 1.0f;
+    videoContentVMin_ = 0.0f;
+    videoContentVMax_ = 1.0f;
+    lastVideoFrameTime_ = {};
+    lastFrameReceiveTimeNs_ = 0;
+    lastFrameSubmitTimeNs_ = 0;
+    lastFrameAcquireTimeNs_ = 0;
+    lastReportedAcquireTimeNs_ = 0;
+    skippedDecodedFrames_ = 0;
+    decodedFrameCount_ = 0;
+    nalUnitsReceived_ = 0;
+    streamConfigSequence_.store(update.sequence);
+
+    SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
+    RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
+
+    LOGI("Applied stream config update seq=%u render=%ux%u encoded=%ux%u ffe=%d upscaling=%d",
+         update.sequence,
+         update.renderWidth,
+         update.renderHeight,
+         update.encodedWidth,
+         update.encodedHeight,
+         serverFoveatedEncodingEnabled_ ? 1 : 0,
+         clientUpscalingEnabled_ ? 1 : 0);
+}
+
+void XrApp::SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status)
+{
+    const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
+    if ((!usbAdb && controlSocket_ < 0) || (usbAdb && controlTcpSocket_ < 0))
+    {
+        return;
+    }
+
+    protocol::StreamConfigAck ack = {};
+    ack.status = status;
+    ack.sequence = update.sequence;
+    ack.encodedWidth = update.encodedWidth;
+    ack.encodedHeight = update.encodedHeight;
+
+    if (usbAdb)
+    {
+        SendTcpRecord(controlTcpSocket_, protocol::TcpRecordType::Control,
+                      &ack, sizeof(ack));
+    }
+    else
+    {
+        send(controlSocket_, &ack, sizeof(ack), MSG_DONTWAIT);
+    }
 }
 
 void XrApp::SendLatencyReport()
@@ -2910,7 +3286,7 @@ void XrApp::UpdateReprojectionWarp(bool reusingFrame)
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
-                              int64_t timestampNs, int64_t receiveTimeNs)
+                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags)
 {
     nalUnitsReceived_++;
 
@@ -2935,9 +3311,12 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
              nalUnitsReceived_, size, nalType, (long long)timestampNs);
     }
 
+    std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
     if (videoDecoder_ && videoDecoder_->IsInitialized())
     {
-        bool submitted = videoDecoder_->SubmitNalUnit(data, size, timestampNs / 1000, receiveTimeNs);
+        const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;
+        bool submitted = videoDecoder_->SubmitNalUnit(
+            data, size, timestampNs / 1000, receiveTimeNs, alphaBlend);
         if (!submitted && nalUnitsReceived_ <= 10)
         {
             LOGW("Failed to submit NAL unit #%u to decoder (no input buffer available)",
@@ -2975,6 +3354,7 @@ void XrApp::RunFrame()
     }
 
     RetryUsbAdbTransportIfNeeded();
+    ApplyPendingStreamConfigUpdate();
 
     if (connectionState_.load() == ConnectionState::Connected &&
         !hasVideoTexture_ &&
@@ -3098,7 +3478,11 @@ void XrApp::RunFrame()
         bool submitPassthroughLayer = false;
         if (renderedVideo)
         {
-            ReleaseShellForStream();
+            submitPassthroughLayer =
+                serverMixedRealityPassthroughEnabled_ &&
+                CanUseShellPassthrough() &&
+                SetShellPassthroughActive(true);
+            ReleaseShellForStream(submitPassthroughLayer);
         }
         else
         {
@@ -3380,6 +3764,13 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                         presentedVideoFrame_.localAcquireTimeNs = frame.localAcquireTimeNs;
                         presentedVideoFrame_.renderPose = matchedRenderPose;
                         presentedVideoFrame_.hasRenderPose = hasMatchedRenderPose;
+                        presentedVideoFrame_.alphaBlend = frame.alphaBlend;
+                        if (frame.alphaBlend && !hasObservedProtocolAlphaFrame_)
+                        {
+                            LOGI("First alpha-blend video frame received");
+                        }
+                        hasObservedProtocolAlphaFrame_ =
+                            hasObservedProtocolAlphaFrame_ || frame.alphaBlend;
                         presentedVideoFrame_.headsetPoseAtPresentation = BuildCurrentHeadPose();
                         presentedVideoFrame_.consecutiveReuses = 0;
                         (void)usedRenderPoseFallback;
@@ -3501,9 +3892,20 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
 
         if (hasVideo && blitWidth_ > 0)
         {
-            // Clear full swapchain to black (letterbox/pillarbox bars)
+            const quest_passthrough::AlphaKeyDecision alphaKey =
+                EvaluatePassthroughAlphaKey();
+            if (alphaKey.usingTransparentClearFallback &&
+                !loggedTransparentClearFallback_)
+            {
+                LOGW("Passthrough stream has no alpha flags; using black-key fallback");
+                loggedTransparentClearFallback_ = true;
+            }
+
+            // Clear full swapchain to black. In alpha passthrough frames the
+            // letterbox/pillarbox bars should reveal the passthrough underlay.
             glViewport(0, 0, swapchainWidth_, swapchainHeight_);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClearColor(0.0f, 0.0f, 0.0f,
+                         alphaKey.useBlackKeyAlpha ? 0.0f : 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             glDisable(GL_BLEND);
 
@@ -3573,6 +3975,8 @@ void XrApp::BlitVideoToSwapchain(int eye)
     glUniform1i(blitReprojectionWarpEnabledUniform_, reprojectionWarpEnabled_ ? 1 : 0);
     glUniform2f(blitReprojectionWarpOffsetUniform_,
                 reprojectionWarpOffsetX_, reprojectionWarpOffsetY_);
+    glUniform1i(blitPassthroughAlphaEnabledUniform_,
+                EvaluatePassthroughAlphaKey().useBlackKeyAlpha ? 1 : 0);
 
     glBindVertexArray(blitVao_);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -3633,9 +4037,12 @@ void XrApp::DestroyShellResources()
     shellMvpUniform_ = -1;
 }
 
-void XrApp::ReleaseShellForStream()
+void XrApp::ReleaseShellForStream(bool keepPassthrough)
 {
-    SetShellPassthroughActive(false);
+    if (!keepPassthrough)
+    {
+        SetShellPassthroughActive(false);
+    }
     if (shellProgram_ != 0 || shellVao_ != 0 || shellVbo_ != 0)
     {
         DestroyShellResources();
@@ -3994,6 +4401,15 @@ bool XrApp::CanUseShellPassthrough() const
            passthroughSupported_ &&
            passthrough_ != XR_NULL_HANDLE &&
            passthroughLayer_ != XR_NULL_HANDLE;
+}
+
+quest_passthrough::AlphaKeyDecision XrApp::EvaluatePassthroughAlphaKey() const
+{
+    return quest_passthrough::EvaluateAlphaKey({
+        serverMixedRealityPassthroughEnabled_ && CanUseShellPassthrough(),
+        presentedVideoFrame_.alphaBlend,
+        hasObservedProtocolAlphaFrame_,
+    });
 }
 
 bool XrApp::SetShellPassthroughActive(bool active)
@@ -4648,6 +5064,9 @@ void XrApp::Shutdown()
         blitFoveationCenterShiftUniform_ = -1;
         blitFoveationEdgeRatioUniform_ = -1;
         blitFoveationEyeSizeRatioUniform_ = -1;
+        blitReprojectionWarpEnabledUniform_ = -1;
+        blitReprojectionWarpOffsetUniform_ = -1;
+        blitPassthroughAlphaEnabledUniform_ = -1;
     }
     if (blitVao_ != 0)
     {
