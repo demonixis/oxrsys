@@ -45,6 +45,7 @@ actor ImmersiveRenderer {
     private let endFrameEvent: MTLSharedEvent
 
     private var committedFrameIndex: UInt64 = UInt64(ImmersiveRendererConstants.maxBuffersInFlight)
+    private var didLogProjection = false
 
     init(layerRenderer: LayerRenderer, appModel: AppModel, worldTracking: WorldTrackingProvider) {
         self.layerRenderer = layerRenderer
@@ -137,6 +138,8 @@ actor ImmersiveRenderer {
         let presentationTime = drawable.frameTiming.presentationTime.timeInterval
         drawable.deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
 
+        publishEyeProjection(drawable)
+
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
@@ -185,6 +188,33 @@ actor ImmersiveRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         drawable.encodePresent(commandBuffer: commandBuffer)
+    }
+
+    /// Sends the device's real per-eye FOV (radians, OpenXR signed angles) and IPD so the
+    /// runtime renders the matching frustum instead of its symmetric fallback FOV. visionOS
+    /// view tangents are positive magnitudes in (left, right, up, down) order, so negate the
+    /// left and down components to produce OpenXR's signed XrFovf angles.
+    private func publishEyeProjection(_ drawable: LayerRenderer.Drawable) {
+        guard let leftView = drawable.views.first else { return }
+        let t = leftView.tangents
+        let fovAngles = SIMD4<Float>(-atan(t.x), atan(t.y), atan(t.z), -atan(t.w))
+
+        let leftEye = leftView.transform.columns.3
+        let rightEye = (drawable.views.count > 1 ? drawable.views[1] : leftView).transform.columns.3
+        let dx = rightEye.x - leftEye.x, dy = rightEye.y - leftEye.y, dz = rightEye.z - leftEye.z
+        let ipd = (dx * dx + dy * dy + dz * dz).squareRoot()
+
+        if !didLogProjection {
+            didLogProjection = true
+            print("[ProjDiag] L.tangents=(\(t.x), \(t.y), \(t.z), \(t.w))")
+            if drawable.views.count > 1 {
+                let rt = drawable.views[1].tangents
+                print("[ProjDiag] R.tangents=(\(rt.x), \(rt.y), \(rt.z), \(rt.w))")
+            }
+            print("[ProjDiag] fovAngles(rad)=(\(fovAngles.x), \(fovAngles.y), \(fovAngles.z), \(fovAngles.w)) ipd=\(ipd)")
+        }
+
+        appModel.updateEyeProjection(fovAngles: fovAngles, ipd: ipd)
     }
 
     private func makeTexture(from pixelBuffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) -> MTLTexture? {

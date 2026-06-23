@@ -66,6 +66,25 @@ private final class KeyframeRecoveryState: @unchecked Sendable {
     }
 }
 
+private final class EyeProjectionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fovAngles = SIMD4<Float>(repeating: 0) // angleLeft, angleRight, angleUp, angleDown (radians)
+    private var ipd: Float = 0
+
+    func set(fovAngles: SIMD4<Float>, ipd: Float) {
+        lock.lock()
+        self.fovAngles = fovAngles
+        self.ipd = ipd
+        lock.unlock()
+    }
+
+    func get() -> (fovAngles: SIMD4<Float>, ipd: Float) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (fovAngles, ipd)
+    }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -112,6 +131,7 @@ final class AppModel {
     private let trackingManager = VisionTrackingManager()
     private nonisolated let pixelBufferState = PixelBufferState()
     private nonisolated let keyframeRecoveryState = KeyframeRecoveryState()
+    private nonisolated let eyeProjectionState = EyeProjectionState()
 
     private var statsTimer: Timer?
     private var lastStatsTimeNs: Int64 = 0
@@ -136,7 +156,16 @@ final class AppModel {
                 snapshot.orientation.imag.z,
                 snapshot.orientation.real
             )
-            packet.ipd = 0.064
+            let eyeProjection = self.eyeProjectionState.get()
+            packet.ipd = eyeProjection.ipd > 0 ? eyeProjection.ipd : 0.064
+            if eyeProjection.fovAngles != SIMD4<Float>(repeating: 0) {
+                packet.eyeFov = (
+                    eyeProjection.fovAngles.x,
+                    eyeProjection.fovAngles.y,
+                    eyeProjection.fovAngles.z,
+                    eyeProjection.fovAngles.w
+                )
+            }
 
             if let leftHand = snapshot.leftHand {
                 packet.trackingFlags |= TrackingFlagsValues.leftHandActive
@@ -417,6 +446,12 @@ final class AppModel {
 
     nonisolated func currentPixelBuffer() -> CVPixelBuffer? {
         pixelBufferState.get()
+    }
+
+    /// Called from the render loop with the device's real per-eye FOV (radians, OpenXR
+    /// signed angles) and IPD, forwarded to the runtime so it renders the matching frustum.
+    nonisolated func updateEyeProjection(fovAngles: SIMD4<Float>, ipd: Float) {
+        eyeProjectionState.set(fovAngles: fovAngles, ipd: ipd)
     }
 
     private func resolvedServerAddress(for server: DiscoveredServer) -> String {
