@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+import ARKit
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -241,6 +242,12 @@ final class AppModel {
 
     var refreshRate: Int {
         Int(discoveredServer?.refreshRate ?? 90)
+    }
+
+    /// Shared with the immersive renderer so device anchors come from one running ARKit
+    /// session; two separate world-tracking providers conflict and return nil anchors.
+    var sharedWorldTracking: WorldTrackingProvider {
+        trackingManager.worldTracking
     }
 
     func startDiscovery() {
