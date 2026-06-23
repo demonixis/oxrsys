@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -110,7 +111,10 @@ private:
     void ControlReceiveThreadMain();
     void HandleControlPayload(const uint8_t* data, size_t size);
     void HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update);
-    void ApplyPendingStreamConfigUpdate();
+    void StartStreamConfigWorker();
+    void StopStreamConfigWorker();
+    void StreamConfigWorkerMain();
+    void ApplyCompletedStreamConfigUpdate();
     void SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status);
     void SendLatencyReport();
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
@@ -307,8 +311,16 @@ private:
     float decodedTexelWidth_ = 1.0f;
     float decodedTexelHeight_ = 1.0f;
     std::mutex pendingStreamConfigMutex_;
+    std::condition_variable pendingStreamConfigCv_;
     protocol::StreamConfigUpdate pendingStreamConfigUpdate_;
     bool hasPendingStreamConfigUpdate_ = false;
+    std::mutex completedStreamConfigMutex_;
+    protocol::StreamConfigUpdate completedStreamConfigUpdate_;
+    bool hasCompletedStreamConfigUpdate_ = false;
+    bool completedStreamConfigAccepted_ = false;
+    std::thread streamConfigWorkerThread_;
+    std::atomic<bool> streamConfigWorkerRunning_{false};
+    std::atomic<uint32_t> streamConfigWorkerSequence_{0};
     std::atomic<uint32_t> streamConfigSequence_{0};
     int64_t predictedDisplayPeriodNs_ = 11111111;
     int64_t lastFrameReceiveTimeNs_ = 0;

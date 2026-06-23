@@ -2060,6 +2060,7 @@ void XrApp::StartNetworking()
     networkReceiver_ = std::make_unique<NetworkReceiver>();
     trackingSender_ = std::make_unique<TrackingSender>();
     videoDecoder_ = std::make_unique<VideoDecoder>();
+    StartStreamConfigWorker();
     lastLatencyReportTime_ = {};
     lastKeyframeRequestTime_ = {};
     lastObservedDroppedFrames_ = 0;
@@ -2114,6 +2115,7 @@ void XrApp::ResetConnection(const char* reason)
 {
     LOGI("Resetting connection: %s", reason != nullptr ? reason : "unspecified");
     StopControlReceiver();
+    StopStreamConfigWorker();
     CloseControlSocket();
     CloseSpatialSocket();
     if (networkReceiver_)
@@ -2199,6 +2201,13 @@ void XrApp::ResetConnection(const char* reason)
         pendingStreamConfigUpdate_ = {};
         hasPendingStreamConfigUpdate_ = false;
     }
+    {
+        std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
+        completedStreamConfigUpdate_ = {};
+        hasCompletedStreamConfigUpdate_ = false;
+        completedStreamConfigAccepted_ = false;
+    }
+    streamConfigWorkerSequence_.store(0);
     streamConfigSequence_ = 0;
     latencySamples_ = {};
     nalUnitsReceived_ = 0;
@@ -2876,11 +2885,33 @@ void XrApp::HandleControlPayload(const uint8_t* data, size_t size)
 
 void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
 {
-    if (update.sequence <= streamConfigSequence_.load() ||
-        update.encodedWidth == 0 ||
+    if (update.encodedWidth == 0 ||
         update.encodedHeight == 0 ||
         update.renderWidth == 0 ||
         update.renderHeight == 0)
+    {
+        SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
+        return;
+    }
+
+    const uint32_t currentSequence = streamConfigSequence_.load();
+    if (update.sequence < currentSequence)
+    {
+        SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
+        return;
+    }
+    if (update.sequence == currentSequence)
+    {
+        SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
+        return;
+    }
+
+    const uint32_t workerSequence = streamConfigWorkerSequence_.load();
+    if (workerSequence == update.sequence)
+    {
+        return;
+    }
+    if (workerSequence != 0)
     {
         SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
         return;
@@ -2890,7 +2921,9 @@ void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
         std::lock_guard<std::mutex> lock(pendingStreamConfigMutex_);
         pendingStreamConfigUpdate_ = update;
         hasPendingStreamConfigUpdate_ = true;
+        streamConfigWorkerSequence_.store(update.sequence);
     }
+    pendingStreamConfigCv_.notify_one();
 
     LOGI("Queued stream config update seq=%u render=%ux%u encoded=%ux%u flags=0x%x",
          update.sequence,
@@ -2901,27 +2934,102 @@ void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
          update.flags);
 }
 
-void XrApp::ApplyPendingStreamConfigUpdate()
+void XrApp::StartStreamConfigWorker()
 {
-    protocol::StreamConfigUpdate update = {};
+    StopStreamConfigWorker();
+    streamConfigWorkerRunning_.store(true);
+    streamConfigWorkerThread_ = std::thread(&XrApp::StreamConfigWorkerMain, this);
+}
+
+void XrApp::StopStreamConfigWorker()
+{
+    if (!streamConfigWorkerRunning_.load() && !streamConfigWorkerThread_.joinable())
+    {
+        return;
+    }
+
+    streamConfigWorkerRunning_.store(false);
     {
         std::lock_guard<std::mutex> lock(pendingStreamConfigMutex_);
-        if (!hasPendingStreamConfigUpdate_)
+        hasPendingStreamConfigUpdate_ = false;
+        pendingStreamConfigUpdate_ = {};
+    }
+    pendingStreamConfigCv_.notify_all();
+    if (streamConfigWorkerThread_.joinable())
+    {
+        streamConfigWorkerThread_.join();
+    }
+}
+
+void XrApp::StreamConfigWorkerMain()
+{
+    while (streamConfigWorkerRunning_.load())
+    {
+        protocol::StreamConfigUpdate update = {};
+        {
+            std::unique_lock<std::mutex> lock(pendingStreamConfigMutex_);
+            pendingStreamConfigCv_.wait(lock, [this] {
+                return !streamConfigWorkerRunning_.load() || hasPendingStreamConfigUpdate_;
+            });
+            if (!streamConfigWorkerRunning_.load())
+            {
+                break;
+            }
+            update = pendingStreamConfigUpdate_;
+            pendingStreamConfigUpdate_ = {};
+            hasPendingStreamConfigUpdate_ = false;
+        }
+
+        bool accepted = false;
+        {
+            std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
+            if (videoDecoder_)
+            {
+                videoDecoder_->Shutdown();
+                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
+            completedStreamConfigUpdate_ = update;
+            completedStreamConfigAccepted_ = accepted;
+            hasCompletedStreamConfigUpdate_ = true;
+        }
+    }
+}
+
+void XrApp::ApplyCompletedStreamConfigUpdate()
+{
+    protocol::StreamConfigUpdate update = {};
+    bool accepted = false;
+    {
+        std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
+        if (!hasCompletedStreamConfigUpdate_)
         {
             return;
         }
-        update = pendingStreamConfigUpdate_;
-        hasPendingStreamConfigUpdate_ = false;
+        update = completedStreamConfigUpdate_;
+        accepted = completedStreamConfigAccepted_;
+        completedStreamConfigUpdate_ = {};
+        completedStreamConfigAccepted_ = false;
+        hasCompletedStreamConfigUpdate_ = false;
     }
 
-    bool accepted = false;
+    const uint32_t workerSequence = streamConfigWorkerSequence_.load();
+    if (connectionState_.load() != ConnectionState::Connected ||
+        workerSequence != update.sequence ||
+        update.sequence <= streamConfigSequence_.load())
     {
-        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-        if (videoDecoder_)
+        LOGW("Ignored stale stream config result seq=%u worker_seq=%u current_seq=%u",
+             update.sequence,
+             workerSequence,
+             streamConfigSequence_.load());
+        if (workerSequence == update.sequence)
         {
-            videoDecoder_->Shutdown();
-            accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight);
+            streamConfigWorkerSequence_.store(0);
         }
+        return;
     }
 
     if (!accepted)
@@ -2929,6 +3037,7 @@ void XrApp::ApplyPendingStreamConfigUpdate()
         LOGE("Rejected stream config update seq=%u: decoder init failed for %ux%u",
              update.sequence, update.encodedWidth, update.encodedHeight);
         SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_REJECTED);
+        streamConfigWorkerSequence_.store(0);
         return;
     }
 
@@ -2990,6 +3099,7 @@ void XrApp::ApplyPendingStreamConfigUpdate()
     streamConfigSequence_.store(update.sequence);
 
     SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
+    streamConfigWorkerSequence_.store(0);
     RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
 
     LOGI("Applied stream config update seq=%u render=%ux%u encoded=%ux%u ffe=%d upscaling=%d",
@@ -3354,7 +3464,7 @@ void XrApp::RunFrame()
     }
 
     RetryUsbAdbTransportIfNeeded();
-    ApplyPendingStreamConfigUpdate();
+    ApplyCompletedStreamConfigUpdate();
 
     if (connectionState_.load() == ConnectionState::Connected &&
         !hasVideoTexture_ &&

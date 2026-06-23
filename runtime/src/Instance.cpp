@@ -8,7 +8,9 @@
 #include <spdlog/spdlog.h>
 
 Instance::Instance(XrVersion apiVersion, const std::vector<std::string>& enabledExtensions)
-    : apiVersion_(apiVersion), enabledExtensions_(enabledExtensions)
+    : apiVersion_(apiVersion),
+      enabledExtensions_(enabledExtensions),
+      passthroughBlendModeEnabled_(Config::Get().GetValues().passthroughEnabled)
 {
     Runtime::Get().RegisterHandle(handle_, this);
     Runtime::Get().SetInstance(this);
@@ -206,8 +208,7 @@ XrResult Instance::EnumerateEnvironmentBlendModes(XrSystemId systemId,
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
-    const bool alphaBlendEnabled =
-        Config::Get().GetValues().passthroughEnabled;
+    const bool alphaBlendEnabled = SupportsPassthroughBlendMode();
     const uint32_t supportedModeCount = alphaBlendEnabled ? 2u : 1u;
 
     *environmentBlendModeCountOutput = supportedModeCount;

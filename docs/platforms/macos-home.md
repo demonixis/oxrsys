@@ -223,21 +223,25 @@ stale-frame reprojection path.
 
 `abr_mode` controls server-side adaptive bitrate. `bitrate` adjusts bitrate using latency, displayed
 frame age, drops, keyframe requests, and reprojection pressure. `full` can also reconfigure the
-encoded stream resolution when the headset client advertises live stream reconfiguration:
-`quality` and `balanced` use `resolution_scale`, `smooth` uses
+encoded stream resolution when the headset client advertises live stream reconfiguration and the
+active transport is reliable USB TCP. WiFi clients remain bitrate-only for live changes in this
+version. `quality` and `balanced` use `resolution_scale`, `smooth` uses
 `max(dynamic_resolution_min_scale, resolution_scale * 0.85)`, and `wifi_smooth` uses
 `max(dynamic_resolution_min_scale, resolution_scale * 0.70)`.
 
 `passthrough_enabled` controls whether the runtime exposes app-requested passthrough support.
 When enabled, compatible headset clients keep a passthrough underlay active while streaming and
 the runtime can expose `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND`; the application still chooses
-the blend path through OpenXR environment blend mode or source-alpha projection layer flags.
+the blend path through OpenXR environment blend mode or source-alpha projection layer flags. The
+runtime snapshots blend-mode support when an OpenXR instance is created, so changing this setting
+requires restarting the OpenXR app/runtime session to change advertised blend modes.
 `passthrough_supported` is the connected headset capability reported by the Android client after
 querying its local OpenXR runtime, and `passthrough_ready` is true only when the global setting
 and headset support are both present.
 `occlusion_mode` selects the intended occlusion source (`off`, `scene_mesh`, or
 `environment_depth`); occlusion remains disabled when there is no coherent app or headset depth
-source. The `[spatial]` toggles gate reserved spatial entity, anchor, scene, and persistence paths.
+source. The `[spatial]` toggles gate reserved spatial entity, anchor, scene, and persistence paths;
+these remain reserved until a real backend is attached.
 
 Changes in the Streaming tab are saved automatically after a short debounce. `Reload From Disk`
 discards unsaved UI edits and reparses the TOML. `Default` restores the structured streaming,

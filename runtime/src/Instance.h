@@ -65,6 +65,7 @@ public:
     }
     bool IsSystemIdValid(XrSystemId systemId) const;
     bool SupportsLocalFloor() const;
+    bool SupportsPassthroughBlendMode() const { return passthroughBlendModeEnabled_; }
     void MarkMetalGraphicsRequirementsQueried();
     bool HasQueriedMetalGraphicsRequirements() const;
     void MarkVulkanGraphicsRequirementsQueried();
@@ -103,6 +104,7 @@ private:
     Session* session_ = nullptr;
     XrVersion apiVersion_ = XR_CURRENT_API_VERSION;
     std::vector<std::string> enabledExtensions_;
+    bool passthroughBlendModeEnabled_ = false;
 
     std::mutex eventMutex_;
     std::deque<XrEventDataBuffer> eventQueue_;

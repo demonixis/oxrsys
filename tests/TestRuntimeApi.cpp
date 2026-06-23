@@ -8,8 +8,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using Catch::Matchers::WithinAbs;
@@ -73,6 +78,44 @@ PFN_xrVoidFunction GetProc(XrInstance instance, const char* name)
     XR_CHECK(xrGetInstanceProcAddr(instance, name, &function));
     REQUIRE(function != nullptr);
     return function;
+}
+
+std::filesystem::path RuntimeConfigPath()
+{
+    const char* home = std::getenv("HOME");
+    REQUIRE(home != nullptr);
+    return std::filesystem::path(home) /
+           "Library/Application Support/OXRSys/oxrsys-runtime.toml";
+}
+
+void WriteRuntimeConfig(bool passthroughEnabled)
+{
+    const std::filesystem::path path = RuntimeConfigPath();
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path);
+    REQUIRE(file.is_open());
+    file << "[streaming]\n"
+         << "passthrough_enabled = "
+         << (passthroughEnabled ? "true" : "false")
+         << "\n"
+         << "[logging]\n"
+         << "file_logging = false\n";
+    file.close();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+std::vector<XrEnvironmentBlendMode> EnumerateBlendModes(XrInstance instance,
+                                                        XrSystemId systemId)
+{
+    uint32_t count = 0;
+    XR_CHECK(xrEnumerateEnvironmentBlendModes(
+        instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &count, nullptr));
+    std::vector<XrEnvironmentBlendMode> modes(count);
+    XR_CHECK(xrEnumerateEnvironmentBlendModes(
+        instance, systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+        count, &count, modes.data()));
+    modes.resize(count);
+    return modes;
 }
 
 int64_t SelectColorSwapchainFormat(XrSession session)
@@ -369,6 +412,44 @@ TEST_CASE("Instance view and blend APIs reject missing output pointers", "[runti
           XR_ERROR_VALIDATION_FAILURE);
 
     xrDestroyInstance(instance);
+}
+
+TEST_CASE("Environment blend modes are stable for an instance after config reload", "[runtime][passthrough]")
+{
+    WriteRuntimeConfig(true);
+
+    XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(createInfo.applicationInfo.applicationName, "stable_blend_modes_test",
+                 XR_MAX_APPLICATION_NAME_SIZE);
+    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+
+    XrInstance instance = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+    XrSystemGetInfo systemGetInfo = {XR_TYPE_SYSTEM_GET_INFO};
+    systemGetInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemId systemId = XR_NULL_SYSTEM_ID;
+    XR_CHECK(xrGetSystem(instance, &systemGetInfo, &systemId));
+
+    std::vector<XrEnvironmentBlendMode> modes = EnumerateBlendModes(instance, systemId);
+    CHECK(std::find(modes.begin(), modes.end(),
+                    XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) != modes.end());
+
+    WriteRuntimeConfig(false);
+    modes = EnumerateBlendModes(instance, systemId);
+    CHECK(std::find(modes.begin(), modes.end(),
+                    XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) != modes.end());
+
+    xrDestroyInstance(instance);
+
+    XrInstance nextInstance = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateInstance(&createInfo, &nextInstance));
+    XR_CHECK(xrGetSystem(nextInstance, &systemGetInfo, &systemId));
+    modes = EnumerateBlendModes(nextInstance, systemId);
+    CHECK(std::find(modes.begin(), modes.end(),
+                    XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) == modes.end());
+
+    xrDestroyInstance(nextInstance);
 }
 
 TEST_CASE("Runtime accepts Unity metal extension alias", "[runtime][loader]")

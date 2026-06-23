@@ -52,7 +52,7 @@ struct OXRSysServerConfig: Equatable {
     resolution_scale = 0.75
 
     # Minimum encoded-resolution multiplier used only when abr_mode = "full"
-    # and the headset client supports live stream reconfiguration.
+    # and a reliable USB TCP headset client supports live stream reconfiguration.
     dynamic_resolution_min_scale = 0.50
 
     # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
@@ -82,7 +82,7 @@ struct OXRSysServerConfig: Equatable {
     client_reprojection = "pose"
 
     # Adaptive bitrate mode: "off", "bitrate", or "full".
-    # "full" may select resolution/foveation/upscaling profiles after session-safe transitions.
+    # "full" may select live streaming resolution profiles on reliable USB TCP.
     abr_mode = "bitrate"
 
     # Enable headset passthrough as a runtime feature. Apps still choose opaque

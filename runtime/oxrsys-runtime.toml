@@ -23,8 +23,9 @@ refresh_rate_hz = 72
 # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
 resolution_scale = 0.75
 
-# Lowest encode scale that ABR "full" may request when the client supports live stream
-# reconfiguration. The OpenXR app's own swapchain/render resolution is unchanged.
+# Lowest encode scale that ABR "full" may request when a reliable USB TCP
+# headset client supports live stream reconfiguration. The OpenXR app's own
+# swapchain/render resolution is unchanged.
 dynamic_resolution_min_scale = 0.50
 
 # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
@@ -57,7 +58,7 @@ client_upscaling = false
 client_reprojection = "pose"
 
 # Adaptive bitrate mode: "off", "bitrate", or "full".
-# "full" may select live streaming resolution profiles when the headset client supports it.
+# "full" may select live streaming resolution profiles on reliable USB TCP.
 abr_mode = "bitrate"
 
 # Enable headset passthrough as a runtime feature. Apps still choose opaque or

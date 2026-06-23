@@ -179,14 +179,17 @@ and treats missing trailing metrics as zero.
 
 The runtime ABR controller consumes the latency report, displayed frame age, keyframe request
 deltas, video-send drops, encoder drops, and reprojection pressure. `streaming.abr_mode = "bitrate"`
-adjusts encoder bitrate only. `full` now selects real encoded-resolution targets when the client
-advertises `CLIENT_CAPABILITY_STREAM_RECONFIGURE`: `quality` and `balanced` use
-`resolution_scale`, `smooth` uses `max(dynamic_resolution_min_scale, resolution_scale * 0.85)`,
-and `wifi_smooth` uses `max(dynamic_resolution_min_scale, resolution_scale * 0.70)`. The runtime
-sends `StreamConfigUpdate` outside `Session::EndFrame()`, the client recreates its decoder on the XR
-frame loop, replies with `StreamConfigAck`, and the runtime swaps encoders, clears queued video, and
-forces an IDR only after the ack. ABR lowers quickly on loss or high frame age and recovers slowly
-after stable windows to avoid oscillation.
+adjusts encoder bitrate only. `full` selects encoded-resolution targets when the client advertises
+`CLIENT_CAPABILITY_STREAM_RECONFIGURE` and the active control path is reliable USB TCP: `quality`
+and `balanced` use `resolution_scale`, `smooth` uses
+`max(dynamic_resolution_min_scale, resolution_scale * 0.85)`, and `wifi_smooth` uses
+`max(dynamic_resolution_min_scale, resolution_scale * 0.70)`. WiFi control remains best-effort in
+this version, so WiFi clients fall back to bitrate/profile status without live decoder
+reconfiguration. For USB TCP, the runtime sends `StreamConfigUpdate` outside `Session::EndFrame()`,
+the client recreates its decoder on a client worker thread, replies with `StreamConfigAck` only after
+the decoder is ready, and the runtime swaps encoders, clears queued video, and forces an IDR only
+after the ack. Pending updates have bounded retry/timeout behavior; timeout disconnects the client
+so encoder and decoder state recover through the normal reconnect path.
 
 Protocol v1.2 extends `ServerAnnounce` with `spatialPort` and adds feature/capability flags for
 stream reconfiguration, passthrough, depth occlusion, spatial entities, and scene capture. Spatial

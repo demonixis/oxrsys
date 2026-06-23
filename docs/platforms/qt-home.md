@@ -60,8 +60,11 @@ toggles.
 The runtime stats view separates the global passthrough setting from headset support: `unsupported`
 means the selected client did not advertise `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` after
 querying its local OpenXR runtime.
-In `abr_mode = "full"`, compatible headset clients can receive `StreamConfigUpdate/Ack` messages so
-the runtime changes encoded stream resolution without resizing the OpenXR application's swapchains.
+In `abr_mode = "full"`, compatible headset clients can receive `StreamConfigUpdate/Ack` messages on
+the reliable USB TCP control path so the runtime changes encoded stream resolution without resizing
+the OpenXR application's swapchains. WiFi clients remain bitrate-only for live changes in this
+version. The spatial controls and `9948` reverse mapping remain reserved scaffolding until a backend
+is attached.
 The Headset Client section owns headset-side options:
 `auto` leaves Quest/PICO `XR_FB_foveation` unmanaged by Home, while `off`, `light`, `medium`,
 and `high` explicitly override the viewer swapchains. Quest shader upscaling and the reserved

@@ -18,6 +18,7 @@
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
+#include "StreamingReconfigure.h"
 
 // Shared protocol definitions
 #include <oxrsys/protocol/Protocol.h>
@@ -119,6 +120,19 @@ private:
         bool accepting = false;
     };
 
+    struct StreamLayoutState
+    {
+        uint32_t scaledWidth = 0;
+        uint32_t scaledHeight = 0;
+        uint32_t encodedWidth = 0;
+        uint32_t encodedHeight = 0;
+        uint32_t foveatedTargetEyeWidth = 0;
+        uint32_t foveatedTargetEyeHeight = 0;
+        float activeResolutionScale = 0.75f;
+        bool foveatedEncodingActive = false;
+        uint32_t streamConfigSequence = 0;
+    };
+
     struct PacketDispatchState
     {
         std::mutex mutex;
@@ -143,7 +157,7 @@ private:
     void TcpTrackingThread();
     void TcpSpatialThread();
     std::string GetLocalIpAddress() const;
-    oxr::protocol::ServerAnnounce BuildServerAnnounce() const;
+    oxr::protocol::ServerAnnounce BuildServerAnnounce(bool reliableControlTransport) const;
     void ReleaseStreamingFrame(StreamingFrame& frame);
     void HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                              const sockaddr_in& clientAddr);
@@ -155,8 +169,11 @@ private:
     void HandleNackRequest(const oxr::protocol::NackRequest& request);
     void HandleControlPayload(const uint8_t* data, size_t size);
     void UpdatePredictionHorizon();
+    void TickPendingStreamConfigTimeout(int64_t nowNs);
     void MaybeRequestStreamReconfigure(float targetResolutionScale);
     void ApplyPendingStreamConfigLocked(const oxr::protocol::StreamConfigUpdate& update);
+    void ResetPendingStreamConfigLocked();
+    StreamLayoutState GetStreamLayoutState() const;
     std::shared_ptr<CallbackAccess> GetCallbackAccess();
     std::shared_ptr<CallbackAccess> RenewCallbackAccess();
     void InvalidateCallbackAccess();
@@ -175,15 +192,9 @@ private:
     // Server config
     uint32_t renderWidth_ = 0;
     uint32_t renderHeight_ = 0;
-    uint32_t scaledWidth_ = 0;      // After resolution_scale (per eye)
-    uint32_t scaledHeight_ = 0;     // After resolution_scale
-    uint32_t encodedWidth_ = 0;     // Actual encoded stereo width
-    uint32_t encodedHeight_ = 0;    // Actual encoded height
-    uint32_t foveatedTargetEyeWidth_ = 0;
-    uint32_t foveatedTargetEyeHeight_ = 0;
-    float activeResolutionScale_ = 0.75f;
+    mutable std::mutex streamLayoutMutex_;
+    StreamLayoutState streamLayout_;
     uint32_t refreshRateHz_ = 90;
-    bool foveatedEncodingActive_ = false;
     std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic_bool clientSupportsFoveatedEncoding_{false};
     std::atomic_bool clientSupportsStreamReconfigure_{false};
@@ -207,11 +218,11 @@ private:
     std::string abrModeName_ = "bitrate";
     std::string abrStateName_ = "stable";
     std::string abrProfileName_ = "bitrate";
-    std::atomic<uint32_t> streamConfigSequence_{0};
     std::atomic<uint32_t> pendingStreamConfigSequence_{0};
     std::atomic<float> pendingResolutionScale_{0.0f};
     std::mutex streamConfigMutex_;
     oxr::protocol::StreamConfigUpdate pendingStreamConfigUpdate_ = {};
+    oxrsys::streaming_reconfigure::PendingState streamConfigPending_;
     std::atomic<float> clientDisplayedFrameAgeMs_{0.0f};
     std::atomic<uint32_t> clientReprojectedFramesDelta_{0};
     std::atomic<uint32_t> clientStaleFrameReusesDelta_{0};

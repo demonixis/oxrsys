@@ -2,7 +2,6 @@
 
 #include "Session.h"
 #include "CompositionLayerAlpha.h"
-#include "Config.h"
 #include "Instance.h"
 #include "Runtime.h"
 #include "Swapchain.h"
@@ -48,14 +47,15 @@ SessionMetricSummary SummarizeSessionSamples(std::vector<double>& samples)
     return summary;
 }
 
-bool IsSupportedEnvironmentBlendMode(XrEnvironmentBlendMode blendMode)
+bool IsSupportedEnvironmentBlendMode(XrEnvironmentBlendMode blendMode, const Instance* instance)
 {
     if (blendMode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE)
     {
         return true;
     }
     return blendMode == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND &&
-           Config::Get().GetValues().passthroughEnabled;
+           instance != nullptr &&
+           instance->SupportsPassthroughBlendMode();
 }
 
 constexpr uint32_t kMaxSupportedCompositionLayers = XR_MIN_COMPOSITION_LAYERS_SUPPORTED;
@@ -454,7 +454,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     {
         return XR_ERROR_TIME_INVALID;
     }
-    if (!IsSupportedEnvironmentBlendMode(frameEndInfo->environmentBlendMode))
+    if (!IsSupportedEnvironmentBlendMode(frameEndInfo->environmentBlendMode, instance_))
     {
         return XR_ERROR_ENVIRONMENT_BLEND_MODE_UNSUPPORTED;
     }
@@ -469,7 +469,8 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
 
     // Extract submitted eye sources for streaming. Missing streaming sources do
     // not invalidate the OpenXR frame; they only skip this frame's video encode.
-    const bool passthroughEnabled = Config::Get().GetValues().passthroughEnabled;
+    const bool passthroughEnabled = instance_ != nullptr &&
+                                    instance_->SupportsPassthroughBlendMode();
     const bool environmentAlphaBlend =
         frameEndInfo->environmentBlendMode == XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND;
     bool sourceAlphaProjectionLayer = false;
