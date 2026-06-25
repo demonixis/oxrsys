@@ -11,6 +11,9 @@ import os
 
 public final class VideoReceiver: @unchecked Sendable {
     public typealias OnNalUnit = @Sendable (Data, Int64, Int64) -> Void
+    /// (presentationTimeNs, orientation xyzw) — the head orientation the server rendered this
+    /// frame for, echoed back so the client can reproject the frame to the live head pose.
+    public typealias OnRenderPose = @Sendable (Int64, (Float, Float, Float, Float)) -> Void
 
     private struct State {
         var socket: Int32 = -1
@@ -34,7 +37,7 @@ public final class VideoReceiver: @unchecked Sendable {
 
     public init() {}
 
-    public func start(onNalUnit: @escaping OnNalUnit) {
+    public func start(onNalUnit: @escaping OnNalUnit, onRenderPose: OnRenderPose? = nil) {
         let shouldStart = state.withLock { state in
             if state.running {
                 return false
@@ -97,7 +100,7 @@ public final class VideoReceiver: @unchecked Sendable {
             }
             print("[VideoRecv] Listening on port \(OXRProtocol.videoPort)")
 
-            self.receiveLoop(fd: fd, onNalUnit: onNalUnit)
+            self.receiveLoop(fd: fd, onNalUnit: onNalUnit, onRenderPose: onRenderPose)
 
             let shouldClose = state.withLock { state in
                 state.running = false
@@ -135,7 +138,7 @@ public final class VideoReceiver: @unchecked Sendable {
 
     // MARK: - Receive loop (raw memory, zero-copy hot path)
 
-    private func receiveLoop(fd: Int32, onNalUnit: @escaping OnNalUnit) {
+    private func receiveLoop(fd: Int32, onNalUnit: @escaping OnNalUnit, onRenderPose: OnRenderPose?) {
         let headerSize = MemoryLayout<VideoPacketHeader>.size
         let maxPacketSize = headerSize + OXRProtocol.maxPacketPayload
 
@@ -262,8 +265,17 @@ public final class VideoReceiver: @unchecked Sendable {
             let header = UnsafeRawPointer(recvBuf).loadUnaligned(as: VideoPacketHeader.self)
             let payloadSize = min(Int(header.payloadSize), n - headerSize)
 
-            // Render pose packet — skip (handled separately if needed)
+            // Render pose packet — the head pose the server rendered this frame for. The payload
+            // is position xyz then orientation xyzw (7 floats); we use the orientation to reproject.
             if header.flags & VideoFlags.renderPose != 0 {
+                if let onRenderPose, payloadSize >= MemoryLayout<Float>.size * 7 {
+                    let base = UnsafeRawPointer(recvBuf + headerSize)
+                    let ox = base.loadUnaligned(fromByteOffset: 12, as: Float.self)
+                    let oy = base.loadUnaligned(fromByteOffset: 16, as: Float.self)
+                    let oz = base.loadUnaligned(fromByteOffset: 20, as: Float.self)
+                    let ow = base.loadUnaligned(fromByteOffset: 24, as: Float.self)
+                    onRenderPose(header.presentationTimeNs, (ox, oy, oz, ow))
+                }
                 continue
             }
 
