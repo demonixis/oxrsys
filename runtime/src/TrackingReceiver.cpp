@@ -300,8 +300,10 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     if (nowNs - lastLogNs >= 5LL * 1000LL * 1000LL * 1000LL &&
         lastPredictionDiagnosticNs_.compare_exchange_strong(lastLogNs, nowNs))
     {
-        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} speed={:.2f}rad/s",
-                     horizonMs, hasHeadAngularVelocity ? "yes" : "no", headAngularSpeed);
+        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} speed={:.2f}rad/s "
+                     "reordered_dropped={}",
+                     horizonMs, hasHeadAngularVelocity ? "yes" : "no", headAngularSpeed,
+                     reorderedDropCount_.load());
     }
 
     StoreVec3(outPacket.headPosition,
@@ -377,6 +379,23 @@ void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, 
 
     {
         std::lock_guard<std::mutex> lock(poseMutex_);
+
+        // Drop out-of-order / duplicate tracking packets. UDP reorders packets freely over Wi-Fi,
+        // and the client stamps each sample with a monotonically increasing timestamp. If a packet
+        // arrives with a timestamp at or before the latest stored one, accepting it would put a
+        // backward sample at the head of the history; finite-difference prediction would then read
+        // a reversed delta over a tiny receive-time gap and emit a large bogus angular velocity.
+        // That is the cause of per-frame render-pose jumps (the head-rotation jitter): the runtime
+        // renders the app from a pose that jumps several degrees while the real head moved a
+        // fraction of a degree. Ordering by client timestamp keeps the history strictly forward in
+        // time. Packets without a timestamp (0) cannot be ordered, so they are always accepted.
+        if (hasData_.load() && packet.timestampNs > 0 && latestPacket_.timestampNs > 0 &&
+            packet.timestampNs <= latestPacket_.timestampNs)
+        {
+            reorderedDropCount_.fetch_add(1);
+            return;
+        }
+
         const glm::quat* headReference = nullptr;
         const glm::quat* leftControllerReference = nullptr;
         const glm::quat* rightControllerReference = nullptr;

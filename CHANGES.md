@@ -70,6 +70,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 - Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
 - Fixed visionOS eye projection by sending the device's real per-eye FOV (OpenXR signed angles) and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
+- Fixed Vision Pro head-rotation jitter at the source: the runtime now tags each streamed frame with the exact head pose the application rendered it for (captured at `xrLocateViews`) instead of a pose re-predicted at frame submission, so the headset client reprojects against a pose that matches the pixels. It also drops out-of-order/duplicate UDP tracking packets by the client's monotonic timestamp so finite-difference prediction cannot emit a bogus angular velocity from a reordered sample.
 
 ### Documentation
 
