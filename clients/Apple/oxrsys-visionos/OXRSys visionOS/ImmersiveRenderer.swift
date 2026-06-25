@@ -39,16 +39,18 @@ actor ImmersiveRenderer {
     private unowned let appModel: AppModel
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
-    private let worldTracking = WorldTrackingProvider()
+    private let worldTracking: WorldTrackingProvider
     private let textureCache: CVMetalTextureCache
     private let pipelineState: MTLRenderPipelineState
     private let endFrameEvent: MTLSharedEvent
 
     private var committedFrameIndex: UInt64 = UInt64(ImmersiveRendererConstants.maxBuffersInFlight)
+    private var didLogProjection = false
 
-    init(layerRenderer: LayerRenderer, appModel: AppModel) {
+    init(layerRenderer: LayerRenderer, appModel: AppModel, worldTracking: WorldTrackingProvider) {
         self.layerRenderer = layerRenderer
         self.appModel = appModel
+        self.worldTracking = worldTracking
         self.device = layerRenderer.device
         self.commandQueue = layerRenderer.device.makeCommandQueue()!
 
@@ -62,6 +64,7 @@ actor ImmersiveRenderer {
         pipelineDescriptor.vertexFunction = library.makeFunction(name: "stereoImmersiveVertex")
         pipelineDescriptor.fragmentFunction = library.makeFunction(name: "stereoImmersiveFragment")
         pipelineDescriptor.colorAttachments[0].pixelFormat = layerRenderer.configuration.colorFormat
+        pipelineDescriptor.depthAttachmentPixelFormat = layerRenderer.configuration.depthFormat
         pipelineDescriptor.maxVertexAmplificationCount = layerRenderer.properties.viewCount
         self.pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
 
@@ -69,19 +72,10 @@ actor ImmersiveRenderer {
         self.endFrameEvent.signaledValue = committedFrameIndex
     }
 
-    private func startARSession(_ arSession: ARKitSession) async {
-        do {
-            try await arSession.run([worldTracking])
-        } catch {
-            print("[VisionImmersive] Failed to start ARKitSession: \(error)")
-        }
-    }
-
     @MainActor
-    static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, arSession: ARKitSession) {
+    static func startRenderLoop(_ layerRenderer: LayerRenderer, appModel: AppModel, worldTracking: WorldTrackingProvider) {
         Task(executorPreference: ImmersiveRendererTaskExecutor.shared) {
-            let renderer = ImmersiveRenderer(layerRenderer: layerRenderer, appModel: appModel)
-            await renderer.startARSession(arSession)
+            let renderer = ImmersiveRenderer(layerRenderer: layerRenderer, appModel: appModel, worldTracking: worldTracking)
             await renderer.renderLoop()
         }
     }
@@ -144,11 +138,21 @@ actor ImmersiveRenderer {
         let presentationTime = drawable.frameTiming.presentationTime.timeInterval
         drawable.deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
 
+        publishEyeProjection(drawable)
+
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         renderPassDescriptor.colorAttachments[0].storeAction = .store
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // visionOS reprojects each presented frame using the depth buffer; with no valid depth
+        // the device drops every frame (black) while the simulator does not. Clear the depth to
+        // a fixed head-locked distance so the compositor has a real surface to reproject.
+        let clip = drawable.computeProjection(viewIndex: 0) * SIMD4<Float>(0, 0, -2.0, 1)
+        renderPassDescriptor.depthAttachment.texture = drawable.depthTextures[0]
+        renderPassDescriptor.depthAttachment.loadAction = .clear
+        renderPassDescriptor.depthAttachment.storeAction = .store
+        renderPassDescriptor.depthAttachment.clearDepth = clip.w != 0 ? Double(clip.z / clip.w) : 0
         renderPassDescriptor.rasterizationRateMap = drawable.rasterizationRateMaps.first
         if layerRenderer.configuration.layout == .layered {
             renderPassDescriptor.renderTargetArrayLength = drawable.views.count
@@ -184,6 +188,33 @@ actor ImmersiveRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         drawable.encodePresent(commandBuffer: commandBuffer)
+    }
+
+    /// Sends the device's real per-eye FOV (radians, OpenXR signed angles) and IPD so the
+    /// runtime renders the matching frustum instead of its symmetric fallback FOV. visionOS
+    /// view tangents are positive magnitudes in (left, right, up, down) order, so negate the
+    /// left and down components to produce OpenXR's signed XrFovf angles.
+    private func publishEyeProjection(_ drawable: LayerRenderer.Drawable) {
+        guard let leftView = drawable.views.first else { return }
+        let t = leftView.tangents
+        let fovAngles = SIMD4<Float>(-atan(t.x), atan(t.y), atan(t.z), -atan(t.w))
+
+        let leftEye = leftView.transform.columns.3
+        let rightEye = (drawable.views.count > 1 ? drawable.views[1] : leftView).transform.columns.3
+        let dx = rightEye.x - leftEye.x, dy = rightEye.y - leftEye.y, dz = rightEye.z - leftEye.z
+        let ipd = (dx * dx + dy * dy + dz * dz).squareRoot()
+
+        if !didLogProjection {
+            didLogProjection = true
+            print("[ProjDiag] L.tangents=(\(t.x), \(t.y), \(t.z), \(t.w))")
+            if drawable.views.count > 1 {
+                let rt = drawable.views[1].tangents
+                print("[ProjDiag] R.tangents=(\(rt.x), \(rt.y), \(rt.z), \(rt.w))")
+            }
+            print("[ProjDiag] fovAngles(rad)=(\(fovAngles.x), \(fovAngles.y), \(fovAngles.z), \(fovAngles.w)) ipd=\(ipd)")
+        }
+
+        appModel.updateEyeProjection(fovAngles: fovAngles, ipd: ipd)
     }
 
     private func makeTexture(from pixelBuffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) -> MTLTexture? {

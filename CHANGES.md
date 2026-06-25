@@ -67,6 +67,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed a Unity editor crash on session shutdown by invalidating stale VideoToolbox encode callbacks before the streaming server is destroyed and by catching callback exceptions inside the encoder.
 - Filtered known macOS `linkd.autoShortcut` App Intents diagnostics from Home captured app logs.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
+- Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
+- Fixed visionOS eye projection by sending the device's real per-eye FOV (OpenXR signed angles) and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
 
 ### Documentation
 
