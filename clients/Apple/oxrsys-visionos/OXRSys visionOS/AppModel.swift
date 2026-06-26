@@ -14,10 +14,12 @@ import simd
 private final class PixelBufferState: @unchecked Sendable {
     private let lock = NSLock()
     private var pixelBuffer: CVPixelBuffer?
+    private var presentationTimeNs: Int64 = 0
 
-    func set(_ newValue: CVPixelBuffer?) {
+    func set(_ newValue: CVPixelBuffer?, presentationTimeNs: Int64) {
         lock.lock()
         pixelBuffer = newValue
+        self.presentationTimeNs = presentationTimeNs
         lock.unlock()
     }
 
@@ -26,6 +28,14 @@ private final class PixelBufferState: @unchecked Sendable {
         let value = pixelBuffer
         lock.unlock()
         return value
+    }
+
+    /// The displayed frame and the presentation timestamp it was tagged with, read together so
+    /// the renderer reprojects that exact frame with the render pose that belongs to it.
+    func getWithTimestamp() -> (pixelBuffer: CVPixelBuffer?, presentationTimeNs: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (pixelBuffer, presentationTimeNs)
     }
 }
 
@@ -85,6 +95,38 @@ private final class EyeProjectionState: @unchecked Sendable {
     }
 }
 
+/// Stores the head orientation the server rendered each frame for, keyed by the frame's
+/// presentation timestamp, so the renderer can reproject the displayed frame to the live pose.
+private final class RenderPoseReprojector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var orientationByPresentationNs: [Int64: simd_quatf] = [:]
+    private let capacity = 240   // ring-buffer cap (~a few seconds of frames); bounds memory only
+    private var latestKey: Int64 = 0
+    private var latestOrientation: simd_quatf?
+
+    func note(presentationTimeNs: Int64, orientation: simd_quatf) {
+        lock.lock()
+        orientationByPresentationNs[presentationTimeNs] = orientation
+        if presentationTimeNs >= latestKey {
+            latestKey = presentationTimeNs
+            latestOrientation = orientation
+        }
+        if orientationByPresentationNs.count > capacity,
+           let oldest = orientationByPresentationNs.keys.min() {
+            orientationByPresentationNs.removeValue(forKey: oldest)
+        }
+        lock.unlock()
+    }
+
+    /// Exact render pose for this frame, falling back to the most recent one if this frame's pose
+    /// packet was lost (it's a single un-FEC'd UDP packet) — exact match first, recent pose second.
+    func orientation(forPresentationTimeNs presentationTimeNs: Int64) -> simd_quatf? {
+        lock.lock()
+        defer { lock.unlock() }
+        return orientationByPresentationNs[presentationTimeNs] ?? latestOrientation
+    }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -132,6 +174,7 @@ final class AppModel {
     private nonisolated let pixelBufferState = PixelBufferState()
     private nonisolated let keyframeRecoveryState = KeyframeRecoveryState()
     private nonisolated let eyeProjectionState = EyeProjectionState()
+    private nonisolated let renderPoseReprojector = RenderPoseReprojector()
 
     private var statsTimer: Timer?
     private var lastStatsTimeNs: Int64 = 0
@@ -308,7 +351,7 @@ final class AppModel {
         decoder.configure { [weak self] pixelBuffer, presentationTime in
             guard let self else { return }
             self.keyframeRecoveryState.noteDecodedFrame()
-            self.pixelBufferState.set(pixelBuffer)
+            self.pixelBufferState.set(pixelBuffer, presentationTimeNs: Self.nanoseconds(from: presentationTime))
 
             self.latencyReporter.noteFrameDecoded(
                 presentationTimeNs: Self.nanoseconds(from: presentationTime),
@@ -335,14 +378,17 @@ final class AppModel {
             }
         }
 
-        videoReceiver.start { [weak self] nalData, presentationTimeNs, receiveTimeNs in
+        videoReceiver.start(onNalUnit: { [weak self] nalData, presentationTimeNs, receiveTimeNs in
             guard let self else { return }
             self.latencyReporter.noteFrameReceived(
                 presentationTimeNs: presentationTimeNs,
                 receiveTimeNs: receiveTimeNs
             )
             self.decoder.decode(nalData: nalData, presentationTimeNs: presentationTimeNs)
-        }
+        }, onRenderPose: { [weak self] presentationTimeNs, orientation in
+            let quat = simd_quatf(ix: orientation.0, iy: orientation.1, iz: orientation.2, r: orientation.3)
+            self?.renderPoseReprojector.note(presentationTimeNs: presentationTimeNs, orientation: quat)
+        })
 
         Thread.sleep(forTimeInterval: 0.05)
 
@@ -378,7 +424,7 @@ final class AppModel {
         isTrackingActive = false
         stats = StreamStats()
         statusText = "Tap Search to find the runtime"
-        pixelBufferState.set(nil)
+        pixelBufferState.set(nil, presentationTimeNs: 0)
         keyframeRecoveryState.reset()
     }
 
@@ -446,6 +492,18 @@ final class AppModel {
 
     nonisolated func currentPixelBuffer() -> CVPixelBuffer? {
         pixelBufferState.get()
+    }
+
+    /// The displayed frame and its presentation timestamp, snapshotted together so the renderer
+    /// reprojects that exact frame with the render pose that belongs to it.
+    nonisolated func currentFrame() -> (pixelBuffer: CVPixelBuffer?, presentationTimeNs: Int64) {
+        pixelBufferState.getWithTimestamp()
+    }
+
+    /// The head orientation the frame with this presentation timestamp was rendered for, used by
+    /// the renderer to reproject it to the live head pose.
+    nonisolated func renderOrientation(forPresentationTimeNs presentationTimeNs: Int64) -> simd_quatf? {
+        renderPoseReprojector.orientation(forPresentationTimeNs: presentationTimeNs)
     }
 
     /// Called from the render loop with the device's real per-eye FOV (radians, OpenXR

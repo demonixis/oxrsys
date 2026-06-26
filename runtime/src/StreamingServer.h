@@ -61,7 +61,14 @@ public:
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
     // The source owns backend graphics resources until the frame is encoded,
     // dropped, or replaced by a newer pending frame.
-    void SendFrame(FrameSource frameSource);
+    //
+    // renderHeadOrientation (xyzw) / renderHeadPosition (xyz) are the exact head pose the
+    // application rendered this frame for (from xrLocateViews). When provided, the frame is tagged
+    // with it so the headset client reprojects against the pose the pixels were drawn with, instead
+    // of a later re-prediction. Pass nullptr to fall back to the latest predicted pose.
+    void SendFrame(FrameSource frameSource,
+                   const float* renderHeadOrientation = nullptr,
+                   const float* renderHeadPosition = nullptr);
 
     // Set the platform graphics device for VideoEncoder initialization.
     void SetGraphicsContext(const GraphicsContext& graphicsContext) { graphicsContext_ = graphicsContext; }

@@ -5,6 +5,7 @@ import CompositorServices
 import CoreVideo
 import Metal
 import os
+import simd
 
 nonisolated private enum ImmersiveRendererConstants {
     static let maxBuffersInFlight = 3
@@ -46,6 +47,13 @@ actor ImmersiveRenderer {
 
     private var committedFrameIndex: UInt64 = UInt64(ImmersiveRendererConstants.maxBuffersInFlight)
     private var didLogProjection = false
+
+    /// Per-eye reprojection data for the fragment shader: the rotation from the current-eye frame
+    /// into the render-eye frame, plus that eye's frustum tangents.
+    struct ReprojData {
+        var rot: simd_float3x3       // current-eye → render-eye rotation (R_render⁻¹ · R_current)
+        var tangents: SIMD4<Float>   // (left, right, up, down) positive tangent magnitudes
+    }
 
     init(layerRenderer: LayerRenderer, appModel: AppModel, worldTracking: WorldTrackingProvider) {
         self.layerRenderer = layerRenderer
@@ -136,9 +144,20 @@ actor ImmersiveRenderer {
 
     private func render(drawable: LayerRenderer.Drawable, commandBuffer: MTLCommandBuffer) {
         let presentationTime = drawable.frameTiming.presentationTime.timeInterval
-        drawable.deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        let currentAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        drawable.deviceAnchor = currentAnchor
 
         publishEyeProjection(drawable)
+
+        // Pair the displayed frame with the render pose it was drawn for, and reproject it into
+        // the live head pose. The compositor still does its small predicted→actual pass via
+        // deviceAnchor; this handles the larger render-pose→now rotation.
+        let frame = appModel.currentFrame()
+        let currentOrientation = currentAnchor.map { headOrientation(from: $0) }
+        let renderOrientation = appModel.renderOrientation(forPresentationTimeNs: frame.presentationTimeNs)
+        var reprojData = reprojectionData(drawable: drawable,
+                                          currentOrientation: currentOrientation,
+                                          renderOrientation: renderOrientation)
 
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = drawable.colorTextures[0]
@@ -178,7 +197,9 @@ actor ImmersiveRenderer {
             encoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
         }
 
-        if let pixelBuffer = appModel.currentPixelBuffer(),
+        encoder.setFragmentBytes(&reprojData, length: MemoryLayout<ReprojData>.stride * reprojData.count, index: 0)
+
+        if let pixelBuffer = frame.pixelBuffer,
            let luma = makeTexture(from: pixelBuffer, plane: 0, format: .r8Unorm),
            let chroma = makeTexture(from: pixelBuffer, plane: 1, format: .rg8Unorm) {
             encoder.setFragmentTexture(luma, index: 0)
@@ -188,6 +209,43 @@ actor ImmersiveRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         drawable.encodePresent(commandBuffer: commandBuffer)
+    }
+
+    /// Builds per-eye reprojection data: the rotation mapping a current-eye ray into the render
+    /// pose's eye frame, plus that eye's frustum tangents. Identity rotation (no render pose yet,
+    /// or no head motion since the frame was rendered) is an exact passthrough.
+    private func reprojectionData(drawable: LayerRenderer.Drawable,
+                                  currentOrientation: simd_quatf?,
+                                  renderOrientation: simd_quatf?) -> [ReprojData] {
+        let viewCount = max(drawable.views.count, 1)
+        var data: [ReprojData] = (0..<viewCount).map { index in
+            let tangents = index < drawable.views.count
+                ? drawable.views[index].tangents
+                : SIMD4<Float>(1, 1, 1, 1)
+            return ReprojData(rot: matrix_identity_float3x3, tangents: tangents)
+        }
+
+        guard let currentOrientation, let renderOrientation else {
+            return data
+        }
+
+        // dir_render = (R_render⁻¹ · R_current) · dir_current, so the shader finds which texel of
+        // the server-rendered frame each live output ray maps to.
+        let rot = simd_float3x3(simd_normalize(renderOrientation.inverse * currentOrientation))
+        for index in data.indices {
+            data[index].rot = rot
+        }
+        return data
+    }
+
+    /// Head orientation (world-from-head) from a device anchor's transform.
+    private func headOrientation(from anchor: DeviceAnchor) -> simd_quatf {
+        let m = anchor.originFromAnchorTransform
+        return simd_quatf(simd_float3x3(
+            SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+            SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+            SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z)
+        ))
     }
 
     /// Sends the device's real per-eye FOV (radians, OpenXR signed angles) and IPD so the

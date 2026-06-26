@@ -535,7 +535,21 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
         auto sendStart = Clock::now();
-        streamingServer_->SendFrame(std::move(frameSource));
+        if (lastRenderHasPose_)
+        {
+            const float renderHeadOrientation[4] = {
+                lastRenderHeadPose_.orientation.x, lastRenderHeadPose_.orientation.y,
+                lastRenderHeadPose_.orientation.z, lastRenderHeadPose_.orientation.w};
+            const float renderHeadPosition[3] = {
+                lastRenderHeadPose_.position.x, lastRenderHeadPose_.position.y,
+                lastRenderHeadPose_.position.z};
+            streamingServer_->SendFrame(std::move(frameSource), renderHeadOrientation,
+                                        renderHeadPosition);
+        }
+        else
+        {
+            streamingServer_->SendFrame(std::move(frameSource));
+        }
         double enqueueMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
             Clock::now() - sendStart).count();
 
@@ -724,6 +738,12 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     }
 
     inputManager_->GetEyeViews(views, 2);
+
+    // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
+    // tagged with it at submission instead of a later re-prediction.
+    lastRenderHeadPose_ = inputManager_->GetHeadPose();
+    lastRenderHasPose_ = true;
+
     return XR_SUCCESS;
 }
 

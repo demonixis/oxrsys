@@ -12,6 +12,7 @@ The visionOS target is a first-pass native viewer that fits the Apple platform m
 - a minimal floating control window with a `Search` action
 - UDP stream connection through the shared `OXRSysStreaming` package
 - immersive stereo presentation through a native Metal compositor layer, on a single shared ARKit world-tracking session with a depth-backed drawable so the compositor can reproject
+- world-space (rotational) reprojection of each streamed frame from the runtime's per-frame render pose into the live head pose, so the view stays locked to the world as the head turns
 - automatic immersive VR entry once the stream is connected
 - 6DOF head-pose return while the immersive space is open, including the device's real per-eye FOV and IPD so the runtime renders a matching frustum
 - hand-joint streaming through the shared 26-joint tracking payload

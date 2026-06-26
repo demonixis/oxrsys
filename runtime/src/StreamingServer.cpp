@@ -2354,7 +2354,9 @@ void StreamingServer::UpdatePredictionHorizon()
     trackingReceiver_->SetPredictionHorizonMs(horizonMs);
 }
 
-void StreamingServer::SendFrame(FrameSource frameSource)
+void StreamingServer::SendFrame(FrameSource frameSource,
+                                const float* renderHeadOrientation,
+                                const float* renderHeadPosition)
 {
     if (!frameSource.IsStereoValid() || state_.load() != State::Connected)
     {
@@ -2377,8 +2379,18 @@ void StreamingServer::SendFrame(FrameSource frameSource)
     frame.valid = true;
     pendingFrameDepthMax_.store(std::max(pendingFrameDepthMax_.load(), 1u));
 
-    // Capture the predicted pose used for this frame's rendering
-    if (trackingReceiver_ != nullptr)
+    // Tag the frame with the exact head pose it was rendered for. The application's render pose
+    // (from xrLocateViews) is preferred so the client reprojects against the pose the pixels were
+    // drawn with; re-predicting here would echo a pose taken later than the one rendered, leaving a
+    // per-frame rotation mismatch that the client cannot correct (head-rotation jitter). Fall back
+    // to the latest predicted pose only when the render pose is unavailable.
+    if (renderHeadOrientation != nullptr && renderHeadPosition != nullptr)
+    {
+        memcpy(frame.headPosition, renderHeadPosition, sizeof(float) * 3);
+        memcpy(frame.headOrientation, renderHeadOrientation, sizeof(float) * 4);
+        frame.hasPose = true;
+    }
+    else if (trackingReceiver_ != nullptr)
     {
         oxr::protocol::TrackingPacket pose = {};
         if (trackingReceiver_->GetPredictedPose(pose))

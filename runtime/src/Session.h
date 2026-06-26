@@ -127,6 +127,11 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<StreamingServer> streamingServer_;
+
+    // Head pose returned by the most recent xrLocateViews — the exact pose the application renders
+    // the current frame for. Captured here so the streamed frame is tagged with it at submission.
+    XrPosef lastRenderHeadPose_ = {{0, 0, 0, 1}, {0, 0, 0}};
+    bool lastRenderHasPose_ = false;
     std::vector<std::unique_ptr<Swapchain>> swapchains_;
     std::vector<std::unique_ptr<Space>> spaces_;
 

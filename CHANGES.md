@@ -24,6 +24,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added a local Quest/PICO shell that replaces standby/loading color clears with a 3D grid, upright status panel, reset button, optional `XR_FB_passthrough` mode, controller laser interaction, hand laser/pinch interaction, and visible hand-joint markers.
 - Added a runtime ABR controller with `off`, `bitrate`, and `full` modes, sliding-window hysteresis, fast bitrate downshift, slow recovery, and profile reporting for future session-safe resolution/foveation/upscaling transitions.
 - Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`) for reliable USB TCP, dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved optional spatial TCP channel on `9948`, and matching SwiftUI/Qt Home controls and status display.
+- Added world-space (rotational) reprojection to the visionOS viewer: each streamed frame is reprojected from the head pose the runtime rendered it for into the live head pose every vsync, so the view stays locked to the world as the head turns instead of lagging the stream. It reuses the per-frame `VIDEO_FLAG_RENDER_POSE` the runtime already sends and is client-only (no runtime, protocol, or other-client changes).
 
 ### Changed
 
@@ -69,6 +70,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 - Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
 - Fixed visionOS eye projection by sending the device's real per-eye FOV (OpenXR signed angles) and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
+- Fixed Vision Pro head-rotation jitter at the source: the runtime now tags each streamed frame with the exact head pose the application rendered it for (captured at `xrLocateViews`) instead of a pose re-predicted at frame submission, so the headset client reprojects against a pose that matches the pixels. It also drops out-of-order/duplicate UDP tracking packets by the client's monotonic timestamp so finite-difference prediction cannot emit a bogus angular velocity from a reordered sample.
 
 ### Documentation
 
