@@ -291,6 +291,15 @@ ABC unauthorized usb:1-1
     expect(devices.first().isUsable(), "Expected authorized adb device");
     expect(!devices.last().isUsable(), "Expected unauthorized adb device");
 
+    const QList<AdbDevice> serverDevices = AdbBridge::parseDevices(R"(
+1WMHH000000000 device usb:336592896X product:hollywood model:Quest_3
+ABC unauthorized usb:1-1
+)");
+    expect(serverDevices.size() == 2, "Expected two adb server devices without header");
+    expect(serverDevices.first().serial == "1WMHH000000000", "Expected adb server serial");
+    expect(serverDevices.first().isUsable(), "Expected authorized adb server device");
+    expect(!serverDevices.last().isUsable(), "Expected unauthorized adb server device");
+
     const QSet<int> ports = AdbBridge::parseReversePorts(R"(
 UsbFfs tcp:9944 tcp:9944
 UsbFfs tcp:9945 tcp:9945

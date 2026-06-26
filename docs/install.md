@@ -10,13 +10,17 @@ Install the base macOS toolchain:
 
 ```bash
 xcode-select --install
-brew install cmake ninja gradle adb-enhanced openjdk@17
+brew install cmake ninja gradle openjdk@17
 ```
 
-Install `adb-enhanced` via Homebrew to get `adb` on the command line in this setup. If `adb` is
-installed elsewhere, both Home apps can store a custom ADB executable path from the Quest USB ADB
-panel. The SwiftUI Home and Qt Home preferences are intentionally separate; clear the custom path to
-return to automatic SDK/Homebrew/PATH detection.
+The macOS SwiftUI Home app does not require Android Studio, the Android SDK, or a Homebrew `adb`
+install for normal Quest USB setup: it can claim the headset USB ADB interface directly, complete
+ADB authentication, and configure reverse mappings itself. External `adb` remains optional for
+diagnostics, logcat, manual server startup, and fallback workflows. Install `adb-enhanced` or
+Android Platform Tools only when you need those command-line tools. If `adb` is installed outside
+the automatic search paths, both Home apps can store a custom ADB executable path from the Quest USB
+ADB panel. The SwiftUI Home and Qt Home preferences are intentionally separate; clear the custom
+path to return to automatic native/server/Homebrew/PATH detection.
 
 Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper checks Homebrew,
 MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as
@@ -39,7 +43,7 @@ Linux runtime and Qt frontend builds need equivalent distro packages for:
 - FFmpeg development libraries: `libavcodec`, `libavutil`, `libswscale`
 - pkg-config
 - Qt 6 Core, Widgets, and Network
-- adb / Android Platform Tools for USB transport setup
+- adb / Android Platform Tools for starting an ADB server, logcat, and USB fallback setup
 
 On Fedora with RPM Fusion FFmpeg packages installed, use the matching RPM Fusion
 development package:

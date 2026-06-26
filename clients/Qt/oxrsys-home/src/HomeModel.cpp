@@ -101,6 +101,18 @@ QString portsText(const QSet<int>& ports)
     return portsText(sorted);
 }
 
+bool hasAllReversePorts(const QSet<int>& ports)
+{
+    for (int port : AdbBridge::reversePorts())
+    {
+        if (!ports.contains(port))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct WifiReadiness
 {
     bool ready = true;
@@ -263,14 +275,18 @@ TransportRefreshResult collectTransportRefresh(int requestId,
     }
 
     const QList<AdbDevice> usable = usableDevices(result.devices);
-    if (result.requestedSerial.isEmpty() ||
-        !containsUsableDevice(usable, result.requestedSerial))
+    if (!result.requestedSerial.isEmpty() &&
+        containsUsableDevice(usable, result.requestedSerial))
     {
-        result.selectedSerial = usable.isEmpty() ? QString() : usable.first().serial;
+        result.selectedSerial = result.requestedSerial;
+    }
+    else if (usable.size() == 1)
+    {
+        result.selectedSerial = usable.first().serial;
     }
     else
     {
-        result.selectedSerial = result.requestedSerial;
+        result.selectedSerial.clear();
     }
 
     if (!result.selectedSerial.isEmpty())
@@ -292,6 +308,10 @@ TransportRefreshResult collectTransportRefresh(int requestId,
     else if (usable.isEmpty())
     {
         result.usbStatus = "ADB sees device(s), but none are authorized for reverse tunneling.";
+    }
+    else if (usable.size() > 1 && result.selectedSerial.isEmpty())
+    {
+        result.usbStatus = "Multiple Quest devices found; select one before configuring USB.";
     }
     else
     {
@@ -523,6 +543,10 @@ QString HomeModel::currentProfileAppDisplayName() const
 
 QString HomeModel::mainTransportSelection() const
 {
+    if (!pendingMainTransportSelection_.isEmpty())
+    {
+        return pendingMainTransportSelection_;
+    }
     if (!mainTransportOverride_.isEmpty())
     {
         return mainTransportOverride_;
@@ -552,6 +576,14 @@ TransportReadiness HomeModel::mainTransportReadiness() const
         return {wifiReady_, false, wifiStatus_};
     }
 
+    if (transportRefreshPending_ && !pendingMainTransportSelection_.isEmpty())
+    {
+        return {false, false, "Checking USB ADB transport..."};
+    }
+    if (usbConfigurePending_)
+    {
+        return {false, false, "Configuring USB ADB reverse..."};
+    }
     if (!adbStatus_.isAvailable())
     {
         return {false, false, adbStatus_.message};
@@ -665,6 +697,7 @@ void HomeModel::setMainTransportSelection(const QString& transport)
     if (transport == "usb_adb")
     {
         pendingMainTransportSelection_ = transport;
+        mainTransportOverride_ = transport;
         questUsbStatus_ = "Checking USB ADB transport...";
         setStatusMessage("Checking USB ADB transport.");
         requestTransportRefresh(true, true);
@@ -1152,9 +1185,28 @@ void HomeModel::requestTransportRefresh(bool force, bool validateUsbSelection)
                                           if (result.validateUsbSelection &&
                                               target->pendingMainTransportSelection_ == "usb_adb")
                                           {
-                                              target->pendingMainTransportSelection_.clear();
-                                              if (target->adbStatus_.isAvailable())
+                                              if (!target->adbStatus_.isAvailable())
                                               {
+                                                  target->pendingMainTransportSelection_.clear();
+                                                  if (target->serverConfig_.transport != "usb_adb")
+                                                  {
+                                                      target->mainTransportOverride_.clear();
+                                                  }
+                                                  target->setErrorMessage(target->questUsbStatus_);
+                                              }
+                                              else if (target->selectedQuestUsbSerial_.isEmpty())
+                                              {
+                                                  target->pendingMainTransportSelection_.clear();
+                                                  if (target->serverConfig_.transport != "usb_adb")
+                                                  {
+                                                      target->mainTransportOverride_.clear();
+                                                  }
+                                                  target->setStatusMessage(
+                                                      "Select a Quest device for USB ADB transport.");
+                                              }
+                                              else if (hasAllReversePorts(target->selectedQuestUsbReversePorts_))
+                                              {
+                                                  target->pendingMainTransportSelection_.clear();
                                                   target->mainTransportOverride_ = "usb_adb";
                                                   target->serverConfig_.transport = "usb_adb";
                                                   target->saveStructuredConfig();
@@ -1163,7 +1215,7 @@ void HomeModel::requestTransportRefresh(bool force, bool validateUsbSelection)
                                               }
                                               else
                                               {
-                                                  target->setErrorMessage(target->questUsbStatus_);
+                                                  target->requestUsbReverseConfigure();
                                               }
                                           }
                                           emit target->changed();
@@ -1216,6 +1268,11 @@ void HomeModel::requestUsbReverseConfigure()
                                           target->adbStatus_ = result.adbStatus;
                                           if (!result.error.isEmpty())
                                           {
+                                              target->pendingMainTransportSelection_.clear();
+                                              if (target->serverConfig_.transport != "usb_adb")
+                                              {
+                                                  target->mainTransportOverride_.clear();
+                                              }
                                               target->questUsbStatus_ = result.error;
                                               target->setErrorMessage(target->questUsbStatus_);
                                               return;
@@ -1227,8 +1284,20 @@ void HomeModel::requestUsbReverseConfigure()
                                               QString("Verified adb reverse for %1 on ports %2.")
                                                   .arg(result.selectedSerial,
                                                        portsText(result.reversePorts));
-                                          target->setStatusMessage(
-                                              "Configured Quest USB ADB transport.");
+                                          if (target->pendingMainTransportSelection_ == "usb_adb")
+                                          {
+                                              target->pendingMainTransportSelection_.clear();
+                                              target->mainTransportOverride_ = "usb_adb";
+                                              target->serverConfig_.transport = "usb_adb";
+                                              target->saveStructuredConfig();
+                                              target->setStatusMessage(
+                                                  "Selected USB ADB transport.");
+                                          }
+                                          else
+                                          {
+                                              target->setStatusMessage(
+                                                  "Configured Quest USB ADB transport.");
+                                          }
                                           emit target->changed();
                                       },
                                       Qt::QueuedConnection);

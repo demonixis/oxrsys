@@ -87,7 +87,18 @@ Platform behavior:
 - Windows can build the launcher scaffold later, but runtime registration and app-card
   terminal actions are intentionally not implemented yet.
 
-If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
+Selecting USB in the header validates the selected or single authorized Quest device and configures
+missing reverse mappings automatically before persisting `streaming.transport = "usb_adb"`. If
+multiple authorized devices are present, pick one in the Quest USB ADB panel first.
+
+When no custom ADB path is configured, Qt Home first talks directly to a running local ADB server on
+`127.0.0.1:5037`. This avoids launching an `adb` executable for reverse setup when another Android
+tool has already started the server. If no server responds, Qt Home falls back to SDK, Homebrew, and
+`PATH` executable discovery. The SDK-free native USB ADB backend currently belongs to the macOS
+SwiftUI Home app; Qt Home keeps the portable server/executable path.
+
+If USB mode reports missing ADB in Qt Home on macOS and no ADB server is already running, install
+the optional `adb-enhanced` fallback with Homebrew:
 
 ```bash
 brew install adb-enhanced

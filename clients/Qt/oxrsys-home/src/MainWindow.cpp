@@ -34,6 +34,7 @@
 #include <QSlider>
 #include <QStyle>
 #include <QTabWidget>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -507,6 +508,57 @@ MainWindow::MainWindow(QWidget* parent)
     });
 
     refreshUi();
+    QTimer::singleShot(0, this, &MainWindow::showRuntimeSetupGuidanceIfNeeded);
+}
+
+void MainWindow::showRuntimeSetupGuidanceIfNeeded()
+{
+    if (runtimeSetupGuidancePresented_ || !supportsRuntimeRegistration())
+    {
+        return;
+    }
+
+    const bool selectedActive =
+        normalizedPath(model_->runtimeRegistrationStatus().activeRuntimeTarget) ==
+        normalizedPath(model_->runtimeManifestPath());
+    if (selectedActive)
+    {
+        return;
+    }
+
+    runtimeSetupGuidancePresented_ = true;
+    if (tabs_ != nullptr)
+    {
+        tabs_->setCurrentIndex(1);
+    }
+
+    QMessageBox box(QMessageBox::Information,
+                    "Runtime is not configured",
+                    "OXRSys is not registered as the active OpenXR runtime. Register the selected runtime so compatible apps can find it outside this launcher.",
+                    QMessageBox::NoButton,
+                    this);
+    QAbstractButton* registerButton = nullptr;
+    if (QFileInfo(model_->runtimeManifestPath()).isFile())
+    {
+        registerButton = box.addButton("Register Runtime", QMessageBox::AcceptRole);
+    }
+    QAbstractButton* chooseButton = box.addButton("Choose Runtime JSON", QMessageBox::ActionRole);
+    box.addButton("Later", QMessageBox::RejectRole);
+    box.exec();
+
+    if (registerButton != nullptr && box.clickedButton() == registerButton)
+    {
+        model_->setRuntimeManifestPath(runtimeManifestLineEdit_->text());
+        model_->registerRuntime();
+    }
+    else if (box.clickedButton() == chooseButton)
+    {
+        chooseRuntimeManifest();
+        if (QFileInfo(model_->runtimeManifestPath()).isFile())
+        {
+            model_->registerRuntime();
+        }
+    }
 }
 
 void MainWindow::buildUi()

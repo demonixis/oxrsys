@@ -9,6 +9,7 @@
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QTcpSocket>
 
 namespace
 {
@@ -43,6 +44,126 @@ QString cleanedPath(QString path)
         }
     }
     return path;
+}
+
+QByteArray adbServerReadExact(QTcpSocket& socket, qsizetype size, QString* errorMessage)
+{
+    QByteArray data;
+    while (data.size() < size)
+    {
+        if (!socket.waitForReadyRead(1000) && socket.bytesAvailable() <= 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = socket.errorString();
+            }
+            return {};
+        }
+        data += socket.read(size - data.size());
+    }
+    return data;
+}
+
+bool adbServerReadPayload(QTcpSocket& socket, QString* output, QString* errorMessage)
+{
+    const QByteArray lengthBytes = adbServerReadExact(socket, 4, errorMessage);
+    if (lengthBytes.size() != 4)
+    {
+        return false;
+    }
+    bool ok = false;
+    const int length = QString::fromLatin1(lengthBytes).toInt(&ok, 16);
+    if (!ok || length < 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ADB server returned an invalid payload length.";
+        }
+        return false;
+    }
+    const QByteArray payload = adbServerReadExact(socket, length, errorMessage);
+    if (payload.size() != length)
+    {
+        return false;
+    }
+    if (output != nullptr)
+    {
+        *output = QString::fromUtf8(payload).trimmed();
+    }
+    return true;
+}
+
+bool adbServerRequest(const QString& service,
+                      bool expectsPayload,
+                      QString* output,
+                      QString* errorMessage)
+{
+    QTcpSocket socket;
+    socket.connectToHost("127.0.0.1", 5037);
+    if (!socket.waitForConnected(750))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ADB server is not available on 127.0.0.1:5037.";
+        }
+        return false;
+    }
+
+    const QByteArray serviceBytes = service.toUtf8();
+    const QByteArray command =
+        QByteArray::number(serviceBytes.size(), 16).rightJustified(4, '0') + serviceBytes;
+    if (socket.write(command) != command.size() || !socket.waitForBytesWritten(1000))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = socket.errorString();
+        }
+        return false;
+    }
+
+    const QByteArray status = adbServerReadExact(socket, 4, errorMessage);
+    if (status == "FAIL")
+    {
+        QString failure;
+        adbServerReadPayload(socket, &failure, nullptr);
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = failure.isEmpty()
+                ? QString("ADB server rejected %1.").arg(service)
+                : failure;
+        }
+        return false;
+    }
+    if (status != "OKAY")
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ADB server returned an unexpected status.";
+        }
+        return false;
+    }
+
+    if (!expectsPayload)
+    {
+        if (output != nullptr)
+        {
+            output->clear();
+        }
+        return true;
+    }
+    return adbServerReadPayload(socket, output, errorMessage);
+}
+
+bool adbServerAvailable()
+{
+    QString output;
+    QString error;
+    return adbServerRequest("host:version", true, &output, &error);
+}
+
+bool useAdbServer(const QString& customPath)
+{
+    return cleanedPath(customPath).isEmpty();
 }
 
 bool runProcess(const QString& program,
@@ -222,24 +343,31 @@ AdbStatus AdbBridge::status(const QString& customPath)
                 QString("Custom ADB found at %1.").arg(QFileInfo(custom).absoluteFilePath())};
     }
 
+    if (adbServerAvailable())
+    {
+        return {"adb-server://127.0.0.1:5037",
+                "ADB server found on 127.0.0.1:5037; no adb executable is required for USB reverse setup."};
+    }
+
     const QString adb = resolveExecutablePath();
     if (adb.isEmpty())
     {
         const QString paths = candidatePaths().join(", ");
 #if defined(Q_OS_MACOS)
         return {QString(),
-                QString("ADB is required for USB mode. Install adb-enhanced with Homebrew: "
-                        "brew install adb-enhanced. Checked: %1.")
+                QString("No ADB server was available on 127.0.0.1:5037. Qt Home needs an external "
+                        "adb fallback on macOS; install adb-enhanced with Homebrew: "
+                        "brew install adb-enhanced. Checked executables: %1.")
                     .arg(paths)};
 #elif defined(Q_OS_WIN)
         return {QString(),
-                QString("ADB is required for USB mode. Install Android Platform Tools "
-                        "or add adb.exe to PATH. Checked: %1.")
+                QString("No ADB server was available on 127.0.0.1:5037. Install Android Platform "
+                        "Tools or add adb.exe to PATH. Checked executables: %1.")
                     .arg(paths)};
 #else
         return {QString(),
-                QString("ADB is required for USB mode. Install Android Platform Tools "
-                        "or make sure adb is in PATH. Checked: %1.")
+                QString("No ADB server was available on 127.0.0.1:5037. Install Android Platform "
+                        "Tools or make sure adb is in PATH. Checked executables: %1.")
                     .arg(paths)};
 #endif
     }
@@ -250,7 +378,9 @@ QList<AdbDevice> AdbBridge::parseDevices(const QString& output)
 {
     QList<AdbDevice> devices;
     const QStringList lines = output.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
-    for (int i = 1; i < lines.size(); ++i)
+    const int firstDeviceLine =
+        !lines.isEmpty() && lines.first().contains("List of devices", Qt::CaseInsensitive) ? 1 : 0;
+    for (int i = firstDeviceLine; i < lines.size(); ++i)
     {
         const QString line = lines.at(i).trimmed();
         if (line.isEmpty())
@@ -287,6 +417,16 @@ QSet<int> AdbBridge::parseReversePorts(const QString& output)
 
 QList<AdbDevice> AdbBridge::devices(QString* errorMessage, const QString& customPath)
 {
+    if (useAdbServer(customPath))
+    {
+        QString output;
+        QString serverError;
+        if (adbServerRequest("host:devices-l", true, &output, &serverError))
+        {
+            return parseDevices(output);
+        }
+    }
+
     QString output;
     if (!runAdb({"devices", "-l"}, &output, errorMessage, customPath))
     {
@@ -299,6 +439,19 @@ QSet<int> AdbBridge::reverseMappings(const QString& serial,
                                      QString* errorMessage,
                                      const QString& customPath)
 {
+    if (useAdbServer(customPath))
+    {
+        QString output;
+        QString serverError;
+        if (adbServerRequest(QString("host-serial:%1:reverse:list-forward").arg(serial),
+                             true,
+                             &output,
+                             &serverError))
+        {
+            return parseReversePorts(output);
+        }
+    }
+
     QString output;
     if (!runAdb({"-s", serial, "reverse", "--list"}, &output, errorMessage, customPath))
     {
@@ -311,6 +464,53 @@ QSet<int> AdbBridge::configureReverse(const QString& serial,
                                       QString* errorMessage,
                                       const QString& customPath)
 {
+    if (useAdbServer(customPath))
+    {
+        bool configuredWithServer = true;
+        for (int port : reversePorts())
+        {
+            QString ignoredOutput;
+            QString ignoredError;
+            adbServerRequest(QString("host-serial:%1:reverse:killforward:tcp:%2")
+                                 .arg(serial)
+                                 .arg(port),
+                             false,
+                             &ignoredOutput,
+                             &ignoredError);
+        }
+        for (int port : reversePorts())
+        {
+            QString output;
+            QString serverError;
+            if (!adbServerRequest(QString("host-serial:%1:reverse:forward:tcp:%2;tcp:%2")
+                                      .arg(serial)
+                                      .arg(port),
+                                  false,
+                                  &output,
+                                  &serverError))
+            {
+                configuredWithServer = false;
+                break;
+            }
+        }
+        if (configuredWithServer)
+        {
+            const QSet<int> configuredPorts = reverseMappings(serial, errorMessage, customPath);
+            for (int port : reversePorts())
+            {
+                if (!configuredPorts.contains(port))
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = QString("adb reverse did not report port %1.").arg(port);
+                    }
+                    return configuredPorts;
+                }
+            }
+            return configuredPorts;
+        }
+    }
+
     for (int port : reversePorts())
     {
         QString ignoredOutput;

@@ -13,8 +13,10 @@ struct HomeLauncherTests {
         try testLauncherMergeDeduplicatesManualApps()
         try testTerminalScriptQuoting()
         try testQuestUsbDeviceParsing()
+        try testQuestUsbDeviceParsingWithoutHeader()
         try testQuestUsbReverseParsing()
         try testQuestUsbAdbCandidatePaths()
+        try testPackagedRuntimeManifestDefault()
         try testQuestUsbAdbCustomPathOrdering()
         try testQuestUsbAdbCustomResolution()
         try testQuestUsbAdbInvalidCustomStatus()
@@ -117,6 +119,18 @@ struct HomeLauncherTests {
         try expect(!devices[1].isUsable, "Expected unauthorized state to be unusable")
     }
 
+    private static func testQuestUsbDeviceParsingWithoutHeader() throws {
+        let devices = QuestUsbBridge.parseDevices("""
+        1WMHH000000000 device usb:336592896X product:hollywood model:Quest_3 device:eureka transport_id:4
+        ABC unauthorized usb:1-1 transport_id:5
+        """)
+
+        try expect(devices.count == 2, "Expected two parsed adb server devices")
+        try expect(devices[0].serial == "1WMHH000000000", "Expected first adb server serial")
+        try expect(devices[0].isUsable, "Expected adb server device state to be usable")
+        try expect(!devices[1].isUsable, "Expected adb server unauthorized state to be unusable")
+    }
+
     private static func testQuestUsbReverseParsing() throws {
         let ports = QuestUsbBridge.parseReversePorts("""
         UsbFfs tcp:55504 tcp:55504
@@ -144,6 +158,28 @@ struct HomeLauncherTests {
         try expect(candidates.contains("/Users/tester/Library/Android/sdk/platform-tools/adb"), "Expected default Android SDK adb path")
         try expect(candidates.contains("/opt/homebrew/bin/adb"), "Expected Homebrew adb path")
         try expect(candidates.contains("/custom/bin/adb"), "Expected PATH adb path")
+    }
+
+    private static func testPackagedRuntimeManifestDefault() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let packageRoot = root.appendingPathComponent("Package", isDirectory: true)
+        let appURL = packageRoot.appendingPathComponent("OXRSys Home.app", isDirectory: true)
+        let runtimeURL = packageRoot
+            .appendingPathComponent("runtime", isDirectory: true)
+            .appendingPathComponent("oxrsys-runtime.json")
+        try FileManager.default.createDirectory(
+            at: runtimeURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("{}".utf8).write(to: runtimeURL)
+
+        let selected = SourceDefaults.defaultRuntimeManifestPath(
+            sourceFilePath: root.appendingPathComponent("Sources/HomeSupport.swift").path,
+            bundleURL: appURL
+        )
+        try expect(selected == runtimeURL.path, "Expected packaged runtime manifest to be preferred")
     }
 
     private static func testQuestUsbAdbCustomPathOrdering() throws {
@@ -480,8 +516,8 @@ struct HomeLauncherTests {
             "Expected detected ADB to be available"
         )
         try expect(
-            HomeAdbInstallGuidance.message.contains("brew install adb-enhanced"),
-            "Expected Homebrew install guidance"
+            HomeAdbInstallGuidance.message.contains("Android SDK are not required"),
+            "Expected SDK-free USB setup guidance"
         )
     }
 

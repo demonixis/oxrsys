@@ -55,6 +55,7 @@ private:
     void chooseCustomAdbExecutable();
     void openSimulatorWindow();
     void updateConfigFromControls();
+    void showRuntimeSetupGuidanceIfNeeded();
 
     HomeModel* model_ = nullptr;
     QTabWidget* tabs_ = nullptr;
@@ -136,4 +137,5 @@ private:
     RuntimeStatsChart* pipelineChart_ = nullptr;
     RuntimeStatsChart* encodeChart_ = nullptr;
     QPointer<QMainWindow> simulatorWindow_;
+    bool runtimeSetupGuidancePresented_ = false;
 };

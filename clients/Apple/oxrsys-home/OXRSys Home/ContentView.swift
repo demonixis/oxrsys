@@ -27,21 +27,28 @@ struct ContentView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
 
-            TabView {
+            TabView(selection: Binding(
+                get: { model.selectedTab },
+                set: { model.selectedTab = $0 }
+            )) {
                 appsTab
+                    .tag(HomeTab.apps)
                     .tabItem {
                         Label("Apps", systemImage: "square.grid.2x2")
                     }
                 settingsTab
+                    .tag(HomeTab.settings)
                     .tabItem {
                         Label("Settings", systemImage: "gearshape")
                     }
                 streamingTab
+                    .tag(HomeTab.streaming)
                     .tabItem {
                         Label("Streaming", systemImage: "antenna.radiowaves.left.and.right")
                     }
                 if preferences.developerModeEnabled {
                     developerTab
+                        .tag(HomeTab.developer)
                         .tabItem {
                             Label("Developer", systemImage: "hammer")
                         }
@@ -51,6 +58,9 @@ struct ContentView: View {
             .padding(.bottom, 20)
         }
         .frame(minWidth: 980, minHeight: 720)
+        .task {
+            model.presentRuntimeSetupGuidanceIfNeeded()
+        }
         .alert("Error", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { newValue in
@@ -65,6 +75,28 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .alert("Runtime is not configured", isPresented: Binding(
+            get: { model.isRuntimeSetupGuidancePresented },
+            set: { newValue in
+                if !newValue {
+                    model.dismissRuntimeSetupGuidance()
+                }
+            })
+        ) {
+            if model.canRegisterSelectedRuntime {
+                Button("Register Runtime") {
+                    model.registerRuntimeFromGuidance()
+                }
+            }
+            Button("Choose Runtime JSON") {
+                model.chooseRuntimeManifestFromGuidance()
+            }
+            Button("Later", role: .cancel) {
+                model.dismissRuntimeSetupGuidance()
+            }
+        } message: {
+            Text(model.runtimeSetupGuidanceMessage)
+        }
         .alert(HomeAdbInstallGuidance.title, isPresented: Binding(
             get: { model.isAdbInstallGuidancePresented },
             set: { newValue in
@@ -73,7 +105,7 @@ struct ContentView: View {
                 }
             })
         ) {
-            Button("Open Homebrew") {
+            Button("Optional adb Fallback") {
                 model.openAdbInstallHelp()
             }
             Button("OK", role: .cancel) {
@@ -186,6 +218,7 @@ struct ContentView: View {
                 } label: {
                     Label("Configure", systemImage: "cable.connector")
                 }
+                .disabled(model.isUsbSetupInProgress)
             }
         }
         .frame(minWidth: 360, alignment: .leading)
@@ -516,7 +549,7 @@ struct ContentView: View {
                 GroupBox("Quest USB ADB") {
                     VStack(alignment: .leading, spacing: 12) {
                         if model.questUsbDevices.isEmpty {
-                            Text("No adb device found.")
+                            Text("No USB debugging device found.")
                                 .foregroundStyle(.secondary)
                         } else {
                             Picker("Quest device", selection: Binding(
@@ -565,7 +598,8 @@ struct ContentView: View {
                             .disabled(model.selectedQuestUsbSerial == nil ||
                                       !model.questUsbDevices.contains(where: {
                                           $0.serial == model.selectedQuestUsbSerial && $0.isUsable
-                                      }))
+                                      }) ||
+                                      model.isUsbSetupInProgress)
                             Spacer()
                         }
                     }

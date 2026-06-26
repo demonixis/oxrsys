@@ -142,23 +142,31 @@ idle. The fields are:
   `counters.stale_frame_reuses_delta`, `counters.render_pose_fallbacks_delta`
 
 The same header area includes a WiFi/USB selector. Selecting WiFi writes `streaming.transport = "wifi"`
-and shows whether the Mac WiFi interface is powered on. Selecting USB writes
-`streaming.transport = "usb_adb"` only when `adb` is available. If `adb` is missing, the Home app
-keeps the current transport and shows install guidance for `adb-enhanced`, including the Homebrew
-command `brew install adb-enhanced`. When `adb` is present, USB mode checks the
-selected ADB device for reverse mappings on `9944`, `9945`, `9946`, and `9948`. If any USB reverse mapping
-is missing, the header shows an action state and exposes a `Configure` button; once all ports are
-mapped, the button is hidden.
+and shows whether the Mac WiFi interface is powered on. Selecting USB first switches the header into
+USB setup, then checks the selected or single authorized Quest device and automatically configures
+missing reverse mappings on `9944`, `9945`, `9946`, and `9948`. The Home app writes
+`streaming.transport = "usb_adb"` only after USB validation or reverse setup succeeds. If multiple
+authorized devices are visible, Home asks the user to pick one before configuring reverse mappings.
+If setup fails, Home keeps the previous persisted transport and leaves the USB action available for
+retry.
 
 The Quest USB ADB section can also store a custom `adb` executable path in the SwiftUI Home
-`UserDefaults`. A selected custom path is tried before SDK, Homebrew, and `PATH` candidates and must
-be executable and pass `adb version`. If the custom path becomes invalid, Home reports that path and
-does not silently fall back; use `Auto Detect` to clear it and resume automatic detection.
+`UserDefaults`. Without a custom path, Home first claims the headset's USB ADB interface directly,
+performs ADB authentication with a Home-managed host key, and configures reverse mappings without
+Android Studio, the Android SDK, Homebrew, or an `adb` executable. If the native USB path is
+unavailable, Home falls back to a running local ADB server on `127.0.0.1:5037`, then to SDK,
+Homebrew, and `PATH` executable candidates. A selected custom path is tried directly and must be
+executable and pass `adb version`; if it becomes invalid, Home reports that path and does not
+silently fall back until `Auto Detect` clears it.
 
 ## Runtime Registration
 
 Runtime registration mirrors `scripts/oxrsys_runtime_default.sh`:
 
+- On first launch, if the selected OXRSys runtime is not the active runtime, Home opens Settings and
+  shows a registration prompt.
+- Packaged builds prefer the sibling `runtime/oxrsys-runtime.json` next to `OXRSys Home.app`, then
+  fall back to the local development `build/runtime/oxrsys-runtime.json`.
 - `Enable OpenXR Registration` points `~/.config/openxr/1/active_runtime.json` to the selected JSON
 - `Update OpenXR Registration` replaces an existing active runtime file or symlink
 - it writes `~/Library/LaunchAgents/net.demonixis.oxrsys.runtime-env.plist`
@@ -263,4 +271,4 @@ The runtime reloads config file changes opportunistically:
   encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
-The Quest USB ADB section detects authorized `adb` devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them with `adb reverse --list`. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.
+The Quest USB ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the native USB ADB protocol, the local ADB server protocol, or `adb reverse --list` fallback. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.

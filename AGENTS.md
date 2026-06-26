@@ -38,8 +38,9 @@ distribution so it can scan known apps, launch compatible apps with the user-sel
 `XR_RUNTIME_JSON`, register that selected runtime, and capture app logs.
 The Home app shows a main-window runtime activity summary from
 `~/Library/Application Support/OXRSys/runtime_status.json`, including idle/streaming state,
-transport, connected device family, active OpenXR application, WiFi/USB transport readiness, and
-per-app custom ADB path selection for USB setup. Home streaming controls include the shared
+transport, connected device family, active OpenXR application, WiFi/USB transport readiness,
+first-launch runtime registration guidance, one-step USB reverse setup, SDK-free native USB ADB
+setup in the SwiftUI Home app, native ADB-server protocol support with external `adb` fallback, and per-app custom ADB path selection for USB setup. Home streaming controls include the shared
 runtime 1-200 Mbps bitrate bounds, server-selected refresh rate, encoder preset, foveated encoding
 preset, ABR/dynamic-resolution mode, mixed reality, occlusion, spatial toggles, and a separate Headset Client section for client foveation override,
 Quest shader upscaling, client reprojection, and reserved headset-audio configuration;
@@ -94,6 +95,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - The streaming encoder queue is latest-frame-only; replacing a pending frame must release its `FrameSource` resources.
 - Metal streaming must snapshot dynamic swapchain images through the app-provided command queue and GPU-side shared-event waits; if no staging slot is safe to reuse, drop that streaming frame instead of reading a live reused swapchain slot.
 - Quest USB streaming uses reconnecting ADB reverse TCP on localhost ports `9944`, `9945`, `9946`, and the reserved reliable spatial port `9948`; app-level Android USB permission dialogs are only for `UsbManager`-visible devices and are not required for ADB reverse streaming.
+- Home USB setup should prefer the native ADB host-server protocol on `127.0.0.1:5037` when available, fall back to a selected or auto-detected `adb` executable only when needed, and configure missing reverse mappings automatically when the user selects USB.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encoded-frame sender, VideoToolbox callback, or `Session::EndFrame()`.
 - Encoded video dispatch is latest-frame-oriented and bounded; stale queued frames may be dropped instead of building latency when the transport cannot keep up.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.

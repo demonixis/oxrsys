@@ -49,6 +49,7 @@ target_include_directories(oxrsys-home PRIVATE
 
 target_link_libraries(oxrsys-home PRIVATE
     Qt6::Widgets
+    Qt6::Network
     oxrsys-simulator-shared
 )
 
@@ -64,6 +65,7 @@ target_include_directories(oxrsys-home-tests PRIVATE
 
 target_link_libraries(oxrsys-home-tests PRIVATE
     Qt6::Widgets
+    Qt6::Network
 )
 
 add_test(NAME oxrsys-home-tests COMMAND oxrsys-home-tests)
