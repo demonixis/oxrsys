@@ -35,7 +35,7 @@ struct VisionTrackingSnapshot: Sendable {
 
 final class VisionTrackingManager: @unchecked Sendable {
     private let session = ARKitSession()
-    private let worldTracking = WorldTrackingProvider()
+    let worldTracking = WorldTrackingProvider()
     private let handTracking = HandTrackingProvider()
     private let queue = DispatchQueue(label: "oxr.visionos.tracking", qos: .userInteractive)
 

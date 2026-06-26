@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
 
-import ARKit
 import CompositorServices
 import SwiftUI
 
@@ -9,7 +8,7 @@ struct ImmersiveSpaceContent: CompositorContent {
 
     var body: some CompositorContent {
         CompositorLayer(configuration: self) { @MainActor layerRenderer in
-            ImmersiveRenderer.startRenderLoop(layerRenderer, appModel: appModel, arSession: ARKitSession())
+            ImmersiveRenderer.startRenderLoop(layerRenderer, appModel: appModel, worldTracking: appModel.sharedWorldTracking)
         }
     }
 }
