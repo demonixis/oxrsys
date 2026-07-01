@@ -1472,25 +1472,14 @@ bool XrApp::InitializeDisplayRefreshRate(float preferredRefreshRateHz)
 
     LOGI("Requested display refresh rate: %.1fHz", preferredRefreshRateHz);
 
-    if (xrGetDisplayRefreshRateFB_ != nullptr)
-    {
-        float currentRate = 0.0f;
-        if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
-        {
-            LOGI("Current display refresh rate after request: %.1fHz", currentRate);
-            clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
-        }
-        else
-        {
-            clientRefreshRateHz_ =
-                static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
-        }
-    }
-    else
-    {
-        clientRefreshRateHz_ =
-            static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
-    }
+    // xrRequestDisplayRefreshRateFB is asynchronous -- the runtime hasn't
+    // necessarily applied the new rate by the time this function returns, so
+    // querying xrGetDisplayRefreshRateFB right here is racy and can read back
+    // the *old* rate, silently reporting the wrong refresh to the server for
+    // the lifetime of the connection. We already confirmed preferredRefreshRateHz
+    // is in the supported list (hasPreferredRate above) and the request itself
+    // succeeded, so just trust it instead of an immediate, unreliable read-back.
+    clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
 
     return true;
 }

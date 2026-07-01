@@ -63,6 +63,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Hardened Quest headset foveation shutdown by detaching the foveation profile from swapchains before destroying it.
 - Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
 - Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
+- Fixed Quest refresh-rate reporting by trusting the successful `xrRequestDisplayRefreshRateFB` value instead of immediately querying the asynchronous runtime readback.
 - Filtered known macOS `linkd.autoShortcut` App Intents diagnostics from Home captured app logs.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 
