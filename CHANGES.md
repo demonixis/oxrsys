@@ -43,6 +43,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated the Quest USB ADB client to defer bitrate limits to the server/Home configuration instead of imposing an extra 100 Mbps cap.
 - Updated the Quest decoder path to drain MediaCodec output on a decoder thread instead of the XR frame loop.
 - Updated the Quest MediaCodec input sizing to keep bounded headroom for high-bitrate foveated-encoding IDR frames.
+- Updated the Quest video shader to run foveated decompression once per pixel and linearize upscale neighbor taps instead of repeating binary-search warps for each tap.
 - Updated the Quest/PICO shell to pause passthrough, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
 - Updated SwiftUI Home and Qt Home with ABR and Quest client reprojection controls plus runtime status display for frame age, ABR state, and reprojection reuse.
 - Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.

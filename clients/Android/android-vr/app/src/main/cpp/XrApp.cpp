@@ -127,11 +127,18 @@ float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeR
     return center;
 }
 
-float decompressAxis(float targetUv, float centerSize, float centerShift, float edgeRatio) {
+// Binary search inverse of compressAxis. Also returns the warp's local derivative
+// (via one extra cheap finite-difference eval) so callers sampling a few texels away
+// from targetUv can place those neighbor taps with a linear extrapolation instead of
+// re-running the full 10-iteration search -- the warp is smooth, so this is accurate
+// to well within a texel for the tiny offsets used by the upscale sharpen kernel.
+float decompressAxisAndSlope(float targetUv, float centerSize, float centerShift,
+                              float edgeRatio, out float invSlope) {
     float lo = 0.0;
     float hi = 1.0;
+    float mid = 0.5;
     for (int i = 0; i < 10; ++i) {
-        float mid = (lo + hi) * 0.5;
+        mid = (lo + hi) * 0.5;
         float mapped = compressAxis(mid, centerSize, centerShift, edgeRatio);
         if (mapped < targetUv) {
             lo = mid;
@@ -139,25 +146,13 @@ float decompressAxis(float targetUv, float centerSize, float centerShift, float 
             hi = mid;
         }
     }
-    return (lo + hi) * 0.5;
-}
-
-vec2 mapEyeUvToSource(vec2 eyeUv) {
-    vec2 corrected = eyeUv;
-    if (uFoveatedEncodingEnabled != 0) {
-        corrected.x = decompressAxis(eyeUv.x, uFoveationCenterSize.x,
-                                     uFoveationCenterShift.x,
-                                     uFoveationEdgeRatio.x) * uFoveationEyeSizeRatio.x;
-        corrected.y = decompressAxis(eyeUv.y, uFoveationCenterSize.y,
-                                     uFoveationCenterShift.y,
-                                     uFoveationEdgeRatio.y) * uFoveationEyeSizeRatio.y;
-    }
-    corrected = clamp(corrected, vec2(0.0), vec2(1.0));
-    return mix(uEyeSourceMin, uEyeSourceMax, corrected);
-}
-
-vec3 sampleVideo(vec2 eyeUv) {
-    return texture(uTexture, mapEyeUvToSource(clamp(eyeUv, vec2(0.0), vec2(1.0)))).rgb;
+    mid = (lo + hi) * 0.5;
+    const float eps = 0.001;
+    float fPlus = compressAxis(min(mid + eps, 1.0), centerSize, centerShift, edgeRatio);
+    float fMinus = compressAxis(max(mid - eps, 0.0), centerSize, centerShift, edgeRatio);
+    float slope = (fPlus - fMinus) / (2.0 * eps);
+    invSlope = abs(slope) > 0.0001 ? 1.0 / slope : 1.0;
+    return mid;
 }
 
 float luma(vec3 color) {
@@ -172,13 +167,37 @@ void main() {
         eyeUv = clamp(eyeUv + uReprojectionWarpOffset * edgeWeight,
                       vec2(0.0), vec2(1.0));
     }
-    vec3 color = sampleVideo(eyeUv);
+
+    // Expensive iterative de-foveation warp: evaluated once, at the center sample only.
+    vec2 corrected;
+    vec2 invSlope;
+    if (uFoveatedEncodingEnabled != 0) {
+        corrected.x = decompressAxisAndSlope(eyeUv.x, uFoveationCenterSize.x,
+                                              uFoveationCenterShift.x,
+                                              uFoveationEdgeRatio.x, invSlope.x)
+                      * uFoveationEyeSizeRatio.x;
+        corrected.y = decompressAxisAndSlope(eyeUv.y, uFoveationCenterSize.y,
+                                              uFoveationCenterShift.y,
+                                              uFoveationEdgeRatio.y, invSlope.y)
+                      * uFoveationEyeSizeRatio.y;
+        invSlope *= uFoveationEyeSizeRatio;
+    } else {
+        corrected = eyeUv;
+        invSlope = vec2(1.0);
+    }
+    corrected = clamp(corrected, vec2(0.0), vec2(1.0));
+    vec2 sourceRange = uEyeSourceMax - uEyeSourceMin;
+    vec2 sourceUv = mix(uEyeSourceMin, uEyeSourceMax, corrected);
+    vec3 color = texture(uTexture, sourceUv).rgb;
+
     if (uClientUpscalingEnabled != 0) {
         vec2 stepUv = max(uLogicalTexelSize, vec2(0.00001));
-        vec3 left = sampleVideo(eyeUv + vec2(-stepUv.x, 0.0));
-        vec3 right = sampleVideo(eyeUv + vec2(stepUv.x, 0.0));
-        vec3 up = sampleVideo(eyeUv + vec2(0.0, -stepUv.y));
-        vec3 down = sampleVideo(eyeUv + vec2(0.0, stepUv.y));
+        // Linearized neighbor placement -- no extra binary searches.
+        vec2 sourceStep = stepUv * invSlope * sourceRange;
+        vec3 left = texture(uTexture, sourceUv - vec2(sourceStep.x, 0.0)).rgb;
+        vec3 right = texture(uTexture, sourceUv + vec2(sourceStep.x, 0.0)).rgb;
+        vec3 up = texture(uTexture, sourceUv - vec2(0.0, sourceStep.y)).rgb;
+        vec3 down = texture(uTexture, sourceUv + vec2(0.0, sourceStep.y)).rgb;
         float edgeVote = abs(luma(left) - luma(right)) + abs(luma(up) - luma(down));
         if (edgeVote > uUpscaleEdgeThreshold) {
             vec3 detail = color * 4.0 - left - right - up - down;
