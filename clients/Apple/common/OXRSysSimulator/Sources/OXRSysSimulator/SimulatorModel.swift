@@ -75,7 +75,7 @@ final class SimulatorModel {
     private let videoReceiver = VideoReceiver()
     private let trackingSender = TrackingSender()
     private let controlChannel = ControlChannel()
-    private let decoder = H265Decoder()
+    private let decoder = VideoDecoderRouter()
     private let latencyReporter = LatencyReporter()
     let inputManager = SimulatorInputManager()
 
