@@ -65,6 +65,10 @@ struct FrameImageSource
     std::shared_ptr<void> image = {};
     FrameSyncToken sync = {};
     std::shared_ptr<void> lifetime = {};
+    // Source sub-rectangle within image (OpenXR subImage.imageRect). When width/height are 0
+    // the whole image is used. UE packs both eyes side-by-side in one swapchain, so each eye is
+    // a sub-rect of the shared image.
+    uint32_t srcX = 0, srcY = 0, srcW = 0, srcH = 0;
 
     void* GetImage() const
     {
@@ -81,6 +85,7 @@ struct FrameImageSource
         image.reset();
         sync = {};
         lifetime.reset();
+        srcX = srcY = srcW = srcH = 0;
     }
 };
 

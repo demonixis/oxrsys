@@ -100,6 +100,8 @@ private:
         void* tmpLeftTexture = nullptr;   // id<MTLTexture>
         void* tmpRightTexture = nullptr;  // id<MTLTexture>
         void* foveatedScratchTexture = nullptr; // id<MTLTexture>
+        void* leftCropTexture = nullptr;   // id<MTLTexture>, lazily (re)sized to srcW/srcH
+        void* rightCropTexture = nullptr;  // id<MTLTexture>, lazily (re)sized to srcW/srcH
         bool inUse = false;
     };
 
