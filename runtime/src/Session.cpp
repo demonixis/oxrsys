@@ -609,6 +609,11 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
         FrameImageSource imageSource =
             swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
+        // Honor the per-view sub-rectangle: UE packs both eyes into one swapchain side-by-side.
+        imageSource.srcX = static_cast<uint32_t>(view.subImage.imageRect.offset.x);
+        imageSource.srcY = static_cast<uint32_t>(view.subImage.imageRect.offset.y);
+        imageSource.srcW = static_cast<uint32_t>(view.subImage.imageRect.extent.width);
+        imageSource.srcH = static_cast<uint32_t>(view.subImage.imageRect.extent.height);
         if (viewIndex == 0)
         {
             frameSource.left = std::move(imageSource);
