@@ -1,42 +1,23 @@
 // SPDX-License-Identifier: MPL-2.0
 
 // H264Decoder.swift — Hardware H.264 (AVC) decoding via VideoToolbox.
-// Mirror of H265Decoder for the CrossOver/Rosetta path: oxrsys must encode H.264
-// there because HEVC hardware encode is unavailable under Rosetta 2.
+// For the CrossOver/Rosetta path: oxrsys must encode H.264 there because HEVC
+// hardware encode is unavailable under Rosetta 2. Shares its VideoToolbox
+// plumbing with H265Decoder via VTDecoderBase; only the parameter-set layout
+// (SPS/PPS, no VPS) and the H.264 format-description constructor are codec-specific.
 
 import CoreMedia
 import CoreVideo
 import Foundation
 import VideoToolbox
 
-public final class H264Decoder: @unchecked Sendable {
-    public typealias OnFrame = @Sendable (CVPixelBuffer, CMTime) -> Void
-
-    private let lock = NSLock()
-    fileprivate var session: VTDecompressionSession?
-    fileprivate var formatDesc: CMFormatDescription?
-    fileprivate var onFrame: OnFrame?
-    fileprivate var onDecodeErrorCallback: (@Sendable () -> Void)?
-
-    public var onDecodeError: (@Sendable () -> Void)? {
-        get { locked { onDecodeErrorCallback } }
-        set { locked { onDecodeErrorCallback = newValue } }
-    }
-
+public final class H264Decoder: VTDecoderBase, @unchecked Sendable {
     // H.264 parameter sets: SPS (7), PPS (8). No VPS.
     private var sps: Data?
     private var pps: Data?
     private var paramSetsReady = false
 
-    private var sliceCount: Int = 0
-    private var decodeErrorCount: Int = 0
-    public var totalDecodeErrors: Int { locked { decodeErrorCount } }
-
-    public init() {}
-
-    public func configure(callback: @escaping OnFrame) {
-        locked { onFrame = callback }
-    }
+    public init() { super.init(tag: "H264") }
 
     /// Feed a raw H.264 byte stream (may contain multiple NAL units with start codes).
     /// One call carries one reassembled access unit (frame). Low-latency rate control can
@@ -88,17 +69,10 @@ public final class H264Decoder: @unchecked Sendable {
         }
     }
 
-    public func invalidate() {
-        let oldSession = locked { () -> VTDecompressionSession? in
-            let oldSession = session
-            session = nil
-            formatDesc = nil
-            sps = nil
-            pps = nil
-            paramSetsReady = false
-            return oldSession
-        }
-        if let oldSession { VTDecompressionSessionInvalidate(oldSession) }
+    override func resetParameterSetsLocked() {
+        sps = nil
+        pps = nil
+        paramSetsReady = false
     }
 
     // MARK: - Private
@@ -134,182 +108,8 @@ public final class H264Decoder: @unchecked Sendable {
             return
         }
 
-        let canKeepExistingSession = locked { () -> Bool in
-            if let existingFmt = formatDesc, session != nil,
-               CMFormatDescriptionEqual(existingFmt, otherFormatDescription: fmt) {
-                paramSetsReady = true
-                return true
-            }
-            return false
-        }
-        if canKeepExistingSession { return }
-
-        let decoderAttrs: [String: Any] = [
-            kCVPixelBufferMetalCompatibilityKey as String: true,
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        ]
-
-        var outputCallback = VTDecompressionOutputCallbackRecord(
-            decompressionOutputCallback: h264DecompressionCallback,
-            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
-        )
-
-        var newSession: VTDecompressionSession?
-        let sessionStatus = VTDecompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            formatDescription: fmt,
-            decoderSpecification: nil,
-            imageBufferAttributes: decoderAttrs as CFDictionary,
-            outputCallback: &outputCallback,
-            decompressionSessionOut: &newSession
-        )
-
-        guard sessionStatus == noErr, let newSession else {
-            print("[H264] Failed to create decompression session: \(sessionStatus)")
-            return
-        }
-        let oldSession = locked { () -> VTDecompressionSession? in
-            let oldSession = session
-            session = newSession
-            formatDesc = fmt
-            paramSetsReady = true
-            sliceCount = 0
-            decodeErrorCount = 0
-            return oldSession
-        }
-        if let oldSession { VTDecompressionSessionInvalidate(oldSession) }
-
-        let dim = CMVideoFormatDescriptionGetDimensions(fmt)
-        print("[H264] Decoder session created — \(dim.width)x\(dim.height)")
-    }
-
-    /// Decode one access unit made of one or more VCL slice NALs. All slices are packed into a
-    /// single CMSampleBuffer (4-byte length-prefixed, AVCC) and submitted as one frame.
-    private func decodeAccessUnit(_ vclNals: [Data], presentationTimeNs: Int64) {
-        let snapshot = locked { () -> (VTDecompressionSession, CMFormatDescription, Int)? in
-            guard let session, let formatDesc else { return nil }
-            sliceCount += 1
-            return (session, formatDesc, sliceCount)
-        }
-        guard let (session, formatDesc, frameNumber) = snapshot else { return }
-
-        var totalSize = 0
-        for nal in vclNals { totalSize += 4 + nal.count }
-        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: totalSize)
-        var offset = 0
-        for nal in vclNals {
-            let len = UInt32(nal.count).bigEndian
-            withUnsafeBytes(of: len) { src in
-                (buf + offset).update(from: src.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 4)
-            }
-            offset += 4
-            nal.copyBytes(to: buf + offset, count: nal.count)
-            offset += nal.count
-        }
-
-        var blockBuffer: CMBlockBuffer?
-        let bbStatus = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: buf,
-            blockLength: totalSize,
-            blockAllocator: kCFAllocatorMalloc,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: totalSize,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-        guard bbStatus == kCMBlockBufferNoErr, let blockBuffer else {
-            buf.deallocate(); return
-        }
-
-        let pts = CMTime(value: Int64(presentationTimeNs), timescale: 1_000_000_000)
-        var timingInfo = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
-        var sampleSize = totalSize
-        var sampleBuffer: CMSampleBuffer?
-        let sbStatus = CMSampleBufferCreateReady(
-            allocator: kCFAllocatorDefault,
-            dataBuffer: blockBuffer,
-            formatDescription: formatDesc,
-            sampleCount: 1,
-            sampleTimingEntryCount: 1,
-            sampleTimingArray: &timingInfo,
-            sampleSizeEntryCount: 1,
-            sampleSizeArray: &sampleSize,
-            sampleBufferOut: &sampleBuffer
-        )
-        guard sbStatus == noErr, let sampleBuffer else { return }
-
-        let decodeFlags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
-        var infoFlags: VTDecodeInfoFlags = []
-        let decStatus = VTDecompressionSessionDecodeFrame(
-            session, sampleBuffer: sampleBuffer, flags: decodeFlags,
-            frameRefcon: nil, infoFlagsOut: &infoFlags
-        )
-        if decStatus != noErr {
-            let errorCount = locked { () -> Int in decodeErrorCount += 1; return decodeErrorCount }
-            if errorCount <= 5 || errorCount % 100 == 0 {
-                print("[H264] DecodeFrame error: \(decStatus) (frame #\(frameNumber), \(vclNals.count) slices, \(totalSize) bytes)")
-            }
-        } else if frameNumber <= 3 || frameNumber % 200 == 0 {
-            print("[H264] Decoded frame #\(frameNumber) — \(vclNals.count) slice(s), \(totalSize) bytes")
+        if installFormatDescription(fmt) {
+            locked { paramSetsReady = true }
         }
     }
-
-    private func splitNalUnits(_ data: Data) -> [Data] {
-        var units = [Data]()
-        let bytes = [UInt8](data)
-        let count = bytes.count
-        var i = 0
-        var nalStart = -1
-        while i < count - 2 {
-            let isFourByte = (i < count - 3 && bytes[i] == 0 && bytes[i + 1] == 0 &&
-                              bytes[i + 2] == 0 && bytes[i + 3] == 1)
-            let isThreeByte = !isFourByte && (bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1)
-            if isThreeByte || isFourByte {
-                if nalStart >= 0 { units.append(Data(bytes[nalStart..<i])) }
-                let startCodeLen = isFourByte ? 4 : 3
-                nalStart = i + startCodeLen
-                i += startCodeLen
-            } else {
-                i += 1
-            }
-        }
-        if nalStart >= 0 && nalStart < count { units.append(Data(bytes[nalStart..<count])) }
-        if units.isEmpty && !data.isEmpty { units.append(data) }
-        return units
-    }
-
-    fileprivate func invokeDecodeErrorCallback() {
-        let callback = locked { onDecodeErrorCallback }
-        callback?()
-    }
-    fileprivate func invokeFrameCallback(pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
-        let callback = locked { onFrame }
-        callback?(pixelBuffer, presentationTime)
-    }
-
-    @discardableResult
-    private func locked<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock(); defer { lock.unlock() }
-        return try body()
-    }
-}
-
-private func h264DecompressionCallback(
-    decompressionOutputRefCon: UnsafeMutableRawPointer?,
-    sourceFrameRefCon: UnsafeMutableRawPointer?,
-    status: OSStatus,
-    infoFlags: VTDecodeInfoFlags,
-    imageBuffer: CVImageBuffer?,
-    presentationTimeStamp: CMTime,
-    presentationDuration: CMTime
-) {
-    guard let refCon = decompressionOutputRefCon else { return }
-    let decoder = Unmanaged<H264Decoder>.fromOpaque(refCon).takeUnretainedValue()
-    guard status == noErr, let pixelBuffer = imageBuffer else {
-        if status != noErr { decoder.invokeDecodeErrorCallback() }
-        return
-    }
-    decoder.invokeFrameCallback(pixelBuffer: pixelBuffer, presentationTime: presentationTimeStamp)
 }
