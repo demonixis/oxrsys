@@ -797,33 +797,32 @@ void StreamingServer::BroadcastThread()
 {
     oxr::protocol::ServerAnnounce announce = BuildServerAnnounce(false);
 
-    sockaddr_in broadcastAddr = {};
-    broadcastAddr.sin_family = AF_INET;
-    broadcastAddr.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
-    broadcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
-
-    // Also beacon to loopback so a same-machine client (the simulator, or a
-    // Rosetta/Wine-hosted setup) can discover us: macOS does not loop a
-    // 255.255.255.255 broadcast back to local listeners.
-    sockaddr_in loopbackAddr = {};
-    loopbackAddr.sin_family = AF_INET;
-    loopbackAddr.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
-    loopbackAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // Beacon to the subnet broadcast and to loopback: macOS does not loop a
+    // 255.255.255.255 broadcast back to local listeners, so a same-machine client
+    // (the simulator, or a Rosetta/Wine-hosted setup) needs the explicit loopback copy.
+    auto makeTarget = [](in_addr_t addr) {
+        sockaddr_in sa = {};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
+        sa.sin_addr.s_addr = addr;
+        return sa;
+    };
+    const sockaddr_in targets[] = {
+        makeTarget(INADDR_BROADCAST),
+        makeTarget(htonl(INADDR_LOOPBACK)),
+    };
 
     while (running_.load() && state_.load() == State::Broadcasting)
     {
-        oxrsys::runtime_socket::SendTo(broadcastSocket_,
-                                       &announce,
-                                       sizeof(announce),
-                                       0,
-                                       (sockaddr*)&broadcastAddr,
-                                       sizeof(broadcastAddr));
-        oxrsys::runtime_socket::SendTo(broadcastSocket_,
-                                       &announce,
-                                       sizeof(announce),
-                                       0,
-                                       (sockaddr*)&loopbackAddr,
-                                       sizeof(loopbackAddr));
+        for (const sockaddr_in& target : targets)
+        {
+            oxrsys::runtime_socket::SendTo(broadcastSocket_,
+                                           &announce,
+                                           sizeof(announce),
+                                           0,
+                                           (const sockaddr*)&target,
+                                           sizeof(target));
+        }
 
         for (int i = 0; i < 10 && running_.load() && state_.load() == State::Broadcasting; i++)
         {
