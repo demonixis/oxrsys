@@ -545,6 +545,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
 
+        // Tag the (BGRA) input so VideoToolbox knows how to convert RGB->YCbCr. Without this,
+        // VT's implicit conversion in the low-latency path under Rosetta drops chroma entirely
+        // (correct luma, zero Cb/Cr -> green). BT.709 matches the client shader.
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
+            kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
+            kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
+            kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+
         CVMetalTextureRef cvMetalTexture = nullptr;
         cvResult = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,
@@ -671,6 +681,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_MaxFrameDelayCount, delayRef);
     CFRelease(delayRef);
+
+    // Explicit output color space (matches the input attachments + client BT.709 shader).
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
