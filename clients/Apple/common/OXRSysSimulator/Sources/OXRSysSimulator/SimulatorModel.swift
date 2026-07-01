@@ -44,10 +44,9 @@ final class SimulatorModel {
         var deliveryFps: Double = 0
     }
 
-    /// One decoded-frame timing sample for the live performance plot.
-    struct FrameSample: Identifiable {
-        let id: Int
-        let t: Double            // seconds since stream start (x-axis)
+    /// One decoded-frame timing sample for the live performance plot. The plot keys
+    /// each point off its position in the rolling window, so no id/timestamp is stored.
+    struct FrameSample {
         let frameTimeMs: Double  // interval since previous decoded frame
         let fps: Double          // instantaneous 1000/frameTimeMs
     }
@@ -59,8 +58,6 @@ final class SimulatorModel {
     /// Rolling window of recent frame-timing samples (most recent last).
     var frameSamples: [FrameSample] = []
     private var lastFrameDecodeNs: Int64 = 0
-    private var streamStartNs: Int64 = 0
-    private var frameSampleIndex: Int = 0
     let maxFrameSamples = 300
     var isTracking: Bool = false
     var stats = StreamStats()
@@ -269,8 +266,6 @@ final class SimulatorModel {
         framesDecoded = 0
         frameSamples.removeAll(keepingCapacity: true)
         lastFrameDecodeNs = 0
-        streamStartNs = 0
-        frameSampleIndex = 0
         isTracking = false
         statusText = {
             #if os(iOS)
@@ -449,14 +444,11 @@ final class SimulatorModel {
     /// Append a frame-timing sample from a decoded frame (called on the main actor).
     @MainActor
     private func recordFrameSample(decodeNs: Int64) {
-        if streamStartNs == 0 { streamStartNs = decodeNs }
         defer { lastFrameDecodeNs = decodeNs }
         guard lastFrameDecodeNs != 0 else { return } // need a previous frame for an interval
         let dtMs = Double(decodeNs - lastFrameDecodeNs) / 1_000_000.0
         guard dtMs > 0 else { return }
-        let tSec = Double(decodeNs - streamStartNs) / 1_000_000_000.0
-        frameSamples.append(FrameSample(id: frameSampleIndex, t: tSec, frameTimeMs: dtMs, fps: 1000.0 / dtMs))
-        frameSampleIndex += 1
+        frameSamples.append(FrameSample(frameTimeMs: dtMs, fps: 1000.0 / dtMs))
         if frameSamples.count > maxFrameSamples {
             frameSamples.removeFirst(frameSamples.count - maxFrameSamples)
         }
