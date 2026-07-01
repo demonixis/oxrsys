@@ -8,6 +8,8 @@
 #include <atomic>
 #include <utility>
 
+#include "OpenXRPlatform.h"
+
 namespace
 {
 

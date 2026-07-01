@@ -4,7 +4,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <openxr/openxr.h>
-#include <openxr/openxr_platform.h>
+#include "OpenXRPlatform.h"
 
 #include <algorithm>
 #include <array>

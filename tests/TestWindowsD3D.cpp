@@ -9,7 +9,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
-#include <openxr/openxr_platform.h>
+#include "OpenXRPlatform.h"
 
 #include <algorithm>
 #include <array>

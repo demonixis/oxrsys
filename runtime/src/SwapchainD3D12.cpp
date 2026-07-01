@@ -5,6 +5,8 @@
 
 #if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
 
+#include "OpenXRPlatform.h"
+
 #include <spdlog/spdlog.h>
 
 #include <iomanip>

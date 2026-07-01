@@ -44,8 +44,6 @@
 #include <GL/gl.h>
 #endif
 
-#include <openxr/openxr_platform.h>
-
 #include "Runtime.h"
 #include "Instance.h"
 #include "Session.h"
@@ -75,6 +73,8 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
+
+#include "OpenXRPlatform.h"
 
 // We need to keep ownership of created objects
 static std::unique_ptr<Instance> gInstance;

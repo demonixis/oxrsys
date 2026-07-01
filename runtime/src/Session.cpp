@@ -17,8 +17,6 @@
 #include <thread>
 #include <utility>
 
-#include <openxr/openxr_platform.h>
-
 namespace
 {
 

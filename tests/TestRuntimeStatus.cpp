@@ -32,6 +32,11 @@ std::filesystem::path RuntimeStatusPathForHome(const std::filesystem::path& home
 #if defined(__APPLE__)
     return home / "Library/Application Support/OXRSys/runtime_status.json";
 #else
+    if (const char* xdgStateHome = std::getenv("XDG_STATE_HOME");
+        xdgStateHome != nullptr && xdgStateHome[0] != '\0')
+    {
+        return std::filesystem::path(xdgStateHome) / "oxrsys/runtime_status.json";
+    }
     return home / ".local/state/oxrsys/runtime_status.json";
 #endif
 }

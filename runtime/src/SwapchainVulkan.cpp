@@ -16,6 +16,8 @@
 #include <mutex>
 #include <thread>
 
+#include "OpenXRPlatform.h"
+
 #if defined(__APPLE__)
 extern "C" void* OxrsysRetainMetalObjectForSwapchain(void* object);
 #endif

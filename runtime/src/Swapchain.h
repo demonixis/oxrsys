@@ -14,7 +14,6 @@
                         defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
 #include "D3DGraphicsContext.h"
 #endif
-#include <openxr/openxr_platform.h>
 #include <vector>
 #include <cstdint>
 #include <deque>
