@@ -12,8 +12,12 @@ namespace oxrsys
 // runtime (e.g. when loaded by wineopenxr.so for a Wine D3D11 app) uses H.264.
 inline oxr::protocol::VideoCodec PreferredVideoCodec()
 {
-    return runtime_platform::RunningUnderRosetta() ? oxr::protocol::VideoCodec::H264
-                                                   : oxr::protocol::VideoCodec::H265;
+    // Translation status is fixed for the process lifetime; resolve the sysctl once
+    // (this is queried several times per frame from the streaming hot path).
+    static const oxr::protocol::VideoCodec codec =
+        runtime_platform::RunningUnderRosetta() ? oxr::protocol::VideoCodec::H264
+                                                : oxr::protocol::VideoCodec::H265;
+    return codec;
 }
 
 } // namespace oxrsys
