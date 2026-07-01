@@ -582,10 +582,10 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].inUse = false;
     }
 
-    NSDictionary* encoderSpec = @{
+    NSMutableDictionary* encoderSpec = [@{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
-    };
+    } mutableCopy];
 
     g_useH264 = (oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264);
     const CMVideoCodecType codecType = g_useH264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
@@ -674,6 +674,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
+
+    {
+        CFBooleanRef usingHw = nullptr;
+        OSStatus hwStatus = VTSessionCopyProperty(compressionSession,
+            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+            kCFAllocatorDefault, &usingHw);
+        const bool hw = (hwStatus == noErr && usingHw != nullptr && CFBooleanGetValue(usingHw));
+        if (usingHw) CFRelease(usingHw);
+        spdlog::info("VideoEncoder: hardware-accelerated encoder = {} (status={})", hw, (int)hwStatus);
+    }
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
                   g_useH264 ? "H.264" : "H.265",

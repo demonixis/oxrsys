@@ -25,6 +25,17 @@
 #include <thread>
 #include <utility>
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+namespace { inline void SetThreadRealtimeQoS() {
+    // Streaming encode/send threads are latency-critical; raise QoS so the scheduler
+    // (notably under Rosetta) does not add wakeup jitter to per-frame delivery.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+} }
+#else
+namespace { inline void SetThreadRealtimeQoS() {} }
+#endif
+
 #if !defined(_WIN32)
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -1260,6 +1271,7 @@ void StreamingServer::TcpSpatialThread()
 
 void StreamingServer::EncodeThread()
 {
+    SetThreadRealtimeQoS();
     auto telemetry = std::make_shared<EncodeTelemetry>();
     std::shared_ptr<PacketDispatchState> packetDispatchState = packetDispatchState_;
 
@@ -2501,6 +2513,7 @@ void StreamingServer::ClearVideoSendQueue()
 
 void StreamingServer::VideoSendThread()
 {
+    SetThreadRealtimeQoS();
     while (running_.load())
     {
         TickPendingStreamConfigTimeout(SteadyClockNowNs());
