@@ -120,6 +120,53 @@ kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[text
 }
 )METAL";
 
+// BGRA -> biplanar NV12 (BT.709 full range) so the encoder's CVPixelBufferPool
+// can hand VideoToolbox chroma-subsampled YCbCr directly instead of forcing an
+// internal RGB->YUV conversion of a 2x-larger BGRA buffer on every frame.
+constexpr const char* kNv12ConversionMetalSource = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void bgra_to_nv12(texture2d<float, access::read> src [[texture(0)]],
+                         texture2d<float, access::write> outY [[texture(1)]],
+                         texture2d<float, access::write> outCbCr [[texture(2)]],
+                         uint2 gid [[thread_position_in_grid]])
+{
+    uint srcW = src.get_width();
+    uint srcH = src.get_height();
+    uint2 base = gid * 2;
+    if (base.x >= srcW || base.y >= srcH)
+    {
+        return;
+    }
+
+    const float3 kBt709 = float3(0.2126, 0.7152, 0.0722);
+    float3 sum = float3(0.0);
+    uint count = 0;
+    for (uint dy = 0; dy < 2; ++dy)
+    {
+        for (uint dx = 0; dx < 2; ++dx)
+        {
+            uint2 c = base + uint2(dx, dy);
+            if (c.x >= srcW || c.y >= srcH)
+            {
+                continue;
+            }
+            float3 rgb = src.read(c).rgb;
+            outY.write(float4(dot(rgb, kBt709), 0.0, 0.0, 1.0), c);
+            sum += rgb;
+            count += 1;
+        }
+    }
+
+    float3 avg = sum / max((float)count, 1.0);
+    float yAvg = dot(avg, kBt709);
+    float cb = (avg.b - yAvg) * (0.5 / (1.0 - kBt709.b)) + 0.5;
+    float cr = (avg.r - yAvg) * (0.5 / (1.0 - kBt709.r)) + 0.5;
+    outCbCr.write(float4(cb, cr, 0.0, 1.0), gid);
+}
+)METAL";
+
 void FinalizeEncodeFrame(EncodeFrameContext* context, bool frameDropped)
 {
     if (context == nullptr)
@@ -300,22 +347,23 @@ bool TextureAllowsUsage(id<MTLTexture> texture, MTLTextureUsage requiredUsage)
            (declaredUsage & requiredUsage) == requiredUsage;
 }
 
-id<MTLComputePipelineState> CreateFoveationPipeline(id<MTLDevice> device)
+id<MTLComputePipelineState> CreateComputePipeline(id<MTLDevice> device, const char* source,
+                                                   const char* entryPoint, const char* debugLabel)
 {
     NSError* error = nil;
-    NSString* source = [NSString stringWithUTF8String:kFoveationMetalSource];
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    NSString* nsSource = [NSString stringWithUTF8String:source];
+    id<MTLLibrary> library = [device newLibraryWithSource:nsSource options:nil error:&error];
     if (library == nil)
     {
-        spdlog::error("VideoEncoder: Failed to compile foveation shader: {}",
+        spdlog::error("VideoEncoder: Failed to compile {} shader: {}", debugLabel,
                       error != nil ? error.localizedDescription.UTF8String : "unknown error");
         return nil;
     }
 
-    id<MTLFunction> kernelFunction = [library newFunctionWithName:@"foveation_kernel"];
+    id<MTLFunction> kernelFunction = [library newFunctionWithName:[NSString stringWithUTF8String:entryPoint]];
     if (kernelFunction == nil)
     {
-        spdlog::error("VideoEncoder: Failed to load foveation compute shader entry point");
+        spdlog::error("VideoEncoder: Failed to load {} compute shader entry point", debugLabel);
         [library release];
         return nil;
     }
@@ -325,13 +373,41 @@ id<MTLComputePipelineState> CreateFoveationPipeline(id<MTLDevice> device)
         [device newComputePipelineStateWithFunction:kernelFunction error:&error];
     if (pipeline == nil)
     {
-        spdlog::error("VideoEncoder: Failed to create foveation compute pipeline: {}",
+        spdlog::error("VideoEncoder: Failed to create {} compute pipeline: {}", debugLabel,
                       error != nil ? error.localizedDescription.UTF8String : "unknown error");
     }
 
     [kernelFunction release];
     [library release];
     return pipeline;
+}
+
+id<MTLComputePipelineState> CreateFoveationPipeline(id<MTLDevice> device)
+{
+    return CreateComputePipeline(device, kFoveationMetalSource, "foveation_kernel", "foveation");
+}
+
+id<MTLComputePipelineState> CreateNv12ConversionPipeline(id<MTLDevice> device)
+{
+    return CreateComputePipeline(device, kNv12ConversionMetalSource, "bgra_to_nv12", "NV12 conversion");
+}
+
+// Dispatch sizing shared by both compute kernels: don't artificially cap the
+// threadgroup width at 16 -- Apple Silicon GPUs (M1 through M4) report a
+// threadExecutionWidth of 32, so capping at 16 wastes half the SIMD group on
+// every dispatch.
+void DispatchCompute2D(id<MTLComputeCommandEncoder> encoder, id<MTLComputePipelineState> pipeline,
+                        uint32_t width, uint32_t height)
+{
+    const NSUInteger threadsX = std::max<NSUInteger>(1, pipeline.threadExecutionWidth);
+    const NSUInteger threadsY = std::max<NSUInteger>(
+        1, pipeline.maxTotalThreadsPerThreadgroup / threadsX);
+    const MTLSize threadsPerGroup = MTLSizeMake(threadsX, threadsY, 1);
+    const MTLSize threadgroups = MTLSizeMake(
+        ((NSUInteger)width + threadsX - 1) / threadsX,
+        ((NSUInteger)height + threadsY - 1) / threadsY,
+        1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
 }
 
 id<MTLSamplerState> CreateLinearClampSampler(id<MTLDevice> device)
@@ -435,6 +511,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         }
     }
 
+    videoToolbox_.nv12Pipeline = (void*)CreateNv12ConversionPipeline(device);
+    if (videoToolbox_.nv12Pipeline == nullptr)
+    {
+        spdlog::error("VideoEncoder: BGRA->NV12 conversion shader is unavailable");
+        Shutdown();
+        return false;
+    }
+
     CVMetalTextureCacheRef cache = nullptr;
     CVReturn cvResult = CVMetalTextureCacheCreate(
         kCFAllocatorDefault, nullptr, device, nullptr, &cache);
@@ -448,12 +532,18 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     NSDictionary* poolConfig = @{
         (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @(SlotCount),
     };
+    // Biplanar 4:2:0 NV12, full range, BT.709. This is what the HEVC hardware
+    // encoder consumes natively -- handing it BGRA forces VideoToolbox to do its
+    // own RGB->YUV conversion internally on a buffer twice the size.
     NSDictionary* poolAttrs = @{
         (NSString*)kCVPixelBufferWidthKey: @(width),
         (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
         (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
         (NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
+        (NSString*)kCVImageBufferColorPrimariesKey: (NSString*)kCVImageBufferColorPrimaries_ITU_R_709_2,
+        (NSString*)kCVImageBufferTransferFunctionKey: (NSString*)kCVImageBufferTransferFunction_ITU_R_709_2,
+        (NSString*)kCVImageBufferYCbCrMatrixKey: (NSString*)kCVImageBufferYCbCrMatrix_ITU_R_709_2,
     };
 
     CVPixelBufferPoolRef pool = nullptr;
@@ -478,17 +568,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     tmpDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
     tmpDesc.storageMode = MTLStorageModePrivate;
 
-    MTLTextureDescriptor* foveatedScratchDesc = nil;
-    if (foveationSettings_.enabled)
-    {
-        foveatedScratchDesc = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                         width:MAX((uint32_t)1, width_)
-                                        height:MAX((uint32_t)1, height_)
-                                     mipmapped:NO];
-        foveatedScratchDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        foveatedScratchDesc.storageMode = MTLStorageModePrivate;
-    }
+    MTLTextureDescriptor* composeDesc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:MAX((uint32_t)1, width_)
+                                    height:MAX((uint32_t)1, height_)
+                                 mipmapped:NO];
+    composeDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+    composeDesc.storageMode = MTLStorageModePrivate;
+
+    const uint32_t chromaWidth = MAX((uint32_t)1, (width_ + 1) / 2);
+    const uint32_t chromaHeight = MAX((uint32_t)1, (height_ + 1) / 2);
 
     for (size_t i = 0; i < SlotCount; i++)
     {
@@ -502,40 +591,66 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
 
-        CVMetalTextureRef cvMetalTexture = nullptr;
+        CVMetalTextureRef lumaTexture = nullptr;
         cvResult = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,
             (CVMetalTextureCacheRef)videoToolbox_.textureCache,
             pixelBuffer,
             nullptr,
-            MTLPixelFormatBGRA8Unorm,
+            MTLPixelFormatR8Unorm,
             width_,
             height_,
-            0,
-            &cvMetalTexture);
-        if (cvResult != kCVReturnSuccess || cvMetalTexture == nullptr)
+            0, // luma plane
+            &lumaTexture);
+        if (cvResult != kCVReturnSuccess || lumaTexture == nullptr)
         {
-            spdlog::error("VideoEncoder: Failed to create Metal texture for slot {}", i);
+            spdlog::error("VideoEncoder: Failed to create luma plane texture for slot {}", i);
+            CVPixelBufferRelease(pixelBuffer);
+            Shutdown();
+            return false;
+        }
+
+        CVMetalTextureRef chromaTexture = nullptr;
+        cvResult = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            (CVMetalTextureCacheRef)videoToolbox_.textureCache,
+            pixelBuffer,
+            nullptr,
+            MTLPixelFormatRG8Unorm,
+            chromaWidth,
+            chromaHeight,
+            1, // chroma plane
+            &chromaTexture);
+        if (cvResult != kCVReturnSuccess || chromaTexture == nullptr)
+        {
+            spdlog::error("VideoEncoder: Failed to create chroma plane texture for slot {}", i);
+            CFRelease(lumaTexture);
+            CVPixelBufferRelease(pixelBuffer);
+            Shutdown();
+            return false;
+        }
+
+        id<MTLTexture> composeTexture = [device newTextureWithDescriptor:composeDesc];
+        id<MTLTexture> tmpLeftTexture = [device newTextureWithDescriptor:tmpDesc];
+        id<MTLTexture> tmpRightTexture = [device newTextureWithDescriptor:tmpDesc];
+        if (composeTexture == nil || tmpLeftTexture == nil || tmpRightTexture == nil)
+        {
+            spdlog::error("VideoEncoder: Failed to create compositing scratch textures for slot {}", i);
+            CFRelease(lumaTexture);
+            CFRelease(chromaTexture);
             CVPixelBufferRelease(pixelBuffer);
             Shutdown();
             return false;
         }
 
         slots_[i].pixelBuffer = pixelBuffer;
-        slots_[i].metalTexture = cvMetalTexture;
-        slots_[i].tmpLeftTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
-        slots_[i].tmpRightTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
-        if (foveatedScratchDesc != nil)
-        {
-            slots_[i].foveatedScratchTexture =
-                (void*)[device newTextureWithDescriptor:foveatedScratchDesc];
-            if (slots_[i].foveatedScratchTexture == nullptr)
-            {
-                spdlog::error("VideoEncoder: Failed to create foveated compute scratch texture for slot {}", i);
-                Shutdown();
-                return false;
-            }
-        }
+        slots_[i].lumaTexture = lumaTexture;
+        slots_[i].chromaTexture = chromaTexture;
+        slots_[i].composeTexture = (void*)composeTexture;
+        slots_[i].tmpLeftTexture = (void*)tmpLeftTexture;
+        slots_[i].tmpRightTexture = (void*)tmpRightTexture;
+        // leftCropTexture/rightCropTexture: lazily (re)allocated in EncodeInternal
+        // once the swapchain sub-rect (srcW/srcH) is known.
         slots_[i].inUse = false;
     }
 
@@ -567,6 +682,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    // Must match the NV12 pixel buffer pool's color attributes (set above) so
+    // VideoToolbox tags the bitstream with the same primaries/matrix it encoded.
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
+    VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
 
     const ConfigValues config = Config::Get().GetValues();
     const std::string& preset = config.encoderPreset;
@@ -669,6 +792,11 @@ void VideoEncoder::Shutdown()
         [(id<MTLSamplerState>)videoToolbox_.foveationSampler release];
         videoToolbox_.foveationSampler = nullptr;
     }
+    if (videoToolbox_.nv12Pipeline != nullptr)
+    {
+        [(id<MTLComputePipelineState>)videoToolbox_.nv12Pipeline release];
+        videoToolbox_.nv12Pipeline = nullptr;
+    }
     if (videoToolbox_.commandQueue != nullptr)
     {
         [(id<MTLCommandQueue>)videoToolbox_.commandQueue release];
@@ -736,9 +864,13 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
     BufferSlot& slot = slots_[slotIndex];
     CVPixelBufferRef pixelBuffer = (CVPixelBufferRef)slot.pixelBuffer;
-    CVMetalTextureRef cvMetalTexture = (CVMetalTextureRef)slot.metalTexture;
-    id<MTLTexture> dstTexture = CVMetalTextureGetTexture(cvMetalTexture);
-    if (pixelBuffer == nullptr || cvMetalTexture == nullptr || dstTexture == nil)
+    CVMetalTextureRef cvLumaTexture = (CVMetalTextureRef)slot.lumaTexture;
+    CVMetalTextureRef cvChromaTexture = (CVMetalTextureRef)slot.chromaTexture;
+    id<MTLTexture> lumaTexture = CVMetalTextureGetTexture(cvLumaTexture);
+    id<MTLTexture> chromaTexture = CVMetalTextureGetTexture(cvChromaTexture);
+    id<MTLTexture> dstTexture = (id<MTLTexture>)slot.composeTexture;
+    if (pixelBuffer == nullptr || cvLumaTexture == nullptr || cvChromaTexture == nullptr ||
+        lumaTexture == nil || chromaTexture == nil || dstTexture == nil)
     {
         ReleaseSlot(slotIndex);
         return false;
@@ -834,7 +966,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         foveationSettings_.enabled &&
         videoToolbox_.foveationPipeline != nullptr &&
         videoToolbox_.foveationSampler != nullptr &&
-        slot.foveatedScratchTexture != nullptr;
+        slot.composeTexture != nullptr;
     bool needsDownscale = stereo
         ? (leftTex.width != (NSUInteger)eyeWidth_ || leftTex.height != (NSUInteger)height_ ||
            rightTex.width != (NSUInteger)eyeWidth_ || rightTex.height != (NSUInteger)height_)
@@ -863,7 +995,10 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
     if (useFoveatedEncoding)
     {
-        id<MTLTexture> foveatedDstTexture = (id<MTLTexture>)slot.foveatedScratchTexture;
+        // Foveation kernel writes straight into the shared compose texture --
+        // no separate scratch + blit needed since dstTexture *is* the kernel's
+        // output target here.
+        id<MTLTexture> foveatedDstTexture = dstTexture;
         if (foveatedDstTexture == nil ||
             foveatedDstTexture.width != (NSUInteger)width_ ||
             foveatedDstTexture.height != (NSUInteger)height_ ||
@@ -902,34 +1037,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         [computeEncoder setSamplerState:(id<MTLSamplerState>)videoToolbox_.foveationSampler
                                 atIndex:0];
         [computeEncoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
-
-        const NSUInteger threadsX = std::max<NSUInteger>(1, std::min<NSUInteger>(pipeline.threadExecutionWidth, 16));
-        const NSUInteger threadsY = std::max<NSUInteger>(
-            1,
-            std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup / threadsX, 16));
-        const MTLSize threadsPerGroup = MTLSizeMake(threadsX, threadsY, 1);
-        const MTLSize threadgroups = MTLSizeMake(
-            ((NSUInteger)width_ + threadsX - 1) / threadsX,
-            ((NSUInteger)height_ + threadsY - 1) / threadsY,
-            1);
-        [computeEncoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+        DispatchCompute2D(computeEncoder, pipeline, width_, height_);
         [computeEncoder endEncoding];
-
-        id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
-        if (blit == nil)
-        {
-            return dropAcquiredSlot("failed to create foveated blit encoder");
-        }
-        [blit copyFromTexture:foveatedDstTexture
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(width_, height_, 1)
-                    toTexture:dstTexture
-             destinationSlice:0
-             destinationLevel:0
-            destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [blit endEncoding];
     }
     else if (stereo && needsDownscale)
     {
@@ -1008,6 +1117,25 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
+    }
+
+    // Convert the composed BGRA frame to the NV12 biplanar buffer VideoToolbox
+    // actually wants, instead of feeding it BGRA and forcing an internal RGB->YUV
+    // conversion of a buffer twice the size on every encode.
+    {
+        id<MTLComputeCommandEncoder> nv12Encoder = [cmdBuf computeCommandEncoder];
+        if (nv12Encoder == nil)
+        {
+            return dropAcquiredSlot("failed to create NV12 conversion compute encoder");
+        }
+        id<MTLComputePipelineState> nv12Pipeline =
+            (id<MTLComputePipelineState>)videoToolbox_.nv12Pipeline;
+        [nv12Encoder setComputePipelineState:nv12Pipeline];
+        [nv12Encoder setTexture:dstTexture atIndex:0];
+        [nv12Encoder setTexture:lumaTexture atIndex:1];
+        [nv12Encoder setTexture:chromaTexture atIndex:2];
+        DispatchCompute2D(nv12Encoder, nv12Pipeline, (uint32_t)chromaTexture.width, (uint32_t)chromaTexture.height);
+        [nv12Encoder endEncoding];
     }
 
     auto* context = new EncodeFrameContext();
@@ -1116,6 +1244,21 @@ void VideoEncoder::DestroySlots()
     {
         slot.inUse = false;
 
+        if (slot.lumaTexture != nullptr)
+        {
+            CFRelease(slot.lumaTexture);
+            slot.lumaTexture = nullptr;
+        }
+        if (slot.chromaTexture != nullptr)
+        {
+            CFRelease(slot.chromaTexture);
+            slot.chromaTexture = nullptr;
+        }
+        if (slot.composeTexture != nullptr)
+        {
+            [(id<MTLTexture>)slot.composeTexture release];
+            slot.composeTexture = nullptr;
+        }
         if (slot.tmpLeftTexture != nullptr)
         {
             [(id<MTLTexture>)slot.tmpLeftTexture release];
@@ -1126,11 +1269,6 @@ void VideoEncoder::DestroySlots()
             [(id<MTLTexture>)slot.tmpRightTexture release];
             slot.tmpRightTexture = nullptr;
         }
-        if (slot.foveatedScratchTexture != nullptr)
-        {
-            [(id<MTLTexture>)slot.foveatedScratchTexture release];
-            slot.foveatedScratchTexture = nullptr;
-        }
         if (slot.leftCropTexture != nullptr)
         {
             [(id<MTLTexture>)slot.leftCropTexture release];
@@ -1140,11 +1278,6 @@ void VideoEncoder::DestroySlots()
         {
             [(id<MTLTexture>)slot.rightCropTexture release];
             slot.rightCropTexture = nullptr;
-        }
-        if (slot.metalTexture != nullptr)
-        {
-            CFRelease(slot.metalTexture);
-            slot.metalTexture = nullptr;
         }
         if (slot.pixelBuffer != nullptr)
         {

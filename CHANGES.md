@@ -28,6 +28,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 - Moved the repository toward the OXRSys cross-platform layout, including `clients/Android/android-vr/`, `clients/Apple/common/`, and `clients/Qt/`.
 - Changed the runtime graphics plumbing to use typed `GraphicsContext` and `FrameSource` data across sessions, swapchains, streaming, and encoders.
+- Changed the macOS Metal streaming encoder to convert composed BGRA frames to NV12 on the GPU before VideoToolbox encode, with per-slot compositing scratch textures and wider compute dispatch groups on Apple Silicon.
 - Kept Vulkan loader usage app-owned: the runtime resolves Vulkan entry points from the application-provided dispatch path or already-loaded process symbols without directly linking or loading the Vulkan loader.
 - Reworked streaming frame submission around a latest-frame-only queue so replacing a pending frame releases its backend resources.
 - Expanded runtime configuration reload behavior for dynamic streaming values while keeping initialization-time resources restart-bound.
