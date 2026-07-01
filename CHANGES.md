@@ -31,6 +31,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 - Moved the repository toward the OXRSys cross-platform layout, including `clients/Android/android-vr/`, `clients/Apple/common/`, and `clients/Qt/`.
 - Changed the runtime graphics plumbing to use typed `GraphicsContext` and `FrameSource` data across sessions, swapchains, streaming, and encoders.
+- Changed the macOS Metal streaming encoder to convert composed BGRA frames to NV12 on the GPU before VideoToolbox encode, with per-slot compositing scratch textures and wider compute dispatch groups on Apple Silicon.
 - Kept Vulkan loader usage app-owned: the runtime resolves Vulkan entry points from the application-provided dispatch path or already-loaded process symbols without directly linking or loading the Vulkan loader.
 - Reworked streaming frame submission around a latest-frame-only queue so replacing a pending frame releases its backend resources.
 - Expanded runtime configuration reload behavior for dynamic streaming values while keeping initialization-time resources restart-bound.
@@ -56,6 +57,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 ### Fixed
 
 - Fixed Metal streaming frame snapshots so the async encoder reads a release-time staging texture instead of a swapchain slot that the app may already have reused.
+- Fixed side-by-side swapchain eye packing by honoring `subImage.imageRect` when compositing each eye for video encode (Unreal Engine and similar clients).
 - Fixed server-side foveated encoding on Metal by running the AADT pass through a compute shader into a private GPU scratch texture before blitting into the VideoToolbox pixel buffer, avoiding render-encoder validation aborts on the first encoded frame.
 - Fixed Quest connection recovery when a server is discovered but no first video frame arrives, returning the client to discovery/retry instead of leaving the standby/loading screen stuck.
 - Fixed controller pose handling so streaming packets only update controller poses when the corresponding controller-active flag is present.

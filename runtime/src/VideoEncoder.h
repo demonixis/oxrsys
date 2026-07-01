@@ -95,11 +95,19 @@ public:
 private:
     struct BufferSlot
     {
-        void* pixelBuffer = nullptr;      // CVPixelBufferRef
-        void* metalTexture = nullptr;     // CVMetalTextureRef
-        void* tmpLeftTexture = nullptr;   // id<MTLTexture>
-        void* tmpRightTexture = nullptr;  // id<MTLTexture>
-        void* foveatedScratchTexture = nullptr; // id<MTLTexture>
+        void* pixelBuffer = nullptr;   // CVPixelBufferRef (NV12 biplanar)
+        void* lumaTexture = nullptr;   // CVMetalTextureRef, plane 0 (R8Unorm)
+        void* chromaTexture = nullptr; // CVMetalTextureRef, plane 1 (RG8Unorm)
+        // Per-slot scratch (not shared): a shared scratch texture forces Metal's
+        // hazard tracking to fully serialize each frame's GPU compute against the
+        // previous frame's, defeating the slot pool's whole point (overlapping
+        // GPU work across in-flight frames). Costs ~10MB/slot on unified memory,
+        // buys back real pipelining.
+        void* composeTexture = nullptr;    // id<MTLTexture>, BGRA private, width_ x height_
+        void* tmpLeftTexture = nullptr;    // id<MTLTexture>, BGRA private, eyeWidth_ x height_
+        void* tmpRightTexture = nullptr;   // id<MTLTexture>, BGRA private, eyeWidth_ x height_
+        void* leftCropTexture = nullptr;   // id<MTLTexture>, lazily (re)sized to srcW/srcH
+        void* rightCropTexture = nullptr;  // id<MTLTexture>, lazily (re)sized to srcW/srcH
         bool inUse = false;
     };
 
@@ -120,6 +128,7 @@ private:
         void* scaler = nullptr;           // MPSImageBilinearScale*
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        void* nv12Pipeline = nullptr;      // id<MTLComputePipelineState>, BGRA -> NV12
     };
 
     struct FfmpegState
@@ -147,6 +156,8 @@ private:
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};
     std::mutex slotMutex_;
-    static constexpr size_t SlotCount = 3;
+    // 5 slots gives VideoToolbox more in-flight headroom on Apple Silicon (M4 Max
+    // class GPUs) before frames are dropped under transient encode latency spikes.
+    static constexpr size_t SlotCount = 5;
     std::array<BufferSlot, SlotCount> slots_{};
 };
