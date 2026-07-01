@@ -214,7 +214,7 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
                                                                                     width:width_
                                                                                    height:height_
                                                                                 mipmapped:NO];
-    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     desc.storageMode = MTLStorageModePrivate;
     if (arraySize_ > 1)
     {
@@ -254,7 +254,7 @@ void Swapchain::InitMetalStaging(void* metalDevice)
                                                                                     width:width_
                                                                                    height:height_
                                                                                 mipmapped:NO];
-    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     desc.storageMode = MTLStorageModePrivate;
     if (arraySize_ > 1)
     {
