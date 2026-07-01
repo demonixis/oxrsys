@@ -163,6 +163,11 @@ private:
                              const sockaddr_in& clientAddr);
     void HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect);
     void HandleClientDisconnect();
+    // Watchdog: if a connected client stops sending tracking (e.g. killed abruptly on the
+    // WiFi/UDP path, which sends no disconnect), resume broadcasting so a new client can find us.
+    void CheckClientLiveness(int64_t nowNs);
+    std::atomic<uint64_t> lastTrackingCountSeen_{0};
+    std::atomic<int64_t> lastClientActivityNs_{0};
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
     void HandleStreamConfigAck(const oxr::protocol::StreamConfigAck& ack);

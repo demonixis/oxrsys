@@ -48,6 +48,10 @@ constexpr int64_t kStreamConfigAckTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::milliseconds(500)).count();
 constexpr uint32_t kStreamConfigMaxRetries = 2;
+// Treat a connected client as gone if it sends no tracking for this long (abrupt UDP kill).
+constexpr int64_t kClientLivenessTimeoutNs =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::seconds(3)).count();
 
 int64_t SteadyClockNowNs()
 {
@@ -1580,6 +1584,9 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     UpdatePredictionHorizon();
 
     state_.store(State::Connected);
+    lastClientActivityNs_.store(SteadyClockNowNs(), std::memory_order_relaxed);
+    lastTrackingCountSeen_.store(
+        trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -1723,6 +1730,9 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     UpdatePredictionHorizon();
 
     state_.store(State::Connected);
+    lastClientActivityNs_.store(SteadyClockNowNs(), std::memory_order_relaxed);
+    lastTrackingCountSeen_.store(
+        trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -2369,8 +2379,32 @@ void StreamingServer::UpdatePredictionHorizon()
     trackingReceiver_->SetPredictionHorizonMs(horizonMs);
 }
 
+void StreamingServer::CheckClientLiveness(int64_t nowNs)
+{
+    if (state_.load() != State::Connected)
+    {
+        return;
+    }
+    const uint64_t count = trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0;
+    if (count != lastTrackingCountSeen_.load(std::memory_order_relaxed))
+    {
+        lastTrackingCountSeen_.store(count, std::memory_order_relaxed);
+        lastClientActivityNs_.store(nowNs, std::memory_order_relaxed);
+        return;
+    }
+    const int64_t last = lastClientActivityNs_.load(std::memory_order_relaxed);
+    if (last != 0 && nowNs - last > kClientLivenessTimeoutNs)
+    {
+        spdlog::warn("StreamingServer: no client tracking for {} ms; treating client as "
+                     "disconnected and resuming broadcast",
+                     (nowNs - last) / 1'000'000);
+        HandleClientDisconnect();
+    }
+}
+
 void StreamingServer::SendFrame(FrameSource frameSource)
 {
+    CheckClientLiveness(SteadyClockNowNs());
     if (!frameSource.IsStereoValid() || state_.load() != State::Connected)
     {
         return;
