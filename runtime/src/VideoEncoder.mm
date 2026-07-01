@@ -2,6 +2,7 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
+#import "CodecSelect.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -21,6 +22,10 @@
 
 namespace
 {
+
+// Set once at session init; read by the output callback for parameter-set extraction.
+// H.264 when the runtime runs under Rosetta (HEVC HW encode unavailable there).
+bool g_useH264 = false;
 
 using Clock = std::chrono::steady_clock;
 
@@ -192,15 +197,26 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
         if (formatDesc != nullptr)
         {
             size_t paramSetCount = 0;
-            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            if (g_useH264)
+            {
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            }
+            else
+            {
+                CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            }
 
             for (size_t i = 0; i < paramSetCount; i++)
             {
                 const uint8_t* paramSet = nullptr;
                 size_t paramSetSize = 0;
-                OSStatus status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                    formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr);
+                OSStatus status = g_useH264
+                    ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                          formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr)
+                    : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                          formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr);
                 if (status != noErr || paramSet == nullptr || paramSetSize == 0)
                 {
                     continue;
@@ -571,12 +587,15 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
     };
 
+    g_useH264 = (oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264);
+    const CMVideoCodecType codecType = g_useH264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
+
     VTCompressionSessionRef compressionSession = nullptr;
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault,
         width,
         height,
-        kCMVideoCodecType_HEVC,
+        codecType,
         (__bridge CFDictionaryRef)encoderSpec,
         nullptr,
         kCFAllocatorDefault,
@@ -599,7 +618,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     const std::string& preset = config.encoderPreset;
     VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
-        kVTProfileLevel_HEVC_Main_AutoLevel);
+        g_useH264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
     if (preset == "speed")
     {
         VTSessionSetProperty(compressionSession,
@@ -656,7 +675,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
 
-    spdlog::info("VideoEncoder: Initialized H.265 encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
+    spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
+                  g_useH264 ? "H.264" : "H.265",
                   width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
 }

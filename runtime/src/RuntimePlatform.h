@@ -33,4 +33,9 @@ std::string StateRoot();
 std::string ModuleDirectory(const void* symbolAddress);
 uint64_t ProcessId();
 
+// True when this process is an x86_64 binary translated by Rosetta on Apple Silicon.
+// VideoToolbox HEVC hardware encode is unavailable under Rosetta, so the runtime
+// falls back to H.264 when this is true (see PreferredVideoCodec).
+bool RunningUnderRosetta();
+
 } // namespace oxrsys::runtime_platform

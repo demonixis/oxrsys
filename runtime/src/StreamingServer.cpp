@@ -8,6 +8,7 @@
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
+#include "CodecSelect.h"
 #include <oxrsys/protocol/Foveation.h>
 #include <oxrsys/protocol/FecCodec.h>
 
@@ -1336,7 +1337,7 @@ void StreamingServer::EncodeThread()
                 {
                     nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
                 }
-                nalHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+                nalHeader.codec = static_cast<uint8_t>(oxrsys::PreferredVideoCodec());
 
                 memcpy(nal.tcpPayload.data(), &nalHeader, sizeof(nalHeader));
                 memcpy(nal.tcpPayload.data() + sizeof(nalHeader), nalData, nalSize);
@@ -2571,7 +2572,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
     poseHeader.totalPackets = 0;
     poseHeader.payloadSize = sizeof(posePayload);
     poseHeader.flags = oxr::protocol::VIDEO_FLAG_RENDER_POSE;
-    poseHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+    poseHeader.codec = static_cast<uint8_t>(oxrsys::PreferredVideoCodec());
     poseHeader.presentationTimeNs = frame.timestampNs;
 
     uint8_t buf[sizeof(poseHeader) + sizeof(posePayload)];
@@ -2638,7 +2639,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
         }
-        nalHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+        nalHeader.codec = static_cast<uint8_t>(oxrsys::PreferredVideoCodec());
 
         std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
         if (!SendTcpRecordParts(videoSocket,
@@ -2715,7 +2716,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_END_OF_FRAME;
         }
-        header.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+        header.codec = static_cast<uint8_t>(oxrsys::PreferredVideoCodec());
         header.presentationTimeNs = timestampNs;
 
         size_t packetSize = sizeof(header) + payloadSize;
@@ -2773,7 +2774,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
             }
-            fecHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+            fecHeader.codec = static_cast<uint8_t>(oxrsys::PreferredVideoCodec());
             fecHeader.presentationTimeNs = timestampNs;
 
             memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
