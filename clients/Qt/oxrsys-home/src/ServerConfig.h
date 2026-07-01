@@ -19,6 +19,7 @@ struct ServerConfig
     double resolutionScale = 0.75;
     double dynamicResolutionMinScale = 0.50;
     int keyframeIntervalSec = 2;
+    QString videoCodec = "h265";
     QString encoderPreset = "balanced";
     QString transport = "auto";
     QString foveatedEncodingPreset = "off";
@@ -42,6 +43,7 @@ struct ServerConfig
 };
 
 QString encoderPresetDisplayName(const QString& value);
+QString videoCodecDisplayName(const QString& value);
 QString transportDisplayName(const QString& value);
 QString foveationPresetDisplayName(const QString& value);
 QString clientReprojectionDisplayName(const QString& value);

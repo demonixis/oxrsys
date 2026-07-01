@@ -21,7 +21,7 @@ namespace oxr
  *
  * Runs a background thread that:
  * 1. Listens for server discovery broadcasts
- * 2. Receives H.265 video packets and reassembles NAL units
+ * 2. Receives encoded video packets and reassembles NAL units
  * 3. Recovers lost packets using FEC parity when possible
  */
 class NetworkReceiver
@@ -29,7 +29,7 @@ class NetworkReceiver
 public:
     using OnNalUnitCallback = std::function<void(const uint8_t* data, size_t size,
                                                  int64_t timestampNs, int64_t receiveTimeNs,
-                                                 uint8_t flags)>;
+                                                 uint8_t flags, uint8_t codec)>;
     using OnConnectionLostCallback = std::function<void(const char* reason)>;
     // serverIp is the IP address of the broadcasting server (from recvfrom)
     using OnServerFoundCallback = std::function<void(const protocol::ServerAnnounce& server,
@@ -108,6 +108,7 @@ private:
         uint32_t receivedPackets = 0;
         int64_t timestampNs = 0;
         uint8_t flags = 0;
+        uint8_t codec = static_cast<uint8_t>(protocol::VideoCodec::H265);
         std::vector<uint8_t> data;
         std::vector<uint8_t> packetReceived;
         std::vector<uint16_t> packetSizes;  // Actual size of each packet's payload

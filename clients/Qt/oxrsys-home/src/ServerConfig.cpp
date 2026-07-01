@@ -67,6 +67,11 @@ bool isAbrMode(const QString& value)
     return value == "off" || value == "bitrate" || value == "full";
 }
 
+bool isVideoCodec(const QString& value)
+{
+    return value == "h265" || value == "h264" || value == "auto";
+}
+
 bool isOcclusionMode(const QString& value)
 {
     return value == "off" || value == "scene_mesh" || value == "environment_depth";
@@ -248,6 +253,7 @@ QString ServerConfig::defaultText()
         "resolution_scale = 0.75\n"
         "dynamic_resolution_min_scale = 0.50\n"
         "keyframe_interval_sec = 2\n"
+        "video_codec = \"h265\"\n"
         "encoder_preset = \"balanced\"\n"
         "transport = \"auto\"\n"
         "foveated_encoding_preset = \"off\"\n"
@@ -317,6 +323,12 @@ ServerConfig ServerConfig::parse(const QString& text)
     if (preset == "quality" || preset == "balanced" || preset == "speed")
     {
         config.encoderPreset = preset;
+    }
+
+    const QString videoCodec = stringValue("video_codec", text);
+    if (isVideoCodec(videoCodec))
+    {
+        config.videoCodec = videoCodec;
     }
 
     const QString transportValue = stringValue("transport", text);
@@ -436,6 +448,7 @@ QString ServerConfig::mergedInto(const QString& currentText) const
         {"resolution_scale", decimalString(resolutionScale)},
         {"dynamic_resolution_min_scale", decimalString(dynamicResolutionMinScale)},
         {"keyframe_interval_sec", QString::number(keyframeIntervalSec)},
+        {"video_codec", QString("\"%1\"").arg(videoCodec)},
         {"encoder_preset", QString("\"%1\"").arg(encoderPreset)},
         {"transport", QString("\"%1\"").arg(transport)},
         {"foveated_encoding_preset", QString("\"%1\"").arg(foveatedEncodingPreset)},
@@ -472,6 +485,19 @@ QString encoderPresetDisplayName(const QString& value)
         return "Speed";
     }
     return "Balanced";
+}
+
+QString videoCodecDisplayName(const QString& value)
+{
+    if (value == "h264")
+    {
+        return "H.264";
+    }
+    if (value == "auto")
+    {
+        return "Auto";
+    }
+    return "H.265";
 }
 
 QString transportDisplayName(const QString& value)

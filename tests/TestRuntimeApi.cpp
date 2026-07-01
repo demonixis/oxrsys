@@ -2695,3 +2695,43 @@ TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime]
     CHECK(xrAcquireSwapchainImage(staticSwapchain, nullptr, &extraIndex) == XR_ERROR_CALL_ORDER_INVALID);
     XR_CHECK(xrDestroySwapchain(staticSwapchain));
 }
+
+TEST_CASE("Swapchain creation propagates backend initialization failures", "[runtime][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = 0;
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+
+    XrSwapchain swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}
+
+TEST_CASE("Unsupported swapchain mip counts report feature unsupported", "[runtime][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    createInfo.format = SelectColorSwapchainFormat(context.session);
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 2;
+
+    XrSwapchain swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}

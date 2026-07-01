@@ -13,12 +13,17 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<ServerAnnounce>.offset(of: \.spatialPort), 144)
         XCTAssertEqual(MemoryLayout<ClientConnect>.size, 96)
         XCTAssertEqual(MemoryLayout<ClientConnect>.offset(of: \.clientCapabilities), OXRProtocol.clientConnectBaseSize)
+        XCTAssertEqual(MemoryLayout<ClientConnect>.offset(of: \.supportedCodecs), 88)
         XCTAssertEqual(OXRProtocol.streamingMinBitrateMbps, 1)
         XCTAssertEqual(OXRProtocol.streamingMaxBitrateMbps, 200)
         XCTAssertEqual(OXRProtocol.clientMaxBitrateUseServerConfig, 0)
         XCTAssertEqual(OXRProtocol.spatialPort, 9948)
         XCTAssertEqual(ServerFeatureFlags.streamReconfigure, 0x00000010)
         XCTAssertEqual(ClientCapabilityFlags.streamReconfigure, 0x00000010)
+        XCTAssertEqual(VideoCodec.h264.rawValue, 1)
+        XCTAssertEqual(ClientCodecCapability.h265, 0x00000001)
+        XCTAssertEqual(ClientCodecCapability.h264, 0x00000002)
+        XCTAssertEqual(ClientConnect().preferredCodec, VideoCodec.h265.rawValue)
         XCTAssertEqual(ClientConnect().maxBitrateMbps, OXRProtocol.clientMaxBitrateUseServerConfig)
     }
 

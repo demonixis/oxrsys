@@ -21,6 +21,34 @@ namespace oxr
 namespace
 {
 
+const char* CodecMimeType(protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case protocol::VideoCodec::H264:
+            return "video/avc";
+        case protocol::VideoCodec::H265:
+            return "video/hevc";
+        case protocol::VideoCodec::AV1:
+        default:
+            return nullptr;
+    }
+}
+
+const char* CodecDisplayName(protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case protocol::VideoCodec::H264:
+            return "H.264";
+        case protocol::VideoCodec::AV1:
+            return "AV1";
+        case protocol::VideoCodec::H265:
+        default:
+            return "H.265";
+    }
+}
+
 int64_t SteadyClockNowNs()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -34,10 +62,20 @@ VideoDecoder::~VideoDecoder()
     Shutdown();
 }
 
-bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
+bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCodec videoCodec)
 {
+    const char* mimeType = CodecMimeType(videoCodec);
+    if (mimeType == nullptr)
+    {
+        LOGE("Unsupported video codec: %u", static_cast<uint32_t>(videoCodec));
+        return false;
+    }
+
+    Shutdown();
+
     width_ = width;
     height_ = height;
+    activeCodec_ = videoCodec;
 
     // Create AImageReader as the output surface for MediaCodec.
     // We use AHardwareBuffer from the decoded AImage for zero-copy GPU rendering
@@ -67,11 +105,11 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
 
     LOGI("AImageReader created: %ux%u, format=YUV_420_888", width, height);
 
-    // Create H.265 decoder
-    codec_ = AMediaCodec_createDecoderByType("video/hevc");
+    // Create decoder for the selected stream codec.
+    codec_ = AMediaCodec_createDecoderByType(mimeType);
     if (codec_ == nullptr)
     {
-        LOGE("Failed to create H.265 decoder");
+        LOGE("Failed to create %s decoder (%s)", CodecDisplayName(activeCodec_), mimeType);
         AImageReader_delete(imageReader_);
         imageReader_ = nullptr;
         outputWindow_ = nullptr;
@@ -80,7 +118,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
 
     // Configure decoder
     AMediaFormat* format = AMediaFormat_new();
-    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/hevc");
+    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mimeType);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
     const uint64_t pixelCount = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
@@ -125,8 +163,9 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
     outputThreadRunning_.store(true);
     outputThread_ = std::thread(&VideoDecoder::OutputThreadMain, this);
 
-    LOGI("H.265 decoder initialized with AImageReader surface: %ux%u maxInput=%llu",
-         width, height, (unsigned long long)maxInputSize);
+    LOGI("%s decoder initialized with AImageReader surface: %ux%u mime=%s maxInput=%llu",
+         CodecDisplayName(activeCodec_), width, height, mimeType,
+         (unsigned long long)maxInputSize);
     return true;
 }
 
@@ -159,6 +198,8 @@ void VideoDecoder::Shutdown()
         AImageReader_delete(imageReader_);
         imageReader_ = nullptr;
     }
+    pendingFrames_.clear();
+    outputFramesReleasedSinceAcquire_.store(0);
 }
 
 bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,

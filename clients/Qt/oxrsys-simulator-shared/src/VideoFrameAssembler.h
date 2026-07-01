@@ -16,6 +16,7 @@ struct AssembledVideoFrame
     uint32_t frameIndex = 0;
     int64_t presentationTimeNs = 0;
     int64_t receiveTimeNs = 0;
+    oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
     bool recoveredWithFec = false;
 };
 
@@ -45,6 +46,7 @@ private:
     uint16_t pendingReceivedPackets_ = 0;
     int64_t pendingPresentationTimeNs_ = 0;
     int64_t pendingLastPacketTimeNs_ = 0;
+    oxr::protocol::VideoCodec pendingCodec_ = oxr::protocol::VideoCodec::H265;
     QByteArray pendingFrameData_;
     QVector<uint16_t> pendingPacketSizes_;
     QVector<uint8_t> pendingPacketReceived_;

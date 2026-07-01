@@ -75,7 +75,7 @@ final class SimulatorModel {
     private let videoReceiver = VideoReceiver()
     private let trackingSender = TrackingSender()
     private let controlChannel = ControlChannel()
-    private let decoder = H265Decoder()
+    private let decoder = VideoDecoder()
     private let latencyReporter = LatencyReporter()
     let inputManager = SimulatorInputManager()
 
@@ -211,14 +211,18 @@ final class SimulatorModel {
             }
         }
 
-        videoReceiver.start { [weak self] nalData, presentationTimeNs, receiveTimeNs in
+        videoReceiver.startReceivingEncoded(onNalUnit: { [weak self] frame in
             guard let self else { return }
             self.latencyReporter.noteFrameReceived(
-                presentationTimeNs: presentationTimeNs,
-                receiveTimeNs: receiveTimeNs
+                presentationTimeNs: frame.presentationTimeNs,
+                receiveTimeNs: frame.receiveTimeNs
             )
-            self.decoder.decode(nalData: nalData, presentationTimeNs: presentationTimeNs)
-        }
+            self.decoder.decode(
+                nalData: frame.data,
+                codec: frame.codec,
+                presentationTimeNs: frame.presentationTimeNs
+            )
+        })
 
         Thread.sleep(forTimeInterval: 0.05)
 

@@ -9,6 +9,7 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 #include <mutex>
+#include <oxrsys/protocol/Protocol.h>
 #include <thread>
 
 struct ANativeWindow;
@@ -18,7 +19,7 @@ namespace oxr
 {
 
 /**
- * Hardware H.265 video decoder using Android MediaCodec.
+ * Hardware video decoder using Android MediaCodec.
  *
  * Receives NAL units from the network, feeds them to the hardware decoder,
  * and outputs decoded frames via AImageReader → AHardwareBuffer for zero-copy
@@ -37,10 +38,10 @@ public:
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
-    bool Initialize(uint32_t width, uint32_t height);
+    bool Initialize(uint32_t width, uint32_t height, protocol::VideoCodec codec);
     void Shutdown();
 
-    // Feed an H.265 NAL unit to the decoder
+    // Feed an encoded video NAL unit to the decoder.
     bool SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
                        int64_t receiveTimeNs, bool alphaBlend);
 
@@ -69,6 +70,7 @@ public:
     void ReleaseFrame();
 
     bool IsInitialized() const { return codec_ != nullptr; }
+    protocol::VideoCodec GetCodec() const { return activeCodec_; }
 
     uint32_t GetWidth() const { return width_; }
     uint32_t GetHeight() const { return height_; }
@@ -91,6 +93,7 @@ private:
     bool ConsumeSubmittedFrameMetadata(int64_t presentationTimeUs, PendingFrameMetadata* outMetadata);
 
     AMediaCodec* codec_ = nullptr;
+    protocol::VideoCodec activeCodec_ = protocol::VideoCodec::H265;
     AImageReader* imageReader_ = nullptr;
     ANativeWindow* outputWindow_ = nullptr;     // Owned by AImageReader, do not release
     AImage* currentImage_ = nullptr;

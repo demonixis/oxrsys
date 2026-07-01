@@ -128,6 +128,13 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
 };
 
+enum ClientCodecCapabilityFlags : uint32_t
+{
+    CLIENT_CODEC_CAPABILITY_H265 = 0x00000001,
+    CLIENT_CODEC_CAPABILITY_H264 = 0x00000002,
+    CLIENT_CODEC_CAPABILITY_AV1 = 0x00000004,
+};
+
 enum class FoveationPreset : uint32_t
 {
     Off = 0,
@@ -173,8 +180,8 @@ struct ServerAnnounce
     uint32_t renderWidth;      // Stereo side-by-side width (2x per-eye)
     uint32_t renderHeight;     // Per-eye height
     uint32_t refreshRateHz;    // Target refresh rate (72, 90, 120)
-    uint32_t encodedWidth;     // Actual H.265 encoded width (may be < renderWidth if scaled)
-    uint32_t encodedHeight;    // Actual H.265 encoded height (may be < renderHeight if scaled)
+    uint32_t encodedWidth;     // Actual encoded stream width (may be < renderWidth if scaled)
+    uint32_t encodedHeight;    // Actual encoded stream height (may be < renderHeight if scaled)
     char serverName[64];       // Null-terminated UTF-8
 
     // Protocol v1.1 trailing fields. The first 92 bytes are the stable v1.0
@@ -213,7 +220,7 @@ struct ClientConnect
     // prefix so older servers can still parse the original connect message.
     uint32_t clientCapabilities = 0; // ClientCapabilityFlags
     uint32_t audioSampleRateHz = 48000;
-    uint32_t reserved2 = 0;
+    uint32_t supportedCodecs = 0; // ClientCodecCapabilityFlags; 0 means legacy H.265-only
     uint32_t reserved3 = 0;
 };
 

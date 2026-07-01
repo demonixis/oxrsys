@@ -56,7 +56,7 @@ The handshake exposes:
 - refresh rate
 - server and device names; Android clients send the OpenXR `systemName` in
   `ClientConnect.deviceName`
-- preferred codec and bitrate limits
+- preferred codec, supported codec mask, and bitrate limits
 - server feature flags for foveated encoding, client foveation override, client upscaling, stream
   reconfiguration, passthrough, occlusion, spatial/scene support, and reserved headset audio
 - client capability flags for foveated encoding, client foveation, client upscaling, stream
@@ -84,6 +84,15 @@ no newly decoded video frame is ready:
 (`CLIENT_MAX_BITRATE_USE_SERVER_CONFIG`) means the client does not impose a
 bitrate cap, so the runtime uses `streaming.bitrate_mbps` from its config. The
 runtime accepts configured bitrates from `1` to `200` Mbps.
+
+`ClientConnect.supportedCodecs` reuses the former v1.1 reserved field at byte offset 88.
+A value of `0` is the legacy behavior and means H.265-only. New clients set
+`CLIENT_CODEC_CAPABILITY_H265`, `CLIENT_CODEC_CAPABILITY_H264`, or future codec bits. The runtime
+keeps H.265 as the default and only selects H.264 when the client explicitly advertises H.264
+support. `ClientConnect.preferredCodec` is honored only when `streaming.video_codec = "auto"` and the
+preferred codec is implemented by both sides. Android and shared Apple clients advertise H.264 and
+H.265 support while keeping H.265 as their preferred codec. Each video packet/NAL header carries the
+selected `VideoCodec`, so the wire format does not need a codec-specific stream.
 
 The runtime announces the configured preferred headset refresh rate. Current Home-supported values
 are `60`, `72`, `80`, `90`, and `120` Hz. Quest clients request the announced value through
@@ -122,6 +131,9 @@ Current codec identifiers:
 - `H265`
 - `H264`
 - `AV1`
+
+`AV1` is reserved in the enum and packet headers but is not selected by the runtime until an encoder
+and client decoder path are implemented and verified.
 
 USB TCP video sends complete encoded NAL units as `VideoNal` records. It does not use UDP fragmentation, FEC, or NACK recovery.
 

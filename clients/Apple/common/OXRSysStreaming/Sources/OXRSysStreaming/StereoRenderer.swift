@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// StereoRenderer.swift — Metal renderer that displays decoded H.265 video frames.
+// StereoRenderer.swift - Metal renderer that displays decoded video frames.
 // Renders a full-screen textured quad with the stereo side-by-side video.
 
 import CoreVideo
@@ -52,7 +52,7 @@ public final class StereoRenderer: NSObject, @unchecked Sendable {
         setupTextureCache()
     }
 
-    /// Called from the H265Decoder callback (background thread).
+    /// Called from the VideoDecoder callback (background thread).
     public func submitFrame(_ pixelBuffer: CVPixelBuffer) {
         locked {
             latestPixelBuffer = pixelBuffer

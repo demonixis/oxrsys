@@ -16,6 +16,7 @@ struct RuntimeStreamingStats
     int renderHeight = 0;
     int encodedWidth = 0;
     int encodedHeight = 0;
+    QString videoCodec;
     QString encoderPreset;
     QString foveatedEncodingPreset;
     QString clientFoveationPreset;

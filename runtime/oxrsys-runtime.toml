@@ -32,6 +32,11 @@ dynamic_resolution_min_scale = 0.50
 # Default 2 is a good balance. Use 1 for lossy WiFi, 5+ for USB.
 keyframe_interval_sec = 2
 
+# Video codec: "h265", "h264", or "auto".
+# H.265 remains the default for headset compatibility; H.264 is useful for
+# FFmpeg/Qt simulator validation and clients that advertise H.264 support.
+video_codec = "h265"
+
 # Encoder speed preset: "quality", "balanced", "speed"
 # speed  = lowest latency, fastest encode, lower quality
 # balanced = default, good mix

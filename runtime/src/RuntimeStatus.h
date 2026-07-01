@@ -18,6 +18,7 @@ public:
         uint32_t renderHeight = 0;
         uint32_t encodedWidth = 0;
         uint32_t encodedHeight = 0;
+        std::string videoCodec;
         std::string encoderPreset;
         std::string foveatedEncodingPreset;
         std::string clientFoveationPreset;

@@ -20,6 +20,7 @@ resolution_scale = 0.8
 dynamic_resolution_min_scale = 0.55
 refresh_rate_hz = 120
 keyframe_interval_sec = 4
+video_codec = "h264"
 encoder_preset = "quality"
 foveated_encoding_preset = "medium"
 client_foveation_preset = "high"
@@ -50,6 +51,7 @@ quest_logcat = yes
     CHECK(values.dynamicResolutionMinScale == 0.55f);
     CHECK(values.refreshRateHz == 120);
     CHECK(values.keyframeIntervalSec == 4);
+    CHECK(values.videoCodec == "h264");
     CHECK(values.encoderPreset == "quality");
     CHECK(values.foveatedEncodingPreset == "medium");
     CHECK(values.clientFoveationPreset == "high");
@@ -77,6 +79,7 @@ resolution_scale = 2.0
 dynamic_resolution_min_scale = 0.1
 refresh_rate_hz = 144
 keyframe_interval_sec = 0
+video_codec = "vp9"
 encoder_preset = "turbo"
 foveated_encoding_preset = "extreme"
 client_foveation_preset = "ultra"
@@ -93,6 +96,7 @@ occlusion_mode = "magic"
     defaults.dynamicResolutionMinScale = 0.45f;
     defaults.refreshRateHz = 80;
     defaults.keyframeIntervalSec = 3;
+    defaults.videoCodec = "h265";
     defaults.encoderPreset = "speed";
     defaults.foveatedEncodingPreset = "light";
     defaults.clientFoveationPreset = "medium";
@@ -110,6 +114,7 @@ occlusion_mode = "magic"
     CHECK(values.dynamicResolutionMinScale == 0.45f);
     CHECK(values.refreshRateHz == 80);
     CHECK(values.keyframeIntervalSec == 3);
+    CHECK(values.videoCodec == "h265");
     CHECK(values.encoderPreset == "speed");
     CHECK(values.foveatedEncodingPreset == "light");
     CHECK(values.clientFoveationPreset == "medium");

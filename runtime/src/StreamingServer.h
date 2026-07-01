@@ -113,6 +113,7 @@ private:
     {
         uint32_t frameIndex = 0;
         int64_t timestampNs = 0;
+        oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
         bool alphaBlend = false;
         bool hasPose = false;
         float headPosition[3] = {};
@@ -207,6 +208,7 @@ private:
     std::atomic_bool clientSupportsStreamReconfigure_{false};
     std::atomic_bool clientSupportsMixedRealityPassthrough_{false};
     std::atomic_bool clientSupportsSpatialEntity_{false};
+    std::atomic<oxr::protocol::VideoCodec> activeVideoCodec_{oxr::protocol::VideoCodec::H265};
     std::atomic<uint32_t> targetRefreshRateHz_{90};
     std::atomic<float> clientPipelineLatencyMs_{18.0f};
     std::atomic<float> serverPipelineLatencyMs_{10.0f};
@@ -295,7 +297,8 @@ private:
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
-                     bool isKeyframe, bool alphaBlend, int64_t timestampNs);
+                     bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                     oxr::protocol::VideoCodec codec);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
     static bool SendTcpRecordParts(SocketHandle socket, oxr::protocol::TcpRecordType type,

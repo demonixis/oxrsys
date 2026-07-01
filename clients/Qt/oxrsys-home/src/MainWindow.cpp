@@ -862,6 +862,10 @@ QWidget* MainWindow::buildStreamingTab()
     encoderPresetCombo_->addItem("Quality", "quality");
     encoderPresetCombo_->addItem("Balanced", "balanced");
     encoderPresetCombo_->addItem("Speed", "speed");
+    videoCodecCombo_ = new QComboBox(configBox);
+    videoCodecCombo_->addItem("H.265", "h265");
+    videoCodecCombo_->addItem("H.264", "h264");
+    videoCodecCombo_->addItem("Auto", "auto");
     foveatedEncodingPresetCombo_ = new QComboBox(configBox);
     foveatedEncodingPresetCombo_->addItem("Off", "off");
     foveatedEncodingPresetCombo_->addItem("Light", "light");
@@ -882,6 +886,7 @@ QWidget* MainWindow::buildStreamingTab()
     passthroughCheckBox_ = new QCheckBox("Passthrough", configBox);
     form->addRow("Refresh rate", refreshRateCombo_);
     form->addRow("Encoder preset", encoderPresetCombo_);
+    form->addRow("Video codec", videoCodecCombo_);
     form->addRow("Foveated encoding", foveatedEncodingPresetCombo_);
     form->addRow("Transport", configTransportCombo_);
     form->addRow("ABR mode", abrModeCombo_);
@@ -937,6 +942,7 @@ QWidget* MainWindow::buildStreamingTab()
     connect(keyframeSlider_, &QSlider::valueChanged, this, connectConfigChanged);
     connect(refreshRateCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(encoderPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
+    connect(videoCodecCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(foveatedEncodingPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(clientFoveationPresetCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
     connect(clientReprojectionCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, connectConfigChanged);
@@ -1048,7 +1054,7 @@ QWidget* MainWindow::buildDeveloperTab()
     metricsGrid->addWidget(buildMetric("Refresh", &refreshRateMetricLabel_, "Display target"), 0, 0);
     metricsGrid->addWidget(buildMetric("Bitrate", &bitrateMetricLabel_, "Current / max"), 0, 1);
     metricsGrid->addWidget(buildMetric("Render", &renderMetricLabel_, "Stereo source"), 0, 2);
-    metricsGrid->addWidget(buildMetric("Encoded", &encodedMetricLabel_, "H.265 stream"), 0, 3);
+    metricsGrid->addWidget(buildMetric("Encoded", &encodedMetricLabel_, "Encoded stream"), 0, 3);
     metricsGrid->addWidget(buildMetric("Scale", &scaleMetricLabel_, "Current / min"), 1, 0);
     metricsGrid->addWidget(buildMetric("Passthrough", &passthroughMetricLabel_, "State / occlusion"), 1, 1);
     metricsGrid->addWidget(buildMetric("Spatial", &spatialMetricLabel_, "State / config"), 1, 2);
@@ -1267,7 +1273,7 @@ void MainWindow::refreshStreaming()
         clientUpscalingCheckBox_, headsetAudioCheckBox_, passthroughCheckBox_, spatialEnabledCheckBox_,
         spatialAnchorsCheckBox_, spatialSceneCheckBox_, spatialPersistenceCheckBox_,
         bitrateSlider_, resolutionSlider_, dynamicResolutionSlider_, keyframeSlider_,
-        refreshRateCombo_, encoderPresetCombo_, foveatedEncodingPresetCombo_,
+        refreshRateCombo_, encoderPresetCombo_, videoCodecCombo_, foveatedEncodingPresetCombo_,
         clientFoveationPresetCombo_, clientReprojectionCombo_, abrModeCombo_,
         occlusionModeCombo_, configTransportCombo_, usbDeviceCombo_,
     };
@@ -1292,6 +1298,7 @@ void MainWindow::refreshStreaming()
     keyframeSlider_->setValue(config.keyframeIntervalSec);
     refreshRateCombo_->setCurrentIndex(std::max(refreshRateCombo_->findData(config.refreshRateHz), 0));
     encoderPresetCombo_->setCurrentIndex(std::max(encoderPresetCombo_->findData(config.encoderPreset), 0));
+    videoCodecCombo_->setCurrentIndex(std::max(videoCodecCombo_->findData(config.videoCodec), 0));
     foveatedEncodingPresetCombo_->setCurrentIndex(
         std::max(foveatedEncodingPresetCombo_->findData(config.foveatedEncodingPreset), 0));
     clientFoveationPresetCombo_->setCurrentIndex(
@@ -1343,7 +1350,10 @@ void MainWindow::refreshDeveloper()
                                      .arg(stats.currentBitrateMbps)
                                      .arg(stats.maxBitrateMbps));
     renderMetricLabel_->setText(dimensionsText(stats.renderWidth, stats.renderHeight));
-    encodedMetricLabel_->setText(dimensionsText(stats.encodedWidth, stats.encodedHeight));
+    const QString encodedDimensions = dimensionsText(stats.encodedWidth, stats.encodedHeight);
+    encodedMetricLabel_->setText(stats.videoCodec.isEmpty()
+                                     ? encodedDimensions
+                                     : QString("%1 (%2)").arg(encodedDimensions, stats.videoCodec.toUpper()));
     scaleMetricLabel_->setText(QString("%1 / %2")
                                    .arg(stats.resolutionScale, 0, 'f', 2)
                                    .arg(stats.dynamicResolutionMinScale, 0, 'f', 2));
@@ -1512,6 +1522,7 @@ void MainWindow::updateConfigFromControls()
     config.dynamicResolutionMinScale = dynamicResolutionSlider_->value() / 100.0;
     config.keyframeIntervalSec = keyframeSlider_->value();
     config.encoderPreset = encoderPresetCombo_->currentData().toString();
+    config.videoCodec = videoCodecCombo_->currentData().toString();
     config.foveatedEncodingPreset = foveatedEncodingPresetCombo_->currentData().toString();
     config.clientFoveationPreset = clientFoveationPresetCombo_->currentData().toString();
     config.clientReprojection = clientReprojectionCombo_->currentData().toString();

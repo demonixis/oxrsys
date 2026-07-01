@@ -182,6 +182,11 @@ target_link_libraries(oxrsys_runtime_tests PRIVATE
     spdlog::spdlog
     ${CMAKE_DL_LIBS}
 )
+if(WIN32)
+    target_link_libraries(oxrsys_runtime_tests PRIVATE
+        ws2_32
+    )
+endif()
 if(APPLE)
     target_compile_definitions(oxrsys_runtime_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL
@@ -224,10 +229,31 @@ set_tests_properties(oxrsys_runtime_status_tests PROPERTIES
     TIMEOUT 120
 )
 
+add_executable(oxrsys_runtime_loader_extension_tests
+    tests/TestRuntimeLoaderExtensions.cpp
+)
+target_include_directories(oxrsys_runtime_loader_extension_tests PRIVATE
+    ${openxr_SOURCE_DIR}/include
+)
+target_link_libraries(oxrsys_runtime_loader_extension_tests PRIVATE
+    Catch2::Catch2WithMain
+    OpenXR::openxr_loader
+)
+add_dependencies(oxrsys_runtime_loader_extension_tests oxrsys_runtime)
+add_test(NAME oxrsys_runtime_loader_extension_tests
+    COMMAND oxrsys_runtime_loader_extension_tests
+)
+set_tests_properties(oxrsys_runtime_loader_extension_tests PROPERTIES
+    ENVIRONMENT
+        "HOME=${OXRSYS_TEST_HOME};XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME};XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME};APPDATA=${OXRSYS_TEST_APPDATA};XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+    TIMEOUT 120
+)
+
 set(OXRSYS_RUNTIME_TEST_TARGETS
     oxrsys_runtime
     oxrsys_runtime_tests
     oxrsys_runtime_status_tests
+    oxrsys_runtime_loader_extension_tests
 )
 
 if(APPLE)
@@ -259,6 +285,38 @@ if(APPLE)
         TIMEOUT 120
     )
     list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
+endif()
+
+if(WIN32)
+    add_executable(oxrsys_runtime_d3d_tests
+        tests/TestWindowsD3D.cpp
+    )
+    target_include_directories(oxrsys_runtime_d3d_tests PRIVATE
+        runtime/src
+        ${openxr_SOURCE_DIR}/include
+    )
+    target_link_libraries(oxrsys_runtime_d3d_tests PRIVATE
+        Catch2::Catch2WithMain
+        OpenXR::openxr_loader
+        d3d11
+        d3d12
+        dxgi
+    )
+    target_compile_definitions(oxrsys_runtime_d3d_tests PRIVATE
+        XR_USE_PLATFORM_WIN32
+        XR_USE_GRAPHICS_API_D3D11
+        XR_USE_GRAPHICS_API_D3D12
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+    add_dependencies(oxrsys_runtime_d3d_tests oxrsys_runtime)
+    add_test(NAME oxrsys_runtime_d3d_tests COMMAND oxrsys_runtime_d3d_tests)
+    set_tests_properties(oxrsys_runtime_d3d_tests PROPERTIES
+        ENVIRONMENT
+            "HOME=${OXRSYS_TEST_HOME};XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME};XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME};APPDATA=${OXRSYS_TEST_APPDATA};XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
+        TIMEOUT 120
+    )
+    list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_d3d_tests)
 endif()
 
 add_dependencies(oxrsys_runtime_sync_compile_commands
@@ -313,6 +371,39 @@ if(OXRSYS_ENABLE_CTS)
     set(OXRSYS_CTS_SOURCE_DIR "${OXRSYS_CTS_PREFIX_DIR}/source")
     set(OXRSYS_CTS_BINARY_DIR "${OXRSYS_CTS_PREFIX_DIR}/build")
     set(OXRSYS_CTS_REPORT_DIR "${CMAKE_BINARY_DIR}/reports/openxr-cts")
+    set(OXRSYS_CTS_CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+    )
+    if(APPLE)
+        execute_process(
+            COMMAND xcrun --find metal
+            RESULT_VARIABLE OXRSYS_CTS_METAL_RESULT
+            OUTPUT_VARIABLE OXRSYS_CTS_METAL_EXECUTABLE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(OXRSYS_CTS_METAL_RESULT EQUAL 0 AND OXRSYS_CTS_METAL_EXECUTABLE)
+            set(MetalTools_METAL_EXECUTABLE "${OXRSYS_CTS_METAL_EXECUTABLE}" CACHE FILEPATH "Path to the Apple metal compiler" FORCE)
+        endif()
+        execute_process(
+            COMMAND xcrun --find metallib
+            RESULT_VARIABLE OXRSYS_CTS_METALLIB_RESULT
+            OUTPUT_VARIABLE OXRSYS_CTS_METALLIB_EXECUTABLE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(OXRSYS_CTS_METALLIB_RESULT EQUAL 0 AND OXRSYS_CTS_METALLIB_EXECUTABLE)
+            set(MetalTools_METALLIB_EXECUTABLE "${OXRSYS_CTS_METALLIB_EXECUTABLE}" CACHE FILEPATH "Path to the Apple metallib compiler" FORCE)
+        endif()
+        if(MetalTools_METAL_EXECUTABLE AND MetalTools_METALLIB_EXECUTABLE)
+            list(APPEND OXRSYS_CTS_CMAKE_ARGS
+                -DMetalTools_METAL_EXECUTABLE=${MetalTools_METAL_EXECUTABLE}
+                -DMetalTools_METALLIB_EXECUTABLE=${MetalTools_METALLIB_EXECUTABLE}
+            )
+        else()
+            message(WARNING "Could not resolve metal and metallib with xcrun; install the Xcode Metal Toolchain before running the CTS Metal target.")
+        endif()
+    endif()
 
     ExternalProject_Add(openxr_cts
         GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-CTS.git
@@ -322,7 +413,7 @@ if(OXRSYS_ENABLE_CTS)
         SOURCE_DIR "${OXRSYS_CTS_SOURCE_DIR}"
         BINARY_DIR "${OXRSYS_CTS_BINARY_DIR}"
         CMAKE_ARGS
-            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            ${OXRSYS_CTS_CMAKE_ARGS}
         UPDATE_DISCONNECTED ON
         INSTALL_COMMAND ""
         EXCLUDE_FROM_ALL ON

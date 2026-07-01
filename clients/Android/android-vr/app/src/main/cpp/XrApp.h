@@ -35,7 +35,7 @@ namespace oxr
  * Manages the OpenXR session lifecycle on the headset:
  * - Creates XrInstance with EGL/OpenGL ES, XrSession, XrSwapchains
  * - Discovers the macOS server via UDP broadcast
- * - Receives H.265 video frames, decodes, and blits to swapchains
+ * - Receives H.264/H.265 video frames, decodes, and blits to swapchains
  * - Sends head/controller tracking data back to the server
  */
 class XrApp
@@ -120,7 +120,7 @@ private:
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
     float GetCurrentRefreshRateHz() const;
     void OnNalUnitReceived(const uint8_t* data, size_t size,
-                           int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags);
+                           int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags, uint8_t codec);
 
     bool RenderFrame(XrTime predictedDisplayTime);
     void BlitVideoToSwapchain(int eye);
@@ -271,6 +271,9 @@ private:
     uint16_t serverVideoPort_ = 0;
     uint16_t serverTrackingPort_ = 0;
     uint16_t serverSpatialPort_ = 0;
+    uint32_t decoderEncodedWidth_ = 0;
+    uint32_t decoderEncodedHeight_ = 0;
+    std::atomic<protocol::VideoCodec> activeVideoCodec_{protocol::VideoCodec::H265};
     std::chrono::steady_clock::time_point connectionTime_;
     std::string shellStatusText_ = "Searching for runtime";
 

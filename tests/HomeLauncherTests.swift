@@ -287,6 +287,7 @@ struct HomeLauncherTests {
         [streaming]
         transport = "usb_adb"
         refresh_rate_hz = 120
+        video_codec = "h264"
         foveated_encoding_preset = "medium"
         client_foveation_preset = "high"
         client_upscaling = true
@@ -305,6 +306,7 @@ struct HomeLauncherTests {
         """)
         try expect(parsed.transport == .usbAdb, "Expected USB ADB transport parse")
         try expect(parsed.refreshRateHz == 120, "Expected refresh parse")
+        try expect(parsed.videoCodec == .h264, "Expected codec parse")
         try expect(parsed.foveatedEncodingPreset == .medium, "Expected foveated encoding parse")
         try expect(parsed.clientFoveationPreset == .high, "Expected client foveation parse")
         try expect(parsed.clientUpscaling == true, "Expected client upscaling parse")
@@ -322,6 +324,7 @@ struct HomeLauncherTests {
         let merged = parsed.merged(into: OXRSysServerConfig.defaultText)
         try expect(merged.contains("transport = \"usb_adb\""), "Expected USB ADB transport serialization")
         try expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization")
+        try expect(merged.contains("video_codec = \"h264\""), "Expected codec serialization")
         try expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization")
         try expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization")
         try expect(merged.contains("client_upscaling = true"), "Expected upscaling serialization")
@@ -356,6 +359,7 @@ struct HomeLauncherTests {
         try expect(merged.contains("bitrate_mbps = 50"), "Expected default bitrate serialization")
         try expect(merged.contains("transport = \"auto\""), "Expected default transport serialization")
         try expect(merged.contains("refresh_rate_hz = 72"), "Expected default refresh serialization")
+        try expect(merged.contains("video_codec = \"h265\""), "Expected default codec serialization")
         try expect(!merged.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config")
         try expect(!merged.contains("Rendering FOV"), "Expected legacy simulator FOV comment removal")
         try expect(merged.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization")
@@ -411,6 +415,7 @@ struct HomeLauncherTests {
             "render_height": 1920,
             "encoded_width": 2752,
             "encoded_height": 1440,
+            "video_codec": "h264",
             "encoder_preset": "quality",
             "foveated_encoding_preset": "medium",
             "client_foveation_preset": "high",
@@ -468,6 +473,7 @@ struct HomeLauncherTests {
         try expect(stats?.refreshRateHz == 90, "Expected runtime stats refresh rate")
         try expect(stats?.currentBitrateMbps == 42, "Expected runtime stats bitrate")
         try expect(stats?.encodedWidth == 2752, "Expected runtime stats encoded width")
+        try expect(stats?.videoCodec == "h264", "Expected runtime stats codec")
         try expect(stats?.encoderPreset == "quality", "Expected runtime stats encoder preset")
         try expect(stats?.foveatedEncodingPreset == "medium", "Expected runtime stats FFE preset")
         try expect(stats?.clientFoveationPreset == "high", "Expected runtime stats FFR preset")

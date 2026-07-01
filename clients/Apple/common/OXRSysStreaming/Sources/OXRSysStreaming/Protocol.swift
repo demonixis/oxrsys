@@ -210,7 +210,7 @@ public struct ClientConnect: Sendable {
     public var versionMajor: UInt8 = 1
     public var versionMinor: UInt8 = 0
     public var reserved: UInt8 = 0
-    public var preferredCodec: UInt32 = 0 // H265
+    public var preferredCodec: UInt32 = VideoCodec.h265.rawValue
     public var maxBitrateMbps: UInt32 = OXRProtocol.clientMaxBitrateUseServerConfig
     public var refreshRateHz: UInt32 = 0
     public var deviceName: (
@@ -230,7 +230,7 @@ public struct ClientConnect: Sendable {
     )
     public var clientCapabilities: UInt32 = 0
     public var audioSampleRateHz: UInt32 = 48000
-    public var reserved2: UInt32 = 0
+    public var supportedCodecs: UInt32 = 0 // 0 means legacy H.265-only
     public var reserved3: UInt32 = 0
 
     public init() {}
@@ -253,6 +253,12 @@ public enum VideoCodec: UInt32, Sendable {
     case h265 = 0
     case h264 = 1
     case av1 = 2
+}
+
+public struct ClientCodecCapability {
+    public static let h265: UInt32 = 0x00000001
+    public static let h264: UInt32 = 0x00000002
+    public static let av1: UInt32 = 0x00000004
 }
 
 public struct VideoPacketHeader: Sendable {

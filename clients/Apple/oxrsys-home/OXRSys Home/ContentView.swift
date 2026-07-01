@@ -471,6 +471,12 @@ struct ContentView: View {
                             }
                         }
 
+                        Picker("Video codec", selection: streamingBinding(\.videoCodec)) {
+                            ForEach(VideoCodecSetting.allCases) { codec in
+                                Text(codec.displayName).tag(codec)
+                            }
+                        }
+
                         Picker("Foveated encoding", selection: streamingBinding(\.foveatedEncodingPreset)) {
                             ForEach(FoveationPresetSetting.allCases) { preset in
                                 Text(preset.displayName).tag(preset)
@@ -677,7 +683,7 @@ struct ContentView: View {
                         RuntimeStatsMetric(
                             title: "Encoded",
                             value: dimensions(width: latest.encodedWidth, height: latest.encodedHeight),
-                            subtitle: "H.265 stream",
+                            subtitle: latest.videoCodec.isEmpty ? "Encoded stream" : "\(latest.videoCodec.uppercased()) stream",
                             systemImage: "rectangle.compress.vertical",
                             color: .purple
                         )

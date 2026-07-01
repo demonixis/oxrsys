@@ -129,7 +129,26 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     TransitionState(XR_SESSION_STATE_IDLE);
     TransitionState(XR_SESSION_STATE_READY);
 
-    spdlog::info("OXRSys: Vulkan session created");
+    const char* apiName = "unknown";
+    switch (graphicsContext_.api)
+    {
+        case GraphicsApi::Metal:
+            apiName = "Metal";
+            break;
+        case GraphicsApi::Vulkan:
+            apiName = "Vulkan";
+            break;
+        case GraphicsApi::OpenGL:
+            apiName = "OpenGL";
+            break;
+        case GraphicsApi::D3D11:
+            apiName = "D3D11";
+            break;
+        case GraphicsApi::D3D12:
+            apiName = "D3D12";
+            break;
+    }
+    spdlog::info("OXRSys: {} session created", apiName);
 }
 
 Session::~Session()
@@ -805,8 +824,29 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    if (createInfo->type != XR_TYPE_SWAPCHAIN_CREATE_INFO ||
+        createInfo->width == 0 ||
+        createInfo->height == 0 ||
+        createInfo->faceCount != 1 ||
+        createInfo->arraySize == 0 ||
+        createInfo->sampleCount != 1)
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (createInfo->mipCount != 1)
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
 
+    *swapchain = XR_NULL_HANDLE;
     auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
+    XrResult initializationResult = sc->InitializationResult();
+    if (initializationResult != XR_SUCCESS)
+    {
+        return initializationResult;
+    }
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
     return XR_SUCCESS;

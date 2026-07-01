@@ -168,7 +168,7 @@ final class AppModel {
     private let videoReceiver = VideoReceiver()
     private let trackingSender = TrackingSender()
     private let controlChannel = ControlChannel()
-    private let decoder = H265Decoder()
+    private let decoder = VideoDecoder()
     private let latencyReporter = LatencyReporter()
     private let trackingManager = VisionTrackingManager()
     private nonisolated let pixelBufferState = PixelBufferState()
@@ -378,13 +378,17 @@ final class AppModel {
             }
         }
 
-        videoReceiver.start(onNalUnit: { [weak self] nalData, presentationTimeNs, receiveTimeNs in
+        videoReceiver.startReceivingEncoded(onNalUnit: { [weak self] frame in
             guard let self else { return }
             self.latencyReporter.noteFrameReceived(
-                presentationTimeNs: presentationTimeNs,
-                receiveTimeNs: receiveTimeNs
+                presentationTimeNs: frame.presentationTimeNs,
+                receiveTimeNs: frame.receiveTimeNs
             )
-            self.decoder.decode(nalData: nalData, presentationTimeNs: presentationTimeNs)
+            self.decoder.decode(
+                nalData: frame.data,
+                codec: frame.codec,
+                presentationTimeNs: frame.presentationTimeNs
+            )
         }, onRenderPose: { [weak self] presentationTimeNs, orientation in
             let quat = simd_quatf(ix: orientation.0, iy: orientation.1, iz: orientation.2, r: orientation.3)
             self?.renderPoseReprojector.note(presentationTimeNs: presentationTimeNs, orientation: quat)

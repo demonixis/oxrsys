@@ -263,9 +263,9 @@ void NetworkReceiver::ReceiveThread(OnNalUnitCallback callback)
         uint32_t packetCount = packetsReceived_.fetch_add(1) + 1;
         if (packetCount <= 5 || packetCount % 500 == 0)
         {
-            LOGI("Video packet #%u: frame=%u pkt=%u/%u payload=%zu flags=0x%02x",
+            LOGI("Video packet #%u: frame=%u pkt=%u/%u payload=%zu flags=0x%02x codec=%u",
                  packetCount, header->frameIndex, header->packetIndex,
-                 header->totalPackets, payloadSize, header->flags);
+                 header->totalPackets, payloadSize, header->flags, header->codec);
         }
 
         // Handle render pose packets (server sends these before each frame)
@@ -323,14 +323,15 @@ void NetworkReceiver::ReceiveTcpThread(OnNalUnitCallback callback)
         lastCompletedFrameReceiveTimeNs_.store(receiveTimeNs);
         if (packetCount <= 5 || packetCount % 500 == 0)
         {
-            LOGI("USB TCP NAL #%u: frame=%u payload=%zu flags=0x%02x delivered=%u",
-                 packetCount, nalHeader->frameIndex, nalSize, nalHeader->flags, delivered);
+            LOGI("USB TCP NAL #%u: frame=%u payload=%zu flags=0x%02x codec=%u delivered=%u",
+                 packetCount, nalHeader->frameIndex, nalSize, nalHeader->flags,
+                 nalHeader->codec, delivered);
         }
 
         if (callback)
         {
             callback(nalData, nalSize, nalHeader->presentationTimeNs, receiveTimeNs,
-                     nalHeader->flags);
+                     nalHeader->flags, nalHeader->codec);
         }
     }
 
@@ -406,6 +407,7 @@ void NetworkReceiver::ReassembleFrame(const protocol::VideoPacketHeader& header,
         pendingFrame_.receivedPackets = 0;
         pendingFrame_.timestampNs = header.presentationTimeNs;
         pendingFrame_.flags = header.flags;
+        pendingFrame_.codec = header.codec;
         const size_t dataBytes = header.totalPackets * protocol::MAX_PACKET_PAYLOAD;
         if (pendingFrame_.data.size() < dataBytes)
         {
@@ -479,7 +481,7 @@ deliver:
             {
                 nalCallback_(pendingFrame_.compactedData.data(), totalSize,
                              pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags);
+                             pendingFrame_.flags, pendingFrame_.codec);
             }
         }
         else
@@ -488,7 +490,7 @@ deliver:
             {
                 nalCallback_(pendingFrame_.data.data(), totalSize,
                              pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags);
+                             pendingFrame_.flags, pendingFrame_.codec);
             }
         }
 

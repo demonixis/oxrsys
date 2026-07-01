@@ -123,7 +123,7 @@ idle. The fields are:
 - `sample_unix_ms`
 - `refresh_rate_hz`, `current_bitrate_mbps`, `max_bitrate_mbps`
 - `render_width`, `render_height`, `encoded_width`, `encoded_height`
-- `encoder_preset`, `foveated_encoding_preset`, `client_foveation_preset`,
+- `video_codec`, `encoder_preset`, `foveated_encoding_preset`, `client_foveation_preset`,
   `client_upscaling`, `client_reprojection_mode`, `abr_mode`, `abr_state`,
   `abr_profile`, `resolution_scale`, `dynamic_resolution_min_scale`,
   `stream_reconfigure`, `stream_config_sequence`, `passthrough_enabled`,
@@ -183,6 +183,7 @@ The structured editor covers the current runtime keys:
 - `streaming.dynamic_resolution_min_scale`
 - `streaming.refresh_rate_hz`
 - `streaming.keyframe_interval_sec`
+- `streaming.video_codec`
 - `streaming.encoder_preset`
 - `streaming.transport`
 - `streaming.foveated_encoding_preset`
@@ -204,6 +205,10 @@ The bitrate control accepts the shared runtime range, `1` to `200` Mbps. Apple
 and Qt simulator clients do not add their own bitrate ceiling, so the runtime
 status `max_bitrate_mbps` should reflect the configured value when those
 clients connect.
+
+The video codec control writes `h265`, `h264`, or `auto`. H.265 remains the default and legacy
+clients that do not advertise codec capabilities are treated as H.265-only. H.264 is selected only
+for clients that explicitly advertise H.264 support.
 
 The refresh control writes one of `60`, `72`, `80`, `90`, or `120` Hz. The
 runtime announces that value, and Quest clients request it through

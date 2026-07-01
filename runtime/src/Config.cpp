@@ -362,6 +362,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.keyframeIntervalSec = val;
                 }
             }
+            else if (key == "video_codec")
+            {
+                value = ParseString(value);
+                if (value == "h265" || value == "h264" || value == "auto")
+                {
+                    values.videoCodec = value;
+                }
+            }
             else if (key == "encoder_preset")
             {
                 value = ParseString(value);
@@ -552,7 +560,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s codec={} preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
@@ -561,6 +569,7 @@ bool Config::ReloadIfChangedLocked(bool force)
             newValues.resolutionScale,
             newValues.dynamicResolutionMinScale,
             newValues.keyframeIntervalSec,
+            newValues.videoCodec,
             newValues.encoderPreset,
             newValues.streamingTransport,
             newValues.foveatedEncodingPreset,

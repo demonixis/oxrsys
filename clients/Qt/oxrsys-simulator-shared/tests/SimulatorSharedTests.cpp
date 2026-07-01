@@ -28,7 +28,8 @@ oxr::protocol::VideoPacketHeader videoHeader(uint32_t frameIndex,
                                              uint16_t totalPackets,
                                              uint16_t payloadSize,
                                              uint8_t flags = oxr::protocol::VIDEO_FLAG_STEREO,
-                                             uint16_t fecGroupLastPacketPayloadSize = 0)
+                                             uint16_t fecGroupLastPacketPayloadSize = 0,
+                                             oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265)
 {
     oxr::protocol::VideoPacketHeader header = {};
     header.frameIndex = frameIndex;
@@ -36,7 +37,7 @@ oxr::protocol::VideoPacketHeader videoHeader(uint32_t frameIndex,
     header.totalPackets = totalPackets;
     header.payloadSize = payloadSize;
     header.flags = flags;
-    header.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+    header.codec = static_cast<uint8_t>(codec);
     header.fecGroupLastPacketPayloadSize = fecGroupLastPacketPayloadSize;
     header.presentationTimeNs = 1234 + frameIndex;
     return header;
@@ -48,14 +49,19 @@ void testCompleteVideoFrame()
     const QByteArray first("abc", 3);
     const QByteArray second("de", 2);
 
-    expect(assembler.addPacket(videoHeader(1, 0, 2, 3), first.constData(), first.size(), 10).isEmpty(),
+    expect(assembler.addPacket(videoHeader(1, 0, 2, 3, oxr::protocol::VIDEO_FLAG_STEREO, 0,
+                                           oxr::protocol::VideoCodec::H264),
+                               first.constData(), first.size(), 10).isEmpty(),
            "Expected first packet to wait for frame completion");
     const QList<AssembledVideoFrame> frames =
-        assembler.addPacket(videoHeader(1, 1, 2, 2), second.constData(), second.size(), 20);
+        assembler.addPacket(videoHeader(1, 1, 2, 2, oxr::protocol::VIDEO_FLAG_STEREO, 0,
+                                        oxr::protocol::VideoCodec::H264),
+                            second.constData(), second.size(), 20);
 
     expect(frames.size() == 1, "Expected one complete frame");
     expect(frames.first().nalUnit == QByteArray("abcde", 5), "Expected packet payload concatenation");
     expect(frames.first().presentationTimeNs == 1235, "Expected presentation timestamp");
+    expect(frames.first().codec == oxr::protocol::VideoCodec::H264, "Expected codec propagation");
 }
 
 void testDuplicatePacketIgnored()

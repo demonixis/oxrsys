@@ -82,6 +82,21 @@ namespace
 constexpr auto kUsbAdbRetryInterval = std::chrono::seconds(1);
 constexpr uint32_t kUsbAdbRetryLogInterval = 10;
 
+const char* VideoCodecName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "H.264";
+        case oxr::protocol::VideoCodec::H265:
+            return "H.265";
+        case oxr::protocol::VideoCodec::AV1:
+            return "AV1";
+        default:
+            return "unknown";
+    }
+}
+
 } // namespace
 
 // Foveated decompression follows ALVR's AADT inverse mapping (MIT licensed).
@@ -2070,6 +2085,9 @@ void XrApp::StartNetworking()
     lastFrameAcquireTimeNs_ = 0;
     lastReportedAcquireTimeNs_ = 0;
     skippedDecodedFrames_ = 0;
+    decoderEncodedWidth_ = 0;
+    decoderEncodedHeight_ = 0;
+    activeVideoCodec_.store(protocol::VideoCodec::H265);
     presentedVideoFrame_ = {};
     hasObservedProtocolAlphaFrame_ = false;
     loggedTransparentClearFallback_ = false;
@@ -2610,25 +2628,14 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
          foveationEyeWidthRatio_,
          foveationEyeHeightRatio_);
 
-    // CRITICAL: Start video receiver and decoder BEFORE sending ClientConnect.
+    // CRITICAL: Start video receiver BEFORE sending ClientConnect.
     // The server starts encoding immediately upon receiving ClientConnect.
     // If we send ClientConnect first, the initial keyframe packets arrive at port 9944
     // before we've bound the socket, and they're silently dropped by the OS.
-
-    // Initialize video decoder at the actual encoded resolution
-    if (videoDecoder_ && !videoDecoder_->IsInitialized())
-    {
-        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-        if (videoDecoder_->Initialize(decoderWidth, decoderHeight))
-        {
-            LOGI("Video decoder initialized: %ux%u (encoded), render %ux%u",
-                 decoderWidth, decoderHeight, videoWidth_, videoHeight_);
-        }
-        else
-        {
-            LOGE("Failed to initialize video decoder");
-        }
-    }
+    decoderEncodedWidth_ = decoderWidth;
+    decoderEncodedHeight_ = decoderHeight;
+    LOGI("Video decoder will initialize from first NAL codec: %ux%u (encoded), render %ux%u",
+         decoderWidth, decoderHeight, videoWidth_, videoHeight_);
 
     // Start receiving video packets (bind socket BEFORE telling server we're ready)
     bool receivingStarted = false;
@@ -2636,9 +2643,9 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     {
         auto nalCallback = [this](const uint8_t* data, size_t size,
                                   int64_t timestampNs, int64_t receiveTimeNs,
-                                  uint8_t flags)
+                                  uint8_t flags, uint8_t codec)
         {
-            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags);
+            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags, codec);
         };
         if (usbAdb)
         {
@@ -2730,6 +2737,9 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.versionMajor = 1;
     connect.versionMinor = 2;
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
+    connect.supportedCodecs =
+        protocol::CLIENT_CODEC_CAPABILITY_H265 |
+        protocol::CLIENT_CODEC_CAPABILITY_H264;
     connect.maxBitrateMbps = usbAdb
         ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
         : 100;
@@ -2985,8 +2995,14 @@ void XrApp::StreamConfigWorkerMain()
             std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
             if (videoDecoder_)
             {
+                const protocol::VideoCodec codec = activeVideoCodec_.load();
                 videoDecoder_->Shutdown();
-                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight);
+                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
+                if (accepted)
+                {
+                    decoderEncodedWidth_ = update.encodedWidth;
+                    decoderEncodedHeight_ = update.encodedHeight;
+                }
             }
         }
 
@@ -3396,32 +3412,76 @@ void XrApp::UpdateReprojectionWarp(bool reusingFrame)
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
-                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags)
+                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags, uint8_t codec)
 {
     nalUnitsReceived_++;
+    const auto videoCodec = static_cast<protocol::VideoCodec>(codec);
+    if (videoCodec != protocol::VideoCodec::H265 && videoCodec != protocol::VideoCodec::H264)
+    {
+        if (nalUnitsReceived_ <= 10)
+        {
+            LOGW("Dropping NAL unit with unsupported codec=%u (%s)",
+                 codec, VideoCodecName(videoCodec));
+        }
+        return;
+    }
 
     if (nalUnitsReceived_ <= 10 || nalUnitsReceived_ % 300 == 0)
     {
-        // Log NAL unit type for H.265 (type is in bits 1-6 of second byte after start code)
         const char* nalType = "unknown";
         if (size > 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
         {
-            uint8_t nalTypeId = (data[4] >> 1) & 0x3F;
-            switch (nalTypeId)
+            if (videoCodec == protocol::VideoCodec::H264)
             {
-                case 32: nalType = "VPS"; break;
-                case 33: nalType = "SPS"; break;
-                case 34: nalType = "PPS"; break;
-                case 19: case 20: nalType = "IDR"; break;
-                case 1: nalType = "P-slice"; break;
-                default: nalType = "other"; break;
+                uint8_t nalTypeId = data[4] & 0x1F;
+                switch (nalTypeId)
+                {
+                    case 7: nalType = "SPS"; break;
+                    case 8: nalType = "PPS"; break;
+                    case 5: nalType = "IDR"; break;
+                    case 1: nalType = "P-slice"; break;
+                    default: nalType = "other"; break;
+                }
+            }
+            else
+            {
+                uint8_t nalTypeId = (data[4] >> 1) & 0x3F;
+                switch (nalTypeId)
+                {
+                    case 32: nalType = "VPS"; break;
+                    case 33: nalType = "SPS"; break;
+                    case 34: nalType = "PPS"; break;
+                    case 19: case 20: nalType = "IDR"; break;
+                    case 1: nalType = "P-slice"; break;
+                    default: nalType = "other"; break;
+                }
             }
         }
-        LOGI("NAL unit #%u: size=%zu type=%s ts=%lld",
-             nalUnitsReceived_, size, nalType, (long long)timestampNs);
+        LOGI("NAL unit #%u: size=%zu codec=%s type=%s ts=%lld",
+             nalUnitsReceived_, size,
+             VideoCodecName(videoCodec), nalType, (long long)timestampNs);
     }
 
     std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
+    if (videoDecoder_ && (!videoDecoder_->IsInitialized() || videoDecoder_->GetCodec() != videoCodec))
+    {
+        const uint32_t decoderWidth = decoderEncodedWidth_ > 0 ? decoderEncodedWidth_ : videoWidth_;
+        const uint32_t decoderHeight = decoderEncodedHeight_ > 0 ? decoderEncodedHeight_ : videoHeight_;
+        if (videoDecoder_->IsInitialized())
+        {
+            LOGW("Video codec changed from %u to %u; recreating decoder",
+                 static_cast<uint32_t>(videoDecoder_->GetCodec()),
+                 static_cast<uint32_t>(videoCodec));
+        }
+        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, videoCodec))
+        {
+            LOGE("Failed to initialize decoder for codec=%u (%s)",
+                 codec, VideoCodecName(videoCodec));
+            return;
+        }
+        activeVideoCodec_.store(videoCodec);
+    }
+
     if (videoDecoder_ && videoDecoder_->IsInitialized())
     {
         const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;
@@ -3435,7 +3495,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
     }
     else if (nalUnitsReceived_ <= 5)
     {
-        LOGW("NAL unit received but decoder not initialized");
+        LOGW("NAL unit received but decoder is unavailable");
     }
 }
 

@@ -16,6 +16,25 @@ enum EncoderPreset: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum VideoCodecSetting: String, CaseIterable, Identifiable {
+    case h265
+    case h264
+    case auto
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .h265:
+            return "H.265"
+        case .h264:
+            return "H.264"
+        case .auto:
+            return "Auto"
+        }
+    }
+}
+
 enum StreamingTransportSetting: String, CaseIterable, Identifiable {
     case auto
     case wifi
@@ -233,6 +252,7 @@ struct HomeRuntimeStreamingStats: Equatable {
     var renderHeight: Int = 0
     var encodedWidth: Int = 0
     var encodedHeight: Int = 0
+    var videoCodec: String = ""
     var encoderPreset: String = ""
     var foveatedEncodingPreset: String = ""
     var clientFoveationPreset: String = ""
@@ -273,6 +293,7 @@ struct HomeRuntimeStreamingStats: Equatable {
             renderHeight: intValue(object["render_height"]) ?? 0,
             encodedWidth: intValue(object["encoded_width"]) ?? 0,
             encodedHeight: intValue(object["encoded_height"]) ?? 0,
+            videoCodec: stringValue(object["video_codec"]) ?? "",
             encoderPreset: stringValue(object["encoder_preset"]) ?? "",
             foveatedEncodingPreset: stringValue(object["foveated_encoding_preset"]) ?? "",
             clientFoveationPreset: stringValue(object["client_foveation_preset"]) ?? "",

@@ -60,14 +60,61 @@ Key outputs in the selected build directory. With the default build these are un
 
 - `build/runtime/liboxrsys-runtime.dylib`
 - `build/runtime/liboxrsys-runtime.so` on Linux
+- `build/runtime/oxrsys-runtime.dll` on Windows
 - `build/runtime/oxrsys-runtime.json`
 - `build/runtime/oxrsys-runtime.toml`
 - `compile_commands.json` symlinked at the project root for editor integration
 
 All third-party C++ dependencies are fetched through CMake `FetchContent`.
-Linux additionally requires system/toolchain packages for Vulkan headers, FFmpeg development libraries, and pkg-config.
+Linux additionally requires system/toolchain packages for Vulkan headers, OpenGL/GLX/X11 development files, FFmpeg development libraries, and pkg-config.
+Windows additionally requires a Windows SDK with Direct3D 11/12 and DXGI headers/libraries, Vulkan
+headers, and FFmpeg development libraries discoverable with `FFMPEG_ROOT`, `FFMPEG_DIR`, or standard
+prefixes.
+macOS uses VideoToolbox by default; FFmpeg development libraries are only required on macOS when
+configuring the runtime with `-DOXRSYS_VIDEO_ENCODER=FFMPEG`.
 
-Windows is a scaffold only in this pass; do not treat Windows runtime builds as an acceptance gate yet.
+The runtime video encoder can be selected at configure time:
+
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DOXRSYS_VIDEO_ENCODER=AUTO
+```
+
+Accepted values are:
+
+- `AUTO`: VideoToolbox on Apple platforms, FFmpeg on Linux and Windows.
+- `VIDEOTOOLBOX`: Apple platforms only.
+- `FFMPEG`: FFmpeg on Linux and Windows, or an explicit macOS FFmpeg codec/pipeline validation build.
+
+When `FFMPEG` is selected, CMake resolves FFmpeg with `pkg-config`, Homebrew-style prefixes, or
+`-DFFMPEG_ROOT=/path/to/prefix`.
+
+macOS Vulkan/MoltenVK validation builds should use the FFmpeg encoder explicitly:
+
+```bash
+cmake -B build-vulkan-ffmpeg -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DOXRSYS_VIDEO_ENCODER=FFMPEG
+cmake --build build-vulkan-ffmpeg
+ctest --test-dir build-vulkan-ffmpeg --output-on-failure
+```
+
+On Linux, the runtime enables both Vulkan and the first OpenGL GLX backend when the required
+development files are present. Vulkan color swapchains are copied to host-visible staging buffers
+for FFmpeg encode. OpenGL color swapchains are snapshotted through FBO/PBO readback slots; depth
+formats are available for application compatibility but are not video sources.
+
+On Windows, the runtime builds Vulkan plus Direct3D 11/12 when the Windows SDK, Vulkan headers, and
+FFmpeg development files are available:
+
+```powershell
+cmake -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DOXRSYS_VIDEO_ENCODER=FFMPEG `
+  -DFFMPEG_ROOT=C:\path\to\ffmpeg
+cmake --build build-win
+ctest --test-dir build-win --output-on-failure
+```
+
+The Windows backend exposes Vulkan, D3D11, and D3D12 in this milestone. OpenGL Win32/WGL is not
+advertised yet; Linux remains the only OpenGL runtime backend.
 
 ## Versioning
 

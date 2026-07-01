@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document lists the host tools and SDKs required to build and test the project on macOS and Linux, plus the Android tooling needed for the Android VR client.
+This document lists the host tools and SDKs required to build and test the project on macOS, Linux, and Windows, plus the Android tooling needed for the Android VR client.
 
 ## Host Tools
 
@@ -26,6 +26,10 @@ Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper ch
 MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as
 `~/Qt/6.10.2/macos`.
 
+macOS runtime builds use VideoToolbox by default. Install FFmpeg development libraries on macOS
+only if you want to configure the runtime with `-DOXRSYS_VIDEO_ENCODER=FFMPEG` or build the Qt video
+preview path against a Homebrew/MacPorts FFmpeg.
+
 For the Swift/Xcode applications and Swift package Metal shaders, install the full Xcode app, not only the Command Line Tools. Finish first-launch setup after installing or updating Xcode:
 
 ```bash
@@ -40,6 +44,7 @@ Linux runtime and Qt frontend builds need equivalent distro packages for:
 
 - CMake, Ninja, and a C++20 compiler
 - Vulkan headers
+- OpenGL, GLX, and X11 development files
 - FFmpeg development libraries: `libavcodec`, `libavutil`, `libswscale`
 - pkg-config
 - Qt 6 Core, Widgets, and Network
@@ -50,12 +55,23 @@ development package:
 
 ```bash
 sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config \
-  vulkan-headers vulkan-loader-devel qt6-qtbase-devel android-tools \
+  vulkan-headers vulkan-loader-devel mesa-libGL-devel libX11-devel \
+  qt6-qtbase-devel android-tools \
   ffmpeg-devel
 ```
 
 On Fedora systems that only use Fedora's free FFmpeg package set, use
 `ffmpeg-free-devel` instead of `ffmpeg-devel`.
+
+Windows runtime builds need:
+
+- CMake, Ninja, and a C++20 compiler such as MSVC
+- Windows SDK headers/libraries for Direct3D 11, Direct3D 12, and DXGI
+- Vulkan headers
+- FFmpeg development headers and libraries for `libavcodec`, `libavutil`, and `libswscale`
+
+Set `FFMPEG_ROOT` or pass `-DFFMPEG_ROOT=<prefix>` when FFmpeg is not in a standard prefix. Windows
+OpenGL/WGL is not required until that backend is added.
 
 ## Android SDK And NDK
 

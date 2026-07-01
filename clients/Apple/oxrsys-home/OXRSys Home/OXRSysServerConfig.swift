@@ -13,6 +13,7 @@ struct OXRSysServerConfig: Equatable {
     var resolutionScale = 0.75
     var dynamicResolutionMinScale = 0.50
     var keyframeIntervalSec = 2
+    var videoCodec: VideoCodecSetting = .h265
     var encoderPreset: EncoderPreset = .balanced
     var transport: StreamingTransportSetting = .auto
     var foveatedEncodingPreset: FoveationPresetSetting = .off
@@ -58,6 +59,9 @@ struct OXRSysServerConfig: Equatable {
     # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
     # Default 2 is a good balance. Use 1 for lossy WiFi, 5+ for USB.
     keyframe_interval_sec = 2
+
+    # Video codec: "h265", "h264", or "auto".
+    video_codec = "h265"
 
     # Encoder speed preset: "quality", "balanced", "speed"
     # speed  = lowest latency, fastest encode, lower quality
@@ -134,6 +138,9 @@ struct OXRSysServerConfig: Equatable {
         if let value = intValue("keyframe_interval_sec", in: text), (1...10).contains(value) {
             config.keyframeIntervalSec = value
         }
+        if let value = stringValue("video_codec", in: text), let codec = VideoCodecSetting(rawValue: value) {
+            config.videoCodec = codec
+        }
         if let value = stringValue("encoder_preset", in: text), let preset = EncoderPreset(rawValue: value) {
             config.encoderPreset = preset
         }
@@ -202,6 +209,7 @@ struct OXRSysServerConfig: Equatable {
                 ("resolution_scale", decimalString(resolutionScale)),
                 ("dynamic_resolution_min_scale", decimalString(dynamicResolutionMinScale)),
                 ("keyframe_interval_sec", "\(keyframeIntervalSec)"),
+                ("video_codec", "\"\(videoCodec.rawValue)\""),
                 ("encoder_preset", "\"\(encoderPreset.rawValue)\""),
                 ("transport", "\"\(transport.rawValue)\""),
                 ("foveated_encoding_preset", "\"\(foveatedEncodingPreset.rawValue)\""),

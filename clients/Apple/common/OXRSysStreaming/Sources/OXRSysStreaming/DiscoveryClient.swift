@@ -163,6 +163,8 @@ public final class DiscoveryClient: @unchecked Sendable {
         }
 
         var connect = ClientConnect()
+        connect.preferredCodec = VideoCodec.h265.rawValue
+        connect.supportedCodecs = ClientCodecCapability.h265 | ClientCodecCapability.h264
         connect.maxBitrateMbps = maxBitrateMbps
         connect.refreshRateHz = refreshRateHz
         connect.setDeviceName(deviceName)

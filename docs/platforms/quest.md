@@ -231,11 +231,11 @@ adb -s <serial> reverse tcp:9948 tcp:9948
 
 With `streaming.transport = "auto"`, the Quest app connects to `127.0.0.1:9946` first. If the ADB reverse control channel answers, the client receives `ServerAnnounce`, opens TCP video, tracking, and optional spatial channels, and sends `ClientConnect`. Port `9948` is optional while spatial remains reserved; missing it must not prevent USB video/tracking streaming. If USB is unavailable, it falls back to WiFi UDP discovery while continuing to retry USB periodically so launch order is not critical. When the runtime closes the USB control/video sockets or video stalls after an app exits, the Quest client resets connection state and returns to the same retry loop without requiring the Android app to be relaunched. With `streaming.transport = "usb_adb"`, the runtime disables WiFi discovery fallback.
 
-The Quest client sends `ClientConnect.maxBitrateMbps = 0` on USB ADB, so USB quality is controlled by the server/Home bitrate setting rather than an extra headset-side cap. WiFi keeps its client-side ceiling.
+The Quest client sends `ClientConnect.maxBitrateMbps = 0` on USB ADB, so USB quality is controlled by the server/Home bitrate setting rather than an extra headset-side cap. WiFi keeps its client-side ceiling. It advertises H.264 and H.265 support in `ClientConnect.supportedCodecs` while keeping H.265 in `ClientConnect.preferredCodec`; `supportedCodecs = 0` remains the legacy H.265-only behavior for older clients.
 
 The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIPE` where available, and a bounded send timeout. Encoded video is handed to a bounded sender queue before TCP writes, so socket backpressure cannot run inside the VideoToolbox callback. If a TCP video send fails or times out, the runtime disables the stale TCP video dispatch path and the Android client can reconnect through its existing retry loop. The client also keeps USB tracking TCP sends best-effort/non-blocking so tracking backpressure does not stall the XR frame.
 
-USB TCP sends full H.265 NAL records and render-pose records, so UDP FEC and NACK recovery are disabled on this path.
+USB TCP sends full encoded NAL records and render-pose records, so UDP FEC and NACK recovery are disabled on this path.
 
 ## Current Status
 

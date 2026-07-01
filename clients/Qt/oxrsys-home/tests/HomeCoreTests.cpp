@@ -70,6 +70,7 @@ void testServerConfigRoundTrip()
         resolution_scale = 0.50
         dynamic_resolution_min_scale = 0.55
         refresh_rate_hz = 120
+        video_codec = "h264"
         encoder_preset = "speed"
         foveated_encoding_preset = "medium"
         client_foveation_preset = "high"
@@ -95,6 +96,7 @@ void testServerConfigRoundTrip()
     expect(parsed.resolutionScale == 0.50, "Expected resolution parse");
     expect(parsed.dynamicResolutionMinScale == 0.55, "Expected dynamic resolution parse");
     expect(parsed.refreshRateHz == 120, "Expected refresh parse");
+    expect(parsed.videoCodec == "h264", "Expected codec parse");
     expect(parsed.encoderPreset == "speed", "Expected preset parse");
     expect(parsed.foveatedEncodingPreset == "medium", "Expected FFE parse");
     expect(parsed.clientFoveationPreset == "high", "Expected client foveation parse");
@@ -114,6 +116,7 @@ void testServerConfigRoundTrip()
     expect(merged.contains("transport = \"usb_adb\""), "Expected transport serialization");
     expect(merged.contains("bitrate_mbps = 85"), "Expected bitrate serialization");
     expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization");
+    expect(merged.contains("video_codec = \"h264\""), "Expected codec serialization");
     expect(!merged.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
     expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization");
     expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization");
@@ -188,6 +191,7 @@ quest_logcat = true
     expect(text.contains("bitrate_mbps = 50"), "Expected default bitrate serialization");
     expect(text.contains("transport = \"auto\""), "Expected default transport serialization");
     expect(text.contains("refresh_rate_hz = 72"), "Expected default refresh serialization");
+    expect(text.contains("video_codec = \"h265\""), "Expected default codec serialization");
     expect(!text.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
     expect(!text.contains("Rendering FOV"), "Expected legacy simulator FOV comment removal");
     expect(text.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization");
@@ -466,6 +470,7 @@ void testRuntimeActivityParsing()
         "render_height": 1920,
         "encoded_width": 2752,
         "encoded_height": 1440,
+        "video_codec": "h264",
         "encoder_preset": "quality",
         "foveated_encoding_preset": "medium",
         "client_foveation_preset": "high",
@@ -507,6 +512,7 @@ void testRuntimeActivityParsing()
     expect(activity.deviceDisplayName() == "Quest", "Expected Quest device display");
     expect(activity.hasStreamingStats, "Expected stats");
     expect(activity.streamingStats.refreshRateHz == 90, "Expected refresh stats");
+    expect(activity.streamingStats.videoCodec == "h264", "Expected codec stats");
     expect(activity.streamingStats.encoderPreset == "quality", "Expected encoder preset stats");
     expect(activity.streamingStats.foveatedEncodingPreset == "medium", "Expected FFE stats");
     expect(activity.streamingStats.clientFoveationPreset == "high", "Expected FFR stats");

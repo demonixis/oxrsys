@@ -149,6 +149,96 @@ bool HasClientCapability(const oxr::protocol::ClientConnect& clientConnect, uint
     return (clientConnect.clientCapabilities & flag) != 0;
 }
 
+const char* VideoCodecName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "h264";
+        case oxr::protocol::VideoCodec::AV1:
+            return "av1";
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return "h265";
+    }
+}
+
+uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
+        case oxr::protocol::VideoCodec::AV1:
+            return oxr::protocol::CLIENT_CODEC_CAPABILITY_AV1;
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H265;
+    }
+}
+
+bool RuntimeSupportsVideoCodec(oxr::protocol::VideoCodec codec)
+{
+    return codec == oxr::protocol::VideoCodec::H265 ||
+           codec == oxr::protocol::VideoCodec::H264;
+}
+
+bool ClientSupportsVideoCodec(const oxr::protocol::ClientConnect& clientConnect,
+                              oxr::protocol::VideoCodec codec)
+{
+    if (clientConnect.supportedCodecs == 0)
+    {
+        return codec == oxr::protocol::VideoCodec::H265;
+    }
+    return (clientConnect.supportedCodecs & VideoCodecCapabilityFlag(codec)) != 0;
+}
+
+oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
+{
+    if (value == "h264")
+    {
+        return oxr::protocol::VideoCodec::H264;
+    }
+    return oxr::protocol::VideoCodec::H265;
+}
+
+oxr::protocol::VideoCodec SelectVideoCodec(const ConfigValues& config,
+                                           const oxr::protocol::ClientConnect& clientConnect)
+{
+    if (config.videoCodec == "auto")
+    {
+        const auto preferred = static_cast<oxr::protocol::VideoCodec>(clientConnect.preferredCodec);
+        if (RuntimeSupportsVideoCodec(preferred) && ClientSupportsVideoCodec(clientConnect, preferred))
+        {
+            return preferred;
+        }
+        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
+        {
+            return oxr::protocol::VideoCodec::H265;
+        }
+        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
+        {
+            return oxr::protocol::VideoCodec::H264;
+        }
+        return oxr::protocol::VideoCodec::H265;
+    }
+
+    const oxr::protocol::VideoCodec requested = ParseConfiguredVideoCodec(config.videoCodec);
+    if (RuntimeSupportsVideoCodec(requested) && ClientSupportsVideoCodec(clientConnect, requested))
+    {
+        return requested;
+    }
+    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
+    {
+        return oxr::protocol::VideoCodec::H265;
+    }
+    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
+    {
+        return oxr::protocol::VideoCodec::H264;
+    }
+    return oxr::protocol::VideoCodec::H265;
+}
+
 bool IsGraphicsContextValid(const GraphicsContext& context);
 
 struct StreamLayout
@@ -250,11 +340,28 @@ VideoEncoder::FoveationSettings BuildEncoderFoveationSettings(
 
 bool IsGraphicsContextValid(const GraphicsContext& context)
 {
-    if (context.api == GraphicsApi::Vulkan)
+    switch (context.api)
     {
-        return context.vulkan.device != nullptr;
+        case GraphicsApi::Metal:
+            return context.metalDevice != nullptr;
+        case GraphicsApi::Vulkan:
+            return context.vulkan.device != nullptr;
+        case GraphicsApi::OpenGL:
+            return context.openGL.context != nullptr;
+        case GraphicsApi::D3D11:
+#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
+            return context.d3d11.device != nullptr && context.d3d11.immediateContext != nullptr;
+#else
+            return false;
+#endif
+        case GraphicsApi::D3D12:
+#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
+            return context.d3d12.device != nullptr && context.d3d12.queue != nullptr;
+#else
+            return false;
+#endif
     }
-    return context.metalDevice != nullptr;
+    return false;
 }
 
 bool SendAll(SocketHandle socket, const void* data, size_t size)
@@ -577,6 +684,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
+    activeVideoCodec_.store(oxr::protocol::VideoCodec::H265);
     {
         std::lock_guard<std::mutex> lock(streamConfigMutex_);
         ResetPendingStreamConfigLocked();
@@ -1299,6 +1407,7 @@ void StreamingServer::EncodeThread()
         auto encodedFrame = std::make_shared<EncodedVideoFrame>();
         encodedFrame->frameIndex = frame.frameIndex;
         encodedFrame->timestampNs = frame.timestampNs;
+        encodedFrame->codec = activeVideoCodec_.load();
         encodedFrame->alphaBlend = frame.alphaBlend;
         encodedFrame->hasPose = frame.hasPose;
         if (frame.hasPose)
@@ -1336,7 +1445,7 @@ void StreamingServer::EncodeThread()
                 {
                     nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
                 }
-                nalHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+                nalHeader.codec = static_cast<uint8_t>(encodedFrame->codec);
 
                 memcpy(nal.tcpPayload.data(), &nalHeader, sizeof(nalHeader));
                 memcpy(nal.tcpPayload.data() + sizeof(nalHeader), nalData, nalSize);
@@ -1418,6 +1527,7 @@ void StreamingServer::EncodeThread()
                     stats.renderHeight = server->renderHeight_;
                     stats.encodedWidth = layoutState.encodedWidth;
                     stats.encodedHeight = layoutState.encodedHeight;
+                    stats.videoCodec = VideoCodecName(server->activeVideoCodec_.load());
                     stats.encoderPreset = config.encoderPreset;
                     stats.foveatedEncodingPreset = server->clientFoveatedEncodingActive_.load()
                         ? config.foveatedEncodingPreset
@@ -1583,6 +1693,16 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
+            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            if (config.videoCodec != "auto" &&
+                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+            {
+                spdlog::warn("StreamingServer: client '{}' does not support configured video_codec='{}'; using {}",
+                             clientName,
+                             config.videoCodec,
+                             VideoCodecName(selectedCodec));
+            }
+            activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =
                 (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
                 ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
@@ -1630,13 +1750,13 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                              clientName);
             }
             if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
-                                     bitrateMbps, graphicsContext_))
+                                     bitrateMbps, graphicsContext_, selectedCodec))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
                 encoderReady = true;
-                spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz",
-                              clientName, clientIp_, clientPort_, negotiatedRefresh);
+                spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz codec={}",
+                              clientName, clientIp_, clientPort_, negotiatedRefresh, VideoCodecName(selectedCodec));
                 RuntimeStatus::SetStreaming("wifi", clientName);
             }
             else
@@ -1726,6 +1846,16 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
+            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            if (config.videoCodec != "auto" &&
+                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+            {
+                spdlog::warn("StreamingServer: USB client '{}' does not support configured video_codec='{}'; using {}",
+                             clientName,
+                             config.videoCodec,
+                             VideoCodecName(selectedCodec));
+            }
+            activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =
                 (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
                 ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
@@ -1773,13 +1903,13 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                              clientName);
             }
             if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
-                                     bitrateMbps, graphicsContext_))
+                                     bitrateMbps, graphicsContext_, selectedCodec))
             {
                 encoder_->ForceKeyframe();
                 frameIndex_ = 0;
                 encoderReady = true;
-                spdlog::info("StreamingServer: Client connected via usb_adb: {} refresh={}Hz",
-                              clientName, negotiatedRefresh);
+                spdlog::info("StreamingServer: Client connected via usb_adb: {} refresh={}Hz codec={}",
+                              clientName, negotiatedRefresh, VideoCodecName(selectedCodec));
                 RuntimeStatus::SetStreaming("usb_adb", clientName);
             }
             else
@@ -1872,6 +2002,7 @@ void StreamingServer::HandleClientDisconnect()
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
+    activeVideoCodec_.store(oxr::protocol::VideoCodec::H265);
     {
         std::lock_guard<std::mutex> lock(streamConfigMutex_);
         ResetPendingStreamConfigLocked();
@@ -2225,8 +2356,9 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
 
     const uint32_t bitrateMbps = currentBitrateMbps_.load();
     const uint32_t refreshHz = std::max(targetRefreshRateHz_.load(), 1u);
+    const oxr::protocol::VideoCodec codec = activeVideoCodec_.load();
     if (!newEncoder->Initialize(layout.encodedWidth, layout.encodedHeight,
-                                refreshHz, bitrateMbps, graphicsContext_))
+                                refreshHz, bitrateMbps, graphicsContext_, codec))
     {
         {
             std::lock_guard<std::mutex> lock(streamConfigMutex_);
@@ -2530,7 +2662,7 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs);
+                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec);
     }
 }
 
@@ -2583,7 +2715,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
     poseHeader.totalPackets = 0;
     poseHeader.payloadSize = sizeof(posePayload);
     poseHeader.flags = oxr::protocol::VIDEO_FLAG_RENDER_POSE;
-    poseHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+    poseHeader.codec = static_cast<uint8_t>(frame.codec);
     poseHeader.presentationTimeNs = frame.timestampNs;
 
     uint8_t buf[sizeof(poseHeader) + sizeof(posePayload)];
@@ -2604,7 +2736,8 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
-                                  bool isKeyframe, bool alphaBlend, int64_t timestampNs)
+                                  bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                                  oxr::protocol::VideoCodec codec)
 {
     std::string clientIp;
     SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
@@ -2650,7 +2783,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
         }
-        nalHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+        nalHeader.codec = static_cast<uint8_t>(codec);
 
         std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
         if (!SendTcpRecordParts(videoSocket,
@@ -2727,7 +2860,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_END_OF_FRAME;
         }
-        header.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+        header.codec = static_cast<uint8_t>(codec);
         header.presentationTimeNs = timestampNs;
 
         size_t packetSize = sizeof(header) + payloadSize;
@@ -2785,7 +2918,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
             }
-            fecHeader.codec = static_cast<uint8_t>(oxr::protocol::VideoCodec::H265);
+            fecHeader.codec = static_cast<uint8_t>(codec);
             fecHeader.presentationTimeNs = timestampNs;
 
             memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));

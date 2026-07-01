@@ -11,6 +11,7 @@ The visionOS target is a first-pass native viewer that fits the Apple platform m
 - runtime discovery on the local network
 - a minimal floating control window with a `Search` action
 - UDP stream connection through the shared `OXRSysStreaming` package
+- negotiated H.264/H.265 stream decoding through the shared VideoToolbox decoder, with H.265 kept as the preferred codec
 - immersive stereo presentation through a native Metal compositor layer, on a single shared ARKit world-tracking session with a depth-backed drawable so the compositor can reproject
 - world-space (rotational) reprojection of each streamed frame from the runtime's per-frame render pose into the live head pose, so the view stays locked to the world as the head turns
 - automatic immersive VR entry once the stream is connected

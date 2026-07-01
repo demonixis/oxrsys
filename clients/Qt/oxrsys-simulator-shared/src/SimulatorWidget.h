@@ -90,7 +90,7 @@ private:
                            int64_t decodeEndNs);
     int64_t monotonicNowNs() const;
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
-    bool ensureVideoDecoder();
+    bool ensureVideoDecoder(oxr::protocol::VideoCodec codec);
     void resetVideoDecoder();
     bool decodeVideoFrame(const AssembledVideoFrame& frame);
 #endif
@@ -135,6 +135,7 @@ private:
     AVFrame* decodedFrame_ = nullptr;
     AVPacket* decodePacket_ = nullptr;
     SwsContext* swsContext_ = nullptr;
+    oxr::protocol::VideoCodec decoderCodec_ = oxr::protocol::VideoCodec::H265;
 #endif
     QElapsedTimer poseClock_;
     QSet<int> pressedKeys_;

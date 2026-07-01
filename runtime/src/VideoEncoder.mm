@@ -36,6 +36,7 @@ struct EncodeFrameContext
     std::function<void(size_t)> releaseSlot;
     FrameSource frameSource;
     VideoEncoder::FrameMetrics metrics;
+    oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
     size_t slotIndex = 0;
     Clock::time_point encodeStart;
     Clock::time_point encodeSubmitFinished;
@@ -175,7 +176,80 @@ bool IsKeyframeSample(CMSampleBufferRef sampleBuffer)
     return !CFBooleanGetValue(notSync);
 }
 
+const char* VideoCodecName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "H.264";
+        case oxr::protocol::VideoCodec::AV1:
+            return "AV1";
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return "H.265";
+    }
+}
+
+CMVideoCodecType VideoToolboxCodecType(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return kCMVideoCodecType_H264;
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return kCMVideoCodecType_HEVC;
+    }
+}
+
+CFStringRef VideoToolboxProfileLevel(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return kVTProfileLevel_H264_Main_AutoLevel;
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return kVTProfileLevel_HEVC_Main_AutoLevel;
+    }
+}
+
+bool EmitParameterSetNalUnit(CMFormatDescriptionRef formatDesc,
+                             oxr::protocol::VideoCodec codec,
+                             size_t index,
+                             int64_t timestampNs,
+                             const VideoEncoder::OnNalUnitCallback& callback)
+{
+    const uint8_t* paramSet = nullptr;
+    size_t paramSetSize = 0;
+    OSStatus status = noErr;
+    if (codec == oxr::protocol::VideoCodec::H264)
+    {
+        status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
+    }
+    else
+    {
+        status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
+    }
+    if (status != noErr || paramSet == nullptr || paramSetSize == 0)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> nalUnit(4 + paramSetSize);
+    nalUnit[0] = 0x00;
+    nalUnit[1] = 0x00;
+    nalUnit[2] = 0x00;
+    nalUnit[3] = 0x01;
+    memcpy(nalUnit.data() + 4, paramSet, paramSetSize);
+    callback(nalUnit.data(), nalUnit.size(), true, timestampNs);
+    return true;
+}
+
 void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
+                        oxr::protocol::VideoCodec codec,
                         const VideoEncoder::OnNalUnitCallback& callback)
 {
     if (!callback)
@@ -192,27 +266,20 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
         if (formatDesc != nullptr)
         {
             size_t paramSetCount = 0;
-            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            if (codec == oxr::protocol::VideoCodec::H264)
+            {
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            }
+            else
+            {
+                CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
+            }
 
             for (size_t i = 0; i < paramSetCount; i++)
             {
-                const uint8_t* paramSet = nullptr;
-                size_t paramSetSize = 0;
-                OSStatus status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                    formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr);
-                if (status != noErr || paramSet == nullptr || paramSetSize == 0)
-                {
-                    continue;
-                }
-
-                std::vector<uint8_t> nalUnit(4 + paramSetSize);
-                nalUnit[0] = 0x00;
-                nalUnit[1] = 0x00;
-                nalUnit[2] = 0x00;
-                nalUnit[3] = 0x01;
-                memcpy(nalUnit.data() + 4, paramSet, paramSetSize);
-                callback(nalUnit.data(), nalUnit.size(), true, timestampNs);
+                EmitParameterSetNalUnit(formatDesc, codec, i, timestampNs, callback);
             }
         }
     }
@@ -382,7 +449,7 @@ static void CompressionOutputCallback(void* /*outputCallbackRefCon*/,
     context->metrics.keyframe = isKeyframe;
     try
     {
-        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->nalCallback);
+        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->codec, context->nalCallback);
     }
     catch (const std::exception& error)
     {
@@ -423,15 +490,23 @@ bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsConte
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
+                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
+                               oxr::protocol::VideoCodec codec)
 {
     Shutdown();
+
+    if (codec == oxr::protocol::VideoCodec::AV1)
+    {
+        spdlog::error("VideoEncoder: AV1 is not implemented in the VideoToolbox path");
+        return false;
+    }
 
     width_ = width;
     height_ = height;
     eyeWidth_ = width / 2;
     fps_ = fps;
     bitrateMbps_ = bitrateMbps;
+    codec_ = codec;
     graphicsContext_ = graphicsContext;
     videoToolbox_.metalDevice = graphicsContext.metalDevice;
     shuttingDown_.store(false);
@@ -576,7 +651,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         kCFAllocatorDefault,
         width,
         height,
-        kCMVideoCodecType_HEVC,
+        VideoToolboxCodecType(codec_),
         (__bridge CFDictionaryRef)encoderSpec,
         nullptr,
         kCFAllocatorDefault,
@@ -599,7 +674,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     const std::string& preset = config.encoderPreset;
     VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
-        kVTProfileLevel_HEVC_Main_AutoLevel);
+        VideoToolboxProfileLevel(codec_));
     if (preset == "speed")
     {
         VTSessionSetProperty(compressionSession,
@@ -656,8 +731,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
 
-    spdlog::info("VideoEncoder: Initialized H.265 encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
-                  width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
+    spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
+                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
 }
 
@@ -1006,6 +1081,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
     context->metrics.timestampNs = timestampNs;
     context->metrics.keyframe = forceKeyframe;
+    context->codec = codec_;
     context->encodeStart = Clock::now();
     context->encodeSubmitFinished = context->encodeStart;
 

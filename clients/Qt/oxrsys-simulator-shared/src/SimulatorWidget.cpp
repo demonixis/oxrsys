@@ -75,6 +75,36 @@ QString ffmpegErrorString(int error)
 #endif
 }
 
+#if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
+AVCodecID avCodecId(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return AV_CODEC_ID_H264;
+        case oxr::protocol::VideoCodec::H265:
+            return AV_CODEC_ID_HEVC;
+        case oxr::protocol::VideoCodec::AV1:
+        default:
+            return AV_CODEC_ID_NONE;
+    }
+}
+
+QString videoCodecDisplayName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "H.264";
+        case oxr::protocol::VideoCodec::AV1:
+            return "AV1";
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return "H.265";
+    }
+}
+#endif
+
 QLabel* makeSecondaryLabel(const QString& text, QWidget* parent)
 {
     auto* label = new QLabel(text, parent);
@@ -478,6 +508,9 @@ void SimulatorWidget::connectToDiscoveredRuntime()
     connectPacket.versionMajor = 1;
     connectPacket.versionMinor = 0;
     connectPacket.preferredCodec = static_cast<uint32_t>(oxr::protocol::VideoCodec::H265);
+    connectPacket.supportedCodecs =
+        oxr::protocol::CLIENT_CODEC_CAPABILITY_H265 |
+        oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
     connectPacket.maxBitrateMbps = oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG;
     connectPacket.refreshRateHz = std::max<uint32_t>(discoveredServer_.refreshRateHz, 60);
     const QByteArray deviceName = platformSimulatorDeviceName().toUtf8();
@@ -875,7 +908,7 @@ bool SimulatorWidget::startVideoReceiver()
                      .arg(videoSocket_->errorString()));
         return false;
     }
-    return ensureVideoDecoder();
+    return ensureVideoDecoder(oxr::protocol::VideoCodec::H265);
 #endif
 }
 
@@ -1016,21 +1049,33 @@ int64_t SimulatorWidget::monotonicNowNs() const
 }
 
 #if OXRSYS_QT_SIMULATOR_HAS_FFMPEG
-bool SimulatorWidget::ensureVideoDecoder()
+bool SimulatorWidget::ensureVideoDecoder(oxr::protocol::VideoCodec codec)
 {
-    if (videoDecoder_ != nullptr)
+    if (videoDecoder_ != nullptr && decoderCodec_ == codec)
     {
         return true;
     }
-
-    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
-    if (codec == nullptr)
+    if (videoDecoder_ != nullptr)
     {
-        setState(State::Discovered, "H.265 decoder not found");
+        resetVideoDecoder();
+    }
+
+    const AVCodecID codecId = avCodecId(codec);
+    if (codecId == AV_CODEC_ID_NONE)
+    {
+        setState(State::Discovered, videoCodecDisplayName(codec) + " decoder is not supported");
         return false;
     }
 
-    videoDecoder_ = avcodec_alloc_context3(codec);
+    const AVCodec* avCodec = avcodec_find_decoder(codecId);
+    if (avCodec == nullptr)
+    {
+        setState(State::Discovered, videoCodecDisplayName(codec) + " decoder not found");
+        return false;
+    }
+
+    decoderCodec_ = codec;
+    videoDecoder_ = avcodec_alloc_context3(avCodec);
     decodedFrame_ = av_frame_alloc();
     decodePacket_ = av_packet_alloc();
     if (videoDecoder_ == nullptr || decodedFrame_ == nullptr || decodePacket_ == nullptr)
@@ -1040,12 +1085,12 @@ bool SimulatorWidget::ensureVideoDecoder()
         return false;
     }
 
-    const int result = avcodec_open2(videoDecoder_, codec, nullptr);
+    const int result = avcodec_open2(videoDecoder_, avCodec, nullptr);
     if (result < 0)
     {
         const QString error = ffmpegErrorString(result);
         resetVideoDecoder();
-        setState(State::Discovered, "Failed to open H.265 decoder: " + error);
+        setState(State::Discovered, "Failed to open " + videoCodecDisplayName(codec) + " decoder: " + error);
         return false;
     }
     return true;
@@ -1070,11 +1115,12 @@ void SimulatorWidget::resetVideoDecoder()
     {
         avcodec_free_context(&videoDecoder_);
     }
+    decoderCodec_ = oxr::protocol::VideoCodec::H265;
 }
 
 bool SimulatorWidget::decodeVideoFrame(const AssembledVideoFrame& frame)
 {
-    if (!ensureVideoDecoder() || frame.nalUnit.isEmpty())
+    if (!ensureVideoDecoder(frame.codec) || frame.nalUnit.isEmpty())
     {
         return false;
     }

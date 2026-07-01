@@ -150,6 +150,7 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "    \"render_height\": " << stats.renderHeight << ",\n";
     file << "    \"encoded_width\": " << stats.encodedWidth << ",\n";
     file << "    \"encoded_height\": " << stats.encodedHeight << ",\n";
+    file << "    \"video_codec\": \"" << JsonEscape(stats.videoCodec) << "\",\n";
     file << "    \"encoder_preset\": \"" << JsonEscape(stats.encoderPreset) << "\",\n";
     file << "    \"foveated_encoding_preset\": \"" << JsonEscape(stats.foveatedEncodingPreset) << "\",\n";
     file << "    \"client_foveation_preset\": \"" << JsonEscape(stats.clientFoveationPreset) << "\",\n";

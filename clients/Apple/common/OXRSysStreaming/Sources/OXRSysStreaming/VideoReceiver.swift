@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// VideoReceiver.swift — Receives H.265 video packets on UDP 9944,
+// VideoReceiver.swift — Receives encoded video packets on UDP 9944,
 // reassembles fragmented NAL units, delivers complete frames.
 //
 // Hot path uses raw memory (UnsafeMutablePointer) to avoid Swift Data COW overhead
@@ -11,9 +11,17 @@ import os
 
 public final class VideoReceiver: @unchecked Sendable {
     public typealias OnNalUnit = @Sendable (Data, Int64, Int64) -> Void
+    public typealias OnEncodedNalUnit = @Sendable (EncodedNalUnit) -> Void
     /// (presentationTimeNs, orientation xyzw) — the head orientation the server rendered this
     /// frame for, echoed back so the client can reproject the frame to the live head pose.
     public typealias OnRenderPose = @Sendable (Int64, (Float, Float, Float, Float)) -> Void
+
+    public struct EncodedNalUnit: Sendable {
+        public let data: Data
+        public let codec: VideoCodec
+        public let presentationTimeNs: Int64
+        public let receiveTimeNs: Int64
+    }
 
     private struct State {
         var socket: Int32 = -1
@@ -38,6 +46,12 @@ public final class VideoReceiver: @unchecked Sendable {
     public init() {}
 
     public func start(onNalUnit: @escaping OnNalUnit, onRenderPose: OnRenderPose? = nil) {
+        startReceivingEncoded(onNalUnit: { frame in
+            onNalUnit(frame.data, frame.presentationTimeNs, frame.receiveTimeNs)
+        }, onRenderPose: onRenderPose)
+    }
+
+    public func startReceivingEncoded(onNalUnit: @escaping OnEncodedNalUnit, onRenderPose: OnRenderPose? = nil) {
         let shouldStart = state.withLock { state in
             if state.running {
                 return false
@@ -138,7 +152,7 @@ public final class VideoReceiver: @unchecked Sendable {
 
     // MARK: - Receive loop (raw memory, zero-copy hot path)
 
-    private func receiveLoop(fd: Int32, onNalUnit: @escaping OnNalUnit, onRenderPose: OnRenderPose?) {
+    private func receiveLoop(fd: Int32, onNalUnit: @escaping OnEncodedNalUnit, onRenderPose: OnRenderPose?) {
         let headerSize = MemoryLayout<VideoPacketHeader>.size
         let maxPacketSize = headerSize + OXRProtocol.maxPacketPayload
 
@@ -146,19 +160,19 @@ public final class VideoReceiver: @unchecked Sendable {
         let recvBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: maxPacketSize)
         defer { recvBuf.deallocate() }
 
-        // Frame assembly buffer — raw memory, no COW
-        let maxFrameBytes = 1024 * 1024 // 1MB — more than enough for any single NAL unit
+        // Per-packet tracking. Keep a hard cap so a malformed or oversized
+        // NAL cannot grow receiver memory without bound.
+        let maxFrameBytes = 16 * 1024 * 1024
+        let maxPacketsPerFrame = maxFrameBytes / OXRProtocol.maxPacketPayload
         let frameBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: maxFrameBytes)
         defer { frameBuf.deallocate() }
 
-        // Per-packet tracking
-        let maxPacketsPerGroup: Int = 1024
-        let packetSizes = UnsafeMutablePointer<UInt16>.allocate(capacity: maxPacketsPerGroup)
-        let packetReceived = UnsafeMutablePointer<Bool>.allocate(capacity: maxPacketsPerGroup)
+        let packetSizes = UnsafeMutablePointer<UInt16>.allocate(capacity: maxPacketsPerFrame)
+        let packetReceived = UnsafeMutablePointer<Bool>.allocate(capacity: maxPacketsPerFrame)
         defer { packetSizes.deallocate(); packetReceived.deallocate() }
 
         // FEC parity tracking
-        let maxFecGroups = (maxPacketsPerGroup + FEC.groupSize - 1) / FEC.groupSize
+        let maxFecGroups = (maxPacketsPerFrame + FEC.groupSize - 1) / FEC.groupSize
         let fecReceived = UnsafeMutablePointer<Bool>.allocate(capacity: maxFecGroups)
         let fecData = UnsafeMutablePointer<UInt8>.allocate(capacity: maxFecGroups * OXRProtocol.maxPacketPayload)
         let fecGroupLastPacketSizes = UnsafeMutablePointer<UInt16>.allocate(capacity: maxFecGroups)
@@ -174,7 +188,9 @@ public final class VideoReceiver: @unchecked Sendable {
         var totalExpected: UInt16 = 0
         var receivedCount: UInt16 = 0
         var frameTimestamp: Int64 = 0
+        var frameCodec: VideoCodec = .h265
         var lastGroupPacketTimeNs: Int64 = 0
+        var droppedFrameIndex: UInt32?
 
         // Closure: attempt FEC recovery for all groups, returns true if frame is now complete
         func tryFecRecovery() -> Bool {
@@ -235,7 +251,7 @@ public final class VideoReceiver: @unchecked Sendable {
             if deliveredCount <= 10 || deliveredCount % 200 == 0 {
                 print("[VideoRecv] NAL #\(deliveredCount) (\(finalSize) bytes, frame \(currentFrameIndex))")
             }
-            deliverNalUnit(frameBuf, finalSize, frameTimestamp, onNalUnit)
+            deliverNalUnit(frameBuf, finalSize, frameCodec, frameTimestamp, onNalUnit)
             totalExpected = 0
         }
 
@@ -279,6 +295,13 @@ public final class VideoReceiver: @unchecked Sendable {
                 continue
             }
 
+            if let dropped = droppedFrameIndex {
+                if header.frameIndex == dropped {
+                    continue
+                }
+                droppedFrameIndex = nil
+            }
+
             // FEC parity packet — store separately
             if header.flags & VideoFlags.fec != 0 {
                 if header.frameIndex == currentFrameIndex && totalExpected > 0 {
@@ -314,7 +337,7 @@ public final class VideoReceiver: @unchecked Sendable {
                             // Fallback: deliver partial if >=97% complete (zero-fill gaps)
                             let completionPct = (UInt32(receivedCount) * 100) / UInt32(totalExpected)
                             if completionPct >= 97 {
-                                let count = min(Int(totalExpected), maxPacketsPerGroup)
+                                let count = min(Int(totalExpected), maxPacketsPerFrame)
                                 for i in 0..<count where !packetReceived[i] {
                                     let offset = i * OXRProtocol.maxPacketPayload
                                     if offset < maxFrameBytes {
@@ -339,13 +362,36 @@ public final class VideoReceiver: @unchecked Sendable {
 
                 currentFrameIndex = header.frameIndex
                 state.withLock { $0.totalFramesSeen &+= 1 }
-                totalExpected = header.totalPackets
                 receivedCount = 0
                 frameTimestamp = header.presentationTimeNs
+                let expectedPackets = Int(header.totalPackets)
+                if expectedPackets == 0 || expectedPackets > maxPacketsPerFrame {
+                    let droppedCount = state.withLock { state in
+                        state.groupsDropped &+= 1
+                        return state.groupsDropped
+                    }
+                    if droppedCount <= 20 || droppedCount % 100 == 0 {
+                        print("[VideoRecv] Dropping frame \(header.frameIndex): \(expectedPackets) packets exceed receiver cap \(maxPacketsPerFrame)")
+                    }
+                    totalExpected = 0
+                    fecGroupCount = 0
+                    droppedFrameIndex = header.frameIndex
+                    continue
+                }
+                totalExpected = header.totalPackets
+                guard let codec = VideoCodec(rawValue: UInt32(header.codec)) else {
+                    print("[VideoRecv] Dropping frame \(header.frameIndex) with unknown codec \(header.codec)")
+                    totalExpected = 0
+                    fecGroupCount = 0
+                    droppedFrameIndex = header.frameIndex
+                    state.withLock { $0.groupsDropped &+= 1 }
+                    continue
+                }
+                frameCodec = codec
                 lastGroupPacketTimeNs = 0
 
                 // Zero the tracking arrays
-                let count = min(Int(totalExpected), maxPacketsPerGroup)
+                let count = Int(totalExpected)
                 packetReceived.initialize(repeating: false, count: count)
                 packetSizes.initialize(repeating: 0, count: count)
 
@@ -356,7 +402,7 @@ public final class VideoReceiver: @unchecked Sendable {
             }
 
             let idx = Int(header.packetIndex)
-            guard idx < Int(totalExpected), idx < maxPacketsPerGroup else { continue }
+            guard idx < Int(totalExpected), idx < maxPacketsPerFrame else { continue }
             guard !packetReceived[idx] else { continue }
 
             // Copy payload directly into frame buffer — no Swift Data involved
@@ -378,19 +424,25 @@ public final class VideoReceiver: @unchecked Sendable {
     }
 
     private func deliverNalUnit(_ buf: UnsafeMutablePointer<UInt8>, _ size: Int,
-                                 _ timestamp: Int64, _ callback: OnNalUnit) {
+                                 _ codec: VideoCodec, _ timestamp: Int64, _ callback: OnEncodedNalUnit) {
         // Single copy from raw buffer → Data for delivery
         let data = Data(bytes: buf, count: size)
         let recvTime = Self.monotonicNs()
-        callback(data, timestamp, recvTime)
+        callback(EncodedNalUnit(
+            data: data,
+            codec: codec,
+            presentationTimeNs: timestamp,
+            receiveTimeNs: recvTime
+        ))
     }
 
     private func computeFinalSize(_ packetSizes: UnsafeMutablePointer<UInt16>, _ totalExpected: Int) -> Int {
         guard totalExpected > 0 else { return 0 }
-        if totalExpected == 1 {
-            return Int(packetSizes[0])
+        var finalSize = 0
+        for i in 0..<totalExpected {
+            finalSize += Int(packetSizes[i])
         }
-        return (totalExpected - 1) * OXRProtocol.maxPacketPayload + Int(packetSizes[totalExpected - 1])
+        return finalSize
     }
 
     public static func monotonicNs() -> Int64 {

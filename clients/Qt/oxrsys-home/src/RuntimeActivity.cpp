@@ -53,6 +53,7 @@ RuntimeStreamingStats RuntimeStreamingStats::parse(const QJsonObject& object)
     stats.renderHeight = intValue(object, "render_height");
     stats.encodedWidth = intValue(object, "encoded_width");
     stats.encodedHeight = intValue(object, "encoded_height");
+    stats.videoCodec = object.value("video_codec").toString();
     stats.encoderPreset = object.value("encoder_preset").toString();
     stats.foveatedEncodingPreset = object.value("foveated_encoding_preset").toString();
     stats.clientFoveationPreset = object.value("client_foveation_preset").toString();

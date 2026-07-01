@@ -10,9 +10,9 @@ Current responsibilities:
   Godot/Unity candidates
 - create terminal launch scripts for app cards on macOS and Linux without changing the runtime
   manifest selection model
-- edit the shared runtime TOML keys for streaming, logging, encoder preset, transport, refresh
-  rate, foveation, upscaling, ABR dynamic resolution, mixed reality, occlusion, spatial toggles,
-  and reserved headset-audio configuration
+- edit the shared runtime TOML keys for streaming, logging, video codec, encoder preset,
+  transport, refresh rate, foveation, upscaling, ABR dynamic resolution, mixed reality, occlusion,
+  spatial toggles, and reserved headset-audio configuration
 - detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, `9946`, and `9948`
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - run WiFi readiness, ADB status, device listing, reverse mapping reads, and reverse mapping
@@ -22,7 +22,8 @@ Current responsibilities:
 - register the selected OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
 - launch apps with the manually selected runtime manifest
 - open the shared Qt simulator widget from the Developer tab in a reusable `1280x720` window,
-  including H.265 video preview when FFmpeg is available and mouse-driven synthetic head tracking
+  including H.265/H.264 video preview when FFmpeg is available and mouse-driven synthetic head
+  tracking
 
 Build with the top-level CMake project:
 
@@ -53,10 +54,10 @@ The bitrate slider uses the shared runtime range, `1` to `200` Mbps. The Qt simu
 status `max_bitrate_mbps` follows the server config when the simulator connects.
 
 The Streaming tab also exposes the shared refresh-rate choices `60`, `72`, `80`, `90`, and `120`
-Hz, encoder presets `speed`, `balanced`, and `quality`, and server-side foveated encoding presets
-`off`, `light`, `medium`, and `high`. It also exposes `abr_mode` with `off`, `bitrate`, and `full`,
-`dynamic_resolution_min_scale`, passthrough enablement, occlusion mode, and the `[spatial]` feature
-toggles.
+Hz, video codec choices `h265`, `h264`, and `auto`, encoder presets `speed`, `balanced`, and
+`quality`, and server-side foveated encoding presets `off`, `light`, `medium`, and `high`. It also
+exposes `abr_mode` with `off`, `bitrate`, and `full`, `dynamic_resolution_min_scale`, passthrough
+enablement, occlusion mode, and the `[spatial]` feature toggles.
 The runtime stats view separates the global passthrough setting from headset support: `unsupported`
 means the selected client did not advertise `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` after
 querying its local OpenXR runtime.

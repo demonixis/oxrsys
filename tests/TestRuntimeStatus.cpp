@@ -60,6 +60,7 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.renderHeight = 1920;
     stats.encodedWidth = 2752;
     stats.encodedHeight = 1440;
+    stats.videoCodec = "h264";
     stats.encoderPreset = "quality";
     stats.foveatedEncodingPreset = "medium";
     stats.clientFoveationPreset = "high";
@@ -118,6 +119,7 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"sample_unix_ms\": 1800000000000"));
     CHECK(Contains(streamingStatus, "\"refresh_rate_hz\": 90"));
     CHECK(Contains(streamingStatus, "\"current_bitrate_mbps\": 42"));
+    CHECK(Contains(streamingStatus, "\"video_codec\": \"h264\""));
     CHECK(Contains(streamingStatus, "\"encoder_preset\": \"quality\""));
     CHECK(Contains(streamingStatus, "\"foveated_encoding_preset\": \"medium\""));
     CHECK(Contains(streamingStatus, "\"client_foveation_preset\": \"high\""));
