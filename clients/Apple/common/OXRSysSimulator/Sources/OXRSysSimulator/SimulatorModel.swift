@@ -61,7 +61,7 @@ final class SimulatorModel {
     private var lastFrameDecodeNs: Int64 = 0
     private var streamStartNs: Int64 = 0
     private var frameSampleIndex: Int = 0
-    private let maxFrameSamples = 300
+    let maxFrameSamples = 300
     var isTracking: Bool = false
     var stats = StreamStats()
     var showStats: Bool = true

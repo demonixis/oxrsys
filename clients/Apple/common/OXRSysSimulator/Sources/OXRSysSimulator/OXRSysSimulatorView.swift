@@ -203,8 +203,8 @@ private struct PerfPlotView: View {
                 Text(latest).font(.caption.monospacedDigit().weight(.bold)).foregroundStyle(color)
             }
             Chart {
-                ForEach(samples) { s in
-                    LineMark(x: .value("t", s.t), y: .value(title, value(s)))
+                ForEach(Array(samples.enumerated()), id: \.offset) { pair in
+                    LineMark(x: .value("i", pair.offset), y: .value(title, value(pair.element)))
                         .interpolationMethod(.monotone)
                         .foregroundStyle(color)
                 }
@@ -214,6 +214,10 @@ private struct PerfPlotView: View {
                         .foregroundStyle(.white.opacity(0.4))
                 }
             }
+            // Fixed-width scope window: newest sample enters on the right, oldest
+            // scrolls off the left. Avoids the shrinking-domain artifact of plotting
+            // against absolute elapsed time.
+            .chartXScale(domain: 0...max(model.maxFrameSamples, 1))
             .chartXAxis(.hidden)
             .chartYAxis {
                 AxisMarks(position: .leading) { _ in
