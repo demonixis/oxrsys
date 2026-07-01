@@ -132,6 +132,8 @@ private:
 
     std::chrono::steady_clock::time_point startTime_;
     std::chrono::steady_clock::time_point lastFrameTime_;
+    // Absolute deadline for the next frame so pacing does not accumulate sleep drift.
+    std::chrono::steady_clock::time_point nextFrameDeadline_{};
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

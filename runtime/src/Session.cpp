@@ -105,6 +105,7 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
 
     startTime_ = std::chrono::steady_clock::now();
     lastFrameTime_ = startTime_;
+    nextFrameDeadline_ = {};
 
     Runtime::Get().RegisterHandle(handle_, this);
     instance_->SetSession(this);
@@ -122,6 +123,7 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
 
     startTime_ = std::chrono::steady_clock::now();
     lastFrameTime_ = startTime_;
+    nextFrameDeadline_ = {};
 
     Runtime::Get().RegisterHandle(handle_, this);
     instance_->SetSession(this);
@@ -365,16 +367,35 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         targetRefreshHz = std::max(streamingServer_->GetTargetRefreshRateHz(), 1u);
     }
 
-    // Throttle to the negotiated headset refresh rate when available.
+    // Throttle to the negotiated headset refresh rate. Pace to an ABSOLUTE deadline grid
+    // rather than sleeping (targetFrameTime - elapsed) relative to the actual wake time:
+    // std::this_thread::sleep_for oversleeps (worse under Rosetta), and re-anchoring to the
+    // late wake makes that oversleep accumulate into steady frame-rate drift (13.9ms ->
+    // ~15.3ms => 65fps instead of 72). An absolute grid self-corrects; a short spin for the
+    // final sub-millisecond removes most residual jitter.
+    const auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
     auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - lastFrameTime_;
-    auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
-
-    if (elapsed < targetFrameTime)
+    if (nextFrameDeadline_.time_since_epoch().count() == 0)
     {
-        std::this_thread::sleep_for(targetFrameTime - elapsed);
-        now = std::chrono::steady_clock::now();
+        nextFrameDeadline_ = now; // first frame: anchor the grid here
     }
+    nextFrameDeadline_ += targetFrameTime;
+    if (now > nextFrameDeadline_ + targetFrameTime)
+    {
+        // Fell behind by more than a full frame (long stall) — resync instead of
+        // bursting a catch-up sequence of zero-length frames.
+        nextFrameDeadline_ = now + targetFrameTime;
+    }
+    constexpr auto kSpinMargin = std::chrono::microseconds(1500);
+    if (nextFrameDeadline_ - now > kSpinMargin)
+    {
+        std::this_thread::sleep_for((nextFrameDeadline_ - now) - kSpinMargin);
+    }
+    while (std::chrono::steady_clock::now() < nextFrameDeadline_)
+    {
+        std::this_thread::yield(); // brief spin for sub-ms precision
+    }
+    now = std::chrono::steady_clock::now();
 
     auto dt = std::chrono::duration<float>(now - lastFrameTime_).count();
     lastFrameTime_ = now;
