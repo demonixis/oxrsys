@@ -2577,6 +2577,8 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     // Fallback to render resolution if encodedWidth is 0 (old server without this field)
     uint32_t decoderWidth = server.encodedWidth > 0 ? server.encodedWidth : server.renderWidth;
     uint32_t decoderHeight = server.encodedHeight > 0 ? server.encodedHeight : server.renderHeight;
+    decoderWidth_ = decoderWidth;
+    decoderHeight_ = decoderHeight;
     decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(decoderWidth, 1u));
     decodedTexelHeight_ = 1.0f / static_cast<float>(std::max(decoderHeight, 1u));
     if (serverFoveatedEncodingEnabled_)
@@ -2619,7 +2621,12 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     if (videoDecoder_ && !videoDecoder_->IsInitialized())
     {
         std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-        if (videoDecoder_->Initialize(decoderWidth, decoderHeight))
+        // Start on the codec we advertise in ClientConnect (H.265). If the server
+        // actually streams H.264 (it runs under Rosetta, e.g. the wineopenxr D3D11
+        // bridge), OnNalUnitReceived re-initializes the decoder from the packet's
+        // codec byte on the first NAL.
+        const uint8_t initialCodec = static_cast<uint8_t>(protocol::VideoCodec::H265);
+        if (videoDecoder_->Initialize(decoderWidth, decoderHeight, initialCodec))
         {
             LOGI("Video decoder initialized: %ux%u (encoded), render %ux%u",
                  decoderWidth, decoderHeight, videoWidth_, videoHeight_);
@@ -2636,9 +2643,9 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     {
         auto nalCallback = [this](const uint8_t* data, size_t size,
                                   int64_t timestampNs, int64_t receiveTimeNs,
-                                  uint8_t flags)
+                                  uint8_t flags, uint8_t codec)
         {
-            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags);
+            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags, codec);
         };
         if (usbAdb)
         {
@@ -2985,8 +2992,11 @@ void XrApp::StreamConfigWorkerMain()
             std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
             if (videoDecoder_)
             {
+                const uint8_t codec = videoDecoder_->CodecType();
                 videoDecoder_->Shutdown();
-                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight);
+                decoderWidth_ = update.encodedWidth;
+                decoderHeight_ = update.encodedHeight;
+                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
             }
         }
 
@@ -3396,32 +3406,61 @@ void XrApp::UpdateReprojectionWarp(bool reusingFrame)
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
-                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags)
+                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags,
+                              uint8_t codec)
 {
     nalUnitsReceived_++;
 
     if (nalUnitsReceived_ <= 10 || nalUnitsReceived_ % 300 == 0)
     {
-        // Log NAL unit type for H.265 (type is in bits 1-6 of second byte after start code)
         const char* nalType = "unknown";
         if (size > 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
         {
-            uint8_t nalTypeId = (data[4] >> 1) & 0x3F;
-            switch (nalTypeId)
+            if (codec == static_cast<uint8_t>(protocol::VideoCodec::H264))
             {
-                case 32: nalType = "VPS"; break;
-                case 33: nalType = "SPS"; break;
-                case 34: nalType = "PPS"; break;
-                case 19: case 20: nalType = "IDR"; break;
-                case 1: nalType = "P-slice"; break;
-                default: nalType = "other"; break;
+                switch (data[4] & 0x1F)  // H.264 type = bits 0-4 of the header byte
+                {
+                    case 7: nalType = "SPS"; break;
+                    case 8: nalType = "PPS"; break;
+                    case 5: nalType = "IDR"; break;
+                    case 1: nalType = "P-slice"; break;
+                    default: nalType = "other"; break;
+                }
+            }
+            else
+            {
+                switch ((data[4] >> 1) & 0x3F)  // H.265 type = bits 1-6
+                {
+                    case 32: nalType = "VPS"; break;
+                    case 33: nalType = "SPS"; break;
+                    case 34: nalType = "PPS"; break;
+                    case 19: case 20: nalType = "IDR"; break;
+                    case 1: nalType = "P-slice"; break;
+                    default: nalType = "other"; break;
+                }
             }
         }
-        LOGI("NAL unit #%u: size=%zu type=%s ts=%lld",
-             nalUnitsReceived_, size, nalType, (long long)timestampNs);
+        LOGI("NAL unit #%u: size=%zu codec=%u type=%s ts=%lld",
+             nalUnitsReceived_, size, codec, nalType, (long long)timestampNs);
     }
 
     std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
+
+    // The server stamps the real codec on every packet. If it differs from what the
+    // decoder was initialized with (e.g. an H.264 Rosetta server vs. our H.265
+    // default), rebuild the decoder for the actual codec. Happens once, on the first NAL.
+    if (videoDecoder_ && videoDecoder_->IsInitialized() &&
+        videoDecoder_->CodecType() != codec && decoderWidth_ > 0 && decoderHeight_ > 0)
+    {
+        LOGI("Server stream codec=%u differs from decoder codec=%u; re-initializing decoder",
+             codec, videoDecoder_->CodecType());
+        videoDecoder_->Shutdown();
+        if (!videoDecoder_->Initialize(decoderWidth_, decoderHeight_, codec))
+        {
+            LOGE("Failed to re-initialize decoder for codec=%u", codec);
+        }
+    }
+
     if (videoDecoder_ && videoDecoder_->IsInitialized())
     {
         const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;

@@ -330,7 +330,7 @@ void NetworkReceiver::ReceiveTcpThread(OnNalUnitCallback callback)
         if (callback)
         {
             callback(nalData, nalSize, nalHeader->presentationTimeNs, receiveTimeNs,
-                     nalHeader->flags);
+                     nalHeader->flags, nalHeader->codec);
         }
     }
 
@@ -406,6 +406,7 @@ void NetworkReceiver::ReassembleFrame(const protocol::VideoPacketHeader& header,
         pendingFrame_.receivedPackets = 0;
         pendingFrame_.timestampNs = header.presentationTimeNs;
         pendingFrame_.flags = header.flags;
+        pendingFrame_.codec = header.codec;
         const size_t dataBytes = header.totalPackets * protocol::MAX_PACKET_PAYLOAD;
         if (pendingFrame_.data.size() < dataBytes)
         {
@@ -479,7 +480,7 @@ deliver:
             {
                 nalCallback_(pendingFrame_.compactedData.data(), totalSize,
                              pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags);
+                             pendingFrame_.flags, pendingFrame_.codec);
             }
         }
         else
@@ -488,7 +489,7 @@ deliver:
             {
                 nalCallback_(pendingFrame_.data.data(), totalSize,
                              pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags);
+                             pendingFrame_.flags, pendingFrame_.codec);
             }
         }
 

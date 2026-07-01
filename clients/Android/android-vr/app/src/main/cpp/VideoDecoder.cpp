@@ -34,10 +34,17 @@ VideoDecoder::~VideoDecoder()
     Shutdown();
 }
 
-bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
+bool VideoDecoder::Initialize(uint32_t width, uint32_t height, uint8_t codec)
 {
     width_ = width;
     height_ = height;
+    codecType_ = codec;
+
+    // Select the MediaCodec MIME from the server's codec byte. H.264 arrives when
+    // the server runs under Rosetta (HEVC hardware encode unavailable there).
+    const bool useH264 = (codec == static_cast<uint8_t>(protocol::VideoCodec::H264));
+    const char* const mime = useH264 ? "video/avc" : "video/hevc";
+    const char* const codecName = useH264 ? "H.264" : "H.265";
 
     // Create AImageReader as the output surface for MediaCodec.
     // We use AHardwareBuffer from the decoded AImage for zero-copy GPU rendering
@@ -67,11 +74,11 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
 
     LOGI("AImageReader created: %ux%u, format=YUV_420_888", width, height);
 
-    // Create H.265 decoder
-    codec_ = AMediaCodec_createDecoderByType("video/hevc");
+    // Create the decoder
+    codec_ = AMediaCodec_createDecoderByType(mime);
     if (codec_ == nullptr)
     {
-        LOGE("Failed to create H.265 decoder");
+        LOGE("Failed to create %s decoder", codecName);
         AImageReader_delete(imageReader_);
         imageReader_ = nullptr;
         outputWindow_ = nullptr;
@@ -80,7 +87,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
 
     // Configure decoder
     AMediaFormat* format = AMediaFormat_new();
-    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/hevc");
+    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mime);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
     const uint64_t pixelCount = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
@@ -125,8 +132,8 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height)
     outputThreadRunning_.store(true);
     outputThread_ = std::thread(&VideoDecoder::OutputThreadMain, this);
 
-    LOGI("H.265 decoder initialized with AImageReader surface: %ux%u maxInput=%llu",
-         width, height, (unsigned long long)maxInputSize);
+    LOGI("%s decoder initialized with AImageReader surface: %ux%u maxInput=%llu",
+         codecName, width, height, (unsigned long long)maxInputSize);
     return true;
 }
 
