@@ -1300,7 +1300,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
             encoderDroppedFramesTotalForAbr_.store(0);
             abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
                                  bitrateMbps,
-                                 bitrateMbps);
+                                 bitrateMbps,
+                                 negotiatedRefresh);
             {
                 std::lock_guard<std::mutex> abrLock(abrStateMutex_);
                 abrModeName_ = oxrsys::streaming_abr::ToString(
@@ -1416,7 +1417,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
             encoderDroppedFramesTotalForAbr_.store(0);
             abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
                                  bitrateMbps,
-                                 bitrateMbps);
+                                 bitrateMbps,
+                                 negotiatedRefresh);
             {
                 std::lock_guard<std::mutex> abrLock(abrStateMutex_);
                 abrModeName_ = oxrsys::streaming_abr::ToString(

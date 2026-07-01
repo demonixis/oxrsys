@@ -45,6 +45,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated the Quest MediaCodec input sizing to keep bounded headroom for high-bitrate foveated-encoding IDR frames.
 - Updated the Quest/PICO shell to pause passthrough, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
 - Updated SwiftUI Home and Qt Home with ABR and Quest client reprojection controls plus runtime status display for frame age, ABR state, and reprojection reuse.
+- Updated the streaming ABR controller to scale reprojection thresholds by negotiated refresh rate, raise USB/pose-reprojection baselines, and probe upward when bitrate is stuck at the floor for non-bandwidth causes.
 - Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
 - Updated visionOS streaming behavior around the minimal search window, automatic immersive entry on stream connection, head/hand tracking, and first-pass tracked accessory controller data.
