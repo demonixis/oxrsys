@@ -2058,7 +2058,12 @@ static ActionState::SubactionData GetQueriedActionState(const ActionState* actio
         aggregate.isActive = aggregate.isActive || data.isActive;
         aggregate.boolValue = aggregate.boolValue || data.boolValue;
         aggregate.boolChanged = aggregate.boolChanged || data.boolChanged;
-        aggregate.floatValue = std::max(aggregate.floatValue, data.floatValue);
+        // Magnitude-preserving so bidirectional axes (thumbstick x/y) keep their sign;
+        // identical to max() for one-sided inputs (trigger/grip are always >= 0).
+        if (std::fabs(data.floatValue) > std::fabs(aggregate.floatValue))
+        {
+            aggregate.floatValue = data.floatValue;
+        }
         aggregate.floatChanged = aggregate.floatChanged || data.floatChanged;
         if (std::fabs(data.vector2fValue.x) > std::fabs(aggregate.vector2fValue.x) ||
             std::fabs(data.vector2fValue.y) > std::fabs(aggregate.vector2fValue.y))
@@ -2194,10 +2199,17 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
             break;
 
         case XR_ACTION_TYPE_FLOAT_INPUT:
-            aggregate.floatValue = std::max(aggregate.floatValue,
-                                            inputManager.GetFloatComponentForProfile(
-                                                hand, binding.componentPath, binding.profilePathString));
+        {
+            // Magnitude-preserving so bidirectional axes keep their sign (max() would clamp
+            // negative thumbstick deflection to 0). One-sided inputs are unaffected.
+            const float floatComponent = inputManager.GetFloatComponentForProfile(
+                hand, binding.componentPath, binding.profilePathString);
+            if (std::fabs(floatComponent) > std::fabs(aggregate.floatValue))
+            {
+                aggregate.floatValue = floatComponent;
+            }
             break;
+        }
 
         case XR_ACTION_TYPE_VECTOR2F_INPUT:
         {

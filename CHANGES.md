@@ -59,6 +59,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed server-side foveated encoding on Metal by running the AADT pass through a compute shader into a private GPU scratch texture before blitting into the VideoToolbox pixel buffer, avoiding render-encoder validation aborts on the first encoded frame.
 - Fixed Quest connection recovery when a server is discovered but no first video frame arrives, returning the client to discovery/retry instead of leaving the standby/loading screen stuck.
 - Fixed controller pose handling so streaming packets only update controller poses when the corresponding controller-active flag is present.
+- Fixed float action aggregation so bidirectional axes such as thumbsticks preserve negative deflection instead of being clamped by `std::max()`.
 - Fixed hand tracking and hand-interaction coexistence so hand bindings remain available while controller bindings keep priority for shared actions.
 - Fixed Quest hand tracking ingestion by feeding real `XR_EXT_hand_tracking` joints from the Android client into the runtime.
 - Fixed USB ADB reverse TCP reconnect behavior so closed control/video sockets or video stalls return the Android client to discovery/retry without relaunching the client.
