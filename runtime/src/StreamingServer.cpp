@@ -787,6 +787,14 @@ void StreamingServer::BroadcastThread()
     broadcastAddr.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
     broadcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
 
+    // Also beacon to loopback so a same-machine client (the simulator, or a
+    // Rosetta/Wine-hosted setup) can discover us: macOS does not loop a
+    // 255.255.255.255 broadcast back to local listeners.
+    sockaddr_in loopbackAddr = {};
+    loopbackAddr.sin_family = AF_INET;
+    loopbackAddr.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
+    loopbackAddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
     while (running_.load() && state_.load() == State::Broadcasting)
     {
         oxrsys::runtime_socket::SendTo(broadcastSocket_,
@@ -795,6 +803,12 @@ void StreamingServer::BroadcastThread()
                                        0,
                                        (sockaddr*)&broadcastAddr,
                                        sizeof(broadcastAddr));
+        oxrsys::runtime_socket::SendTo(broadcastSocket_,
+                                       &announce,
+                                       sizeof(announce),
+                                       0,
+                                       (sockaddr*)&loopbackAddr,
+                                       sizeof(loopbackAddr));
 
         for (int i = 0; i < 10 && running_.load() && state_.load() == State::Broadcasting; i++)
         {
