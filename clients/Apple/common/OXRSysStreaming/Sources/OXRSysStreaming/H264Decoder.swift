@@ -39,8 +39,13 @@ public final class H264Decoder: @unchecked Sendable {
     }
 
     /// Feed a raw H.264 byte stream (may contain multiple NAL units with start codes).
+    /// One call carries one reassembled access unit (frame). Low-latency rate control can
+    /// split a frame into MULTIPLE VCL slice NALs; VideoToolbox must receive them all in a
+    /// single CMSampleBuffer, otherwise decoding each slice alone yields corrupt (green)
+    /// pictures with no decode error. So collect all VCL NALs and decode them together.
     public func decode(nalData: Data, presentationTimeNs: Int64) {
         let nalUnits = splitNalUnits(nalData)
+        var vclNals: [Data] = []
 
         for nal in nalUnits {
             guard nal.count > 1 else { continue }
@@ -71,11 +76,15 @@ public final class H264Decoder: @unchecked Sendable {
                     tryCreateFormatDescription()
                 }
             case 1, 2, 3, 4, 5: // VCL slices (non-IDR + IDR)
-                decodeSlice(nal, presentationTimeNs: presentationTimeNs)
+                vclNals.append(nal)
             default:
                 // AUD(9), SEI(6), etc. — not video data.
                 break
             }
+        }
+
+        if !vclNals.isEmpty {
+            decodeAccessUnit(vclNals, presentationTimeNs: presentationTimeNs)
         }
     }
 
@@ -137,7 +146,7 @@ public final class H264Decoder: @unchecked Sendable {
 
         let decoderAttrs: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true,
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         ]
 
         var outputCallback = VTDecompressionOutputCallbackRecord(
@@ -174,21 +183,29 @@ public final class H264Decoder: @unchecked Sendable {
         print("[H264] Decoder session created — \(dim.width)x\(dim.height)")
     }
 
-    private func decodeSlice(_ nalUnit: Data, presentationTimeNs: Int64) {
+    /// Decode one access unit made of one or more VCL slice NALs. All slices are packed into a
+    /// single CMSampleBuffer (4-byte length-prefixed, AVCC) and submitted as one frame.
+    private func decodeAccessUnit(_ vclNals: [Data], presentationTimeNs: Int64) {
         let snapshot = locked { () -> (VTDecompressionSession, CMFormatDescription, Int)? in
             guard let session, let formatDesc else { return nil }
             sliceCount += 1
             return (session, formatDesc, sliceCount)
         }
-        guard let (session, formatDesc, sliceNumber) = snapshot else { return }
+        guard let (session, formatDesc, frameNumber) = snapshot else { return }
 
-        let totalSize = 4 + nalUnit.count
+        var totalSize = 0
+        for nal in vclNals { totalSize += 4 + nal.count }
         let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: totalSize)
-        let len = UInt32(nalUnit.count).bigEndian
-        withUnsafeBytes(of: len) { src in
-            buf.initialize(from: src.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 4)
+        var offset = 0
+        for nal in vclNals {
+            let len = UInt32(nal.count).bigEndian
+            withUnsafeBytes(of: len) { src in
+                (buf + offset).update(from: src.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 4)
+            }
+            offset += 4
+            nal.copyBytes(to: buf + offset, count: nal.count)
+            offset += nal.count
         }
-        nalUnit.copyBytes(to: buf + 4, count: nalUnit.count)
 
         var blockBuffer: CMBlockBuffer?
         let bbStatus = CMBlockBufferCreateWithMemoryBlock(
@@ -232,10 +249,10 @@ public final class H264Decoder: @unchecked Sendable {
         if decStatus != noErr {
             let errorCount = locked { () -> Int in decodeErrorCount += 1; return decodeErrorCount }
             if errorCount <= 5 || errorCount % 100 == 0 {
-                print("[H264] DecodeFrame error: \(decStatus) (slice #\(sliceNumber), \(nalUnit.count) bytes)")
+                print("[H264] DecodeFrame error: \(decStatus) (frame #\(frameNumber), \(vclNals.count) slices, \(totalSize) bytes)")
             }
-        } else if sliceNumber <= 3 || sliceNumber % 200 == 0 {
-            print("[H264] Decoded slice #\(sliceNumber) — \(nalUnit.count) bytes")
+        } else if frameNumber <= 3 || frameNumber % 200 == 0 {
+            print("[H264] Decoded frame #\(frameNumber) — \(vclNals.count) slice(s), \(totalSize) bytes")
         }
     }
 

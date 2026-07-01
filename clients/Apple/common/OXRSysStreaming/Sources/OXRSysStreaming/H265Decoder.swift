@@ -169,7 +169,7 @@ public final class H265Decoder: @unchecked Sendable {
 
         let decoderAttrs: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true,
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         ]
 
         var outputCallback = VTDecompressionOutputCallbackRecord(
