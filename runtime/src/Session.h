@@ -17,7 +17,7 @@ class Instance;
 class Swapchain;
 class Space;
 class InputManager;
-class StreamingServer;
+class IStreamingBackend;
 
 class Session
 {
@@ -92,6 +92,10 @@ public:
         return exitRequested_;
     }
 
+    // Forward controller haptic feedback to the streaming backend.
+    // hand: 0 = left, 1 = right.
+    void ApplyHapticFeedback(int hand, float amplitude, int64_t durationNs, float frequencyHz);
+
     XrTime GetCurrentTime() const;
     // XR_KHR_convert_timespec_time helpers. CLOCK_MONOTONIC is captured at the
     // same instant startTime_ is set (monoStartNs_), so XrTime == mono_ns -
@@ -137,7 +141,7 @@ private:
     mutable std::mutex debugUtilsMutex_;
 
     std::unique_ptr<InputManager> inputManager_;
-    std::unique_ptr<StreamingServer> streamingServer_;
+    std::unique_ptr<IStreamingBackend> streamingServer_;
     std::vector<std::unique_ptr<Swapchain>> swapchains_;
     std::vector<std::unique_ptr<Space>> spaces_;
 

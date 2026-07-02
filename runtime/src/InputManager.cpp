@@ -233,6 +233,11 @@ void InputManager::UpdateFromStreaming()
         return;
     }
 
+    // Remember which tracking sample this frame's poses come from, so the
+    // streaming backend can tag the encoded frame with it (ALVR matches the
+    // frame to the pose by this timestamp for client-side reprojection).
+    lastTrackingSampleNs_.store(packet.timestampNs);
+
     // Apply head pose from headset tracking — store quaternion directly
     headPosition_ = glm::vec3(packet.headPosition[0],
                                 packet.headPosition[1],

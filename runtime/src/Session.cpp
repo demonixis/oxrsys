@@ -8,6 +8,10 @@
 #include "Space.h"
 #include "InputManager.h"
 #include "StreamingServer.h"
+#ifdef OXRSYS_HAS_ALVR
+#include "AlvrStreamingBackend.h"
+#endif
+#include "Config.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -432,16 +436,29 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // final sub-millisecond removes most residual jitter.
     const auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
     auto now = std::chrono::steady_clock::now();
-    if (nextFrameDeadline_.time_since_epoch().count() == 0)
+    int64_t backendSleepNs = 0;
+    if (streamingServer_ && streamingServer_->GetFramePacing(backendSleepNs) &&
+        backendSleepNs > 0 &&
+        backendSleepNs < 2 * targetFrameTime.count())
     {
-        nextFrameDeadline_ = now; // first frame: anchor the grid here
+        // Backend-provided pacing (ALVR: duration until the client's next
+        // vsync) — phase-locks the frame loop to the headset display instead
+        // of a free-running local grid, absorbing clock drift.
+        nextFrameDeadline_ = now + std::chrono::nanoseconds(backendSleepNs);
     }
-    nextFrameDeadline_ += targetFrameTime;
-    if (now > nextFrameDeadline_ + targetFrameTime)
+    else
     {
-        // Fell behind by more than a full frame (long stall) — resync instead of
-        // bursting a catch-up sequence of zero-length frames.
-        nextFrameDeadline_ = now + targetFrameTime;
+        if (nextFrameDeadline_.time_since_epoch().count() == 0)
+        {
+            nextFrameDeadline_ = now; // first frame: anchor the grid here
+        }
+        nextFrameDeadline_ += targetFrameTime;
+        if (now > nextFrameDeadline_ + targetFrameTime)
+        {
+            // Fell behind by more than a full frame (long stall) — resync instead of
+            // bursting a catch-up sequence of zero-length frames.
+            nextFrameDeadline_ = now + targetFrameTime;
+        }
     }
     constexpr auto kSpinMargin = std::chrono::microseconds(1500);
     if (nextFrameDeadline_ - now > kSpinMargin)
@@ -612,6 +629,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     CheckStreamingConnection();
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
+        frameSource.trackingSampleTimestampNs = inputManager_->GetLastTrackingSampleTimestampNs();
         auto sendStart = Clock::now();
         streamingServer_->SendFrame(std::move(frameSource));
         double enqueueMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
@@ -948,6 +966,22 @@ XrResult Session::DestroySpace(Space* space)
     return XR_ERROR_HANDLE_INVALID;
 }
 
+void Session::ApplyHapticFeedback(int hand, float amplitude, int64_t durationNs, float frequencyHz)
+{
+    if (!streamingServer_ || !streamingServer_->IsClientConnected())
+    {
+        return;
+    }
+    // XR_MIN_HAPTIC_DURATION (-1) and very short pulses map to a floor the
+    // client motor can actually render.
+    constexpr float kMinDurationS = 0.01f;
+    float durationS = durationNs > 0 ? static_cast<float>(durationNs) * 1e-9f : kMinDurationS;
+    durationS = std::max(durationS, kMinDurationS);
+    // XR_FREQUENCY_UNSPECIFIED (0) passes through; ALVR applies its default.
+    streamingServer_->ApplyHaptics(hand, std::clamp(amplitude, 0.0f, 1.0f), durationS,
+                                   frequencyHz);
+}
+
 void Session::StartStreamingIfNeeded()
 {
     if (streamingStarted_)
@@ -955,7 +989,23 @@ void Session::StartStreamingIfNeeded()
         return;
     }
 
-    streamingServer_ = std::make_unique<StreamingServer>();
+    const std::string protocol = Config::Get().GetValues().streamingProtocol;
+#ifdef OXRSYS_HAS_ALVR
+    if (protocol == "alvr")
+    {
+        streamingServer_ = std::make_unique<AlvrStreamingBackend>();
+    }
+#else
+    if (protocol == "alvr")
+    {
+        spdlog::warn("OXRSys: protocol=\"alvr\" requested but this build lacks the ALVR "
+                     "backend; falling back to the oxrsys protocol");
+    }
+#endif
+    if (!streamingServer_)
+    {
+        streamingServer_ = std::make_unique<StreamingServer>();
+    }
     streamingServer_->SetGraphicsContext(graphicsContext_);
 
     // Use default resolution until first swapchain is created
@@ -967,7 +1017,8 @@ void Session::StartStreamingIfNeeded()
     if (streamingServer_->Start(width, height, refreshHz))
     {
         streamingStarted_ = true;
-        spdlog::info("OXRSys: Streaming server started, waiting for headset connection...");
+        spdlog::info("OXRSys: Streaming server started (protocol={}), waiting for headset connection...",
+                     protocol);
     }
     else
     {

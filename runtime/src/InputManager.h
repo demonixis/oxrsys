@@ -6,6 +6,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <array>
+#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,8 @@ public:
     // Set the tracking receiver to read poses from (streaming client)
     void SetTrackingReceiver(TrackingReceiver* receiver);
     bool IsStreaming() const { return trackingReceiver_ != nullptr; }
+    // Timestamp of the tracking sample the current frame's poses came from.
+    int64_t GetLastTrackingSampleTimestampNs() const { return lastTrackingSampleNs_.load(); }
 
     // Per-frame update
     void Update(float deltaTime);
@@ -117,6 +120,7 @@ private:
     float GetTrackedGraspValue(Hand hand) const;
 
     TrackingReceiver* trackingReceiver_ = nullptr;
+    std::atomic<int64_t> lastTrackingSampleNs_{0};
 
     // Head state (quaternion from streaming client)
     glm::quat headQuat_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z

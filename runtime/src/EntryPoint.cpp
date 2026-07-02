@@ -2539,6 +2539,29 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
         return XR_SESSION_NOT_FOCUSED;
     }
 
+    if (hapticFeedback->type == XR_TYPE_HAPTIC_VIBRATION)
+    {
+        const auto* vibration = reinterpret_cast<const XrHapticVibration*>(hapticFeedback);
+        // Resolve target hand(s): explicit subaction path, or every hand the
+        // action is bound to when XR_NULL_PATH.
+        const std::string subactionString =
+            hapticActionInfo->subactionPath != XR_NULL_PATH
+                ? Runtime::Get().GetPathString(hapticActionInfo->subactionPath)
+                : std::string();
+        const bool left = subactionString.empty() || subactionString == "/user/hand/left";
+        const bool right = subactionString.empty() || subactionString == "/user/hand/right";
+        const float frequency =
+            vibration->frequency == XR_FREQUENCY_UNSPECIFIED ? 0.0f : vibration->frequency;
+        if (left)
+        {
+            sess->ApplyHapticFeedback(0, vibration->amplitude, vibration->duration, frequency);
+        }
+        if (right)
+        {
+            sess->ApplyHapticFeedback(1, vibration->amplitude, vibration->duration, frequency);
+        }
+    }
+
     return XR_SUCCESS;
 }
 
@@ -2576,6 +2599,22 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
     if (sess->GetState() != XR_SESSION_STATE_FOCUSED)
     {
         return XR_SESSION_NOT_FOCUSED;
+    }
+
+    {
+        // A zero-amplitude pulse cancels any queued vibration on the client.
+        const std::string subactionString =
+            hapticActionInfo->subactionPath != XR_NULL_PATH
+                ? Runtime::Get().GetPathString(hapticActionInfo->subactionPath)
+                : std::string();
+        if (subactionString.empty() || subactionString == "/user/hand/left")
+        {
+            sess->ApplyHapticFeedback(0, 0.0f, 0, 0.0f);
+        }
+        if (subactionString.empty() || subactionString == "/user/hand/right")
+        {
+            sess->ApplyHapticFeedback(1, 0.0f, 0, 0.0f);
+        }
     }
 
     return XR_SUCCESS;

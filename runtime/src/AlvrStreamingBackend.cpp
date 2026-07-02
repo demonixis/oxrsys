@@ -1,0 +1,634 @@
+// SPDX-License-Identifier: MPL-2.0
+
+#ifdef OXRSYS_HAS_ALVR
+
+#include "AlvrStreamingBackend.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <regex>
+#include <sstream>
+
+#include <spdlog/spdlog.h>
+
+#include "CodecSelect.h"
+#include "Config.h"
+#include "TrackingReceiver.h"
+#include "VideoEncoder.h"
+#include "alvr_server_core.h"
+
+namespace fs = std::filesystem;
+
+namespace
+{
+// Discovery with auto-trust (any v20 client on the LAN) plus the magic wired
+// hostname: server_core runs adb port-forwarding and launches the store
+// client itself when a device is plugged in. ALVR extrapolates all missing
+// settings against its defaults and rewrites the file with the full tree.
+constexpr const char* kMinimalSessionJson = R"json({
+  "client_connections": {
+    "client.wired": {
+      "display_name": "Quest (USB)",
+      "current_ip": null,
+      "manual_ips": [],
+      "trusted": true,
+      "connection_state": "Disconnected"
+    }
+  },
+  "session_settings": {
+    "connection": {
+      "client_discovery": { "enabled": true, "content": { "auto_trust_clients": true } }
+    },
+    "video": {
+      "transcoding_view_resolution": { "variant": "Scale", "Scale": 0.75 },
+      "foveated_encoding": { "enabled": false }
+    },
+    "audio": {
+      "game_audio": {
+        "enabled": true,
+        "content": {
+          "device": { "set": true, "content": { "variant": "NameSubstring", "NameSubstring": "BlackHole" } }
+        }
+      }
+    }
+  }
+})json";
+} // namespace
+
+AlvrStreamingBackend::AlvrStreamingBackend()
+    : trackingReceiver_(std::make_unique<TrackingReceiver>())
+{
+    // The receiver is intentionally not Start()ed: poses arrive via
+    // InjectPacket() from the ALVR event loop, not from a UDP socket.
+    frameQueue_.SetReleaseFrameCallback([](StreamingFrame& frame) { frame = {}; });
+}
+
+AlvrStreamingBackend::~AlvrStreamingBackend()
+{
+    Stop();
+}
+
+void AlvrStreamingBackend::EnsureSessionJson(const std::string& configDir)
+{
+    const fs::path sessionPath = fs::path(configDir) / "session.json";
+    if (fs::exists(sessionPath))
+    {
+        return;
+    }
+    std::ofstream out(sessionPath);
+    out << kMinimalSessionJson;
+    spdlog::info("OXRSys/ALVR: wrote initial session.json at {}", sessionPath.string());
+}
+
+bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
+                                 uint32_t refreshRateHz)
+{
+    if (running_.load())
+    {
+        return true;
+    }
+
+    (void)renderWidth;
+    (void)renderHeight;
+    targetRefreshRateHz_.store(refreshRateHz);
+
+    Config& config = Config::Get();
+    const fs::path alvrDir = fs::path(config.appSupportDir) / "alvr";
+    std::error_code ec;
+    fs::create_directories(alvrDir, ec);
+    if (ec)
+    {
+        spdlog::error("OXRSys/ALVR: cannot create {}: {}", alvrDir.string(), ec.message());
+        return false;
+    }
+
+    EnsureSessionJson(alvrDir.string());
+
+    const std::string configDir = alvrDir.string();
+    const std::string sessionLogPath = (alvrDir / "session_log.txt").string();
+    const std::string crashLogPath = (alvrDir / "crash_log.txt").string();
+
+    sessionJsonPath_ = (alvrDir / "session.json").string();
+
+    alvr_initialize_environment(configDir.c_str(), configDir.c_str());
+    alvr_initialize_logging(sessionLogPath.c_str(), crashLogPath.c_str());
+
+    const AlvrTargetConfig target = alvr_initialize();
+    streamWidth_.store(target.stream_width);
+    streamHeight_.store(target.stream_height);
+    spdlog::info("OXRSys/ALVR: initialized (game_render={}x{} stream={}x{}, logs at {})",
+                 target.game_render_width, target.game_render_height, target.stream_width,
+                 target.stream_height, sessionLogPath);
+
+    alvr_start_connection();
+
+    InitInputIds();
+    // ALVR's get_device_motion already extrapolates to the sample timestamp;
+    // oxrsys-side prediction would double-predict.
+    trackingReceiver_->SetPredictionHorizonMs(0.0f);
+
+    running_.store(true);
+    frameQueue_.Start();
+    eventThread_ = std::thread(&AlvrStreamingBackend::EventThread, this);
+    encodeThread_ = std::thread(&AlvrStreamingBackend::EncodeThread, this);
+    return true;
+}
+
+void AlvrStreamingBackend::Stop()
+{
+    if (!running_.exchange(false))
+    {
+        return;
+    }
+    frameQueue_.Stop();
+    if (encodeThread_.joinable())
+    {
+        encodeThread_.join();
+    }
+    if (eventThread_.joinable())
+    {
+        eventThread_.join();
+    }
+    if (encoder_)
+    {
+        // Flushes in-flight VideoToolbox frames; our submit callbacks may
+        // still run during this call, so it precedes alvr_shutdown().
+        encoder_->Shutdown();
+        encoder_.reset();
+    }
+    connected_.store(false);
+    // Tears down ServerCoreContext (tokio runtime + sockets). Must happen
+    // after our own threads stopped touching alvr_* functions.
+    alvr_shutdown();
+    spdlog::info("OXRSys/ALVR: shut down");
+}
+
+void AlvrStreamingBackend::SendFrame(FrameSource frameSource)
+{
+    StreamingFrame frame = {};
+    frame.alphaBlend = frameSource.alphaBlend;
+    // ALVR requires the video timestamp to equal a tracking sample timestamp
+    // (its time domain) so the client can match the frame to the pose it was
+    // rendered from. Session supplies the exact sample the app's poses came
+    // from; fall back to latest-at-enqueue before the first sample lands.
+    frame.timestampNs = frameSource.trackingSampleTimestampNs != 0
+                            ? frameSource.trackingSampleTimestampNs
+                            : static_cast<int64_t>(latestTrackingTimestampNs_.load());
+    frame.source = std::move(frameSource);
+    frame.valid = true;
+    frameQueue_.PushLatest(std::move(frame));
+}
+
+void AlvrStreamingBackend::ApplyHaptics(int hand, float amplitude, float durationSeconds,
+                                        float frequencyHz)
+{
+    if (!connected_.load())
+    {
+        return;
+    }
+    alvr_send_haptics(hand == 0 ? handLeftId_ : handRightId_, durationSeconds, frequencyHz,
+                      amplitude);
+}
+
+bool AlvrStreamingBackend::GetFramePacing(int64_t& outSleepNs)
+{
+    if (!connected_.load())
+    {
+        return false;
+    }
+    uint64_t untilVsyncNs = 0;
+    if (!alvr_duration_until_next_vsync(&untilVsyncNs))
+    {
+        return false;
+    }
+    outSleepNs = static_cast<int64_t>(untilVsyncNs);
+    return true;
+}
+
+void AlvrStreamingBackend::RefreshNegotiatedConfig()
+{
+    std::ifstream in(sessionJsonPath_);
+    if (!in)
+    {
+        return;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    const std::string json = buffer.str();
+
+    // openvr_config holds the values server_core negotiated with the client
+    // during the handshake. Note: the leading quote keeps this from matching
+    // inside "target_eye_resolution_width".
+    static const std::regex widthRe("\"eye_resolution_width\"\\s*:\\s*(\\d+)");
+    static const std::regex heightRe("\"eye_resolution_height\"\\s*:\\s*(\\d+)");
+    static const std::regex fpsRe("\"refresh_rate\"\\s*:\\s*(\\d+)");
+
+    std::smatch match;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fps = 0;
+    if (std::regex_search(json, match, widthRe))
+    {
+        width = static_cast<uint32_t>(std::stoul(match[1]));
+    }
+    if (std::regex_search(json, match, heightRe))
+    {
+        height = static_cast<uint32_t>(std::stoul(match[1]));
+    }
+    if (std::regex_search(json, match, fpsRe))
+    {
+        fps = static_cast<uint32_t>(std::stoul(match[1]));
+    }
+    if (width == 0 || height == 0)
+    {
+        return;
+    }
+
+    const bool changed = width != streamWidth_.load() || height != streamHeight_.load() ||
+                         (fps != 0 && fps != targetRefreshRateHz_.load());
+    streamWidth_.store(width);
+    streamHeight_.store(height);
+    if (fps != 0)
+    {
+        targetRefreshRateHz_.store(fps);
+    }
+    if (changed)
+    {
+        encoderResetPending_.store(true);
+        spdlog::info("OXRSys/ALVR: negotiated stream {}x{} per eye @{}Hz (encoder reset queued)",
+                     width, height, fps);
+    }
+}
+
+bool AlvrStreamingBackend::EnsureEncoder()
+{
+    if (encoderResetPending_.exchange(false) && encoder_)
+    {
+        encoder_->Shutdown();
+        encoder_.reset();
+        submittedConfigNals_.clear();
+    }
+    if (encoder_ && encoder_->IsInitialized())
+    {
+        return true;
+    }
+    const uint32_t eyeWidth = streamWidth_.load();
+    const uint32_t eyeHeight = streamHeight_.load();
+    if (eyeWidth == 0 || eyeHeight == 0)
+    {
+        return false;
+    }
+
+    encoderUsesH264_ = (oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264);
+    encoder_ = std::make_shared<VideoEncoder>();
+    const uint32_t totalWidth = eyeWidth * 2; // side-by-side stereo
+    const uint32_t bitrateMbps = Config::Get().GetValues().bitrateMbps;
+    if (!encoder_->Initialize(totalWidth, eyeHeight, targetRefreshRateHz_.load(),
+                              bitrateMbps, graphicsContext_))
+    {
+        spdlog::error("OXRSys/ALVR: encoder init failed ({}x{} @{}Hz)", totalWidth,
+                      eyeHeight, targetRefreshRateHz_.load());
+        encoder_.reset();
+        return false;
+    }
+    spdlog::info("OXRSys/ALVR: encoder ready {}x{} @{}Hz {}Mbps ({})", totalWidth, eyeHeight,
+                 targetRefreshRateHz_.load(), bitrateMbps, encoderUsesH264_ ? "H.264" : "HEVC");
+    return true;
+}
+
+void AlvrStreamingBackend::SubmitEncodedFrame(PendingEncodedFrame& frame)
+{
+    if (frame.data.empty())
+    {
+        return;
+    }
+
+    if (!frame.config.empty() && frame.config != submittedConfigNals_)
+    {
+        alvr_set_video_config_nals(encoderUsesH264_ ? ALVR_CODEC_H264 : ALVR_CODEC_HEVC,
+                                   frame.config.data(), static_cast<int32_t>(frame.config.size()));
+        submittedConfigNals_ = frame.config;
+        spdlog::info("OXRSys/ALVR: sent codec config ({} bytes)", frame.config.size());
+    }
+
+    alvr_send_video_nal(frame.timestampNs, frame.data.data(),
+                        static_cast<int32_t>(frame.data.size()), frame.isIdr);
+    alvr_report_present(frame.timestampNs, 0);
+}
+
+void AlvrStreamingBackend::EncodeThread()
+{
+    while (running_.load())
+    {
+        StreamingFrame frame = {};
+        if (!frameQueue_.WaitPop(running_, frame))
+        {
+            continue;
+        }
+        if (!connected_.load() || !EnsureEncoder())
+        {
+            continue; // dropping the frame releases its graphics resources
+        }
+
+        if (keyframeRequested_.exchange(false))
+        {
+            encoder_->ForceKeyframe();
+        }
+
+        AlvrDynamicEncoderParams params = {};
+        if (alvr_get_dynamic_encoder_params(&params))
+        {
+            const uint32_t mbps = std::max(1u, static_cast<uint32_t>(params.bitrate_bps / 1e6f));
+            if (mbps != encoder_->GetBitrateMbps())
+            {
+                encoder_->SetBitrate(mbps);
+            }
+        }
+
+        auto pending = std::make_shared<PendingEncodedFrame>();
+        pending->timestampNs = static_cast<uint64_t>(frame.timestampNs);
+
+        alvr_report_composed(pending->timestampNs, 0);
+
+        const bool usesH264 = encoderUsesH264_;
+        encoder_->EncodeStereo(
+            std::move(frame.source), frame.timestampNs,
+            [pending, usesH264](const uint8_t* data, size_t size, bool isKeyframe,
+                                int64_t /*pts*/)
+            {
+                if (data == nullptr || size < 5)
+                {
+                    return;
+                }
+                // data is Annex-B: 4-byte start code then the NAL header.
+                const uint8_t nalType = usesH264 ? (data[4] & 0x1Fu) : ((data[4] >> 1) & 0x3Fu);
+                const bool isConfig =
+                    usesH264 ? (nalType == 7 || nalType == 8)
+                             : (nalType == 32 || nalType == 33 || nalType == 34);
+                auto& buffer = isConfig ? pending->config : pending->data;
+                buffer.insert(buffer.end(), data, data + size);
+                if (isKeyframe && !isConfig)
+                {
+                    pending->isIdr = true;
+                }
+            },
+            [this, pending](const VideoEncoder::FrameMetrics& metrics)
+            {
+                if (!metrics.frameDropped)
+                {
+                    SubmitEncodedFrame(*pending);
+                }
+            });
+    }
+}
+
+std::string AlvrStreamingBackend::GetClientName() const
+{
+    // Contains "Quest" so InputManager resolves the oculus/touch profile.
+    return connected_.load() ? "Quest (ALVR)" : std::string();
+}
+
+void AlvrStreamingBackend::InitInputIds()
+{
+    headId_ = alvr_path_to_id("/user/head");
+    handLeftId_ = alvr_path_to_id("/user/hand/left");
+    handRightId_ = alvr_path_to_id("/user/hand/right");
+
+    const auto add = [this](const char* path, ButtonKind kind)
+    { buttonIds_.emplace(alvr_path_to_id(path), kind); };
+    add("/user/hand/left/input/x/click", ButtonKind::LeftX);
+    add("/user/hand/left/input/y/click", ButtonKind::LeftY);
+    add("/user/hand/left/input/menu/click", ButtonKind::LeftMenu);
+    add("/user/hand/left/input/thumbstick/click", ButtonKind::LeftThumbClick);
+    add("/user/hand/left/input/thumbstick/x", ButtonKind::LeftThumbX);
+    add("/user/hand/left/input/thumbstick/y", ButtonKind::LeftThumbY);
+    add("/user/hand/left/input/trigger/click", ButtonKind::LeftTriggerClick);
+    add("/user/hand/left/input/trigger/value", ButtonKind::LeftTriggerValue);
+    add("/user/hand/left/input/squeeze/click", ButtonKind::LeftSqueezeClick);
+    add("/user/hand/left/input/squeeze/value", ButtonKind::LeftSqueezeValue);
+    add("/user/hand/right/input/a/click", ButtonKind::RightA);
+    add("/user/hand/right/input/b/click", ButtonKind::RightB);
+    add("/user/hand/right/input/system/click", ButtonKind::RightSystem);
+    add("/user/hand/right/input/thumbstick/click", ButtonKind::RightThumbClick);
+    add("/user/hand/right/input/thumbstick/x", ButtonKind::RightThumbX);
+    add("/user/hand/right/input/thumbstick/y", ButtonKind::RightThumbY);
+    add("/user/hand/right/input/trigger/click", ButtonKind::RightTriggerClick);
+    add("/user/hand/right/input/trigger/value", ButtonKind::RightTriggerValue);
+    add("/user/hand/right/input/squeeze/click", ButtonKind::RightSqueezeClick);
+    add("/user/hand/right/input/squeeze/value", ButtonKind::RightSqueezeValue);
+}
+
+void AlvrStreamingBackend::DrainButtons()
+{
+    const uint64_t count = alvr_get_buttons(nullptr);
+    if (count == 0)
+    {
+        return;
+    }
+    std::vector<AlvrButtonEntry> entries(count);
+    const uint64_t written = alvr_get_buttons(entries.data());
+
+    const auto setButton = [this](uint32_t flag, bool down)
+    {
+        if (down)
+        {
+            inputState_.buttons |= flag;
+        }
+        else
+        {
+            inputState_.buttons &= ~flag;
+        }
+    };
+
+    for (uint64_t i = 0; i < written; ++i)
+    {
+        const auto it = buttonIds_.find(entries[i].id);
+        if (it == buttonIds_.end())
+        {
+            continue;
+        }
+        const bool binary = entries[i].value.scalar;
+        const float scalar = entries[i].value.float_;
+        using oxr::protocol::ButtonFlags;
+        switch (it->second)
+        {
+            case ButtonKind::LeftX: setButton(oxr::protocol::BUTTON_X, binary); break;
+            case ButtonKind::LeftY: setButton(oxr::protocol::BUTTON_Y, binary); break;
+            case ButtonKind::LeftMenu: setButton(oxr::protocol::BUTTON_MENU, binary); break;
+            case ButtonKind::LeftThumbClick:
+                setButton(oxr::protocol::BUTTON_LEFT_THUMBSTICK, binary);
+                break;
+            case ButtonKind::LeftThumbX: inputState_.leftThumb[0] = scalar; break;
+            case ButtonKind::LeftThumbY: inputState_.leftThumb[1] = scalar; break;
+            case ButtonKind::LeftTriggerClick:
+                setButton(oxr::protocol::BUTTON_LEFT_TRIGGER, binary);
+                break;
+            case ButtonKind::LeftTriggerValue:
+                inputState_.leftTrigger = scalar;
+                setButton(oxr::protocol::BUTTON_LEFT_TRIGGER, scalar > 0.5f);
+                break;
+            case ButtonKind::LeftSqueezeClick:
+                setButton(oxr::protocol::BUTTON_LEFT_GRIP, binary);
+                break;
+            case ButtonKind::LeftSqueezeValue:
+                inputState_.leftGrip = scalar;
+                setButton(oxr::protocol::BUTTON_LEFT_GRIP, scalar > 0.5f);
+                break;
+            case ButtonKind::RightA: setButton(oxr::protocol::BUTTON_A, binary); break;
+            case ButtonKind::RightB: setButton(oxr::protocol::BUTTON_B, binary); break;
+            case ButtonKind::RightSystem: break; // reserved by the system
+            case ButtonKind::RightThumbClick:
+                setButton(oxr::protocol::BUTTON_RIGHT_THUMBSTICK, binary);
+                break;
+            case ButtonKind::RightThumbX: inputState_.rightThumb[0] = scalar; break;
+            case ButtonKind::RightThumbY: inputState_.rightThumb[1] = scalar; break;
+            case ButtonKind::RightTriggerClick:
+                setButton(oxr::protocol::BUTTON_RIGHT_TRIGGER, binary);
+                break;
+            case ButtonKind::RightTriggerValue:
+                inputState_.rightTrigger = scalar;
+                setButton(oxr::protocol::BUTTON_RIGHT_TRIGGER, scalar > 0.5f);
+                break;
+            case ButtonKind::RightSqueezeClick:
+                setButton(oxr::protocol::BUTTON_RIGHT_GRIP, binary);
+                break;
+            case ButtonKind::RightSqueezeValue:
+                inputState_.rightGrip = scalar;
+                setButton(oxr::protocol::BUTTON_RIGHT_GRIP, scalar > 0.5f);
+                break;
+        }
+    }
+}
+
+void AlvrStreamingBackend::InjectTrackingSample(uint64_t sampleTimestampNs)
+{
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = static_cast<int64_t>(sampleTimestampNs);
+
+    AlvrDeviceMotion motion = {};
+    if (!alvr_get_device_motion(headId_, sampleTimestampNs, &motion))
+    {
+        return; // no sample yet; skip rather than inject a zero head pose
+    }
+    memcpy(packet.headPosition, motion.pose.position, sizeof(packet.headPosition));
+    packet.headOrientation[0] = motion.pose.orientation.x;
+    packet.headOrientation[1] = motion.pose.orientation.y;
+    packet.headOrientation[2] = motion.pose.orientation.z;
+    packet.headOrientation[3] = motion.pose.orientation.w;
+    memcpy(packet.headLinearVelocity, motion.linear_velocity, sizeof(packet.headLinearVelocity));
+    memcpy(packet.headAngularVelocity, motion.angular_velocity,
+           sizeof(packet.headAngularVelocity));
+
+    if (alvr_get_device_motion(handLeftId_, sampleTimestampNs, &motion))
+    {
+        packet.trackingFlags |= oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+        memcpy(packet.leftControllerPos, motion.pose.position, sizeof(packet.leftControllerPos));
+        packet.leftControllerRot[0] = motion.pose.orientation.x;
+        packet.leftControllerRot[1] = motion.pose.orientation.y;
+        packet.leftControllerRot[2] = motion.pose.orientation.z;
+        packet.leftControllerRot[3] = motion.pose.orientation.w;
+    }
+    if (alvr_get_device_motion(handRightId_, sampleTimestampNs, &motion))
+    {
+        packet.trackingFlags |= oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+        memcpy(packet.rightControllerPos, motion.pose.position,
+               sizeof(packet.rightControllerPos));
+        packet.rightControllerRot[0] = motion.pose.orientation.x;
+        packet.rightControllerRot[1] = motion.pose.orientation.y;
+        packet.rightControllerRot[2] = motion.pose.orientation.z;
+        packet.rightControllerRot[3] = motion.pose.orientation.w;
+    }
+
+    packet.buttonState = inputState_.buttons;
+    packet.leftTrigger = inputState_.leftTrigger;
+    packet.rightTrigger = inputState_.rightTrigger;
+    packet.leftGrip = inputState_.leftGrip;
+    packet.rightGrip = inputState_.rightGrip;
+    packet.leftThumbstick[0] = inputState_.leftThumb[0];
+    packet.leftThumbstick[1] = inputState_.leftThumb[1];
+    packet.rightThumbstick[0] = inputState_.rightThumb[0];
+    packet.rightThumbstick[1] = inputState_.rightThumb[1];
+    packet.ipd = inputState_.ipd;
+    memcpy(packet.eyeFov, inputState_.eyeFov, sizeof(packet.eyeFov));
+    // Aim poses left zero: the runtime falls back to the grip pose.
+
+    trackingReceiver_->InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+}
+
+void AlvrStreamingBackend::EventThread()
+{
+    constexpr uint64_t kPollTimeoutNs = 100ull * 1000 * 1000;
+    // alvr_poll_event returns true without writing the event for variants the
+    // C API swallows (GameRenderLatencyFeedback fires per frame once video
+    // flows). Pre-fill with a sentinel so those polls are skipped.
+    constexpr uint8_t kUnwrittenTag = 0xFF;
+
+    while (running_.load())
+    {
+        AlvrEvent event{};
+        event.tag = kUnwrittenTag;
+        if (!alvr_poll_event(&event, kPollTimeoutNs) || event.tag == kUnwrittenTag)
+        {
+            continue;
+        }
+
+        switch (event.tag)
+        {
+            case ALVR_EVENT_CLIENT_CONNECTED:
+                RefreshNegotiatedConfig();
+                connected_.store(true);
+                spdlog::info("OXRSys/ALVR: client connected");
+                break;
+            case ALVR_EVENT_CLIENT_DISCONNECTED:
+                connected_.store(false);
+                spdlog::info("OXRSys/ALVR: client disconnected");
+                break;
+            case ALVR_EVENT_TRACKING_UPDATED:
+                latestTrackingTimestampNs_.store(event.tracking_updated.sample_timestamp_ns);
+                InjectTrackingSample(event.tracking_updated.sample_timestamp_ns);
+                break;
+            case ALVR_EVENT_BUTTONS_UPDATED:
+                DrainButtons();
+                break;
+            case ALVR_EVENT_REQUEST_IDR:
+                keyframeRequested_.store(true);
+                break;
+            case ALVR_EVENT_VIEWS_CONFIG:
+                inputState_.ipd = event.views_config.local_view_transform[1].position[0] -
+                                  event.views_config.local_view_transform[0].position[0];
+                inputState_.eyeFov[0] = event.views_config.fov[0].left;
+                inputState_.eyeFov[1] = event.views_config.fov[0].right;
+                inputState_.eyeFov[2] = event.views_config.fov[0].up;
+                inputState_.eyeFov[3] = event.views_config.fov[0].down;
+                spdlog::info("OXRSys/ALVR: views config (fov0 l={:.2f} r={:.2f}, ipd~{:.4f})",
+                             event.views_config.fov[0].left, event.views_config.fov[0].right,
+                             inputState_.ipd);
+                break;
+            case ALVR_EVENT_BATTERY:
+                spdlog::debug("OXRSys/ALVR: battery {:.0f}%",
+                              event.battery.info.gauge_value * 100.0f);
+                break;
+            case ALVR_EVENT_PLAYSPACE_SYNC:
+                spdlog::info("OXRSys/ALVR: playspace {:.2f}x{:.2f}m",
+                             event.playspace_sync.bounds[0], event.playspace_sync.bounds[1]);
+                break;
+            case ALVR_EVENT_CAPTURE_FRAME:
+                break;
+            case ALVR_EVENT_RESTART_PENDING:
+                // Emitted when negotiation changed restart-flagged settings.
+                // With no SteamVR to restart, the connection loop retries and
+                // succeeds against the updated session (verified in Stage 0).
+                spdlog::warn("OXRSys/ALVR: restart pending (ignored; reconnect handles it)");
+                break;
+            case ALVR_EVENT_SHUTDOWN_PENDING:
+                spdlog::warn("OXRSys/ALVR: shutdown pending");
+                connected_.store(false);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+#endif // OXRSYS_HAS_ALVR

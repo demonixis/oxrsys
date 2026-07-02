@@ -22,6 +22,7 @@ struct ConfigValues
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
+    std::string streamingProtocol = "oxrsys"; // "oxrsys" (own clients), "alvr" (stock ALVR client)
     std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling

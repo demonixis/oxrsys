@@ -16,6 +16,7 @@
 
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
+#include "IStreamingBackend.h"
 #include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
@@ -37,7 +38,7 @@ class TrackingReceiver;
  * 4. TrackingReceiver feeds pose data into InputManager
  * 5. Stop() → cleans up
  */
-class StreamingServer
+class StreamingServer : public IStreamingBackend
 {
 public:
     enum class State
@@ -48,36 +49,36 @@ public:
     };
 
     StreamingServer();
-    ~StreamingServer();
+    ~StreamingServer() override;
 
     // Non-copyable
     StreamingServer(const StreamingServer&) = delete;
     StreamingServer& operator=(const StreamingServer&) = delete;
 
     // Start broadcasting and listening for clients
-    bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz);
-    void Stop();
+    bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz) override;
+    void Stop() override;
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
     // The source owns backend graphics resources until the frame is encoded,
     // dropped, or replaced by a newer pending frame.
-    void SendFrame(FrameSource frameSource);
+    void SendFrame(FrameSource frameSource) override;
 
     // Set the platform graphics device for VideoEncoder initialization.
-    void SetGraphicsContext(const GraphicsContext& graphicsContext) { graphicsContext_ = graphicsContext; }
+    void SetGraphicsContext(const GraphicsContext& graphicsContext) override { graphicsContext_ = graphicsContext; }
     void SetGraphicsDevice(void* graphicsDevice) { SetGraphicsContext(GraphicsContext::Metal(graphicsDevice)); }
     void SetMetalDevice(void* metalDevice) { SetGraphicsDevice(metalDevice); }
 
     // Check if a client is connected
-    bool IsClientConnected() const { return state_.load() == State::Connected; }
+    bool IsClientConnected() const override { return state_.load() == State::Connected; }
     State GetState() const { return state_.load(); }
-    uint32_t GetTargetRefreshRateHz() const { return targetRefreshRateHz_.load(); }
+    uint32_t GetTargetRefreshRateHz() const override { return targetRefreshRateHz_.load(); }
 
     // Get the connected client info
-    std::string GetClientName() const;
+    std::string GetClientName() const override;
 
     // Access to tracking receiver (for InputManager integration)
-    TrackingReceiver* GetTrackingReceiver() { return trackingReceiver_.get(); }
+    TrackingReceiver* GetTrackingReceiver() override { return trackingReceiver_.get(); }
 
 private:
     using SocketHandle = oxrsys::runtime_socket::SocketHandle;
