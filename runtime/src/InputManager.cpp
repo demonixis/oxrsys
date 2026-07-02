@@ -17,9 +17,23 @@ namespace
 {
 
 constexpr const char* kOculusTouchProfile = "/interaction_profiles/oculus/touch_controller";
-constexpr const char* kTouchPlusPromotedProfile = "/interaction_profiles/meta/touch_plus_controller";
 constexpr const char* kSimpleControllerProfile = "/interaction_profiles/khr/simple_controller";
 constexpr const char* kHandInteractionProfile = "/interaction_profiles/ext/hand_interaction_ext";
+
+// Decode a streamed aim (pointer) pose from a packet's pos[3]/rot[4] arrays. Returns
+// false (leaving out-params untouched) when the quaternion is ~zero-length, i.e. the
+// client did not send a distinct aim pose and the caller should fall back to grip.
+bool DecodeAimPose(const float pos[3], const float rot[4], glm::vec3& outPos, glm::quat& outRot)
+{
+    const float len2 = rot[0] * rot[0] + rot[1] * rot[1] + rot[2] * rot[2] + rot[3] * rot[3];
+    if (len2 <= 0.01f)
+    {
+        return false;
+    }
+    outPos = glm::vec3(pos[0], pos[1], pos[2]);
+    outRot = glm::quat(rot[3], rot[0], rot[1], rot[2]);
+    return true;
+}
 
 size_t HandIndex(InputManager::Hand hand)
 {
@@ -64,7 +78,12 @@ std::string DetectStreamingControllerProfile(const std::string& clientName)
 
     if (ContainsAny(lowerName, {"quest 3", "quest3", "touch plus"}))
     {
-        return kTouchPlusPromotedProfile;
+        // Report the base Oculus Touch profile rather than meta/touch_controller_plus:
+        // older OpenXR apps (e.g. Beat Saber 1.29.4 / Unity OpenXR 1.5.3) never suggest
+        // bindings for the newer plus profile, so reporting it leaves all their actions
+        // (trigger, buttons, aim pose) inactive. oculus/touch_controller is a universally
+        // recognized superset-compatible base that every Touch-era app binds.
+        return kOculusTouchProfile;
     }
     if (ContainsAny(lowerName, {"quest 2", "quest2"}))
     {
@@ -254,6 +273,7 @@ void InputManager::UpdateFromStreaming()
                                        packet.leftControllerRot[0],
                                        packet.leftControllerRot[1],
                                        packet.leftControllerRot[2]);
+        leftAimValid_ = DecodeAimPose(packet.leftAimPos, packet.leftAimRot, leftAimPos_, leftAimRot_);
     }
     if (rightControllerActive)
     {
@@ -264,6 +284,7 @@ void InputManager::UpdateFromStreaming()
                                         packet.rightControllerRot[0],
                                         packet.rightControllerRot[1],
                                         packet.rightControllerRot[2]);
+        rightAimValid_ = DecodeAimPose(packet.rightAimPos, packet.rightAimRot, rightAimPos_, rightAimRot_);
     }
 
     // Apply button/trigger states
@@ -436,6 +457,27 @@ XrPosef InputManager::GetControllerPose(Hand hand) const
 
     glm::quat rot = (hand == Hand::Left) ? leftControllerRot_ : rightControllerRot_;
 
+    XrPosef pose{};
+    pose.orientation.x = rot.x;
+    pose.orientation.y = rot.y;
+    pose.orientation.z = rot.z;
+    pose.orientation.w = rot.w;
+    pose.position.x = pos.x;
+    pose.position.y = pos.y;
+    pose.position.z = pos.z;
+    return pose;
+}
+
+XrPosef InputManager::GetControllerAimPose(Hand hand) const
+{
+    const bool valid = (hand == Hand::Left) ? leftAimValid_ : rightAimValid_;
+    if (!valid)
+    {
+        // No distinct aim pose streamed yet — fall back to the grip pose.
+        return GetControllerPose(hand);
+    }
+    const glm::vec3& pos = (hand == Hand::Left) ? leftAimPos_ : rightAimPos_;
+    const glm::quat& rot = (hand == Hand::Left) ? leftAimRot_ : rightAimRot_;
     XrPosef pose{};
     pose.orientation.x = rot.x;
     pose.orientation.y = rot.y;
@@ -622,7 +664,15 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetTriggerValue(hand) > 0.5f;
     }
+    if (componentPath == "select/value")
+    {
+        return GetTriggerValue(hand) > 0.5f;
+    }
     if (componentPath == "trigger/click")
+    {
+        return GetTriggerValue(hand) > 0.5f;
+    }
+    if (componentPath == "trigger/value")
     {
         return GetTriggerValue(hand) > 0.5f;
     }
@@ -631,6 +681,10 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
         return GetTriggerValue(hand) > 0.01f;
     }
     if (componentPath == "squeeze/click")
+    {
+        return GetGrabValue(hand) > 0.5f;
+    }
+    if (componentPath == "squeeze/value")
     {
         return GetGrabValue(hand) > 0.5f;
     }
@@ -830,7 +884,10 @@ XrPosef InputManager::GetPoseComponentForProfile(Hand hand, const std::string& c
         {
             return GetTrackedHandPose(hand, componentPath);
         }
-        return GetControllerPose(hand);
+        // Menu lasers bind aim/pose; sabers/held objects bind grip/pose. These differ
+        // on Touch controllers, so return the distinct aim pose for aim/pose.
+        return componentPath == "aim/pose" ? GetControllerAimPose(hand)
+                                           : GetControllerPose(hand);
     }
 
     if (componentPath == "pinch_ext/pose" || componentPath == "poke_ext/pose")

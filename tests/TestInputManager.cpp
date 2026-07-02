@@ -279,8 +279,8 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
         {"Oculus Quest", "/interaction_profiles/oculus/touch_controller"},
         {"Meta Quest 1", "/interaction_profiles/meta/touch_controller_quest_1_rift_s"},
         {"Meta Quest 2", "/interaction_profiles/meta/touch_controller_quest_2"},
-        {"Meta Quest 3", "/interaction_profiles/meta/touch_plus_controller"},
-        {"Quest 3", "/interaction_profiles/meta/touch_plus_controller"},
+        {"Meta Quest 3", "/interaction_profiles/oculus/touch_controller"},
+        {"Quest 3", "/interaction_profiles/oculus/touch_controller"},
         {"Unknown headset", "/interaction_profiles/oculus/touch_controller"},
         {"PICO Neo3", "/interaction_profiles/bytedance/pico_neo3_controller"},
         {"PICO 4", "/interaction_profiles/bytedance/pico4_controller"},
@@ -340,15 +340,15 @@ TEST_CASE("InputManager — streaming hands and controllers stay profile separat
     receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
     im.Update(0.0f);
 
-    constexpr const char* TouchPlusProfile = "/interaction_profiles/meta/touch_plus_controller";
+    constexpr const char* TouchProfile = "/interaction_profiles/oculus/touch_controller";
     constexpr const char* HandProfile = "/interaction_profiles/ext/hand_interaction_ext";
 
     CHECK(im.IsControllerTrackingActive(InputManager::Hand::Left));
     CHECK(im.IsHandTrackingActive(InputManager::Hand::Left));
-    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) == TouchPlusProfile);
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) == TouchProfile);
 
     std::vector<std::string> activeProfiles = im.GetActiveInteractionProfiles(InputManager::Hand::Left);
-    CHECK(std::find(activeProfiles.begin(), activeProfiles.end(), TouchPlusProfile) !=
+    CHECK(std::find(activeProfiles.begin(), activeProfiles.end(), TouchProfile) !=
           activeProfiles.end());
     CHECK(std::find(activeProfiles.begin(), activeProfiles.end(), HandProfile) !=
           activeProfiles.end());
@@ -356,18 +356,18 @@ TEST_CASE("InputManager — streaming hands and controllers stay profile separat
                     "/interaction_profiles/khr/simple_controller") != activeProfiles.end());
 
     CHECK_THAT(im.GetFloatComponentForProfile(InputManager::Hand::Left,
-                                              "trigger/value", TouchPlusProfile),
+                                              "trigger/value", TouchProfile),
                WithinAbs(0.20f, 0.001f));
     CHECK_THAT(im.GetFloatComponentForProfile(InputManager::Hand::Left,
-                                              "squeeze/value", TouchPlusProfile),
+                                              "squeeze/value", TouchProfile),
                WithinAbs(0.10f, 0.001f));
     XrVector2f stick = im.GetVector2fComponentForProfile(InputManager::Hand::Left,
-                                                         "thumbstick", TouchPlusProfile);
+                                                         "thumbstick", TouchProfile);
     CHECK_THAT(stick.x, WithinAbs(0.25f, 0.001f));
     CHECK_THAT(stick.y, WithinAbs(-0.50f, 0.001f));
 
     XrPosef controllerPose = im.GetPoseComponentForProfile(InputManager::Hand::Left,
-                                                           "grip/pose", TouchPlusProfile);
+                                                           "grip/pose", TouchProfile);
     CHECK_THAT(controllerPose.position.x, WithinAbs(-0.40f, 0.001f));
     CHECK_THAT(controllerPose.position.y, WithinAbs(1.10f, 0.001f));
     CHECK_THAT(controllerPose.position.z, WithinAbs(-0.60f, 0.001f));

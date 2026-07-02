@@ -50,6 +50,7 @@ public:
 
     // Controller poses (world space)
     XrPosef GetControllerPose(Hand hand) const;
+    XrPosef GetControllerAimPose(Hand hand) const;
 
     // Hand tracking joints (26 joints, world space relative to baseSpace)
     void GetHandJointLocations(Hand hand, XrHandJointLocationEXT* joints, uint32_t jointCount) const;
@@ -138,6 +139,16 @@ private:
     // Controller positions (world space offsets)
     glm::vec3 leftControllerPos_ = {-0.2f, 1.3f, -0.4f};
     glm::vec3 rightControllerPos_ = {0.2f, 1.3f, -0.4f};
+
+    // Aim (pointer) pose from the streaming client — distinct from grip. Used for
+    // menu lasers. leftAimValid_/rightAimValid_ is false until an aim pose arrives,
+    // in which case GetControllerAimPose falls back to the grip pose.
+    glm::vec3 leftAimPos_ = {-0.2f, 1.3f, -0.4f};
+    glm::vec3 rightAimPos_ = {0.2f, 1.3f, -0.4f};
+    glm::quat leftAimRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::quat rightAimRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    bool leftAimValid_ = false;
+    bool rightAimValid_ = false;
 
     // Button states
     bool leftGrab_ = false;

@@ -5020,6 +5020,19 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
                 rot[1] = loc.pose.orientation.y;
                 rot[2] = loc.pose.orientation.z;
                 rot[3] = loc.pose.orientation.w;
+
+                // Aim (pointer) pose for menu lasers — distinct from grip. Falls back
+                // to the grip pose when the aim pose action is inactive.
+                float* aimPos = (hand == 0) ? packet.leftAimPos : packet.rightAimPos;
+                float* aimRot = (hand == 0) ? packet.leftAimRot : packet.rightAimRot;
+                const XrPosef& aimSrc = aimActive ? aimLoc.pose : loc.pose;
+                aimPos[0] = aimSrc.position.x;
+                aimPos[1] = aimSrc.position.y;
+                aimPos[2] = aimSrc.position.z;
+                aimRot[0] = aimSrc.orientation.x;
+                aimRot[1] = aimSrc.orientation.y;
+                aimRot[2] = aimSrc.orientation.z;
+                aimRot[3] = aimSrc.orientation.w;
             }
             if (controllerActive || aimActive)
             {

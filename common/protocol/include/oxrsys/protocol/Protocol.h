@@ -312,6 +312,13 @@ struct TrackingPacket
     // Optional hand tracking payload per joint: x, y, z, radius
     float leftHandJoints[HAND_JOINT_COUNT][4];
     float rightHandJoints[HAND_JOINT_COUNT][4];
+
+    // Aim (pointer) pose — distinct from the grip pose above. Used for menu lasers.
+    // Quaternion length ~0 means "not provided"; the runtime then falls back to grip.
+    float leftAimPos[3];
+    float leftAimRot[4];   // x, y, z, w
+    float rightAimPos[3];
+    float rightAimRot[4];
 };
 
 enum ButtonFlags : uint32_t

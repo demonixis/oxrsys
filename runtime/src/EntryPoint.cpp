@@ -11,6 +11,13 @@
 #endif
 #endif
 
+// Enable XR_KHR_convert_timespec_time declarations (xrConvertTimespecTimeToTimeKHR
+// et al.) in openxr_platform.h. wineopenxr substitutes the Win32 QPC extension the
+// app requests (XR_KHR_win32_convert_performance_counter_time) onto this one.
+#include <ctime>
+#ifndef XR_USE_TIMESPEC
+#define XR_USE_TIMESPEC
+#endif
 #include <openxr/openxr_platform.h>
 
 #include "Runtime.h"
@@ -238,6 +245,7 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
         {XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_metal_enable_SPEC_VERSION},
         {UNITY_METAL_ENABLE_EXTENSION_ALIAS, XR_KHR_metal_enable_SPEC_VERSION},
 #endif
+        {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME, XR_KHR_convert_timespec_time_SPEC_VERSION},
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
@@ -309,6 +317,11 @@ static const char* ExtensionForFunctionName(const char* functionName)
         std::strcmp(functionName, "xrSessionInsertDebugUtilsLabelEXT") == 0)
     {
         return XR_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    }
+    if (std::strcmp(functionName, "xrConvertTimespecTimeToTimeKHR") == 0 ||
+        std::strcmp(functionName, "xrConvertTimeToTimespecTimeKHR") == 0)
+    {
+        return XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;
     }
 #ifdef XR_USE_GRAPHICS_API_METAL
     if (std::strcmp(functionName, "xrGetMetalGraphicsRequirementsKHR") == 0 ||
@@ -3591,6 +3604,78 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // xrGetInstanceProcAddr — the main dispatch function
 // ============================================================================
 
+// ============================================================================
+// XR_KHR_convert_timespec_time (bridged to the app's Win32 QPC extension by
+// wineopenxr). CLOCK_MONOTONIC timespec <-> oxrsys XrTime. The session owns the
+// exact time base (monoStartNs_); before a session exists we fall back to a
+// process-global monotonic epoch so conversions never hard-fail.
+// ============================================================================
+static int64_t gTimespecFallbackEpochNs = 0;
+
+static int64_t MonotonicFallbackEpochNs()
+{
+    if (gTimespecFallbackEpochNs == 0)
+    {
+        struct timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        gTimespecFallbackEpochNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    }
+    return gTimespecFallbackEpochNs;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
+    XrInstance instance, const struct timespec* timespecTime, XrTime* time)
+{
+    Instance* inst = GetInstance(instance);
+    if (inst == nullptr)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (timespecTime == nullptr || time == nullptr ||
+        timespecTime->tv_nsec < 0 || timespecTime->tv_nsec >= 1000000000L)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (Session* sess = inst->GetSession())
+    {
+        *time = sess->TimespecToXrTime(*timespecTime);
+    }
+    else
+    {
+        const int64_t monoNs =
+            static_cast<int64_t>(timespecTime->tv_sec) * 1000000000LL + timespecTime->tv_nsec;
+        *time = static_cast<XrTime>(monoNs - MonotonicFallbackEpochNs());
+    }
+    return XR_SUCCESS;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
+    XrInstance instance, XrTime time, struct timespec* timespecTime)
+{
+    Instance* inst = GetInstance(instance);
+    if (inst == nullptr)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (timespecTime == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (Session* sess = inst->GetSession())
+    {
+        sess->XrTimeToTimespec(time, *timespecTime);
+    }
+    else
+    {
+        const int64_t monoNs = static_cast<int64_t>(time) + MonotonicFallbackEpochNs();
+        timespecTime->tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
+        timespecTime->tv_nsec = static_cast<long>(monoNs % 1000000000LL);
+    }
+    return XR_SUCCESS;
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     XrInstance instance, const char* name, PFN_xrVoidFunction* function);
 
@@ -3718,6 +3803,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     DISPATCH(xrSessionBeginDebugUtilsLabelRegionEXT, OxrSessionBeginDebugUtilsLabelRegionEXT)
     DISPATCH(xrSessionEndDebugUtilsLabelRegionEXT, OxrSessionEndDebugUtilsLabelRegionEXT)
     DISPATCH(xrSessionInsertDebugUtilsLabelEXT, OxrSessionInsertDebugUtilsLabelEXT)
+
+    // Convert timespec time extension (bridged to Win32 QPC by wineopenxr)
+    DISPATCH(xrConvertTimespecTimeToTimeKHR, OxrConvertTimespecTimeToTimeKHR)
+    DISPATCH(xrConvertTimeToTimespecTimeKHR, OxrConvertTimeToTimespecTimeKHR)
 
     // Metal extension
 #ifdef XR_USE_GRAPHICS_API_METAL

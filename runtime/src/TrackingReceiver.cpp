@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -13,6 +14,12 @@
 
 namespace
 {
+
+// Minimum acceptable tracking-packet size: everything up to (but not including) the
+// aim-pose fields. Packets at least this large from older clients are accepted; their
+// absent aim fields stay zero and the runtime falls back to the grip pose.
+constexpr size_t kMinTrackingPacketSize =
+    offsetof(oxr::protocol::TrackingPacket, leftAimPos);
 
 int64_t SteadyClockNowNs()
 {
@@ -213,26 +220,29 @@ void TrackingReceiver::ReceiveThread()
         oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
         int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
-        if (received < static_cast<int>(sizeof(oxr::protocol::TrackingPacket)))
+        // Accept any packet carrying at least the pre-aim fields, so older clients that
+        // predate the aim-pose fields keep working (their aim fields stay zero and the
+        // runtime falls back to the grip pose). Copy only the bytes actually received.
+        if (received < static_cast<int>(kMinTrackingPacketSize))
         {
             continue;
         }
 
         oxr::protocol::TrackingPacket packet = {};
-        memcpy(&packet, buffer, sizeof(packet));
+        memcpy(&packet, buffer, std::min(static_cast<size_t>(received), sizeof(packet)));
         StorePacket(packet, SteadyClockNowNs());
     }
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
 {
-    if (size < sizeof(oxr::protocol::TrackingPacket))
+    if (size < kMinTrackingPacketSize)
     {
         return;
     }
 
     oxr::protocol::TrackingPacket packet = {};
-    memcpy(&packet, data, sizeof(packet));
+    memcpy(&packet, data, std::min(size, sizeof(packet)));
     StorePacket(packet, SteadyClockNowNs());
 }
 

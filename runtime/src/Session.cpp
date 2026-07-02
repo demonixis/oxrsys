@@ -24,6 +24,15 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
+// CLOCK_MONOTONIC in nanoseconds. This is the clock wineopenxr samples when it
+// translates a Win32 QPC value to a timespec for XR_KHR_convert_timespec_time.
+int64_t MonotonicNowNs()
+{
+    struct timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
 struct SessionMetricSummary
 {
     double average = 0.0;
@@ -104,6 +113,7 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
+    monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
     nextFrameDeadline_ = {};
 
@@ -122,6 +132,7 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
+    monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
     nextFrameDeadline_ = {};
 
@@ -151,6 +162,21 @@ XrTime Session::GetCurrentTime() const
             .count());
 }
 
+XrTime Session::TimespecToXrTime(const struct timespec& ts) const
+{
+    const int64_t monoNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    // XrTime == steady_clock::now() - startTime_, and CLOCK_MONOTONIC advances in
+    // lockstep with steady_clock (both real-time ns), so XrTime == monoNs - monoStartNs_.
+    return static_cast<XrTime>(monoNs - monoStartNs_);
+}
+
+void Session::XrTimeToTimespec(XrTime time, struct timespec& ts) const
+{
+    const int64_t monoNs = static_cast<int64_t>(time) + monoStartNs_;
+    ts.tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
+    ts.tv_nsec = static_cast<long>(monoNs % 1000000000LL);
+}
+
 void Session::TransitionState(XrSessionState newState)
 {
     state_ = newState;
@@ -168,6 +194,33 @@ void Session::TransitionState(XrSessionState newState)
 
     instance_->PushEvent(event);
     spdlog::info("OXRSys: Session state -> {}", static_cast<int>(newState));
+}
+
+void Session::MaybeEmitInteractionProfileChanged()
+{
+    if (!inputManager_)
+    {
+        return;
+    }
+    // Signature over both hands. When a streaming client connects the profile resolves
+    // (e.g. from empty/simple to oculus/touch), which must be signalled so the app (Unity's
+    // Input System) re-queries xrGetCurrentInteractionProfile and binds the correct device.
+    std::string sig = inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Left) + "|" +
+                      inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Right);
+    if (interactionProfileNotified_ && sig == lastNotifiedInteractionProfile_)
+    {
+        return;
+    }
+    lastNotifiedInteractionProfile_ = sig;
+    interactionProfileNotified_ = true;
+
+    XrEventDataBuffer event{};
+    auto* ip = reinterpret_cast<XrEventDataInteractionProfileChanged*>(&event);
+    ip->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
+    ip->next = nullptr;
+    ip->session = reinterpret_cast<XrSession>(handle_);
+    instance_->PushEvent(event);
+    spdlog::info("OXRSys: emitted XrEventDataInteractionProfileChanged (profiles='{}')", sig);
 }
 
 XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
@@ -360,6 +413,10 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
     }
+
+    // Signal interaction-profile changes (e.g. streaming client connecting after focus) so
+    // the app rebinds to the correct controller device instead of the simple-controller fallback.
+    MaybeEmitInteractionProfileChanged();
 
     uint32_t targetRefreshHz = 90;
     if (streamingServer_)
@@ -602,21 +659,25 @@ XrResult Session::ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage)
     {
         return XR_ERROR_LAYER_INVALID;
     }
-    if (subImage.imageRect.offset.x < 0 || subImage.imageRect.offset.y < 0)
-    {
-        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
-    }
-    if (subImage.imageRect.extent.width <= 0 || subImage.imageRect.extent.height <= 0)
-    {
-        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
-    }
 
-    const int64_t imageRectMaxX =
-        static_cast<int64_t>(subImage.imageRect.offset.x) + static_cast<int64_t>(subImage.imageRect.extent.width);
-    const int64_t imageRectMaxY =
-        static_cast<int64_t>(subImage.imageRect.offset.y) + static_cast<int64_t>(subImage.imageRect.extent.height);
-    if (imageRectMaxX > static_cast<int64_t>(swapchain->GetWidth()) ||
-        imageRectMaxY > static_cast<int64_t>(swapchain->GetHeight()))
+    // OpenComposite (OpenVR->OpenXR) submits Y-flipped rects to signal the OpenVR
+    // texture origin (bottom-left) vs OpenXR (top-left): e.g. offset.y=height,
+    // extent.height=-height. That is technically out-of-spec (negative extent), but
+    // real runtimes tolerate it. Normalize to a min/max covered region and validate
+    // that, so the flipped rect is accepted as long as it stays in bounds.
+    const int64_t x0 = static_cast<int64_t>(subImage.imageRect.offset.x);
+    const int64_t y0 = static_cast<int64_t>(subImage.imageRect.offset.y);
+    const int64_t x1 = x0 + static_cast<int64_t>(subImage.imageRect.extent.width);
+    const int64_t y1 = y0 + static_cast<int64_t>(subImage.imageRect.extent.height);
+    const int64_t minX = std::min(x0, x1), maxX = std::max(x0, x1);
+    const int64_t minY = std::min(y0, y1), maxY = std::max(y0, y1);
+    if (subImage.imageRect.extent.width == 0 || subImage.imageRect.extent.height == 0)
+    {
+        return XR_ERROR_SWAPCHAIN_RECT_INVALID;
+    }
+    if (minX < 0 || minY < 0 ||
+        maxX > static_cast<int64_t>(swapchain->GetWidth()) ||
+        maxY > static_cast<int64_t>(swapchain->GetHeight()))
     {
         return XR_ERROR_SWAPCHAIN_RECT_INVALID;
     }
