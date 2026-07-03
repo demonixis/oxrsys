@@ -5,6 +5,7 @@
 #include "AlvrStreamingBackend.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -41,6 +42,7 @@ constexpr const char* kMinimalSessionJson = R"json({
       "client_discovery": { "enabled": true, "content": { "auto_trust_clients": true } }
     },
     "video": {
+      "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } },
       "transcoding_view_resolution": { "variant": "Scale", "Scale": 0.75 },
       "foveated_encoding": { "enabled": false }
     },
@@ -177,6 +179,9 @@ void AlvrStreamingBackend::SendFrame(FrameSource frameSource)
                             : static_cast<int64_t>(latestTrackingTimestampNs_.load());
     frame.source = std::move(frameSource);
     frame.valid = true;
+    // ALVR latency decomposition: "present" marks the game handing the frame
+    // to the runtime; it must precede "composed" (encode-thread pickup).
+    alvr_report_present(static_cast<uint64_t>(frame.timestampNs), 0);
     frameQueue_.PushLatest(std::move(frame));
 }
 
@@ -297,11 +302,11 @@ bool AlvrStreamingBackend::EnsureEncoder()
     return true;
 }
 
-void AlvrStreamingBackend::SubmitEncodedFrame(PendingEncodedFrame& frame)
+double AlvrStreamingBackend::SubmitEncodedFrame(PendingEncodedFrame& frame)
 {
     if (frame.data.empty())
     {
-        return;
+        return 0.0;
     }
 
     if (!frame.config.empty() && frame.config != submittedConfigNals_)
@@ -312,9 +317,11 @@ void AlvrStreamingBackend::SubmitEncodedFrame(PendingEncodedFrame& frame)
         spdlog::info("OXRSys/ALVR: sent codec config ({} bytes)", frame.config.size());
     }
 
+    const auto sendStart = std::chrono::steady_clock::now();
     alvr_send_video_nal(frame.timestampNs, frame.data.data(),
                         static_cast<int32_t>(frame.data.size()), frame.isIdr);
-    alvr_report_present(frame.timestampNs, 0);
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sendStart)
+        .count();
 }
 
 void AlvrStreamingBackend::EncodeThread()
@@ -375,10 +382,12 @@ void AlvrStreamingBackend::EncodeThread()
             },
             [this, pending](const VideoEncoder::FrameMetrics& metrics)
             {
+                double sendMs = 0.0;
                 if (!metrics.frameDropped)
                 {
-                    SubmitEncodedFrame(*pending);
+                    sendMs = SubmitEncodedFrame(*pending);
                 }
+                RecordFrameMetrics(metrics, pending->data.size(), sendMs);
             });
     }
 }
@@ -556,6 +565,72 @@ void AlvrStreamingBackend::InjectTrackingSample(uint64_t sampleTimestampNs)
     trackingReceiver_->InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
 }
 
+namespace
+{
+double Percentile(std::vector<double>& values, double fraction)
+{
+    if (values.empty())
+    {
+        return 0.0;
+    }
+    const size_t idx = std::min(values.size() - 1,
+                                static_cast<size_t>(fraction * static_cast<double>(values.size())));
+    std::nth_element(values.begin(), values.begin() + static_cast<ptrdiff_t>(idx), values.end());
+    return values[idx];
+}
+} // namespace
+
+void AlvrStreamingBackend::RecordFrameMetrics(const VideoEncoder::FrameMetrics& metrics,
+                                              size_t nalBytes, double sendMs)
+{
+    std::lock_guard<std::mutex> lock(encodeStats_.mutex);
+    auto& s = encodeStats_;
+    const auto now = std::chrono::steady_clock::now();
+    if (s.windowStart == std::chrono::steady_clock::time_point{})
+    {
+        s.windowStart = now;
+    }
+    s.frames++;
+    if (metrics.frameDropped)
+    {
+        s.drops++;
+    }
+    else
+    {
+        if (metrics.keyframe)
+        {
+            s.keyframes++;
+        }
+        s.totalMs.push_back(metrics.totalLatencyMs);
+        s.callbackMs.push_back(metrics.callbackLatencyMs);
+        s.gpuCopyMs.push_back(metrics.gpuCopyMs);
+        s.sendMs.push_back(sendMs);
+        s.nalKb.push_back(static_cast<double>(nalBytes) / 1024.0);
+    }
+    if (now - s.windowStart < std::chrono::seconds(1))
+    {
+        return;
+    }
+    spdlog::info("OXRSys/ALVR: enc1s n={} drop={} key={} totalMs p50={:.1f} p95={:.1f} max={:.1f} "
+                 "cbMs p95={:.1f} gpuMs p95={:.2f} sendMs p50={:.2f} p95={:.2f} max={:.1f} "
+                 "nalKB p50={:.0f} max={:.0f}",
+                 s.frames, s.drops, s.keyframes, Percentile(s.totalMs, 0.5),
+                 Percentile(s.totalMs, 0.95),
+                 s.totalMs.empty() ? 0.0 : *std::max_element(s.totalMs.begin(), s.totalMs.end()),
+                 Percentile(s.callbackMs, 0.95), Percentile(s.gpuCopyMs, 0.95),
+                 Percentile(s.sendMs, 0.5), Percentile(s.sendMs, 0.95),
+                 s.sendMs.empty() ? 0.0 : *std::max_element(s.sendMs.begin(), s.sendMs.end()),
+                 Percentile(s.nalKb, 0.5),
+                 s.nalKb.empty() ? 0.0 : *std::max_element(s.nalKb.begin(), s.nalKb.end()));
+    s.windowStart = now;
+    s.frames = s.drops = s.keyframes = 0;
+    s.totalMs.clear();
+    s.callbackMs.clear();
+    s.gpuCopyMs.clear();
+    s.sendMs.clear();
+    s.nalKb.clear();
+}
+
 void AlvrStreamingBackend::EventThread()
 {
     constexpr uint64_t kPollTimeoutNs = 100ull * 1000 * 1000;
@@ -564,8 +639,23 @@ void AlvrStreamingBackend::EventThread()
     // flows). Pre-fill with a sentinel so those polls are skipped.
     constexpr uint8_t kUnwrittenTag = 0xFF;
 
+    // Staleness watchdog: tracking normally arrives at client refresh rate;
+    // >500ms of silence while connected means the headset slept or the
+    // server-side receive stalled. Only EventThread touches these.
+    using SteadyClock = std::chrono::steady_clock;
+    SteadyClock::time_point lastTrackingArrival{};
+    bool trackingStaleWarned = false;
+
     while (running_.load())
     {
+        if (connected_.load() && !trackingStaleWarned &&
+            lastTrackingArrival != SteadyClock::time_point{} &&
+            SteadyClock::now() - lastTrackingArrival > std::chrono::milliseconds(500))
+        {
+            spdlog::warn("OXRSys/ALVR: tracking stale >500ms (headset asleep or receive stall)");
+            trackingStaleWarned = true;
+        }
+
         AlvrEvent event{};
         event.tag = kUnwrittenTag;
         if (!alvr_poll_event(&event, kPollTimeoutNs) || event.tag == kUnwrittenTag)
@@ -582,9 +672,20 @@ void AlvrStreamingBackend::EventThread()
                 break;
             case ALVR_EVENT_CLIENT_DISCONNECTED:
                 connected_.store(false);
+                lastTrackingArrival = {};
+                trackingStaleWarned = false;
                 spdlog::info("OXRSys/ALVR: client disconnected");
                 break;
             case ALVR_EVENT_TRACKING_UPDATED:
+                if (trackingStaleWarned)
+                {
+                    spdlog::info(
+                        "OXRSys/ALVR: tracking resumed after {:.1f}s stall",
+                        std::chrono::duration<double>(SteadyClock::now() - lastTrackingArrival)
+                            .count());
+                    trackingStaleWarned = false;
+                }
+                lastTrackingArrival = SteadyClock::now();
                 latestTrackingTimestampNs_.store(event.tracking_updated.sample_timestamp_ns);
                 InjectTrackingSample(event.tracking_updated.sample_timestamp_ns);
                 break;

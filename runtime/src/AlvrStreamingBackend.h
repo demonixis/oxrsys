@@ -5,8 +5,10 @@
 #ifdef OXRSYS_HAS_ALVR
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -14,9 +16,9 @@
 
 #include "IStreamingBackend.h"
 #include "StreamingFrameQueue.h"
+#include "VideoEncoder.h"
 
 class TrackingReceiver;
-class VideoEncoder;
 
 /**
  * Streaming backend that embeds ALVR's server_core (libalvr_server_core.dylib,
@@ -120,8 +122,13 @@ private:
     // Flags an encoder reset when they changed. Called on ClientConnected.
     void RefreshNegotiatedConfig();
     // Submits codec config (when changed) + the frame to server_core. Runs on
-    // the VideoToolbox callback thread (serialized per session).
-    void SubmitEncodedFrame(PendingEncodedFrame& frame);
+    // the VideoToolbox callback thread (serialized per session). Returns how
+    // long alvr_send_video_nal blocked, in milliseconds.
+    double SubmitEncodedFrame(PendingEncodedFrame& frame);
+    // Aggregates encode/send timings and logs a 1-second summary line used to
+    // attribute stutter to a pipeline stage. VideoToolbox callback thread.
+    void RecordFrameMetrics(const VideoEncoder::FrameMetrics& metrics, size_t nalBytes,
+                            double sendMs);
     // Writes a minimal session.json (client discovery + auto-trust + wired
     // client entry) when none exists. ALVR extrapolates the rest and owns the
     // file afterwards.
@@ -161,6 +168,23 @@ private:
     // Last codec config submitted to server_core (compare-before-send).
     // Touched only on the VideoToolbox callback thread.
     std::vector<uint8_t> submittedConfigNals_;
+
+    // 1-second window of encode/send statistics. Written from VideoToolbox
+    // callback threads; the mutex keeps the window swap atomic.
+    struct EncodeStats
+    {
+        std::mutex mutex;
+        std::chrono::steady_clock::time_point windowStart{};
+        std::vector<double> totalMs;
+        std::vector<double> callbackMs;
+        std::vector<double> gpuCopyMs;
+        std::vector<double> sendMs;
+        std::vector<double> nalKb;
+        uint32_t frames = 0;
+        uint32_t drops = 0;
+        uint32_t keyframes = 0;
+    };
+    EncodeStats encodeStats_;
 };
 
 #endif // OXRSYS_HAS_ALVR

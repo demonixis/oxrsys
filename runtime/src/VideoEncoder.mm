@@ -629,6 +629,13 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
         g_useH264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
+    if (g_useH264)
+    {
+        // CABAC buys ~10% quality over the CAVLC default at the same bitrate;
+        // High profile already implies the decoder supports it.
+        VTSessionSetProperty(compressionSession,
+            kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC);
+    }
     if (preset == "speed")
     {
         VTSessionSetProperty(compressionSession,
