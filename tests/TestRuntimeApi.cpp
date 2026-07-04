@@ -111,9 +111,20 @@ void WriteRuntimeConfig(bool passthroughEnabled)
 // silently wipes the developer's streaming settings (protocol, bitrate, ...).
 // Plain static (not a Catch2 listener): constructed before main, restored at exit,
 // and deliberately free of Catch macros since it runs outside any test case.
+//
+// Crash-safety: the in-memory snapshot restores only on a clean exit — a static
+// destructor never runs on SIGSEGV/SIGABRT/std::terminate, and crashing the
+// in-process runtime dylib under test is a realistic failure mode. So the snapshot
+// is ALSO persisted to an on-disk sidecar (oxrsys-runtime.toml.test-backup) at
+// construction and removed on clean exit. A leftover sidecar means the previous run
+// crashed after clobbering the config; the constructor heals it before snapshotting.
+// A distinct absent-marker sidecar records the "config did not exist" case so a
+// crash-leftover test config is never adopted as the original on the next run.
 struct RuntimeConfigFileGuard
 {
     std::filesystem::path path;
+    std::filesystem::path backup;
+    std::filesystem::path absentMarker;
     bool existed = false;
     std::string original;
 
@@ -125,12 +136,39 @@ struct RuntimeConfigFileGuard
             return;
         }
         path = std::filesystem::path(home) / "Library/Application Support/OXRSys/oxrsys-runtime.toml";
+        backup = path;
+        backup += ".test-backup";
+        absentMarker = path;
+        absentMarker += ".test-backup.absent";
+
         std::error_code ec;
+        // Heal a leftover from a previously crashed run before taking a fresh snapshot.
+        if (std::filesystem::exists(backup, ec))
+        {
+            // Crashed after snapshotting an existing config: restore the pristine copy.
+            std::filesystem::copy_file(
+                backup, path, std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(backup, ec);
+        }
+        else if (std::filesystem::exists(absentMarker, ec))
+        {
+            // Crashed after snapshotting a non-existent config: drop the clobbered test file.
+            std::filesystem::remove(path, ec);
+            std::filesystem::remove(absentMarker, ec);
+        }
+
         existed = std::filesystem::exists(path, ec);
         if (existed)
         {
             std::ifstream in(path);
             original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            // Persist the snapshot to disk so a crash mid-run is recoverable next time.
+            std::filesystem::copy_file(
+                path, backup, std::filesystem::copy_options::overwrite_existing, ec);
+        }
+        else
+        {
+            std::ofstream marker(absentMarker, std::ios::trunc);
         }
     }
 
@@ -150,6 +188,9 @@ struct RuntimeConfigFileGuard
             std::error_code ec;
             std::filesystem::remove(path, ec);
         }
+        std::error_code ec;
+        std::filesystem::remove(backup, ec);
+        std::filesystem::remove(absentMarker, ec);
     }
 };
 static RuntimeConfigFileGuard gRuntimeConfigFileGuard;
@@ -315,13 +356,18 @@ struct RuntimeSessionContext
         }
     }
 
-    // Advance the session READY->SYNCHRONIZED->VISIBLE->FOCUSED by submitting three
-    // empty frames (state only advances after frame submission). xrSyncActions on a
+    // Advance the session READY->SYNCHRONIZED->VISIBLE->FOCUSED by submitting empty
+    // frames (state only advances after frame submission). xrSyncActions on a
     // non-FOCUSED session returns XR_SESSION_NOT_FOCUSED with all states inactive, so
     // action tests must pump first — like a real app, which frame-loops before input.
+    // Poll the session-state events each frame and stop once FOCUSED is observed (up
+    // to a bounded cap): this asserts the target state instead of assuming a fixed
+    // transition count, fails here rather than downstream if the state machine
+    // changes, and drains the event queue so later poll-based assertions start clean.
     void PumpToFocused()
     {
-        for (int i = 0; i < 3; ++i)
+        bool focused = false;
+        for (int i = 0; i < 10 && !focused; ++i)
         {
             XrFrameState frameState = {XR_TYPE_FRAME_STATE};
             XR_CHECK(xrWaitFrame(session, nullptr, &frameState));
@@ -331,7 +377,23 @@ struct RuntimeSessionContext
             frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             frameEndInfo.layerCount = 0;
             XR_CHECK(xrEndFrame(session, &frameEndInfo));
+
+            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+            while (xrPollEvent(instance, &event) == XR_SUCCESS)
+            {
+                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    const auto* stateChanged =
+                        reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
+                    if (stateChanged->state == XR_SESSION_STATE_FOCUSED)
+                    {
+                        focused = true;
+                    }
+                }
+                event = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
         }
+        REQUIRE(focused);
     }
 
     ~RuntimeSessionContext()
