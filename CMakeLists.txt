@@ -160,6 +160,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
     tests/TestAlvrSessionConfig.cpp
+    tests/TestClientLiveness.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
@@ -210,6 +211,15 @@ add_test(NAME oxrsys_alvr_session_config
     COMMAND oxrsys_runtime_tests "[alvr-session]"
 )
 set_tests_properties(oxrsys_alvr_session_config PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
+# StreamingServer client-liveness watchdog decision (pure); runs the tagged
+# subset of oxrsys_runtime_tests as its own reportable entry.
+add_test(NAME oxrsys_client_liveness
+    COMMAND oxrsys_runtime_tests "[client-liveness]"
+)
+set_tests_properties(oxrsys_client_liveness PROPERTIES
     ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
     TIMEOUT 30
 )

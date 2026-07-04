@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "StreamingServer.h"
+#include "ClientLiveness.h"
 #include "Config.h"
 #include "RuntimeSockets.h"
 #include "RuntimeStatus.h"
@@ -2392,23 +2393,25 @@ void StreamingServer::UpdatePredictionHorizon()
 
 void StreamingServer::CheckClientLiveness(int64_t nowNs)
 {
+    // Only reached from SendFrame, so liveness is evaluated while the app is
+    // still submitting frames.
     if (state_.load() != State::Connected)
     {
         return;
     }
     const uint64_t count = trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0;
-    if (count != lastTrackingCountSeen_.load(std::memory_order_relaxed))
-    {
-        lastTrackingCountSeen_.store(count, std::memory_order_relaxed);
-        lastClientActivityNs_.store(nowNs, std::memory_order_relaxed);
-        return;
-    }
-    const int64_t last = lastClientActivityNs_.load(std::memory_order_relaxed);
-    if (last != 0 && nowNs - last > kClientLivenessTimeoutNs)
+    const oxrsys::ClientLivenessState prev{
+        lastTrackingCountSeen_.load(std::memory_order_relaxed),
+        lastClientActivityNs_.load(std::memory_order_relaxed)};
+    const oxrsys::ClientLivenessDecision decision =
+        oxrsys::EvaluateClientLiveness(prev, count, nowNs, kClientLivenessTimeoutNs);
+    lastTrackingCountSeen_.store(decision.state.lastCountSeen, std::memory_order_relaxed);
+    lastClientActivityNs_.store(decision.state.lastActivityNs, std::memory_order_relaxed);
+    if (decision.disconnect)
     {
         spdlog::warn("StreamingServer: no client tracking for {} ms; treating client as "
                      "disconnected and resuming broadcast",
-                     (nowNs - last) / 1'000'000);
+                     (nowNs - prev.lastActivityNs) / 1'000'000);
         HandleClientDisconnect();
     }
 }
