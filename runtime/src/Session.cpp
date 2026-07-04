@@ -7,6 +7,7 @@
 #include "Swapchain.h"
 #include "Space.h"
 #include "InputManager.h"
+#include "InteractionProfileResolve.h"
 #include "StreamingServer.h"
 #ifdef OXRSYS_HAS_ALVR
 #include "AlvrStreamingBackend.h"
@@ -213,8 +214,17 @@ void Session::MaybeEmitInteractionProfileChanged()
     // Input System) re-queries xrGetCurrentInteractionProfile and binds the correct device.
     // Debounced: only a signature stable for kProfileChangeStableDelay is announced (see
     // the Session.h member comments for why transients must never reach the app).
-    std::string sig = inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Left) + "|" +
-                      inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Right);
+    //
+    // Key on the app-visible (instance-filtered) profile, exactly what
+    // xrGetCurrentInteractionProfile returns — not the raw InputManager profile.
+    // The two can diverge (e.g. the raw profile flips to ext/hand_interaction_ext
+    // for an app that never enabled XR_EXT_hand_interaction, whose visible profile
+    // stays oculus/touch); keying on the raw value would emit a spurious change
+    // event the app cannot observe, the very Unity input churn the debounce exists
+    // to suppress.
+    std::string sig =
+        SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Left) + "|" +
+        SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Right);
     if (sig == lastNotifiedInteractionProfile_)
     {
         // Back to the announced state before the pending change stabilized (A->B->A):

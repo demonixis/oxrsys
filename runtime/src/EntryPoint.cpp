@@ -27,6 +27,7 @@
 #include "Space.h"
 #include "ActionSet.h"
 #include "InputManager.h"
+#include "InteractionProfileResolve.h"
 #include "HandTracker.h"
 #include "Config.h"
 #include "RuntimeStatus.h"
@@ -2264,7 +2265,7 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
     (void)subactionPath;
 }
 
-static std::string SelectCurrentInteractionProfileForInstance(
+std::string SelectCurrentInteractionProfileForInstance(
     const Instance* instance, const InputManager& inputManager, InputManager::Hand hand)
 {
     for (const std::string& profilePath : inputManager.GetCurrentInteractionProfileCandidates(hand))
@@ -2367,7 +2368,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
             }
             for (XrPath subactionPath : action->GetResolvedSubactionPaths())
             {
-                action->ApplySyncState(subactionPath, nullptr, unfocusedSyncTime);
+                // Force state inactive but keep boundSources enumerable while
+                // unfocused (the focus-emulation feature pauses routinely).
+                action->ApplyUnfocusedSync(subactionPath, unfocusedSyncTime);
             }
         }
         return XR_SESSION_NOT_FOCUSED;

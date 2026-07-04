@@ -104,6 +104,46 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
     }
 }
 
+void ActionState::ApplyUnfocusedSync(XrPath subactionPath, XrTime syncTime)
+{
+    // Same as the inactive (nullptr) ApplySyncState path, except boundSources is
+    // preserved. Per the OpenXR spec bound sources reflect the current bindings,
+    // not focus; the focus-emulation feature drops the session to VISIBLE
+    // whenever controllers idle, so this runs routinely and must not make
+    // xrEnumerateBoundSourcesForAction / xrGetInputSourceLocalizedName report
+    // zero sources while paused.
+    auto& data = GetSubactionData(subactionPath);
+
+    bool oldBool = data.boolValue;
+    float oldFloat = data.floatValue;
+    XrVector2f oldVector = data.vector2fValue;
+    bool oldPoseActive = data.poseActive;
+    XrPath oldPoseSourcePath = data.poseSourcePath;
+    std::string oldPoseSourceProfile = data.poseSourceProfile;
+
+    data.isActive = false;
+    data.boolValue = false;
+    data.floatValue = 0.0f;
+    data.vector2fValue = {0.0f, 0.0f};
+    data.poseActive = false;
+    data.poseSourcePath = XR_NULL_PATH;
+    data.poseSourceProfile.clear();
+    // data.boundSources deliberately left untouched.
+
+    data.boolChanged = (data.boolValue != oldBool);
+    data.floatChanged = std::fabs(data.floatValue - oldFloat) > 0.0001f;
+    data.vector2fChanged = (std::fabs(data.vector2fValue.x - oldVector.x) > 0.0001f) ||
+                           (std::fabs(data.vector2fValue.y - oldVector.y) > 0.0001f);
+
+    bool poseChanged = (data.poseActive != oldPoseActive) ||
+                       (data.poseSourcePath != oldPoseSourcePath) ||
+                       (data.poseSourceProfile != oldPoseSourceProfile);
+    if (data.boolChanged || data.floatChanged || data.vector2fChanged || poseChanged)
+    {
+        data.lastChangeTime = syncTime;
+    }
+}
+
 std::vector<XrPath> ActionState::GetBoundSources() const
 {
     std::vector<XrPath> sources;

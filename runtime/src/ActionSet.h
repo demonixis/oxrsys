@@ -104,6 +104,10 @@ public:
     SubactionData& GetSubactionData(XrPath subactionPath);
     const SubactionData& GetSubactionData(XrPath subactionPath) const;
     void ApplySyncState(XrPath subactionPath, const AggregatedActionState* aggregatedState, XrTime syncTime);
+    // Force the action state inactive for an unfocused sync while leaving
+    // boundSources intact, so xrEnumerateBoundSourcesForAction keeps reporting
+    // the current bindings while the session is paused/unfocused.
+    void ApplyUnfocusedSync(XrPath subactionPath, XrTime syncTime);
     std::vector<XrPath> GetBoundSources() const;
 
 private:
