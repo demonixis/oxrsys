@@ -7,6 +7,7 @@
 #include "TrackingReceiver.h"
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
 
@@ -534,6 +535,213 @@ TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[
                WithinAbs(0.20f, 0.001f));
     CHECK(im.GetButtonClick(InputManager::Hand::Left, "select/click"));
     CHECK_FALSE(im.GetButtonClick(InputManager::Hand::Left, "squeeze/click"));
+}
+
+TEST_CASE("InputManager — streamed aim pose routes to aim/pose while grip is unchanged", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Oculus Quest");
+
+    constexpr const char* TouchProfile = "/interaction_profiles/oculus/touch_controller";
+
+    // Distinct grip and aim poses for BOTH hands, with left/right values that would not
+    // survive a member swap (different signs and magnitudes per hand).
+    const glm::quat leftAimRot = glm::angleAxis(0.5f, glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::quat rightAimRot = glm::angleAxis(-0.3f, glm::vec3(1.0f, 0.0f, 0.0f));
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerPos[0] = -0.40f;
+    packet.leftControllerPos[1] = 1.10f;
+    packet.leftControllerPos[2] = -0.60f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerPos[0] = 0.45f;
+    packet.rightControllerPos[1] = 1.15f;
+    packet.rightControllerPos[2] = -0.55f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.leftAimPos[0] = -0.10f;
+    packet.leftAimPos[1] = 1.50f;
+    packet.leftAimPos[2] = -0.90f;
+    packet.leftAimRot[0] = leftAimRot.x;
+    packet.leftAimRot[1] = leftAimRot.y;
+    packet.leftAimRot[2] = leftAimRot.z;
+    packet.leftAimRot[3] = leftAimRot.w;
+    packet.rightAimPos[0] = 0.20f;
+    packet.rightAimPos[1] = 1.55f;
+    packet.rightAimPos[2] = -0.85f;
+    packet.rightAimRot[0] = rightAimRot.x;
+    packet.rightAimRot[1] = rightAimRot.y;
+    packet.rightAimRot[2] = rightAimRot.z;
+    packet.rightAimRot[3] = rightAimRot.w;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    SECTION("aim/pose returns the distinct streamed aim transform, grip/pose the grip pose")
+    {
+        XrPosef leftAim = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                        "aim/pose", TouchProfile);
+        CHECK_THAT(leftAim.position.x, WithinAbs(-0.10f, 0.001f));
+        CHECK_THAT(leftAim.position.y, WithinAbs(1.50f, 0.001f));
+        CHECK_THAT(leftAim.position.z, WithinAbs(-0.90f, 0.001f));
+        CHECK_THAT(leftAim.orientation.y, WithinAbs(leftAimRot.y, 0.001f));
+        CHECK_THAT(leftAim.orientation.w, WithinAbs(leftAimRot.w, 0.001f));
+
+        XrPosef leftGrip = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                         "grip/pose", TouchProfile);
+        CHECK_THAT(leftGrip.position.x, WithinAbs(-0.40f, 0.001f));
+        CHECK_THAT(leftGrip.position.y, WithinAbs(1.10f, 0.001f));
+        CHECK_THAT(leftGrip.position.z, WithinAbs(-0.60f, 0.001f));
+        CHECK_THAT(leftGrip.orientation.w, WithinAbs(1.0f, 0.001f));
+
+        XrPosef rightAim = im.GetPoseComponentForProfile(InputManager::Hand::Right,
+                                                         "aim/pose", TouchProfile);
+        CHECK_THAT(rightAim.position.x, WithinAbs(0.20f, 0.001f));
+        CHECK_THAT(rightAim.position.y, WithinAbs(1.55f, 0.001f));
+        CHECK_THAT(rightAim.position.z, WithinAbs(-0.85f, 0.001f));
+        CHECK_THAT(rightAim.orientation.x, WithinAbs(rightAimRot.x, 0.001f));
+        CHECK_THAT(rightAim.orientation.w, WithinAbs(rightAimRot.w, 0.001f));
+
+        XrPosef rightGrip = im.GetPoseComponentForProfile(InputManager::Hand::Right,
+                                                          "grip/pose", TouchProfile);
+        CHECK_THAT(rightGrip.position.x, WithinAbs(0.45f, 0.001f));
+        CHECK_THAT(rightGrip.position.y, WithinAbs(1.15f, 0.001f));
+        CHECK_THAT(rightGrip.position.z, WithinAbs(-0.55f, 0.001f));
+    }
+
+    SECTION("A zeroed aim quaternion falls the aim pose back to the grip pose")
+    {
+        oxr::protocol::TrackingPacket noAim = {};
+        noAim.timestampNs = 1'011'111'111;
+        noAim.headOrientation[3] = 1.0f;
+        noAim.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+        noAim.leftControllerPos[0] = -0.42f;
+        noAim.leftControllerPos[1] = 1.12f;
+        noAim.leftControllerPos[2] = -0.62f;
+        noAim.leftControllerRot[3] = 1.0f;
+        // leftAimRot left zeroed → DecodeAimPose rejects it → aim/pose == grip/pose.
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&noAim), sizeof(noAim));
+        im.Update(0.0f);
+
+        XrPosef aim = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                    "aim/pose", TouchProfile);
+        XrPosef grip = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                     "grip/pose", TouchProfile);
+        CHECK_THAT(aim.position.x, WithinAbs(grip.position.x, 0.001f));
+        CHECK_THAT(aim.position.y, WithinAbs(grip.position.y, 0.001f));
+        CHECK_THAT(aim.position.z, WithinAbs(grip.position.z, 0.001f));
+        CHECK_THAT(aim.orientation.w, WithinAbs(grip.orientation.w, 0.001f));
+    }
+}
+
+TEST_CASE("TrackingReceiver — accepts pre-aim packets and rejects sub-minimum ones", "[input]")
+{
+    constexpr size_t kPreAimSize = offsetof(oxr::protocol::TrackingPacket, leftAimPos);
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headPosition[0] = 0.5f;
+    packet.headPosition[1] = 1.7f;
+    packet.headPosition[2] = -0.3f;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    packet.leftControllerPos[0] = -0.33f;
+    packet.leftControllerPos[1] = 1.05f;
+    packet.leftControllerPos[2] = -0.52f;
+    packet.leftControllerRot[3] = 1.0f;
+
+    SECTION("A truncated pre-aim packet is accepted and aim falls back to grip")
+    {
+        InputManager im;
+        TrackingReceiver receiver;
+        im.SetTrackingReceiver(&receiver);
+        im.SetStreamingClientName("Oculus Quest");
+        // Inject exactly the pre-aim byte count — an older client that predates aim fields.
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), kPreAimSize);
+        im.Update(0.0f);
+
+        constexpr const char* TouchProfile = "/interaction_profiles/oculus/touch_controller";
+        CHECK(im.IsControllerTrackingActive(InputManager::Hand::Left));
+        XrPosef grip = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                     "grip/pose", TouchProfile);
+        CHECK_THAT(grip.position.x, WithinAbs(-0.33f, 0.001f));
+        CHECK_THAT(grip.position.y, WithinAbs(1.05f, 0.001f));
+        CHECK_THAT(grip.position.z, WithinAbs(-0.52f, 0.001f));
+
+        // Absent aim fields stay zero, so aim/pose falls back to the grip pose.
+        XrPosef aim = im.GetPoseComponentForProfile(InputManager::Hand::Left,
+                                                    "aim/pose", TouchProfile);
+        CHECK_THAT(aim.position.x, WithinAbs(grip.position.x, 0.001f));
+        CHECK_THAT(aim.position.y, WithinAbs(grip.position.y, 0.001f));
+        CHECK_THAT(aim.position.z, WithinAbs(grip.position.z, 0.001f));
+    }
+
+    SECTION("A packet below the minimum size is rejected, leaving state untouched")
+    {
+        TrackingReceiver receiver;
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), kPreAimSize - 1);
+
+        oxr::protocol::TrackingPacket latest = {};
+        CHECK_FALSE(receiver.GetLatestPose(latest));
+    }
+}
+
+TEST_CASE("InputManager — profile re-resolves on reconnect and falls back without a client name",
+          "[input]")
+{
+    SECTION("Reconnecting a different client re-resolves the profile, not the old sticky one")
+    {
+        InputManager im;
+        TrackingReceiver first;
+        im.SetTrackingReceiver(&first);
+        im.SetStreamingClientName("Meta Quest 2");
+
+        oxr::protocol::TrackingPacket packet = {};
+        packet.timestampNs = 1'000'000'000;
+        packet.headOrientation[3] = 1.0f;
+        packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+        packet.leftControllerRot[3] = 1.0f;
+        first.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+        CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+              "/interaction_profiles/meta/touch_controller_quest_2");
+
+        // Disconnect clears the sticky profile.
+        im.SetTrackingReceiver(nullptr);
+        CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left).empty());
+
+        // A fresh client (PICO 4) must resolve to its own profile, not resurrect Quest 2.
+        TrackingReceiver second;
+        im.SetTrackingReceiver(&second);
+        im.SetStreamingClientName("PICO 4");
+        second.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+        CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+              "/interaction_profiles/bytedance/pico4_controller");
+    }
+
+    SECTION("A controller waking before the client name resolves falls back to oculus/touch")
+    {
+        InputManager im;
+        TrackingReceiver receiver;
+        im.SetTrackingReceiver(&receiver);
+        // No SetStreamingClientName — the empty-name fallback branch must engage.
+
+        oxr::protocol::TrackingPacket packet = {};
+        packet.timestampNs = 1'000'000'000;
+        packet.headOrientation[3] = 1.0f;
+        packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+        packet.leftControllerRot[3] = 1.0f;
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+
+        CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+              "/interaction_profiles/oculus/touch_controller");
+    }
 }
 
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")
