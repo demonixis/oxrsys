@@ -38,6 +38,15 @@ int64_t MonotonicNowNs()
     return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
 
+// steady_clock reading in nanoseconds, for feeding the clock-injected focus-emulation
+// and profile-debounce policies (FocusEmulation.h / ProfileChangeDebounce.h).
+int64_t SteadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               Clock::now().time_since_epoch())
+        .count();
+}
+
 struct SessionMetricSummary
 {
     double average = 0.0;
@@ -225,27 +234,23 @@ void Session::MaybeEmitInteractionProfileChanged()
     std::string sig =
         SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Left) + "|" +
         SelectCurrentInteractionProfileForInstance(instance_, *inputManager_, InputManager::Hand::Right);
-    if (sig == lastNotifiedInteractionProfile_)
+
+    const std::string previousPending = interactionProfileDebounce_.pending;
+    const auto decision = oxrsys::EvaluateProfileChangeDebounce(
+        interactionProfileDebounce_, sig, SteadyNowNs(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(kProfileChangeStableDelay).count());
+    interactionProfileDebounce_ = decision.state;
+
+    // A freshly seen signature just started debouncing.
+    if (!decision.emit && !decision.state.pending.empty() &&
+        decision.state.pending != previousPending)
     {
-        // Back to the announced state before the pending change stabilized (A->B->A):
-        // drop the pending change so it can never fire late.
-        pendingInteractionProfile_.clear();
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (sig != pendingInteractionProfile_)
-    {
-        pendingInteractionProfile_ = sig;
-        pendingInteractionProfileSince_ = now;
         spdlog::info("OXRSys: interaction profile pending '{}' (debouncing)", sig);
-        return;
     }
-    if (now - pendingInteractionProfileSince_ < kProfileChangeStableDelay)
+    if (!decision.emit)
     {
         return;
     }
-    lastNotifiedInteractionProfile_ = sig;
-    pendingInteractionProfile_.clear();
 
     XrEventDataBuffer event{};
     auto* ip = reinterpret_cast<XrEventDataInteractionProfileChanged*>(&event);
@@ -253,7 +258,8 @@ void Session::MaybeEmitInteractionProfileChanged()
     ip->next = nullptr;
     ip->session = reinterpret_cast<XrSession>(handle_);
     instance_->PushEvent(event);
-    spdlog::info("OXRSys: emitted XrEventDataInteractionProfileChanged (profiles='{}')", sig);
+    spdlog::info("OXRSys: emitted XrEventDataInteractionProfileChanged (profiles='{}')",
+                 decision.emitted);
 }
 
 XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
@@ -276,11 +282,10 @@ XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
     }
 
     exitRequested_ = false;
-    // Reset focus emulation for the new run: a stale focusSuppressed_ would gate the
-    // VISIBLE->FOCUSED ratchet forever and stall the restarted session at VISIBLE.
-    focusSuppressed_ = false;
-    streamingInputSeenActive_ = false;
-    lastInputActiveTime_ = std::chrono::steady_clock::now();
+    // Reset focus emulation for the new run: a stale suppressed ratchet would gate the
+    // VISIBLE->FOCUSED transition forever and stall the restarted session at VISIBLE.
+    focusEmulation_ = {};
+    focusEmulation_.lastActiveNs = SteadyNowNs();
     {
         std::scoped_lock lock(frameStateMutex_);
         frameBegun_ = false;
@@ -939,19 +944,15 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
     // focus. VISIBLE (not SYNCHRONIZED) is also the disconnect state: the frame loop
     // is identical in both states here and SYNCHRONIZED would only add extra ratchet
     // transitions on resume.
-    if (inputManager_ && inputManager_->IsStreaming() &&
-        (inputManager_->IsInputDeviceActive(InputManager::Hand::Left) ||
-         inputManager_->IsInputDeviceActive(InputManager::Hand::Right)))
+    const bool inputActive = inputManager_ && inputManager_->IsStreaming() &&
+                             (inputManager_->IsInputDeviceActive(InputManager::Hand::Left) ||
+                              inputManager_->IsInputDeviceActive(InputManager::Hand::Right));
+    const auto focusDecision = oxrsys::EvaluateFocusEmulation(
+        focusEmulation_, inputActive, state_ == XR_SESSION_STATE_FOCUSED, SteadyNowNs(),
+        std::chrono::duration_cast<std::chrono::nanoseconds>(kFocusLossDelay).count());
+    focusEmulation_ = focusDecision.state;
+    if (focusDecision.suppressFocus)
     {
-        streamingInputSeenActive_ = true;
-        lastInputActiveTime_ = std::chrono::steady_clock::now();
-        focusSuppressed_ = false; // ratchet below restores FOCUSED next frame
-    }
-    else if (streamingInputSeenActive_ && !focusSuppressed_ &&
-             state_ == XR_SESSION_STATE_FOCUSED &&
-             std::chrono::steady_clock::now() - lastInputActiveTime_ >= kFocusLossDelay)
-    {
-        focusSuppressed_ = true;
         TransitionState(XR_SESSION_STATE_VISIBLE);
         return;
     }
@@ -967,7 +968,7 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
             break;
 
         case XR_SESSION_STATE_VISIBLE:
-            if (!focusSuppressed_)
+            if (!focusEmulation_.suppressed)
             {
                 TransitionState(XR_SESSION_STATE_FOCUSED);
             }

@@ -161,6 +161,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestQuestShellInteraction.cpp
     tests/TestAlvrSessionConfig.cpp
     tests/TestClientLiveness.cpp
+    tests/TestSessionStateMachines.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
@@ -220,6 +221,15 @@ add_test(NAME oxrsys_client_liveness
     COMMAND oxrsys_runtime_tests "[client-liveness]"
 )
 set_tests_properties(oxrsys_client_liveness PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
+# Session focus-emulation and interaction-profile-debounce state machines (pure,
+# clock-injected); runs the tagged subset of oxrsys_runtime_tests as its own entry.
+add_test(NAME oxrsys_session_state_machines
+    COMMAND oxrsys_runtime_tests "[session-fsm]"
+)
+set_tests_properties(oxrsys_session_state_machines PROPERTIES
     ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
     TIMEOUT 30
 )
