@@ -2588,6 +2588,26 @@ static void ResolveHapticHands(const ActionState* action, XrPath subactionPath,
     }
 }
 
+// Resolves the action's target hand(s) once and issues the per-hand vibration.
+// Stop passes a zero-amplitude pulse. Shared by apply/stop so the resolve +
+// dispatch cannot drift between them.
+static void ApplyHapticsForSubaction(Session* sess, const ActionState* action,
+                                     XrPath subactionPath, float amplitude,
+                                     XrDuration duration, float frequency)
+{
+    bool left = false;
+    bool right = false;
+    ResolveHapticHands(action, subactionPath, left, right);
+    if (left)
+    {
+        sess->ApplyHapticFeedback(0, amplitude, duration, frequency);
+    }
+    if (right)
+    {
+        sess->ApplyHapticFeedback(1, amplitude, duration, frequency);
+    }
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     XrSession session, const XrHapticActionInfo* hapticActionInfo,
     const XrHapticBaseHeader* hapticFeedback)
@@ -2631,19 +2651,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
         // Resolve target hand(s): an explicit subaction path drives only that
         // hand; XR_NULL_PATH drives every hand the action is scoped to, not
         // unconditionally both. A left-only action must not buzz the right.
-        bool left = false;
-        bool right = false;
-        ResolveHapticHands(action, hapticActionInfo->subactionPath, left, right);
         const float frequency =
             vibration->frequency == XR_FREQUENCY_UNSPECIFIED ? 0.0f : vibration->frequency;
-        if (left)
-        {
-            sess->ApplyHapticFeedback(0, vibration->amplitude, vibration->duration, frequency);
-        }
-        if (right)
-        {
-            sess->ApplyHapticFeedback(1, vibration->amplitude, vibration->duration, frequency);
-        }
+        ApplyHapticsForSubaction(sess, action, hapticActionInfo->subactionPath,
+                                 vibration->amplitude, vibration->duration, frequency);
     }
 
     return XR_SUCCESS;
@@ -2689,17 +2700,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
         // A zero-amplitude pulse cancels any queued vibration on the client.
         // Same scope rules as apply: XR_NULL_PATH stops only the hands the
         // action is scoped to, not unconditionally both.
-        bool left = false;
-        bool right = false;
-        ResolveHapticHands(action, hapticActionInfo->subactionPath, left, right);
-        if (left)
-        {
-            sess->ApplyHapticFeedback(0, 0.0f, 0, 0.0f);
-        }
-        if (right)
-        {
-            sess->ApplyHapticFeedback(1, 0.0f, 0, 0.0f);
-        }
+        ApplyHapticsForSubaction(sess, action, hapticActionInfo->subactionPath, 0.0f, 0, 0.0f);
     }
 
     return XR_SUCCESS;

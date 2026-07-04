@@ -240,7 +240,6 @@ void AlvrStreamingBackend::StopInternal(bool skipAlvrShutdown)
 void AlvrStreamingBackend::SendFrame(FrameSource frameSource)
 {
     StreamingFrame frame = {};
-    frame.alphaBlend = frameSource.alphaBlend;
     // ALVR requires the video timestamp to equal a tracking sample timestamp
     // (its time domain) so the client can match the frame to the pose it was
     // rendered from. Session supplies the exact sample the app's poses came
@@ -526,8 +525,9 @@ void AlvrStreamingBackend::DrainButtons()
         const auto it = buttonIds_.find(entries[i].id);
         if (it == buttonIds_.end())
         {
-            // Menu-button diagnosis: surface path ids the client sends that we
-            // never mapped, once per id per session.
+            // Log unmapped client button path ids, once per id per process
+            // (the set is a function-local static that never resets), to catch
+            // controller paths we haven't bound.
             static std::unordered_set<uint64_t> unmatchedLogged;
             if (unmatchedLogged.insert(entries[i].id).second)
             {
@@ -538,13 +538,11 @@ void AlvrStreamingBackend::DrainButtons()
         }
         const bool binary = entries[i].value.scalar;
         const float scalar = entries[i].value.float_;
-        using oxr::protocol::ButtonFlags;
         switch (it->second)
         {
             case ButtonKind::LeftX: setButton(oxr::protocol::BUTTON_X, binary); break;
             case ButtonKind::LeftY: setButton(oxr::protocol::BUTTON_Y, binary); break;
             case ButtonKind::LeftMenu:
-                spdlog::info("OXRSys/ALVR: left menu click -> {}", binary);
                 setButton(oxr::protocol::BUTTON_MENU, binary);
                 break;
             case ButtonKind::LeftThumbClick:

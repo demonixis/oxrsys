@@ -700,22 +700,12 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
         return GetMenuClick();
     }
     // No "system/click" case: /input/system/* is reserved (never accumulated — see
-    // AccumulateBindingState). A c059553 experiment mirrored menu state here; that
-    // fabricated feed on the right-hand half of Unity's menuButton action is exactly
-    // what real runtimes never do, so the component is left unmapped.
-    if (componentPath == "select/click")
-    {
-        return GetTriggerValue(hand) > 0.5f;
-    }
-    if (componentPath == "select/value")
-    {
-        return GetTriggerValue(hand) > 0.5f;
-    }
-    if (componentPath == "trigger/click")
-    {
-        return GetTriggerValue(hand) > 0.5f;
-    }
-    if (componentPath == "trigger/value")
+    // AccumulateBindingState). An earlier diagnostic experiment mirrored menu state
+    // onto system/click here; that fabricated feed on the right-hand half of Unity's
+    // menuButton action is exactly what real runtimes never do, so the component is
+    // left unmapped.
+    if (componentPath == "select/click" || componentPath == "select/value" ||
+        componentPath == "trigger/click" || componentPath == "trigger/value")
     {
         return GetTriggerValue(hand) > 0.5f;
     }
@@ -723,11 +713,7 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetTriggerValue(hand) > 0.01f;
     }
-    if (componentPath == "squeeze/click")
-    {
-        return GetGrabValue(hand) > 0.5f;
-    }
-    if (componentPath == "squeeze/value")
+    if (componentPath == "squeeze/click" || componentPath == "squeeze/value")
     {
         return GetGrabValue(hand) > 0.5f;
     }

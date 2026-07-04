@@ -23,9 +23,14 @@
 namespace
 {
 
-// Set once at session init; read by the output callback for parameter-set extraction.
 // H.264 when the runtime runs under Rosetta (HEVC HW encode unavailable there).
-bool g_useH264 = false;
+// Rosetta status is fixed for the process lifetime and PreferredVideoCodec()
+// caches it, so each site resolves the codec locally rather than via a mutable
+// global (which would carry stale cross-session state into output callbacks).
+inline bool UsesH264()
+{
+    return oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264;
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -234,8 +239,9 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
         CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
         if (formatDesc != nullptr)
         {
+            const bool useH264 = UsesH264();
             size_t paramSetCount = 0;
-            if (g_useH264)
+            if (useH264)
             {
                 CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                     formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
@@ -250,7 +256,7 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
             {
                 const uint8_t* paramSet = nullptr;
                 size_t paramSetSize = 0;
-                OSStatus status = g_useH264
+                OSStatus status = useH264
                     ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                           formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr)
                     : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
@@ -701,8 +707,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].inUse = false;
     }
 
-    g_useH264 = (oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264);
-    const CMVideoCodecType codecType = g_useH264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
+    const bool useH264 = UsesH264();
+    const CMVideoCodecType codecType = useH264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
 
     // Low-latency rate control halves encode latency (33 -> 10.6ms measured)
     // and fixes the ~30% bitrate overshoot of the default RC. Its Rosetta
@@ -765,8 +771,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     const std::string& preset = config.encoderPreset;
     SetSessionProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
-        g_useH264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
-    if (g_useH264)
+        useH264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
+    if (useH264)
     {
         // CABAC buys ~10% quality over the CAVLC default at the same bitrate;
         // High profile already implies the decoder supports it.
@@ -872,7 +878,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
-                  g_useH264 ? "H.264" : "H.265",
+                  useH264 ? "H.264" : "H.265",
                   width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
 }

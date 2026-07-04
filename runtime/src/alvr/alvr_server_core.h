@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+//
+// Declarations mirrored from ALVR's MIT-licensed alvr/server_core/src/c_api.rs;
+// carries ALVR's license rather than the oxrsys-wide MPL-2.0.
+//
 // Hand-written C header for ALVR's alvr_server_core C API.
 // Pinned to ALVR v20.14.1 (commit a9f6542fa507a841f40ab4f3fcb531427cd02550),
 // mirrors alvr/server_core/src/c_api.rs at that tag exactly. If the ALVR
