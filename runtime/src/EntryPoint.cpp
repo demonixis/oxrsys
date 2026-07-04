@@ -153,12 +153,12 @@ static bool EnsureVulkanInstanceDispatch(VkInstance vkInstance, const char* cont
 
 static bool IsAttachedActionSetHandle(uint64_t actionSetHandle);
 
-static void CleanupRuntimeState()
+static void CleanupRuntimeState(bool forProcessExit = false)
 {
     gHandTrackers.clear();
     if (gSession)
     {
-        gSession->Shutdown();
+        gSession->Shutdown(forProcessExit);
     }
     gSession.reset();
     gActions.clear();
@@ -3898,7 +3898,9 @@ extern "C"
     __attribute__((destructor))
     static void CleanupRuntimeOnUnload()
     {
-        CleanupRuntimeState();
+        // Dylib-unload path: skip backend teardown that joins external runtimes
+        // (alvr_shutdown() hangs here); the process is dying anyway.
+        CleanupRuntimeState(/*forProcessExit=*/true);
     }
 
     __attribute__((visibility("default")))

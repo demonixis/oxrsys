@@ -306,7 +306,7 @@ XrResult Session::RequestExitSession()
     return XR_SUCCESS;
 }
 
-void Session::Shutdown()
+void Session::Shutdown(bool forProcessExit)
 {
     running_ = false;
     exitRequested_ = true;
@@ -325,7 +325,14 @@ void Session::Shutdown()
 
     if (streamingServer_)
     {
-        streamingServer_->Stop();
+        if (forProcessExit)
+        {
+            streamingServer_->StopForProcessExit();
+        }
+        else
+        {
+            streamingServer_->Stop();
+        }
         streamingServer_.reset();
         streamingStarted_ = false;
     }
@@ -436,18 +443,48 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // final sub-millisecond removes most residual jitter.
     const auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
     auto now = std::chrono::steady_clock::now();
+    if (targetRefreshHz != pacedRefreshHz_)
+    {
+        // Refresh rate changed (e.g. ALVR negotiation): the grid's period/phase is
+        // stale — clear the anchor so the branch below re-anchors once at the new rate.
+        pacedRefreshHz_ = targetRefreshHz;
+        nextFrameDeadline_ = {};
+    }
     int64_t backendSleepNs = 0;
     if (streamingServer_ && streamingServer_->GetFramePacing(backendSleepNs) &&
         backendSleepNs > 0 &&
         backendSleepNs < 2 * targetFrameTime.count())
     {
-        // Backend-provided pacing (ALVR: duration until the client's next
-        // vsync) — phase-locks the frame loop to the headset display instead
-        // of a free-running local grid, absorbing clock drift.
-        nextFrameDeadline_ = now + std::chrono::nanoseconds(backendSleepNs);
+        // Backend pacing (ALVR: duration until the client's next vsync) is used only
+        // to ANCHOR the grid, not per frame: re-anchoring from `now` every frame folds
+        // per-frame clock jitter into the produced rate (~73.8fps against the 72Hz
+        // panel), slowly flooding the client's vsync queue -> periodic micro-stutter.
+        // Between anchors, advance the same absolute grid as the fallback below.
+        const auto backendDeadline = now + std::chrono::nanoseconds(backendSleepNs);
+        if (nextFrameDeadline_.time_since_epoch().count() == 0 || !backendPacedLastFrame_)
+        {
+            // First backend-paced frame — either the very first WaitFrame, or the
+            // previous frame ran on the local fallback grid (client just connected or
+            // reconnected). One-shot phase-lock the grid to the client vsync estimate;
+            // the arbitrary fallback phase would otherwise persist (up to ~1 frame of
+            // standing latency) since the grid below only advances, never re-phases.
+            nextFrameDeadline_ = backendDeadline;
+        }
+        else
+        {
+            nextFrameDeadline_ += targetFrameTime;
+            if (now > nextFrameDeadline_ + targetFrameTime)
+            {
+                // Fell behind by more than a full frame (long stall) — resync to the
+                // client vsync estimate instead of bursting zero-length catch-up frames.
+                nextFrameDeadline_ = backendDeadline;
+            }
+        }
+        backendPacedLastFrame_ = true;
     }
     else
     {
+        backendPacedLastFrame_ = false;
         if (nextFrameDeadline_.time_since_epoch().count() == 0)
         {
             nextFrameDeadline_ = now; // first frame: anchor the grid here
@@ -1012,7 +1049,7 @@ void Session::StartStreamingIfNeeded()
     // Will be updated when we know the actual render resolution
     uint32_t width = 1512;
     uint32_t height = 1680;
-    uint32_t refreshHz = 90;
+    uint32_t refreshHz = std::max(Config::Get().GetValues().refreshRateHz, 1u);
 
     if (streamingServer_->Start(width, height, refreshHz))
     {

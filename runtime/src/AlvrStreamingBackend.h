@@ -47,6 +47,7 @@ public:
 
     bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz) override;
     void Stop() override;
+    void StopForProcessExit() override;
     void SendFrame(FrameSource frameSource) override;
     void SetGraphicsContext(const GraphicsContext& graphicsContext) override
     {
@@ -129,10 +130,17 @@ private:
     // attribute stutter to a pipeline stage. VideoToolbox callback thread.
     void RecordFrameMetrics(const VideoEncoder::FrameMetrics& metrics, size_t nalBytes,
                             double sendMs);
+    // Shared Stop() body; skipAlvrShutdown keeps oxrsys's own threads joining
+    // but leaves ServerCoreContext alive (process-exit path).
+    void StopInternal(bool skipAlvrShutdown);
     // Writes a minimal session.json (client discovery + auto-trust + wired
     // client entry) when none exists. ALVR extrapolates the rest and owns the
     // file afterwards.
     static void EnsureSessionJson(const std::string& configDir);
+    // Merge-updates the existing session.json before alvr_initialize so
+    // oxrsys-runtime.toml stays the single source of truth for bitrate, and
+    // client-side buffering is capped (max_buffering_frames).
+    void SyncSessionSettings();
 
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};

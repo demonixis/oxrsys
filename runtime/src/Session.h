@@ -106,7 +106,9 @@ public:
     void EndDebugUtilsLabelRegion();
     void InsertDebugUtilsLabel(const XrDebugUtilsLabelEXT& labelInfo);
     void GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std::vector<std::string>& labelNames) const;
-    void Shutdown();
+    // forProcessExit: called from the dylib destructor / process teardown, where the
+    // streaming backend must not join external runtimes (see StopForProcessExit()).
+    void Shutdown(bool forProcessExit = false);
 
 private:
     struct DebugUtilsLabelState
@@ -154,6 +156,11 @@ private:
     std::chrono::steady_clock::time_point lastFrameTime_;
     // Absolute deadline for the next frame so pacing does not accumulate sleep drift.
     std::chrono::steady_clock::time_point nextFrameDeadline_{};
+    // Refresh rate the pacing grid was built for; a change re-anchors the grid once.
+    uint32_t pacedRefreshHz_ = 0;
+    // Whether the previous WaitFrame used backend (client vsync) pacing. A false->true
+    // transition means the client just (re)connected: phase-lock the grid once.
+    bool backendPacedLastFrame_ = false;
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

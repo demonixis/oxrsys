@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -95,8 +96,10 @@ public:
 private:
     struct BufferSlot
     {
-        void* pixelBuffer = nullptr;      // CVPixelBufferRef
-        void* metalTexture = nullptr;     // CVMetalTextureRef
+        void* pixelBuffer = nullptr;      // CVPixelBufferRef (NV12)
+        void* yTexture = nullptr;         // CVMetalTextureRef (plane 0, R8)
+        void* cbcrTexture = nullptr;      // CVMetalTextureRef (plane 1, RG8)
+        void* compositeTexture = nullptr; // id<MTLTexture> (BGRA compose target)
         void* tmpLeftTexture = nullptr;   // id<MTLTexture>
         void* tmpRightTexture = nullptr;  // id<MTLTexture>
         void* foveatedScratchTexture = nullptr; // id<MTLTexture>
@@ -120,6 +123,7 @@ private:
         void* scaler = nullptr;           // MPSImageBilinearScale*
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        void* nv12ConvertPipeline = nullptr; // id<MTLComputePipelineState>
     };
 
     struct FfmpegState
@@ -140,6 +144,16 @@ private:
     uint32_t bitrateMbps_ = 50;
     FoveationSettings foveationSettings_ = {};
     uint32_t frameCount_ = 0;
+    // Rate-limit state for explicit ForceKeyframe() calls. The first
+    // ForcedKeyframeWarmupCount accepted forces after Initialize() bypass the
+    // 500ms limit so StreamingServer's deliberate redundant-IDR warmup at
+    // connect (one post-Initialize force plus frames 0-4) is not collapsed to
+    // a single keyframe. Both are reset in Initialize(). Atomics because
+    // ForceKeyframe() is called from multiple threads; lastForcedKeyframeNs_
+    // holds steady_clock time_since_epoch().count().
+    static constexpr uint32_t ForcedKeyframeWarmupCount = 6;
+    std::atomic<uint32_t> acceptedForcedKeyframes_{0};
+    std::atomic<int64_t> lastForcedKeyframeNs_{0};
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> foveationValidationWarningLogged_{false};

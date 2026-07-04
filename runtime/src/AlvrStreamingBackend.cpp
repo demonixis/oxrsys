@@ -27,6 +27,9 @@ namespace
 // hostname: server_core runs adb port-forwarding and launches the store
 // client itself when a device is plugged in. ALVR extrapolates all missing
 // settings against its defaults and rewrites the file with the full tree.
+// The ConstantMbps value here is only a seed: SyncSessionSettings() always
+// rewrites it from oxrsys-runtime.toml before alvr_initialize, so the toml
+// stays the single source of truth.
 constexpr const char* kMinimalSessionJson = R"json({
   "client_connections": {
     "client.wired": {
@@ -43,6 +46,7 @@ constexpr const char* kMinimalSessionJson = R"json({
     },
     "video": {
       "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } },
+      "max_buffering_frames": 1.5,
       "transcoding_view_resolution": { "variant": "Scale", "Scale": 0.75 },
       "foveated_encoding": { "enabled": false }
     },
@@ -83,6 +87,47 @@ void AlvrStreamingBackend::EnsureSessionJson(const std::string& configDir)
     spdlog::info("OXRSys/ALVR: wrote initial session.json at {}", sessionPath.string());
 }
 
+void AlvrStreamingBackend::SyncSessionSettings()
+{
+    std::ifstream in(sessionJsonPath_);
+    if (!in)
+    {
+        return;
+    }
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    const std::string json = buffer.str();
+
+    // Targeted key rewrites (same style as RefreshNegotiatedConfig) instead of a
+    // JSON library: ALVR rewrites the file with its full settings tree, so both
+    // keys exist after first run. "variant": "ConstantMbps" does not match — the
+    // regex requires the key position (quote before the colon).
+    const uint32_t bitrateMbps = std::max(Config::Get().GetValues().bitrateMbps, 1u);
+    static const std::regex bitrateRe("\"ConstantMbps\"\\s*:\\s*[0-9.]+");
+    static const std::regex bufferingRe("\"max_buffering_frames\"\\s*:\\s*[0-9.]+");
+
+    std::string updated =
+        std::regex_replace(json, bitrateRe, "\"ConstantMbps\": " + std::to_string(bitrateMbps));
+    // Cap client-side frame queueing: larger values let server pacing drift pool
+    // into standing latency before the vsync queue overflows into stutter.
+    updated = std::regex_replace(updated, bufferingRe, "\"max_buffering_frames\": 1.5");
+
+    if (updated == json)
+    {
+        return; // already in sync
+    }
+    std::ofstream out(sessionJsonPath_, std::ios::trunc);
+    if (!out)
+    {
+        spdlog::warn("OXRSys/ALVR: cannot rewrite {} to sync toml settings", sessionJsonPath_);
+        return;
+    }
+    out << updated;
+    spdlog::info(
+        "OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, max_buffering_frames=1.5)",
+        bitrateMbps);
+}
+
 bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
                                  uint32_t refreshRateHz)
 {
@@ -112,6 +157,9 @@ bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
     const std::string crashLogPath = (alvrDir / "crash_log.txt").string();
 
     sessionJsonPath_ = (alvrDir / "session.json").string();
+    // Must precede alvr_initialize: server_core loads session.json once and
+    // owns it afterwards.
+    SyncSessionSettings();
 
     alvr_initialize_environment(configDir.c_str(), configDir.c_str());
     alvr_initialize_logging(sessionLogPath.c_str(), crashLogPath.c_str());
@@ -139,6 +187,16 @@ bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
 
 void AlvrStreamingBackend::Stop()
 {
+    StopInternal(/*skipAlvrShutdown=*/false);
+}
+
+void AlvrStreamingBackend::StopForProcessExit()
+{
+    StopInternal(/*skipAlvrShutdown=*/true);
+}
+
+void AlvrStreamingBackend::StopInternal(bool skipAlvrShutdown)
+{
     if (!running_.exchange(false))
     {
         return;
@@ -160,6 +218,15 @@ void AlvrStreamingBackend::Stop()
         encoder_.reset();
     }
     connected_.store(false);
+    if (skipAlvrShutdown)
+    {
+        // Process exit / dylib unload: alvr_shutdown() drops ServerCoreContext
+        // (joins threads, waits for client disconnect, drops a tokio runtime),
+        // which hangs or crashes at this point. Leave it to die with the
+        // process; running_ is already false so a later Stop() is a no-op.
+        spdlog::info("OXRSys/ALVR: threads stopped (alvr_shutdown skipped for process exit)");
+        return;
+    }
     // Tears down ServerCoreContext (tokio runtime + sockets). Must happen
     // after our own threads stopped touching alvr_* functions.
     alvr_shutdown();

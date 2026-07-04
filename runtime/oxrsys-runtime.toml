@@ -14,6 +14,9 @@ runtime_enabled = true
 [streaming]
 # H.265 encoding bitrate in Mbps. Lower = less latency but more artifacts.
 # Try 20-30 for lower latency, 50+ for quality.
+# With protocol = "alvr" this value is also synced into ALVR's session.json
+# (video.bitrate.mode.ConstantMbps) at startup, so this file is the single
+# source of truth.
 bitrate_mbps = 50
 
 # Preferred headset display refresh rate. Supported values: 60, 72, 80, 90, 120.

@@ -26,6 +26,13 @@ public:
     virtual bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz) = 0;
     virtual void Stop() = 0;
 
+    // Stop() variant for process exit / dylib unload: must still join the
+    // backend's own threads but skip teardown that blocks on external runtimes
+    // (ALVR's alvr_shutdown() joins a tokio runtime and waits for the client to
+    // disconnect — fatal/hangy in a destructor at exit). Backends without such
+    // state just Stop().
+    virtual void StopForProcessExit() { Stop(); }
+
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
     virtual void SendFrame(FrameSource frameSource) = 0;
 
