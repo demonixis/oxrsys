@@ -1275,8 +1275,15 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     auto* context = new EncodeFrameContext();
     context->nalCallback = std::move(callback);
     context->frameCallback = std::move(frameCallback);
-    context->releaseSlot = [this](size_t releasedSlotIndex) {
-        ReleaseSlot(releasedSlotIndex);
+    // Hold a strong reference to the encoder for as long as the frame's
+    // context is alive. FinalizeEncodeFrame (which invokes this lambda and then
+    // deletes the context) can run from either the Metal completed handler
+    // below or, on the success path, the asynchronous VT output callback
+    // (CompressionOutputCallback) long after both owners have dropped their
+    // shared_ptr. Capturing self keeps ReleaseSlot()'s `this` valid through
+    // that whole window instead of dereferencing a freed encoder.
+    context->releaseSlot = [self = shared_from_this()](size_t releasedSlotIndex) {
+        self->ReleaseSlot(releasedSlotIndex);
     };
     context->frameSource = std::move(frameSource);
     context->slotIndex = slotIndex;
@@ -1292,14 +1299,18 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     VTCompressionSessionRef compressionSession =
         (VTCompressionSessionRef)CFRetain(videoToolbox_.session);
     CVPixelBufferRetain(pixelBuffer);
+    // Capture self so the handler's direct member accesses (shuttingDown_,
+    // forceKeyframe_) stay valid even if this fires after both owners have
+    // dropped their shared_ptr and the 200ms Shutdown() drain gave up.
+    auto self = shared_from_this();
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer)
     {
-        if (commandBuffer.status != MTLCommandBufferStatusCompleted || this->shuttingDown_.load())
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted || self->shuttingDown_.load())
         {
-            if (forceKeyframe && !this->shuttingDown_.load())
+            if (forceKeyframe && !self->shuttingDown_.load())
             {
                 // Frame never reached VT; re-arm the swallowed keyframe request.
-                this->forceKeyframe_.store(true);
+                self->forceKeyframe_.store(true);
             }
             FinalizeEncodeFrame(context, true);
             CVPixelBufferRelease(pixelBuffer);
@@ -1345,10 +1356,10 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
             // VT does not invoke the output callback when EncodeFrame itself
             // fails, so the context is still ours to reclaim here.
             spdlog::warn("VideoEncoder: VTCompressionSessionEncodeFrame failed: {}", status);
-            if (forceKeyframe && !this->shuttingDown_.load())
+            if (forceKeyframe && !self->shuttingDown_.load())
             {
                 // Frame never reached VT; re-arm the swallowed keyframe request.
-                this->forceKeyframe_.store(true);
+                self->forceKeyframe_.store(true);
             }
             FinalizeEncodeFrame(context, true);
         }
