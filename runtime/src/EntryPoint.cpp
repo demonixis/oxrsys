@@ -2553,6 +2553,38 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
+// Resolve which controller(s) a haptic call targets. An explicit subaction
+// path drives only that hand. XR_NULL_PATH drives every hand the action is
+// scoped to via its declared subaction paths; an action that declared no
+// subaction paths is not hand-scoped and drives both. Shared by apply/stop so
+// the scope rules cannot drift between them.
+static void ResolveHapticHands(const ActionState* action, XrPath subactionPath,
+                               bool& left, bool& right)
+{
+    left = false;
+    right = false;
+    if (subactionPath != XR_NULL_PATH)
+    {
+        const std::string subactionString = Runtime::Get().GetPathString(subactionPath);
+        left = subactionString == "/user/hand/left";
+        right = subactionString == "/user/hand/right";
+        return;
+    }
+    for (XrPath resolved : action->GetResolvedSubactionPaths())
+    {
+        if (resolved == XR_NULL_PATH)
+        {
+            // No declared subaction paths: not hand-scoped, so target both.
+            left = true;
+            right = true;
+            continue;
+        }
+        const std::string resolvedString = Runtime::Get().GetPathString(resolved);
+        left = left || resolvedString == "/user/hand/left";
+        right = right || resolvedString == "/user/hand/right";
+    }
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     XrSession session, const XrHapticActionInfo* hapticActionInfo,
     const XrHapticBaseHeader* hapticFeedback)
@@ -2593,14 +2625,12 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     if (hapticFeedback->type == XR_TYPE_HAPTIC_VIBRATION)
     {
         const auto* vibration = reinterpret_cast<const XrHapticVibration*>(hapticFeedback);
-        // Resolve target hand(s): explicit subaction path, or every hand the
-        // action is bound to when XR_NULL_PATH.
-        const std::string subactionString =
-            hapticActionInfo->subactionPath != XR_NULL_PATH
-                ? Runtime::Get().GetPathString(hapticActionInfo->subactionPath)
-                : std::string();
-        const bool left = subactionString.empty() || subactionString == "/user/hand/left";
-        const bool right = subactionString.empty() || subactionString == "/user/hand/right";
+        // Resolve target hand(s): an explicit subaction path drives only that
+        // hand; XR_NULL_PATH drives every hand the action is scoped to, not
+        // unconditionally both. A left-only action must not buzz the right.
+        bool left = false;
+        bool right = false;
+        ResolveHapticHands(action, hapticActionInfo->subactionPath, left, right);
         const float frequency =
             vibration->frequency == XR_FREQUENCY_UNSPECIFIED ? 0.0f : vibration->frequency;
         if (left)
@@ -2654,15 +2684,16 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
 
     {
         // A zero-amplitude pulse cancels any queued vibration on the client.
-        const std::string subactionString =
-            hapticActionInfo->subactionPath != XR_NULL_PATH
-                ? Runtime::Get().GetPathString(hapticActionInfo->subactionPath)
-                : std::string();
-        if (subactionString.empty() || subactionString == "/user/hand/left")
+        // Same scope rules as apply: XR_NULL_PATH stops only the hands the
+        // action is scoped to, not unconditionally both.
+        bool left = false;
+        bool right = false;
+        ResolveHapticHands(action, hapticActionInfo->subactionPath, left, right);
+        if (left)
         {
             sess->ApplyHapticFeedback(0, 0.0f, 0, 0.0f);
         }
-        if (subactionString.empty() || subactionString == "/user/hand/right")
+        if (right)
         {
             sess->ApplyHapticFeedback(1, 0.0f, 0, 0.0f);
         }
@@ -3700,17 +3731,17 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // exact time base (monoStartNs_); before a session exists we fall back to a
 // process-global monotonic epoch so conversions never hard-fail.
 // ============================================================================
-static int64_t gTimespecFallbackEpochNs = 0;
-
 static int64_t MonotonicFallbackEpochNs()
 {
-    if (gTimespecFallbackEpochNs == 0)
-    {
+    // Function-local static: C++11 guarantees the initializer runs exactly once
+    // even under concurrent conversion calls before any session exists. Matches
+    // the PreferredVideoCodec() process-lifetime-constant idiom.
+    static const int64_t epochNs = []() -> int64_t {
         struct timespec ts{};
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        gTimespecFallbackEpochNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-    }
-    return gTimespecFallbackEpochNs;
+        return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    }();
+    return epochNs;
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
