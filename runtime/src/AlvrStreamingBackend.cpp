@@ -10,6 +10,7 @@
 #include <fstream>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -47,7 +48,10 @@ constexpr const char* kMinimalSessionJson = R"json({
     "video": {
       "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } },
       "max_buffering_frames": 1.5,
-      "transcoding_view_resolution": { "variant": "Scale", "Scale": 0.75 },
+      "transcoding_view_resolution": {
+        "variant": "Absolute",
+        "Absolute": { "width": 1512, "height": { "set": true, "content": 1680 } }
+      },
       "foveated_encoding": { "enabled": false }
     },
     "audio": {
@@ -522,6 +526,14 @@ void AlvrStreamingBackend::DrainButtons()
         const auto it = buttonIds_.find(entries[i].id);
         if (it == buttonIds_.end())
         {
+            // Menu-button diagnosis: surface path ids the client sends that we
+            // never mapped, once per id per session.
+            static std::unordered_set<uint64_t> unmatchedLogged;
+            if (unmatchedLogged.insert(entries[i].id).second)
+            {
+                spdlog::info("OXRSys/ALVR: unmapped button path id {:#x} (value bin={} f={})",
+                             entries[i].id, entries[i].value.scalar, entries[i].value.float_);
+            }
             continue;
         }
         const bool binary = entries[i].value.scalar;
@@ -531,7 +543,10 @@ void AlvrStreamingBackend::DrainButtons()
         {
             case ButtonKind::LeftX: setButton(oxr::protocol::BUTTON_X, binary); break;
             case ButtonKind::LeftY: setButton(oxr::protocol::BUTTON_Y, binary); break;
-            case ButtonKind::LeftMenu: setButton(oxr::protocol::BUTTON_MENU, binary); break;
+            case ButtonKind::LeftMenu:
+                spdlog::info("OXRSys/ALVR: left menu click -> {}", binary);
+                setButton(oxr::protocol::BUTTON_MENU, binary);
+                break;
             case ButtonKind::LeftThumbClick:
                 setButton(oxr::protocol::BUTTON_LEFT_THUMBSTICK, binary);
                 break;
