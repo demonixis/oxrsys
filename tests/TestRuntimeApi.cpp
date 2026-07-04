@@ -4,6 +4,13 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <openxr/openxr.h>
+// Enable the XR_KHR_convert_timespec_time function-pointer declarations
+// (PFN_xrConvertTimespecTimeToTimeKHR et al.) in openxr_platform.h, mirroring the
+// runtime's own EntryPoint.cpp so the loader-level conversion path can be tested.
+#include <ctime>
+#ifndef XR_USE_TIMESPEC
+#define XR_USE_TIMESPEC
+#endif
 #include <openxr/openxr_platform.h>
 
 #include <algorithm>
@@ -2855,12 +2862,124 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
         },
         XR_ERROR_POSE_INVALID);
 
+    // OpenComposite (OpenVR->OpenXR) submits a bottom-left-origin Y-flipped rect:
+    // offset.y = height, extent.height = -height. That negative extent is out-of-spec
+    // but real runtimes tolerate it, so the runtime normalizes to a min/max region and
+    // accepts it as long as it stays in bounds (swapchain is 16x16).
+    runProjectionCase(
+        [](const RuntimeSessionContext&, XrSwapchain swapchain, XrCompositionLayerProjectionView (&views)[2])
+        {
+            uint32_t imageIndex = 0;
+            XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+            XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            waitInfo.timeout = 0;
+            XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+            XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+            views[0].subImage.imageRect.offset = {0, 16};
+            views[0].subImage.imageRect.extent = {16, -16};
+        },
+        XR_SUCCESS);
+
+    // A genuinely degenerate rect (zero extent) is still rejected — the normalization
+    // tolerates negative extents, not empty ones.
+    runProjectionCase(
+        [](const RuntimeSessionContext&, XrSwapchain swapchain, XrCompositionLayerProjectionView (&views)[2])
+        {
+            uint32_t imageIndex = 0;
+            XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+            XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            waitInfo.timeout = 0;
+            XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+            XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+            views[0].subImage.imageRect.extent = {16, 0};
+        },
+        XR_ERROR_SWAPCHAIN_RECT_INVALID);
+
     runQuadCase(
         [](const RuntimeSessionContext&, XrSwapchain, XrCompositionLayerQuad& quad)
         {
             quad.subImage.imageArrayIndex = 1;
         },
         XR_ERROR_VALIDATION_FAILURE);
+}
+
+TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[runtime][timespec]")
+{
+    // wineopenxr translates Win32 QPC through this extension for all frame timing, so
+    // both directions must be resolvable and round-trip losslessly. Exercise the
+    // no-session fallback epoch (process-global) and the active-session time base.
+
+    SECTION("No-session fallback rejects bad input and round-trips losslessly")
+    {
+        const char* extensions[] = {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+        XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+        std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_tests",
+                     XR_MAX_APPLICATION_NAME_SIZE);
+        createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+        createInfo.enabledExtensionCount = 1;
+        createInfo.enabledExtensionNames = extensions;
+        XrInstance instance = XR_NULL_HANDLE;
+        XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+        auto convertTimespecToTime = reinterpret_cast<PFN_xrConvertTimespecTimeToTimeKHR>(
+            GetProc(instance, "xrConvertTimespecTimeToTimeKHR"));
+        auto convertTimeToTimespec = reinterpret_cast<PFN_xrConvertTimeToTimespecTimeKHR>(
+            GetProc(instance, "xrConvertTimeToTimespecTimeKHR"));
+
+        // Out-of-range tv_nsec is rejected in both parameter forms.
+        struct timespec badTimespec{};
+        badTimespec.tv_sec = 100;
+        badTimespec.tv_nsec = 1'000'000'000L; // == 1e9 is out of [0, 1e9)
+        XrTime scratch = 0;
+        CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
+              XR_ERROR_VALIDATION_FAILURE);
+        badTimespec.tv_nsec = -1;
+        CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
+              XR_ERROR_VALIDATION_FAILURE);
+
+        struct timespec now{};
+        REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+        XrTime xrTime = 0;
+        XR_CHECK(convertTimespecToTime(instance, &now, &xrTime));
+        struct timespec roundTrip{};
+        XR_CHECK(convertTimeToTimespec(instance, xrTime, &roundTrip));
+        CHECK(roundTrip.tv_sec == now.tv_sec);
+        CHECK(roundTrip.tv_nsec == now.tv_nsec);
+
+        XR_CHECK(xrDestroyInstance(instance));
+    }
+
+    SECTION("Active session shares its time base with predicted display time")
+    {
+        RuntimeSessionContext context({
+            XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+            XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
+        });
+
+        auto convertTimespecToTime = reinterpret_cast<PFN_xrConvertTimespecTimeToTimeKHR>(
+            GetProc(context.instance, "xrConvertTimespecTimeToTimeKHR"));
+        auto convertTimeToTimespec = reinterpret_cast<PFN_xrConvertTimeToTimespecTimeKHR>(
+            GetProc(context.instance, "xrConvertTimeToTimespecTimeKHR"));
+
+        // Round-trip against the session's own time base.
+        struct timespec now{};
+        REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+        XrTime xrNow = 0;
+        XR_CHECK(convertTimespecToTime(context.instance, &now, &xrNow));
+        struct timespec roundTrip{};
+        XR_CHECK(convertTimeToTimespec(context.instance, xrNow, &roundTrip));
+        CHECK(roundTrip.tv_sec == now.tv_sec);
+        CHECK(roundTrip.tv_nsec == now.tv_nsec);
+
+        // Domain sanity: the XrTime for "now" must sit in the same base as the frame
+        // loop's predicted display time (within a generous few-second bound).
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        const int64_t deltaNs =
+            std::llabs(static_cast<int64_t>(frameState.predictedDisplayTime) -
+                       static_cast<int64_t>(xrNow));
+        CHECK(deltaNs < 5'000'000'000LL);
+    }
 }
 
 TEST_CASE("EndFrame accepts a released projection image while another swapchain image is acquired", "[runtime][frame][swapchain]")
