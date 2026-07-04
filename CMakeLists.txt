@@ -159,6 +159,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
+    tests/TestAlvrSessionConfig.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
@@ -167,6 +168,7 @@ add_executable(oxrsys_runtime_tests
     runtime/src/RuntimePlatform.cpp
     runtime/src/RuntimeSockets.cpp
     runtime/src/StreamingFrameQueue.cpp
+    runtime/src/AlvrSessionConfig.cpp
     runtime/src/VulkanDispatch.cpp
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
@@ -201,6 +203,15 @@ add_test(NAME oxrsys_runtime_logcat_timeout
 set_tests_properties(oxrsys_runtime_logcat_timeout PROPERTIES
     ENVIRONMENT "${OXRSYS_LOGCAT_TEST_ENV}"
     TIMEOUT 10
+)
+# ALVR session.json / NAL-framing pure logic (dylib-free); runs the tagged
+# subset of oxrsys_runtime_tests as its own reportable entry.
+add_test(NAME oxrsys_alvr_session_config
+    COMMAND oxrsys_runtime_tests "[alvr-session]"
+)
+set_tests_properties(oxrsys_alvr_session_config PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
 )
 
 add_executable(oxrsys_runtime_status_tests

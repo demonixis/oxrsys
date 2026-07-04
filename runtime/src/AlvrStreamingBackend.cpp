@@ -8,12 +8,13 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <regex>
 #include <sstream>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
+#include "AlvrNalFraming.h"
+#include "AlvrSessionConfig.h"
 #include "CodecSelect.h"
 #include "Config.h"
 #include "TrackingReceiver.h"
@@ -21,50 +22,6 @@
 #include "alvr_server_core.h"
 
 namespace fs = std::filesystem;
-
-namespace
-{
-// Discovery with auto-trust (any v20 client on the LAN) plus the magic wired
-// hostname: server_core runs adb port-forwarding and launches the store
-// client itself when a device is plugged in. ALVR extrapolates all missing
-// settings against its defaults and rewrites the file with the full tree.
-// The ConstantMbps value here is only a seed: SyncSessionSettings() always
-// rewrites it from oxrsys-runtime.toml before alvr_initialize, so the toml
-// stays the single source of truth.
-constexpr const char* kMinimalSessionJson = R"json({
-  "client_connections": {
-    "client.wired": {
-      "display_name": "Quest (USB)",
-      "current_ip": null,
-      "manual_ips": [],
-      "trusted": true,
-      "connection_state": "Disconnected"
-    }
-  },
-  "session_settings": {
-    "connection": {
-      "client_discovery": { "enabled": true, "content": { "auto_trust_clients": true } }
-    },
-    "video": {
-      "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } },
-      "max_buffering_frames": 1.5,
-      "transcoding_view_resolution": {
-        "variant": "Absolute",
-        "Absolute": { "width": 1512, "height": { "set": true, "content": 1680 } }
-      },
-      "foveated_encoding": { "enabled": false }
-    },
-    "audio": {
-      "game_audio": {
-        "enabled": true,
-        "content": {
-          "device": { "set": true, "content": { "variant": "NameSubstring", "NameSubstring": "BlackHole" } }
-        }
-      }
-    }
-  }
-})json";
-} // namespace
 
 AlvrStreamingBackend::AlvrStreamingBackend()
     : trackingReceiver_(std::make_unique<TrackingReceiver>())
@@ -87,34 +44,33 @@ void AlvrStreamingBackend::EnsureSessionJson(const std::string& configDir)
         return;
     }
     std::ofstream out(sessionPath);
-    out << kMinimalSessionJson;
+    out << oxrsys::alvr::MinimalSessionJson();
     spdlog::info("OXRSys/ALVR: wrote initial session.json at {}", sessionPath.string());
 }
 
-void AlvrStreamingBackend::SyncSessionSettings()
+bool AlvrStreamingBackend::ReadSessionJson(std::string& out) const
 {
     std::ifstream in(sessionJsonPath_);
     if (!in)
     {
-        return;
+        return false;
     }
     std::stringstream buffer;
     buffer << in.rdbuf();
-    const std::string json = buffer.str();
+    out = buffer.str();
+    return true;
+}
 
-    // Targeted key rewrites (same style as RefreshNegotiatedConfig) instead of a
-    // JSON library: ALVR rewrites the file with its full settings tree, so both
-    // keys exist after first run. "variant": "ConstantMbps" does not match — the
-    // regex requires the key position (quote before the colon).
+void AlvrStreamingBackend::SyncSessionSettings()
+{
+    std::string json;
+    if (!ReadSessionJson(json))
+    {
+        return;
+    }
+
     const uint32_t bitrateMbps = std::max(Config::Get().GetValues().bitrateMbps, 1u);
-    static const std::regex bitrateRe("\"ConstantMbps\"\\s*:\\s*[0-9.]+");
-    static const std::regex bufferingRe("\"max_buffering_frames\"\\s*:\\s*[0-9.]+");
-
-    std::string updated =
-        std::regex_replace(json, bitrateRe, "\"ConstantMbps\": " + std::to_string(bitrateMbps));
-    // Cap client-side frame queueing: larger values let server pacing drift pool
-    // into standing latency before the vsync queue overflows into stutter.
-    updated = std::regex_replace(updated, bufferingRe, "\"max_buffering_frames\": 1.5");
+    const std::string updated = oxrsys::alvr::ApplySessionSettings(json, bitrateMbps);
 
     if (updated == json)
     {
@@ -283,56 +239,34 @@ bool AlvrStreamingBackend::GetFramePacing(int64_t& outSleepNs)
 
 void AlvrStreamingBackend::RefreshNegotiatedConfig()
 {
-    std::ifstream in(sessionJsonPath_);
-    if (!in)
+    std::string json;
+    if (!ReadSessionJson(json))
     {
         return;
     }
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    const std::string json = buffer.str();
 
     // openvr_config holds the values server_core negotiated with the client
-    // during the handshake. Note: the leading quote keeps this from matching
-    // inside "target_eye_resolution_width".
-    static const std::regex widthRe("\"eye_resolution_width\"\\s*:\\s*(\\d+)");
-    static const std::regex heightRe("\"eye_resolution_height\"\\s*:\\s*(\\d+)");
-    static const std::regex fpsRe("\"refresh_rate\"\\s*:\\s*(\\d+)");
-
-    std::smatch match;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t fps = 0;
-    if (std::regex_search(json, match, widthRe))
-    {
-        width = static_cast<uint32_t>(std::stoul(match[1]));
-    }
-    if (std::regex_search(json, match, heightRe))
-    {
-        height = static_cast<uint32_t>(std::stoul(match[1]));
-    }
-    if (std::regex_search(json, match, fpsRe))
-    {
-        fps = static_cast<uint32_t>(std::stoul(match[1]));
-    }
-    if (width == 0 || height == 0)
+    // during the handshake.
+    const oxrsys::alvr::NegotiatedConfig config = oxrsys::alvr::ParseNegotiatedConfig(json);
+    if (config.width == 0 || config.height == 0)
     {
         return;
     }
 
-    const bool changed = width != streamWidth_.load() || height != streamHeight_.load() ||
-                         (fps != 0 && fps != targetRefreshRateHz_.load());
-    streamWidth_.store(width);
-    streamHeight_.store(height);
-    if (fps != 0)
+    const bool changed = config.width != streamWidth_.load() ||
+                         config.height != streamHeight_.load() ||
+                         (config.fps != 0 && config.fps != targetRefreshRateHz_.load());
+    streamWidth_.store(config.width);
+    streamHeight_.store(config.height);
+    if (config.fps != 0)
     {
-        targetRefreshRateHz_.store(fps);
+        targetRefreshRateHz_.store(config.fps);
     }
     if (changed)
     {
         encoderResetPending_.store(true);
         spdlog::info("OXRSys/ALVR: negotiated stream {}x{} per eye @{}Hz (encoder reset queued)",
-                     width, height, fps);
+                     config.width, config.height, config.fps);
     }
 }
 
@@ -433,23 +367,7 @@ void AlvrStreamingBackend::EncodeThread()
             std::move(frame.source), frame.timestampNs,
             [pending, usesH264](const uint8_t* data, size_t size, bool isKeyframe,
                                 int64_t /*pts*/)
-            {
-                if (data == nullptr || size < 5)
-                {
-                    return;
-                }
-                // data is Annex-B: 4-byte start code then the NAL header.
-                const uint8_t nalType = usesH264 ? (data[4] & 0x1Fu) : ((data[4] >> 1) & 0x3Fu);
-                const bool isConfig =
-                    usesH264 ? (nalType == 7 || nalType == 8)
-                             : (nalType == 32 || nalType == 33 || nalType == 34);
-                auto& buffer = isConfig ? pending->config : pending->data;
-                buffer.insert(buffer.end(), data, data + size);
-                if (isKeyframe && !isConfig)
-                {
-                    pending->isIdr = true;
-                }
-            },
+            { oxrsys::alvr::AppendEncodedNal(*pending, data, size, isKeyframe, usesH264); },
             [this, pending](const VideoEncoder::FrameMetrics& metrics)
             {
                 double sendMs = 0.0;

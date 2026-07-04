@@ -15,6 +15,7 @@ set(OXRSYS_RUNTIME_SOURCES
     src/InputManager.cpp
     src/HandTracker.cpp
     src/AlvrStreamingBackend.cpp
+    src/AlvrSessionConfig.cpp
     src/StreamingServer.cpp
     src/TrackingReceiver.cpp
     src/VulkanDispatch.cpp

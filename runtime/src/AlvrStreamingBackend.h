@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "AlvrNalFraming.h"
 #include "IStreamingBackend.h"
 #include "StreamingFrameQueue.h"
 #include "VideoEncoder.h"
@@ -62,15 +63,8 @@ public:
                       float frequencyHz) override;
 
 private:
-    // One encoded frame in flight: config NALs (SPS/PPS/VPS) split from the
-    // payload NALs, aggregated on the VideoToolbox callback thread.
-    struct PendingEncodedFrame
-    {
-        uint64_t timestampNs = 0;
-        bool isIdr = false;
-        std::vector<uint8_t> config;
-        std::vector<uint8_t> data;
-    };
+    // Config/payload NAL aggregation lives in AlvrNalFraming.h (unit-tested).
+    using PendingEncodedFrame = oxrsys::alvr::PendingEncodedFrame;
 
     // Distinguishes which oxrsys input a given ALVR button path id feeds.
     enum class ButtonKind
@@ -137,6 +131,9 @@ private:
     // client entry) when none exists. ALVR extrapolates the rest and owns the
     // file afterwards.
     static void EnsureSessionJson(const std::string& configDir);
+    // Slurps session.json into `out`; false if it cannot be opened. Shared by
+    // SyncSessionSettings and RefreshNegotiatedConfig.
+    bool ReadSessionJson(std::string& out) const;
     // Merge-updates the existing session.json before alvr_initialize so
     // oxrsys-runtime.toml stays the single source of truth for bitrate, and
     // client-side buffering is capped (max_buffering_frames).
