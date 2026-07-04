@@ -791,12 +791,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
 
     // Rate control: AverageBitRate + an EXACT per-second DataRateLimits budget.
-    // Do NOT use kVTCompressionPropertyKey_ConstantBitRate here: this encoder
-    // (H.264 HW under Rosetta) ACCEPTS the property and then stalls the
-    // pipeline — output callbacks stop after a few frames, all slots leak,
-    // 100% drops (observed 2026-07-03). AverageBitRate alone (with the old
-    // 1.5x limits headroom) overshot ~2x; the exact 1.0x budget below holds
-    // the measured output at/under target.
+    // Do NOT use kVTCompressionPropertyKey_ConstantBitRate here: the header
+    // documents it as incompatible with AverageBitRate/DataRateLimits, the
+    // LL-RC encoder rejects it (-12900), and classic RC silently ignores it
+    // (vt-llrc-probe --cbr, 2026-07-04; the "accepted then stalls" observation
+    // of 2026-07-03 traced to the frame-context use-after-free fixed
+    // alongside the NV12 encoder-input work, not CBR). AverageBitRate alone (with the old 1.5x limits
+    // headroom) overshot ~2x; the exact 1.0x budget below holds the measured
+    // output at/under target.
     int targetBitrate = bitrateMbps * 1000000;
     CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &targetBitrate);
     SetSessionProperty(compressionSession,
@@ -1490,9 +1492,9 @@ void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
     VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
 
     // No CBR path here: kVTCompressionPropertyKey_ConstantBitRate is banned —
-    // this encoder accepts it and then stalls the pipeline (see the
-    // rate-control comment in Initialize()), so only the AverageBitRate +
-    // DataRateLimits pair is ever updated.
+    // documented incompatible with the AverageBitRate/DataRateLimits pair we
+    // rely on (see the rate-control comment in Initialize()), so only that
+    // pair is ever updated.
     int targetBitrate = bitrateMbps * 1000000;
     CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &targetBitrate);
     OSStatus status = SetSessionProperty(compressionSession,
