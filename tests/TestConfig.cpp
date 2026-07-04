@@ -30,6 +30,9 @@ passthrough_enabled = true
 occlusion_mode = "environment_depth"
 headset_audio = true
 
+[input]
+simple_controller_fallback = true
+
 [spatial]
 enabled = true
 anchors = true
@@ -59,6 +62,7 @@ quest_logcat = yes
     CHECK(values.passthroughEnabled == true);
     CHECK(values.occlusionMode == "environment_depth");
     CHECK(values.headsetAudio == true);
+    CHECK(values.simpleControllerFallback == true);
     CHECK(values.spatialEnabled == true);
     CHECK(values.spatialAnchors == true);
     CHECK(values.spatialScene == true);

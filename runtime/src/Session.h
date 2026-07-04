@@ -4,6 +4,7 @@
 
 #include <openxr/openxr.h>
 #include "GraphicsTypes.h"
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -134,9 +135,19 @@ private:
     Instance* instance_;
     GraphicsContext graphicsContext_ = {};
 
-    XrSessionState state_ = XR_SESSION_STATE_IDLE;
+    // Atomic: written on the frame thread (TransitionState), read from the app's input
+    // thread by xrSyncActions/haptics focus checks.
+    std::atomic<XrSessionState> state_{XR_SESSION_STATE_IDLE};
     bool running_ = false;
     bool exitRequested_ = false;
+    // Focus emulation (see AdvanceSessionStateAfterFrameSubmission): FOCUSED->VISIBLE
+    // while streaming input is gone (system overlay, controllers asleep, client
+    // disconnect), restored when input returns. Armed only after input has been seen
+    // active on the current connection so the connect window cannot suppress focus.
+    bool focusSuppressed_ = false;
+    bool streamingInputSeenActive_ = false;
+    std::chrono::steady_clock::time_point lastInputActiveTime_{};
+    static constexpr std::chrono::milliseconds kFocusLossDelay{500};
     bool frameBegun_ = false;
     uint32_t waitedFrameCount_ = 0;
     mutable std::mutex frameStateMutex_;
@@ -150,9 +161,17 @@ private:
     std::chrono::steady_clock::time_point startTime_;
     // CLOCK_MONOTONIC nanoseconds sampled at the same instant as startTime_.
     int64_t monoStartNs_ = 0;
-    // Last interaction-profile signature (left|right) we emitted an event for.
-    std::string lastNotifiedInteractionProfile_;
-    bool interactionProfileNotified_ = false;
+    // Last interaction-profile signature (left|right) we emitted an event for. Starts
+    // at the both-hands-empty signature so startup announces nothing until a real
+    // profile resolves (apps assume no profile until the first event anyway).
+    std::string lastNotifiedInteractionProfile_ = "|";
+    // Debounce: a new signature must hold for kProfileChangeStableDelay before it is
+    // announced — transient flaps (connect handshake, one controller waking after the
+    // other, sub-second reconnect blips) must never reach the app, which destroys and
+    // recreates its input devices on every event (breaks Unity's legacy pause bridge).
+    std::string pendingInteractionProfile_;
+    std::chrono::steady_clock::time_point pendingInteractionProfileSince_{};
+    static constexpr std::chrono::milliseconds kProfileChangeStableDelay{1000};
     std::chrono::steady_clock::time_point lastFrameTime_;
     // Absolute deadline for the next frame so pacing does not accumulate sleep drift.
     std::chrono::steady_clock::time_point nextFrameDeadline_{};

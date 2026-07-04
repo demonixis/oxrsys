@@ -447,6 +447,10 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.headsetAudio = ParseBool(value);
             }
+            else if (key == "simple_controller_fallback")
+            {
+                values.simpleControllerFallback = ParseBool(value);
+            }
             else if (key == "enabled")
             {
                 values.spatialEnabled = ParseBool(value);

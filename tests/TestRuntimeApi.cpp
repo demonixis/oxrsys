@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -103,6 +104,55 @@ void WriteRuntimeConfig(bool passthroughEnabled)
     file.close();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
+
+// WriteRuntimeConfig overwrites the REAL user config (the runtime resolves it from
+// HOME, and these tests intentionally exercise the live reload path). Snapshot the
+// file for the whole test run and restore it on exit — without this, every test run
+// silently wipes the developer's streaming settings (protocol, bitrate, ...).
+// Plain static (not a Catch2 listener): constructed before main, restored at exit,
+// and deliberately free of Catch macros since it runs outside any test case.
+struct RuntimeConfigFileGuard
+{
+    std::filesystem::path path;
+    bool existed = false;
+    std::string original;
+
+    RuntimeConfigFileGuard()
+    {
+        const char* home = std::getenv("HOME");
+        if (home == nullptr)
+        {
+            return;
+        }
+        path = std::filesystem::path(home) / "Library/Application Support/OXRSys/oxrsys-runtime.toml";
+        std::error_code ec;
+        existed = std::filesystem::exists(path, ec);
+        if (existed)
+        {
+            std::ifstream in(path);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+    }
+
+    ~RuntimeConfigFileGuard()
+    {
+        if (path.empty())
+        {
+            return;
+        }
+        if (existed)
+        {
+            std::ofstream out(path, std::ios::trunc);
+            out << original;
+        }
+        else
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    }
+};
+static RuntimeConfigFileGuard gRuntimeConfigFileGuard;
 
 std::vector<XrEnvironmentBlendMode> EnumerateBlendModes(XrInstance instance,
                                                         XrSystemId systemId)
@@ -262,6 +312,25 @@ struct RuntimeSessionContext
             referenceSpaceCreateInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
             referenceSpaceCreateInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
             XR_CHECK(xrCreateReferenceSpace(session, &referenceSpaceCreateInfo, &localSpace));
+        }
+    }
+
+    // Advance the session READY->SYNCHRONIZED->VISIBLE->FOCUSED by submitting three
+    // empty frames (state only advances after frame submission). xrSyncActions on a
+    // non-FOCUSED session returns XR_SESSION_NOT_FOCUSED with all states inactive, so
+    // action tests must pump first — like a real app, which frame-loops before input.
+    void PumpToFocused()
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+            XR_CHECK(xrWaitFrame(session, nullptr, &frameState));
+            XR_CHECK(xrBeginFrame(session, nullptr));
+            XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+            frameEndInfo.displayTime = frameState.predictedDisplayTime;
+            frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            frameEndInfo.layerCount = 0;
+            XR_CHECK(xrEndFrame(session, &frameEndInfo));
         }
     }
 
@@ -1233,6 +1302,8 @@ TEST_CASE("Conformance automation drives Khronos simple controller actions", "[r
     XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
                                                 context.Path("/input/select/click"), XR_TRUE));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1278,6 +1349,168 @@ TEST_CASE("Conformance automation drives Khronos simple controller actions", "[r
     CHECK(std::string(localizedName).find("Select") != std::string::npos);
 
     XR_CHECK(xrDestroyAction(selectAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("SyncActions returns XR_SESSION_NOT_FOCUSED and inactive states before focus",
+          "[runtime][actions][focus]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath simpleControllerPath = context.Path("/interaction_profiles/khr/simple_controller");
+    XrPath selectClickPath = context.Path("/user/hand/left/input/select/click");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "focusgate", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Focus Gate", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction selectAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    actionCreateInfo.countSubactionPaths = 1;
+    actionCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(actionCreateInfo.actionName, "select", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Select", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &selectAction));
+
+    XrActionSuggestedBinding suggestedBinding = {selectAction, selectClickPath};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = simpleControllerPath;
+    suggestedBindings.suggestedBindings = &suggestedBinding;
+    suggestedBindings.countSuggestedBindings = 1;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, simpleControllerPath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
+                                                context.Path("/input/select/click"), XR_TRUE));
+
+    // Session is READY (no frames submitted): the sync must be refused as unfocused
+    // and every action state must read inactive.
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    CHECK(xrSyncActions(context.session, &syncInfo) == XR_SESSION_NOT_FOCUSED);
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = selectAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &boolState));
+    CHECK(boolState.isActive == XR_FALSE);
+    CHECK(boolState.currentState == XR_FALSE);
+
+    // Once focused, the same sync succeeds and the automation state comes through.
+    context.PumpToFocused();
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &boolState));
+    CHECK(boolState.isActive == XR_TRUE);
+    CHECK(boolState.currentState == XR_TRUE);
+
+    XR_CHECK(xrDestroyAction(selectAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("Reserved system/click bindings stay unbound and inactive", "[runtime][actions]")
+{
+    // Unity's oculus/touch menuButton action is asymmetric: ONE action bound to
+    // left=menu/click and right=system/click. The system path is platform-reserved;
+    // the right subaction must read inactive with no bound sources even while the
+    // right controller itself is active (real-runtime behavior — an active fabricated
+    // feed there breaks Unity's legacy menu-pause bridge in Beat Saber 1.29.4).
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath rightHandPath = context.Path("/user/hand/right");
+    std::array<XrPath, 2> handPaths = {leftHandPath, rightHandPath};
+    XrPath touchProfilePath = context.Path("/interaction_profiles/oculus/touch_controller");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "menuasym", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Menu Asymmetric", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction menuAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    actionCreateInfo.countSubactionPaths = static_cast<uint32_t>(handPaths.size());
+    actionCreateInfo.subactionPaths = handPaths.data();
+    std::strncpy(actionCreateInfo.actionName, "menubutton", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Menu Button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &menuAction));
+
+    std::array<XrActionSuggestedBinding, 2> suggested = {{
+        {menuAction, context.Path("/user/hand/left/input/menu/click")},
+        {menuAction, context.Path("/user/hand/right/input/system/click")},
+    }};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchProfilePath;
+    suggestedBindings.suggestedBindings = suggested.data();
+    suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(suggested.size());
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    // BOTH controllers active on the touch profile; left menu physically pressed.
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchProfilePath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchProfilePath, rightHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
+                                                context.Path("/input/menu/click"), XR_TRUE));
+
+    context.PumpToFocused();
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = menuAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateBoolean leftState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &leftState));
+    CHECK(leftState.isActive == XR_TRUE);
+    CHECK(leftState.currentState == XR_TRUE);
+
+    getInfo.subactionPath = rightHandPath;
+    XrActionStateBoolean rightState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &rightState));
+    CHECK(rightState.isActive == XR_FALSE);
+    CHECK(rightState.currentState == XR_FALSE);
+
+    // Bound sources contain only the left menu/click — the reserved right binding is
+    // accepted at suggest time but never bound, matching real runtimes.
+    uint32_t sourceCount = 0;
+    XrBoundSourcesForActionEnumerateInfo enumerateInfo = {
+        XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+    enumerateInfo.action = menuAction;
+    XR_CHECK(xrEnumerateBoundSourcesForAction(context.session, &enumerateInfo, 0, &sourceCount, nullptr));
+    CHECK(sourceCount == 1);
+
+    XR_CHECK(xrDestroyAction(menuAction));
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
@@ -1780,6 +2013,8 @@ TEST_CASE("Quest Touch profile reports float and vector inputs", "[runtime][acti
     XR_CHECK(context.setInputDeviceStateVector2fEXT(context.session, leftHandPath,
                                                     context.Path("/input/thumbstick"), {0.25f, -0.5f}));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1901,6 +2136,8 @@ TEST_CASE("Quest Pico and simple profiles report float inputs through automation
     attachInfo.actionSets = &actionSet;
     XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1988,6 +2225,8 @@ TEST_CASE("Touch Plus extension profile is selectable for OpenXR 1.0 apps",
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/trigger/value"), 0.66f));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2063,6 +2302,8 @@ TEST_CASE("Touch Plus promoted profile is selectable for OpenXR 1.1 apps",
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/trigger/value"), 0.58f));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2130,6 +2371,8 @@ TEST_CASE("Inactive action spaces clear location flags", "[runtime][actions]")
 
     XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchControllerPath,
                                              leftHandPath, XR_FALSE));
+
+    context.PumpToFocused();
 
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
@@ -2224,6 +2467,8 @@ TEST_CASE("Hand interaction pose and value inputs work through automation", "[ru
                                                context.localSpace, pinchPose));
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/pinch_ext/value"), 0.8f));
+
+    context.PumpToFocused();
 
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;

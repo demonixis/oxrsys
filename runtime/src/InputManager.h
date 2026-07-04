@@ -83,6 +83,14 @@ public:
     XrPosef GetPoseComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
     void SetStreamingClientName(const std::string& clientName);
+    // Dev/testing only: fabricate khr/simple_controller profiles when no client is
+    // connected (see ConfigValues::simpleControllerFallback for why this is off by default).
+    void SetSimpleControllerFallback(bool enabled) { simpleControllerFallback_ = enabled; }
+    // True once a controller has been seen on the current streaming connection. The
+    // resolved profile stays bound (sticky) until the client disconnects, even while
+    // the controllers are idle (system overlay, controllers asleep) — real runtimes
+    // keep the profile bound and only drop action isActive.
+    bool HasResolvedControllerProfile() const { return !resolvedControllerProfile_.empty(); }
 
     // Conformance automation overrides
     void SetAutomationInteractionProfile(Hand hand, const std::string& interactionProfile, bool isActive);
@@ -139,6 +147,10 @@ private:
     std::array<bool, 2> streamingControllerActive_ = {false, false};
     std::string streamingClientName_;
     std::string streamingControllerProfile_;
+    // Sticky per-client interaction profile: set for both hands when either controller
+    // first activates, cleared only on disconnect. See HasResolvedControllerProfile().
+    std::string resolvedControllerProfile_;
+    bool simpleControllerFallback_ = false;
 
     // Controller positions (world space offsets)
     glm::vec3 leftControllerPos_ = {-0.2f, 1.3f, -0.4f};

@@ -29,6 +29,12 @@ struct ConfigValues
     std::string clientReprojectionMode = "pose"; // "off", "pose", "pose_warp"
     std::string abrMode = "bitrate"; // "off", "bitrate", "full"
     bool passthroughEnabled = false;  // Allow app-requested alpha blend passthrough
+    // Fabricate khr/simple_controller interaction profiles before a streaming client
+    // connects (client-less dev/testing only). Real runtimes report no profile until a
+    // physical controller is bound; fabricating one makes apps (Unity) create input
+    // devices against it and destroy/recreate them at connect, which breaks Unity's
+    // legacy XR-usage->joystick bridge (Beat Saber pause button).
+    bool simpleControllerFallback = false;
     std::string occlusionMode = "off"; // "off", "scene_mesh", "environment_depth"
     bool headsetAudio = false;       // Stream server audio to the headset
 

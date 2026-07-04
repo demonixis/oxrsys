@@ -260,11 +260,114 @@ TEST_CASE("InputManager — streaming controller activity gates pose updates", "
 
     CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
     CHECK_FALSE(im.IsInputDeviceActive(InputManager::Hand::Left));
-    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left).empty());
+    // The interaction profile stays bound (sticky) while the client is connected even
+    // though the controller went idle — only activity drops, like real runtimes.
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/meta/touch_controller_quest_2");
     left = im.GetControllerPose(InputManager::Hand::Left);
     CHECK_THAT(left.position.x, WithinAbs(-0.35f, 0.001f));
     CHECK_THAT(left.position.y, WithinAbs(1.20f, 0.001f));
     CHECK_THAT(left.position.z, WithinAbs(-0.55f, 0.001f));
+}
+
+TEST_CASE("InputManager — controller profile is sticky per client while streaming", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Meta Quest 3");
+
+    // Only the RIGHT controller wakes: the profile resolves for BOTH hands at once so
+    // the left controller waking later never changes the two-hand signature (a second
+    // XrEventDataInteractionProfileChanged would make Unity churn its input devices).
+    oxr::protocol::TrackingPacket rightOnly = {};
+    rightOnly.timestampNs = 1'000'000'000;
+    rightOnly.headOrientation[3] = 1.0f;
+    rightOnly.trackingFlags = oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    rightOnly.rightControllerRot[3] = 1.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&rightOnly), sizeof(rightOnly));
+    im.Update(0.0f);
+
+    CHECK(im.HasResolvedControllerProfile());
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/oculus/touch_controller");
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right) ==
+          "/interaction_profiles/oculus/touch_controller");
+    CHECK_FALSE(im.IsControllerTrackingActive(InputManager::Hand::Left));
+    CHECK(im.IsControllerTrackingActive(InputManager::Hand::Right));
+
+    // Both controllers idle (system overlay / controllers asleep): profile stays bound.
+    oxr::protocol::TrackingPacket idle = {};
+    idle.timestampNs = 1'011'111'111;
+    idle.headOrientation[3] = 1.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&idle), sizeof(idle));
+    im.Update(0.0f);
+
+    CHECK(im.HasResolvedControllerProfile());
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/oculus/touch_controller");
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right) ==
+          "/interaction_profiles/oculus/touch_controller");
+
+    // Genuine disconnect: the sticky profile unbinds with the client.
+    im.SetTrackingReceiver(nullptr);
+    CHECK_FALSE(im.HasResolvedControllerProfile());
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left).empty());
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right).empty());
+}
+
+TEST_CASE("InputManager — active hand tracking outranks the sticky controller profile", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Meta Quest 3");
+
+    oxr::protocol::TrackingPacket controllers = {};
+    controllers.timestampNs = 1'000'000'000;
+    controllers.headOrientation[3] = 1.0f;
+    controllers.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                                oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    controllers.leftControllerRot[3] = 1.0f;
+    controllers.rightControllerRot[3] = 1.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&controllers), sizeof(controllers));
+    im.Update(0.0f);
+
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/oculus/touch_controller");
+
+    // Switch to hand tracking: live hands must win over the sticky controller profile.
+    oxr::protocol::TrackingPacket hands = {};
+    hands.timestampNs = 1'011'111'111;
+    hands.headOrientation[3] = 1.0f;
+    hands.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE |
+                          oxr::protocol::TRACKING_FLAG_RIGHT_HAND_ACTIVE;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&hands), sizeof(hands));
+    im.Update(0.0f);
+
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left) ==
+          "/interaction_profiles/ext/hand_interaction_ext");
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right) ==
+          "/interaction_profiles/ext/hand_interaction_ext");
+    CHECK(im.HasResolvedControllerProfile());
+}
+
+TEST_CASE("InputManager — no fabricated profile without a client unless dev flag set", "[input]")
+{
+    InputManager im;
+
+    // Default (no client, flag off): no interaction profile exists — real runtimes
+    // report none until a controller is bound.
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Left).empty());
+    CHECK(im.GetCurrentInteractionProfileCandidates(InputManager::Hand::Left).empty());
+    CHECK(im.GetCurrentInteractionProfileCandidates(InputManager::Hand::Right).empty());
+
+    // Dev flag (simple_controller_fallback in config.toml): fabricate khr/simple for
+    // client-less testing.
+    im.SetSimpleControllerFallback(true);
+    const auto candidates = im.GetCurrentInteractionProfileCandidates(InputManager::Hand::Left);
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates[0] == "/interaction_profiles/khr/simple_controller");
 }
 
 TEST_CASE("InputManager — streaming client names map to controller profiles and aliases", "[input]")

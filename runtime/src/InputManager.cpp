@@ -199,6 +199,7 @@ void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
         }
         streamingClientName_.clear();
         streamingControllerProfile_.clear();
+        resolvedControllerProfile_.clear();
     }
 }
 
@@ -267,6 +268,23 @@ void InputManager::UpdateFromStreaming()
         spdlog::info("InputManager: right controller {} flags=0x{:x}",
                      rightControllerActive ? "active" : "inactive",
                      packet.trackingFlags);
+    }
+
+    // Resolve the sticky per-client profile as soon as EITHER controller is seen —
+    // per-client (not per-hand) so a second controller waking later never changes the
+    // signature and never triggers another XrEventDataInteractionProfileChanged (the
+    // app would destroy/recreate its input devices). Compare-then-assign keeps writes
+    // rare (same discipline as SetStreamingClientName).
+    if (leftControllerActive || rightControllerActive)
+    {
+        const std::string& profile =
+            streamingControllerProfile_.empty() ? kOculusTouchProfile : streamingControllerProfile_;
+        if (resolvedControllerProfile_ != profile)
+        {
+            resolvedControllerProfile_ = profile;
+            spdlog::info("InputManager: resolved controller profile '{}' (sticky while streaming)",
+                         profile);
+        }
     }
 
     if (leftControllerActive)
@@ -617,10 +635,26 @@ std::vector<std::string> InputManager::GetCurrentInteractionProfileCandidates(Ha
 
     if (IsStreaming())
     {
+        // Controllers idle (system overlay, controllers asleep): keep the last resolved
+        // profile bound instead of flapping to NULL — unbinding emits a profile-changed
+        // event and the app destroys/recreates its input devices mid-session, which
+        // permanently breaks Unity's legacy XR-usage->joystick bridge (pause button).
+        // Action isActive still drops per frame, matching real runtimes.
+        if (!resolvedControllerProfile_.empty())
+        {
+            return {resolvedControllerProfile_};
+        }
         return {};
     }
 
-    return {kSimpleControllerProfile};
+    // No client connected: report no profile, like real runtimes with no controller
+    // bound. Fabricating khr/simple_controller here makes apps create input devices
+    // during load and churn them at connect (dev flag for client-less testing only).
+    if (simpleControllerFallback_)
+    {
+        return {kSimpleControllerProfile};
+    }
+    return {};
 }
 
 std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) const
@@ -665,6 +699,10 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetMenuClick();
     }
+    // No "system/click" case: /input/system/* is reserved (never accumulated — see
+    // AccumulateBindingState). A c059553 experiment mirrored menu state here; that
+    // fabricated feed on the right-hand half of Unity's menuButton action is exactly
+    // what real runtimes never do, so the component is left unmapped.
     if (componentPath == "select/click")
     {
         return GetTriggerValue(hand) > 0.5f;

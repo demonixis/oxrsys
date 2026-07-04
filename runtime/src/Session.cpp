@@ -115,6 +115,7 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     : instance_(instance), graphicsContext_(GraphicsContext::Metal(metalDevice, metalCommandQueue))
 {
     inputManager_ = std::make_unique<InputManager>();
+    inputManager_->SetSimpleControllerFallback(Config::Get().GetValues().simpleControllerFallback);
 
     startTime_ = std::chrono::steady_clock::now();
     monoStartNs_ = MonotonicNowNs();
@@ -134,6 +135,7 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     : instance_(instance), graphicsContext_(graphicsContext)
 {
     inputManager_ = std::make_unique<InputManager>();
+    inputManager_->SetSimpleControllerFallback(Config::Get().GetValues().simpleControllerFallback);
 
     startTime_ = std::chrono::steady_clock::now();
     monoStartNs_ = MonotonicNowNs();
@@ -207,16 +209,33 @@ void Session::MaybeEmitInteractionProfileChanged()
         return;
     }
     // Signature over both hands. When a streaming client connects the profile resolves
-    // (e.g. from empty/simple to oculus/touch), which must be signalled so the app (Unity's
+    // (e.g. from empty to oculus/touch), which must be signalled so the app (Unity's
     // Input System) re-queries xrGetCurrentInteractionProfile and binds the correct device.
+    // Debounced: only a signature stable for kProfileChangeStableDelay is announced (see
+    // the Session.h member comments for why transients must never reach the app).
     std::string sig = inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Left) + "|" +
                       inputManager_->GetCurrentInteractionProfile(InputManager::Hand::Right);
-    if (interactionProfileNotified_ && sig == lastNotifiedInteractionProfile_)
+    if (sig == lastNotifiedInteractionProfile_)
+    {
+        // Back to the announced state before the pending change stabilized (A->B->A):
+        // drop the pending change so it can never fire late.
+        pendingInteractionProfile_.clear();
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (sig != pendingInteractionProfile_)
+    {
+        pendingInteractionProfile_ = sig;
+        pendingInteractionProfileSince_ = now;
+        spdlog::info("OXRSys: interaction profile pending '{}' (debouncing)", sig);
+        return;
+    }
+    if (now - pendingInteractionProfileSince_ < kProfileChangeStableDelay)
     {
         return;
     }
     lastNotifiedInteractionProfile_ = sig;
-    interactionProfileNotified_ = true;
+    pendingInteractionProfile_.clear();
 
     XrEventDataBuffer event{};
     auto* ip = reinterpret_cast<XrEventDataInteractionProfileChanged*>(&event);
@@ -247,6 +266,11 @@ XrResult Session::BeginSession(const XrSessionBeginInfo* beginInfo)
     }
 
     exitRequested_ = false;
+    // Reset focus emulation for the new run: a stale focusSuppressed_ would gate the
+    // VISIBLE->FOCUSED ratchet forever and stall the restarted session at VISIBLE.
+    focusSuppressed_ = false;
+    streamingInputSeenActive_ = false;
+    lastInputActiveTime_ = std::chrono::steady_clock::now();
     {
         std::scoped_lock lock(frameStateMutex_);
         frameBegun_ = false;
@@ -897,6 +921,31 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
         return;
     }
 
+    // Focus emulation: the Quest drops both controllers' active flags while the system
+    // overlay is open (and everything on client disconnect); Unity maps the session
+    // FOCUSED<->VISIBLE transitions to OnApplicationFocus, which is the system-side
+    // pause path. Armed only once input has been seen active on the current connection
+    // so the connect window (controller flags can lag connect by >0.5s) cannot drop
+    // focus. VISIBLE (not SYNCHRONIZED) is also the disconnect state: the frame loop
+    // is identical in both states here and SYNCHRONIZED would only add extra ratchet
+    // transitions on resume.
+    if (inputManager_ && inputManager_->IsStreaming() &&
+        (inputManager_->IsInputDeviceActive(InputManager::Hand::Left) ||
+         inputManager_->IsInputDeviceActive(InputManager::Hand::Right)))
+    {
+        streamingInputSeenActive_ = true;
+        lastInputActiveTime_ = std::chrono::steady_clock::now();
+        focusSuppressed_ = false; // ratchet below restores FOCUSED next frame
+    }
+    else if (streamingInputSeenActive_ && !focusSuppressed_ &&
+             state_ == XR_SESSION_STATE_FOCUSED &&
+             std::chrono::steady_clock::now() - lastInputActiveTime_ >= kFocusLossDelay)
+    {
+        focusSuppressed_ = true;
+        TransitionState(XR_SESSION_STATE_VISIBLE);
+        return;
+    }
+
     switch (state_)
     {
         case XR_SESSION_STATE_READY:
@@ -908,7 +957,10 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
             break;
 
         case XR_SESSION_STATE_VISIBLE:
-            TransitionState(XR_SESSION_STATE_FOCUSED);
+            if (!focusSuppressed_)
+            {
+                TransitionState(XR_SESSION_STATE_FOCUSED);
+            }
             break;
 
         default:

@@ -2176,6 +2176,18 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
         return;
     }
 
+    // /input/system/* is reserved by the platform on every supported device (the Quest
+    // OS consumes the system button; the client never transmits it). Real runtimes
+    // accept these suggested bindings but leave them unbound and inactive. Reporting
+    // an active state here feeds the app's device a fabricated value on a control that
+    // must be dead — Unity maps oculus/touch action state per device (left=menu/click,
+    // right=system/click on the SAME action), and an active right-hand feed broke its
+    // legacy MenuButton-usage->joystick bridge (Beat Saber's menu pause).
+    if (binding.componentPath.rfind("system/", 0) == 0)
+    {
+        return;
+    }
+
     InputManager::Hand hand = HandFromBindingPath(binding.bindingPathString);
     bool deviceActive = inputManager.IsInputDeviceActive(hand);
     if (inputManager.IsStreaming())
@@ -2263,7 +2275,12 @@ static std::string SelectCurrentInteractionProfileForInstance(
         }
     }
 
-    if (inputManager.IsControllerTrackingActive(hand) &&
+    // HasResolvedControllerProfile keeps this fallback coherent with the sticky
+    // profile: when the candidates above are rejected by the instance-version filter
+    // (e.g. quest_2/quest_3 profiles on an OpenXR 1.0 instance), the reported profile
+    // must not flip to NULL while the controllers are merely idle (system overlay) —
+    // no event is emitted for that, and the getter must agree with the event stream.
+    if ((inputManager.IsControllerTrackingActive(hand) || inputManager.HasResolvedControllerProfile()) &&
         IsKnownInteractionProfilePath(instance, "/interaction_profiles/oculus/touch_controller"))
     {
         return "/interaction_profiles/oculus/touch_controller";
@@ -2332,6 +2349,28 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
     if (!gActionSetsAttached)
     {
         return XR_ERROR_ACTIONSET_NOT_ATTACHED;
+    }
+
+    // Spec: when the session is not focused, xrSyncActions must leave every action
+    // state inactive and return XR_SESSION_NOT_FOCUSED (a success code). ALL attached
+    // actions go inactive — not just the requested sets — so later xrGetActionState*
+    // reads cannot observe stale active data. Same focus source as the haptics checks.
+    if (sess->GetState() != XR_SESSION_STATE_FOCUSED)
+    {
+        const XrTime unfocusedSyncTime = sess->GetCurrentTime();
+        for (const auto& actionHolder : gActions)
+        {
+            ActionState* action = actionHolder.get();
+            if (!IsActionAttached(action))
+            {
+                continue;
+            }
+            for (XrPath subactionPath : action->GetResolvedSubactionPaths())
+            {
+                action->ApplySyncState(subactionPath, nullptr, unfocusedSyncTime);
+            }
+        }
+        return XR_SESSION_NOT_FOCUSED;
     }
 
     const InputManager& inputManager = sess->GetInputManager();
