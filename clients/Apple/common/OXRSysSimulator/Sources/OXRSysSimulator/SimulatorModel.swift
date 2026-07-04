@@ -224,13 +224,13 @@ final class SimulatorModel {
             }
         }
 
-        videoReceiver.start { [weak self] nalData, presentationTimeNs, receiveTimeNs in
+        videoReceiver.start { [weak self] nalData, presentationTimeNs, receiveTimeNs, codec in
             guard let self else { return }
             self.latencyReporter.noteFrameReceived(
                 presentationTimeNs: presentationTimeNs,
                 receiveTimeNs: receiveTimeNs
             )
-            self.decoder.decode(nalData: nalData, presentationTimeNs: presentationTimeNs)
+            self.decoder.decode(nalData: nalData, presentationTimeNs: presentationTimeNs, codec: codec)
         }
 
         Thread.sleep(forTimeInterval: 0.05)

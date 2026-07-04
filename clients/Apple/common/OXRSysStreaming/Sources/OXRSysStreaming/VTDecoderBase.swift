@@ -4,7 +4,12 @@
 // and H.265 (HEVC) decoders. The codecs differ only in their parameter-set NAL
 // layout and format-description constructor; everything else — the NSLock-guarded
 // state, start-code splitting, decompression-session creation, AVCC packing, and
-// the async decode callback — is identical and lives here.
+// the async decode callback — is shared here.
+//
+// One deliberate behavior change came with the shared path: it requests a
+// FullRange output pixel format (see the decoderAttrs comment below), whereas the
+// old standalone H.265 decoder requested VideoRange. This is not a no-op copy of
+// the previous plumbing — it fixes a pre-existing range/shader mismatch.
 //
 // Subclasses implement `decode(nalData:presentationTimeNs:)`: they classify NALs
 // with their own bit layout, cache parameter sets, build a CMFormatDescription and
@@ -78,6 +83,12 @@ public class VTDecoderBase: @unchecked Sendable {
         }
         if canKeepExistingSession { return true }
 
+        // FullRange (not VideoRange): VideoToolbox range-converts to the requested
+        // format, and Shaders.metal's stereoFragmentYCbCr does full-range BT.709 math
+        // (luma used directly, no 16..235 -> 0..255 expansion). Requesting FullRange
+        // here makes the decoded buffers match that shader. The old standalone H.265
+        // decoder requested VideoRange, which rendered washed-out through the same
+        // shader; this pairing fixes that pre-existing mismatch. Keep them in sync.
         let decoderAttrs: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true,
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange

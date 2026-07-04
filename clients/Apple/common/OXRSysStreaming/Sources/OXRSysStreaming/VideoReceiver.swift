@@ -10,7 +10,9 @@ import Foundation
 import os
 
 public final class VideoReceiver: @unchecked Sendable {
-    public typealias OnNalUnit = @Sendable (Data, Int64, Int64) -> Void
+    // (nalData, presentationTimeNs, receiveTimeNs, codec). codec is the server-stamped
+    // VideoPacketHeader.codec byte (VideoCodec cast to u8) so the decoder need not sniff.
+    public typealias OnNalUnit = @Sendable (Data, Int64, Int64, UInt8) -> Void
 
     private struct State {
         var socket: Int32 = -1
@@ -171,6 +173,7 @@ public final class VideoReceiver: @unchecked Sendable {
         var totalExpected: UInt16 = 0
         var receivedCount: UInt16 = 0
         var frameTimestamp: Int64 = 0
+        var frameCodec: UInt8 = 0
         var lastGroupPacketTimeNs: Int64 = 0
 
         // Closure: attempt FEC recovery for all groups, returns true if frame is now complete
@@ -232,7 +235,7 @@ public final class VideoReceiver: @unchecked Sendable {
             if deliveredCount <= 10 || deliveredCount % 200 == 0 {
                 print("[VideoRecv] NAL #\(deliveredCount) (\(finalSize) bytes, frame \(currentFrameIndex))")
             }
-            deliverNalUnit(frameBuf, finalSize, frameTimestamp, onNalUnit)
+            deliverNalUnit(frameBuf, finalSize, frameTimestamp, frameCodec, onNalUnit)
             totalExpected = 0
         }
 
@@ -330,6 +333,7 @@ public final class VideoReceiver: @unchecked Sendable {
                 totalExpected = header.totalPackets
                 receivedCount = 0
                 frameTimestamp = header.presentationTimeNs
+                frameCodec = header.codec
                 lastGroupPacketTimeNs = 0
 
                 // Zero the tracking arrays
@@ -366,11 +370,11 @@ public final class VideoReceiver: @unchecked Sendable {
     }
 
     private func deliverNalUnit(_ buf: UnsafeMutablePointer<UInt8>, _ size: Int,
-                                 _ timestamp: Int64, _ callback: OnNalUnit) {
+                                 _ timestamp: Int64, _ codec: UInt8, _ callback: OnNalUnit) {
         // Single copy from raw buffer → Data for delivery
         let data = Data(bytes: buf, count: size)
         let recvTime = Self.monotonicNs()
-        callback(data, timestamp, recvTime)
+        callback(data, timestamp, recvTime, codec)
     }
 
     private func computeFinalSize(_ packetSizes: UnsafeMutablePointer<UInt16>, _ totalExpected: Int) -> Int {

@@ -2577,8 +2577,6 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     // Fallback to render resolution if encodedWidth is 0 (old server without this field)
     uint32_t decoderWidth = server.encodedWidth > 0 ? server.encodedWidth : server.renderWidth;
     uint32_t decoderHeight = server.encodedHeight > 0 ? server.encodedHeight : server.renderHeight;
-    decoderWidth_ = decoderWidth;
-    decoderHeight_ = decoderHeight;
     decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(decoderWidth, 1u));
     decodedTexelHeight_ = 1.0f / static_cast<float>(std::max(decoderHeight, 1u));
     if (serverFoveatedEncodingEnabled_)
@@ -2994,8 +2992,6 @@ void XrApp::StreamConfigWorkerMain()
             {
                 const uint8_t codec = videoDecoder_->CodecType();
                 videoDecoder_->Shutdown();
-                decoderWidth_ = update.encodedWidth;
-                decoderHeight_ = update.encodedHeight;
                 accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
             }
         }
@@ -3449,13 +3445,17 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
     // The server stamps the real codec on every packet. If it differs from what the
     // decoder was initialized with (e.g. an H.264 Rosetta server vs. our H.265
     // default), rebuild the decoder for the actual codec. Happens once, on the first NAL.
+    // IsInitialized() already guarantees valid dimensions, so read them from the decoder
+    // (authoritative) before Shutdown() rather than tracking a parallel copy.
     if (videoDecoder_ && videoDecoder_->IsInitialized() &&
-        videoDecoder_->CodecType() != codec && decoderWidth_ > 0 && decoderHeight_ > 0)
+        videoDecoder_->CodecType() != codec)
     {
         LOGI("Server stream codec=%u differs from decoder codec=%u; re-initializing decoder",
              codec, videoDecoder_->CodecType());
+        const uint32_t w = videoDecoder_->GetWidth();
+        const uint32_t h = videoDecoder_->GetHeight();
         videoDecoder_->Shutdown();
-        if (!videoDecoder_->Initialize(decoderWidth_, decoderHeight_, codec))
+        if (!videoDecoder_->Initialize(w, h, codec))
         {
             LOGE("Failed to re-initialize decoder for codec=%u", codec);
         }

@@ -285,8 +285,6 @@ private:
     // Decoded frame state
     uint32_t videoWidth_ = 0;
     uint32_t videoHeight_ = 0;
-    uint32_t decoderWidth_ = 0;   // Encoded resolution the decoder is configured for
-    uint32_t decoderHeight_ = 0;  // (used to re-init the decoder if the codec changes)
     bool hasVideoTexture_ = false;  // True once we've bound at least one decoded frame
     std::chrono::steady_clock::time_point lastVideoFrameTime_;  // Detect stream loss
     float videoContentUMin_ = 0.0f;
