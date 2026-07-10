@@ -156,16 +156,6 @@ private:
     FoveationSettings foveationSettings_ = {};
     bool tenBit_ = false;
     uint32_t frameCount_ = 0;
-    // Rate-limit state for explicit ForceKeyframe() calls. The first
-    // ForcedKeyframeWarmupCount accepted forces after Initialize() bypass the
-    // 500ms limit so StreamingServer's deliberate redundant-IDR warmup at
-    // connect (one post-Initialize force plus frames 0-4) is not collapsed to
-    // a single keyframe. Both are reset in Initialize(). Atomics because
-    // ForceKeyframe() is called from multiple threads; lastForcedKeyframeNs_
-    // holds steady_clock time_since_epoch().count().
-    static constexpr uint32_t ForcedKeyframeWarmupCount = 6;
-    std::atomic<uint32_t> acceptedForcedKeyframes_{0};
-    std::atomic<int64_t> lastForcedKeyframeNs_{0};
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> foveationValidationWarningLogged_{false};

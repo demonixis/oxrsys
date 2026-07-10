@@ -2179,8 +2179,16 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
 
 void StreamingServer::HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request)
 {
+    // ABR counters see every request (they measure client distress); only the
+    // actual force is rate-limited.
     requestKeyframeCount_.fetch_add(1);
     requestKeyframeTotalForAbr_.fetch_add(1);
+
+    if (!keyframeRequestLimiter_.Accept(SteadyClockNowNs()))
+    {
+        spdlog::debug("StreamingServer: Suppressing keyframe request (<500ms since last)");
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(encoderMutex_);
     if (encoder_ != nullptr)

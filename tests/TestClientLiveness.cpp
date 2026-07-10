@@ -63,3 +63,25 @@ TEST_CASE("Client liveness: a zero activity clock never disconnects", "[client-l
     CHECK_FALSE(decision.disconnect);
     CHECK(decision.state.lastActivityNs == 0);
 }
+
+#include "KeyframeRequestLimiter.h"
+
+TEST_CASE("Keyframe limiter: first request is accepted, spam is suppressed", "[client-liveness]")
+{
+    oxrsys::KeyframeRequestLimiter limiter;
+    // Connect-time IDR spam: only the first request within the window forwards.
+    CHECK(limiter.Accept(/*nowNs=*/600 * kMs));
+    CHECK_FALSE(limiter.Accept(/*nowNs=*/700 * kMs));
+    CHECK_FALSE(limiter.Accept(/*nowNs=*/600 * kMs + oxrsys::KeyframeRequestLimiter::kMinIntervalNs - 1));
+}
+
+TEST_CASE("Keyframe limiter: accepts again after the window and re-arms it", "[client-liveness]")
+{
+    oxrsys::KeyframeRequestLimiter limiter;
+    CHECK(limiter.Accept(/*nowNs=*/600 * kMs));
+    const int64_t second = 600 * kMs + oxrsys::KeyframeRequestLimiter::kMinIntervalNs;
+    CHECK(limiter.Accept(second));
+    // The window restarts from the accepted request, not the suppressed ones.
+    CHECK_FALSE(limiter.Accept(second + 1));
+    CHECK(limiter.Accept(second + oxrsys::KeyframeRequestLimiter::kMinIntervalNs));
+}

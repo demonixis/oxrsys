@@ -577,8 +577,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
     frameCount_ = 0;
-    acceptedForcedKeyframes_.store(0, std::memory_order_relaxed);
-    lastForcedKeyframeNs_.store(0, std::memory_order_relaxed);
 
     id<MTLDevice> device = (__bridge id<MTLDevice>)graphicsContext.metalDevice;
     if (device == nil)
@@ -1572,40 +1570,9 @@ void VideoEncoder::DestroySlots()
 
 void VideoEncoder::ForceKeyframe()
 {
-    // Clients spam IDR requests for several seconds on connect; cap explicit
-    // forces at 2/sec. Natural GOP keyframes (MaxKeyFrameInterval) are unaffected.
-    // The first ForcedKeyframeWarmupCount forces after Initialize() bypass the
-    // cap: StreamingServer intentionally sends a redundant IDR burst at connect
-    // (post-Initialize force + frames 0-4) so a single lost packet does not
-    // leave the client black until a keyframe request round-trips.
-    // Called from multiple threads: CAS keeps the warmup counter from
-    // double-counting past the cap; the 500ms-window check is a benign race
-    // (worst case one extra accepted keyframe).
-    bool warmup = false;
-    uint32_t accepted = acceptedForcedKeyframes_.load(std::memory_order_relaxed);
-    while (accepted < ForcedKeyframeWarmupCount)
-    {
-        if (acceptedForcedKeyframes_.compare_exchange_weak(
-                accepted, accepted + 1, std::memory_order_relaxed))
-        {
-            warmup = true;
-            break;
-        }
-    }
-
-    const int64_t nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
-    if (!warmup)
-    {
-        constexpr int64_t minIntervalTicks =
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::milliseconds(500)).count();
-        if (nowNs - lastForcedKeyframeNs_.load(std::memory_order_relaxed) < minIntervalTicks)
-        {
-            spdlog::debug("VideoEncoder: Suppressing forced keyframe (<500ms since last)");
-            return;
-        }
-    }
-    lastForcedKeyframeNs_.store(nowNs, std::memory_order_relaxed);
+    // Unconditional: rate-limiting client keyframe requests is the caller's
+    // job (KeyframeRequestLimiter at the request-ingress points); internal
+    // forces (connect warmup, GOP cadence, reconfigure) are deliberate.
     forceKeyframe_.store(true);
 }
 

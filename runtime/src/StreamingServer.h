@@ -17,6 +17,7 @@
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
 #include "IStreamingBackend.h"
+#include "KeyframeRequestLimiter.h"
 #include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
@@ -290,6 +291,7 @@ private:
     std::atomic<uint32_t> replacedFrameCount_{0};
     std::atomic<uint32_t> requestKeyframeCount_{0};
     std::atomic<uint32_t> requestKeyframeTotalForAbr_{0};
+    oxrsys::KeyframeRequestLimiter keyframeRequestLimiter_;
     std::atomic<uint32_t> encoderDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoSendQueueDepthMax_{0};
     std::atomic<uint32_t> videoSendDroppedFrames_{0};

@@ -694,7 +694,11 @@ void AlvrStreamingBackend::EventThread()
                 DrainButtons();
                 break;
             case ALVR_EVENT_REQUEST_IDR:
-                keyframeRequested_.store(true);
+                if (keyframeRequestLimiter_.Accept(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count()))
+                {
+                    keyframeRequested_.store(true);
+                }
                 break;
             case ALVR_EVENT_VIEWS_CONFIG:
                 inputState_.ipd = event.views_config.local_view_transform[1].position[0] -

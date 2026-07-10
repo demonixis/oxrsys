@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "AlvrNalFraming.h"
+#include "KeyframeRequestLimiter.h"
 #include "IStreamingBackend.h"
 #include "StreamingFrameQueue.h"
 #include "VideoEncoder.h"
@@ -151,6 +152,7 @@ private:
     // Video frames must be tagged with a value from this domain.
     std::atomic<uint64_t> latestTrackingTimestampNs_{0};
     std::atomic<bool> keyframeRequested_{false};
+    oxrsys::KeyframeRequestLimiter keyframeRequestLimiter_;
 
     std::thread eventThread_;
     std::thread encodeThread_;
