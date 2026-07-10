@@ -51,7 +51,6 @@
 #include "Space.h"
 #include "ActionSet.h"
 #include "InputManager.h"
-#include "InteractionProfileResolve.h"
 #include "HandTracker.h"
 #include "Config.h"
 #include "RuntimeStatus.h"

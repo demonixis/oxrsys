@@ -8,7 +8,6 @@
 #include "Swapchain.h"
 #include "Space.h"
 #include "InputManager.h"
-#include "InteractionProfileResolve.h"
 #include "StreamingServer.h"
 #ifdef OXRSYS_HAS_ALVR
 #include "AlvrStreamingBackend.h"
