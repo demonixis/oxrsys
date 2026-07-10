@@ -17,9 +17,23 @@ namespace
 {
 
 constexpr const char* kOculusTouchProfile = "/interaction_profiles/oculus/touch_controller";
-constexpr const char* kTouchPlusPromotedProfile = "/interaction_profiles/meta/touch_plus_controller";
 constexpr const char* kSimpleControllerProfile = "/interaction_profiles/khr/simple_controller";
 constexpr const char* kHandInteractionProfile = "/interaction_profiles/ext/hand_interaction_ext";
+
+// Decode a streamed aim (pointer) pose from a packet's pos[3]/rot[4] arrays. Returns
+// false (leaving out-params untouched) when the quaternion is ~zero-length, i.e. the
+// client did not send a distinct aim pose and the caller should fall back to grip.
+bool DecodeAimPose(const float pos[3], const float rot[4], glm::vec3& outPos, glm::quat& outRot)
+{
+    const float len2 = rot[0] * rot[0] + rot[1] * rot[1] + rot[2] * rot[2] + rot[3] * rot[3];
+    if (len2 <= 0.01f)
+    {
+        return false;
+    }
+    outPos = glm::vec3(pos[0], pos[1], pos[2]);
+    outRot = glm::quat(rot[3], rot[0], rot[1], rot[2]);
+    return true;
+}
 
 size_t HandIndex(InputManager::Hand hand)
 {
@@ -64,7 +78,12 @@ std::string DetectStreamingControllerProfile(const std::string& clientName)
 
     if (ContainsAny(lowerName, {"quest 3", "quest3", "touch plus"}))
     {
-        return kTouchPlusPromotedProfile;
+        // Report the base Oculus Touch profile rather than meta/touch_controller_plus:
+        // older OpenXR apps (e.g. Beat Saber 1.29.4 / Unity OpenXR 1.5.3) never suggest
+        // bindings for the newer plus profile, so reporting it leaves all their actions
+        // (trigger, buttons, aim pose) inactive. oculus/touch_controller is a universally
+        // recognized superset-compatible base that every Touch-era app binds.
+        return kOculusTouchProfile;
     }
     if (ContainsAny(lowerName, {"quest 2", "quest2"}))
     {
@@ -180,6 +199,7 @@ void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
         }
         streamingClientName_.clear();
         streamingControllerProfile_.clear();
+        resolvedControllerProfile_.clear();
     }
 }
 
@@ -214,6 +234,11 @@ void InputManager::UpdateFromStreaming()
         return;
     }
 
+    // Remember which tracking sample this frame's poses come from, so the
+    // streaming backend can tag the encoded frame with it (ALVR matches the
+    // frame to the pose by this timestamp for client-side reprojection).
+    lastTrackingSampleNs_.store(packet.timestampNs);
+
     // Apply head pose from headset tracking — store quaternion directly
     headPosition_ = glm::vec3(packet.headPosition[0],
                                 packet.headPosition[1],
@@ -245,6 +270,23 @@ void InputManager::UpdateFromStreaming()
                      packet.trackingFlags);
     }
 
+    // Resolve the sticky per-client profile as soon as EITHER controller is seen —
+    // per-client (not per-hand) so a second controller waking later never changes the
+    // signature and never triggers another XrEventDataInteractionProfileChanged (the
+    // app would destroy/recreate its input devices). Compare-then-assign keeps writes
+    // rare (same discipline as SetStreamingClientName).
+    if (leftControllerActive || rightControllerActive)
+    {
+        const std::string& profile =
+            streamingControllerProfile_.empty() ? kOculusTouchProfile : streamingControllerProfile_;
+        if (resolvedControllerProfile_ != profile)
+        {
+            resolvedControllerProfile_ = profile;
+            spdlog::info("InputManager: resolved controller profile '{}' (sticky while streaming)",
+                         profile);
+        }
+    }
+
     if (leftControllerActive)
     {
         leftControllerPos_ = glm::vec3(packet.leftControllerPos[0],
@@ -254,6 +296,7 @@ void InputManager::UpdateFromStreaming()
                                        packet.leftControllerRot[0],
                                        packet.leftControllerRot[1],
                                        packet.leftControllerRot[2]);
+        leftAimValid_ = DecodeAimPose(packet.leftAimPos, packet.leftAimRot, leftAimPos_, leftAimRot_);
     }
     if (rightControllerActive)
     {
@@ -264,6 +307,7 @@ void InputManager::UpdateFromStreaming()
                                         packet.rightControllerRot[0],
                                         packet.rightControllerRot[1],
                                         packet.rightControllerRot[2]);
+        rightAimValid_ = DecodeAimPose(packet.rightAimPos, packet.rightAimRot, rightAimPos_, rightAimRot_);
     }
 
     // Apply button/trigger states
@@ -450,6 +494,27 @@ XrPosef InputManager::GetControllerPose(Hand hand) const
     return pose;
 }
 
+XrPosef InputManager::GetControllerAimPose(Hand hand) const
+{
+    const bool valid = (hand == Hand::Left) ? leftAimValid_ : rightAimValid_;
+    if (!valid)
+    {
+        // No distinct aim pose streamed yet — fall back to the grip pose.
+        return GetControllerPose(hand);
+    }
+    const glm::vec3& pos = (hand == Hand::Left) ? leftAimPos_ : rightAimPos_;
+    const glm::quat& rot = (hand == Hand::Left) ? leftAimRot_ : rightAimRot_;
+    XrPosef pose{};
+    pose.orientation.x = rot.x;
+    pose.orientation.y = rot.y;
+    pose.orientation.z = rot.z;
+    pose.orientation.w = rot.w;
+    pose.position.x = pos.x;
+    pose.position.y = pos.y;
+    pose.position.z = pos.z;
+    return pose;
+}
+
 float InputManager::GetGrabValue(Hand hand) const
 {
     return (hand == Hand::Left) ? leftGripValue_ : rightGripValue_;
@@ -573,10 +638,26 @@ std::vector<std::string> InputManager::GetCurrentInteractionProfileCandidates(Ha
 
     if (IsStreaming())
     {
+        // Controllers idle (system overlay, controllers asleep): keep the last resolved
+        // profile bound instead of flapping to NULL — unbinding emits a profile-changed
+        // event and the app destroys/recreates its input devices mid-session, which
+        // permanently breaks Unity's legacy XR-usage->joystick bridge (pause button).
+        // Action isActive still drops per frame, matching real runtimes.
+        if (!resolvedControllerProfile_.empty())
+        {
+            return {resolvedControllerProfile_};
+        }
         return {};
     }
 
-    return {kSimpleControllerProfile};
+    // No client connected: report no profile, like real runtimes with no controller
+    // bound. Fabricating khr/simple_controller here makes apps create input devices
+    // during load and churn them at connect (dev flag for client-less testing only).
+    if (simpleControllerFallback_)
+    {
+        return {kSimpleControllerProfile};
+    }
+    return {};
 }
 
 std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) const
@@ -621,11 +702,13 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetMenuClick();
     }
-    if (componentPath == "select/click")
-    {
-        return GetTriggerValue(hand) > 0.5f;
-    }
-    if (componentPath == "trigger/click")
+    // No "system/click" case: /input/system/* is reserved (never accumulated — see
+    // AccumulateBindingState). An earlier diagnostic experiment mirrored menu state
+    // onto system/click here; that fabricated feed on the right-hand half of Unity's
+    // menuButton action is exactly what real runtimes never do, so the component is
+    // left unmapped.
+    if (componentPath == "select/click" || componentPath == "select/value" ||
+        componentPath == "trigger/click" || componentPath == "trigger/value")
     {
         return GetTriggerValue(hand) > 0.5f;
     }
@@ -633,7 +716,7 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetTriggerValue(hand) > 0.01f;
     }
-    if (componentPath == "squeeze/click")
+    if (componentPath == "squeeze/click" || componentPath == "squeeze/value")
     {
         return GetGrabValue(hand) > 0.5f;
     }
@@ -833,7 +916,10 @@ XrPosef InputManager::GetPoseComponentForProfile(Hand hand, const std::string& c
         {
             return GetTrackedHandPose(hand, componentPath);
         }
-        return GetControllerPose(hand);
+        // Menu lasers bind aim/pose; sabers/held objects bind grip/pose. These differ
+        // on Touch controllers, so return the distinct aim pose for aim/pose.
+        return componentPath == "aim/pose" ? GetControllerAimPose(hand)
+                                           : GetControllerPose(hand);
     }
 
     if (componentPath == "pinch_ext/pose" || componentPath == "poke_ext/pose")

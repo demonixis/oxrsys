@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -106,6 +107,96 @@ void WriteRuntimeConfig(bool passthroughEnabled, bool appAlphaBlendPassthrough =
     file.close();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
+
+// WriteRuntimeConfig overwrites the REAL user config (the runtime resolves it from
+// HOME, and these tests intentionally exercise the live reload path). Snapshot the
+// file for the whole test run and restore it on exit — without this, every test run
+// silently wipes the developer's streaming settings (protocol, bitrate, ...).
+// Plain static (not a Catch2 listener): constructed before main, restored at exit,
+// and deliberately free of Catch macros since it runs outside any test case.
+//
+// Crash-safety: the in-memory snapshot restores only on a clean exit — a static
+// destructor never runs on SIGSEGV/SIGABRT/std::terminate, and crashing the
+// in-process runtime dylib under test is a realistic failure mode. So the snapshot
+// is ALSO persisted to an on-disk sidecar (oxrsys-runtime.toml.test-backup) at
+// construction and removed on clean exit. A leftover sidecar means the previous run
+// crashed after clobbering the config; the constructor heals it before snapshotting.
+// A distinct absent-marker sidecar records the "config did not exist" case so a
+// crash-leftover test config is never adopted as the original on the next run.
+struct RuntimeConfigFileGuard
+{
+    std::filesystem::path path;
+    std::filesystem::path backup;
+    std::filesystem::path absentMarker;
+    bool existed = false;
+    std::string original;
+
+    RuntimeConfigFileGuard()
+    {
+        const char* home = std::getenv("HOME");
+        if (home == nullptr)
+        {
+            return;
+        }
+        path = std::filesystem::path(home) / "Library/Application Support/OXRSys/oxrsys-runtime.toml";
+        backup = path;
+        backup += ".test-backup";
+        absentMarker = path;
+        absentMarker += ".test-backup.absent";
+
+        std::error_code ec;
+        // Heal a leftover from a previously crashed run before taking a fresh snapshot.
+        if (std::filesystem::exists(backup, ec))
+        {
+            // Crashed after snapshotting an existing config: restore the pristine copy.
+            std::filesystem::copy_file(
+                backup, path, std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(backup, ec);
+        }
+        else if (std::filesystem::exists(absentMarker, ec))
+        {
+            // Crashed after snapshotting a non-existent config: drop the clobbered test file.
+            std::filesystem::remove(path, ec);
+            std::filesystem::remove(absentMarker, ec);
+        }
+
+        existed = std::filesystem::exists(path, ec);
+        if (existed)
+        {
+            std::ifstream in(path);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            // Persist the snapshot to disk so a crash mid-run is recoverable next time.
+            std::filesystem::copy_file(
+                path, backup, std::filesystem::copy_options::overwrite_existing, ec);
+        }
+        else
+        {
+            std::ofstream marker(absentMarker, std::ios::trunc);
+        }
+    }
+
+    ~RuntimeConfigFileGuard()
+    {
+        if (path.empty())
+        {
+            return;
+        }
+        if (existed)
+        {
+            std::ofstream out(path, std::ios::trunc);
+            out << original;
+        }
+        else
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+        std::error_code ec;
+        std::filesystem::remove(backup, ec);
+        std::filesystem::remove(absentMarker, ec);
+    }
+};
+static RuntimeConfigFileGuard gRuntimeConfigFileGuard;
 
 std::vector<XrEnvironmentBlendMode> EnumerateBlendModes(XrInstance instance,
                                                         XrSystemId systemId)
@@ -266,6 +357,46 @@ struct RuntimeSessionContext
             referenceSpaceCreateInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
             XR_CHECK(xrCreateReferenceSpace(session, &referenceSpaceCreateInfo, &localSpace));
         }
+    }
+
+    // Advance the session READY->SYNCHRONIZED->VISIBLE->FOCUSED by submitting empty
+    // frames (state only advances after frame submission). xrSyncActions on a
+    // non-FOCUSED session returns XR_SESSION_NOT_FOCUSED with all states inactive, so
+    // action tests must pump first — like a real app, which frame-loops before input.
+    // Poll the session-state events each frame and stop once FOCUSED is observed (up
+    // to a bounded cap): this asserts the target state instead of assuming a fixed
+    // transition count, fails here rather than downstream if the state machine
+    // changes, and drains the event queue so later poll-based assertions start clean.
+    void PumpToFocused()
+    {
+        bool focused = false;
+        for (int i = 0; i < 10 && !focused; ++i)
+        {
+            XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+            XR_CHECK(xrWaitFrame(session, nullptr, &frameState));
+            XR_CHECK(xrBeginFrame(session, nullptr));
+            XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+            frameEndInfo.displayTime = frameState.predictedDisplayTime;
+            frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            frameEndInfo.layerCount = 0;
+            XR_CHECK(xrEndFrame(session, &frameEndInfo));
+
+            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+            while (xrPollEvent(instance, &event) == XR_SUCCESS)
+            {
+                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    const auto* stateChanged =
+                        reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
+                    if (stateChanged->state == XR_SESSION_STATE_FOCUSED)
+                    {
+                        focused = true;
+                    }
+                }
+                event = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
+        }
+        REQUIRE(focused);
     }
 
     ~RuntimeSessionContext()
@@ -1260,6 +1391,8 @@ TEST_CASE("Conformance automation drives Khronos simple controller actions", "[r
     XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
                                                 context.Path("/input/select/click"), XR_TRUE));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1305,6 +1438,168 @@ TEST_CASE("Conformance automation drives Khronos simple controller actions", "[r
     CHECK(std::string(localizedName).find("Select") != std::string::npos);
 
     XR_CHECK(xrDestroyAction(selectAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("SyncActions returns XR_SESSION_NOT_FOCUSED and inactive states before focus",
+          "[runtime][actions][focus]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath simpleControllerPath = context.Path("/interaction_profiles/khr/simple_controller");
+    XrPath selectClickPath = context.Path("/user/hand/left/input/select/click");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "focusgate", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Focus Gate", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction selectAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    actionCreateInfo.countSubactionPaths = 1;
+    actionCreateInfo.subactionPaths = &leftHandPath;
+    std::strncpy(actionCreateInfo.actionName, "select", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Select", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &selectAction));
+
+    XrActionSuggestedBinding suggestedBinding = {selectAction, selectClickPath};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = simpleControllerPath;
+    suggestedBindings.suggestedBindings = &suggestedBinding;
+    suggestedBindings.countSuggestedBindings = 1;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, simpleControllerPath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
+                                                context.Path("/input/select/click"), XR_TRUE));
+
+    // Session is READY (no frames submitted): the sync must be refused as unfocused
+    // and every action state must read inactive.
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    CHECK(xrSyncActions(context.session, &syncInfo) == XR_SESSION_NOT_FOCUSED);
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = selectAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateBoolean boolState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &boolState));
+    CHECK(boolState.isActive == XR_FALSE);
+    CHECK(boolState.currentState == XR_FALSE);
+
+    // Once focused, the same sync succeeds and the automation state comes through.
+    context.PumpToFocused();
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &boolState));
+    CHECK(boolState.isActive == XR_TRUE);
+    CHECK(boolState.currentState == XR_TRUE);
+
+    XR_CHECK(xrDestroyAction(selectAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("Reserved system/click bindings stay unbound and inactive", "[runtime][actions]")
+{
+    // Unity's oculus/touch menuButton action is asymmetric: ONE action bound to
+    // left=menu/click and right=system/click. The system path is platform-reserved;
+    // the right subaction must read inactive with no bound sources even while the
+    // right controller itself is active (real-runtime behavior — an active fabricated
+    // feed there breaks Unity's legacy menu-pause bridge in Beat Saber 1.29.4).
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath rightHandPath = context.Path("/user/hand/right");
+    std::array<XrPath, 2> handPaths = {leftHandPath, rightHandPath};
+    XrPath touchProfilePath = context.Path("/interaction_profiles/oculus/touch_controller");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "menuasym", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Menu Asymmetric", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction menuAction = XR_NULL_HANDLE;
+    XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    actionCreateInfo.countSubactionPaths = static_cast<uint32_t>(handPaths.size());
+    actionCreateInfo.subactionPaths = handPaths.data();
+    std::strncpy(actionCreateInfo.actionName, "menubutton", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(actionCreateInfo.localizedActionName, "Menu Button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &menuAction));
+
+    std::array<XrActionSuggestedBinding, 2> suggested = {{
+        {menuAction, context.Path("/user/hand/left/input/menu/click")},
+        {menuAction, context.Path("/user/hand/right/input/system/click")},
+    }};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchProfilePath;
+    suggestedBindings.suggestedBindings = suggested.data();
+    suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(suggested.size());
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    // BOTH controllers active on the touch profile; left menu physically pressed.
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchProfilePath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchProfilePath, rightHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateBoolEXT(context.session, leftHandPath,
+                                                context.Path("/input/menu/click"), XR_TRUE));
+
+    context.PumpToFocused();
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.action = menuAction;
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateBoolean leftState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &leftState));
+    CHECK(leftState.isActive == XR_TRUE);
+    CHECK(leftState.currentState == XR_TRUE);
+
+    getInfo.subactionPath = rightHandPath;
+    XrActionStateBoolean rightState = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    XR_CHECK(xrGetActionStateBoolean(context.session, &getInfo, &rightState));
+    CHECK(rightState.isActive == XR_FALSE);
+    CHECK(rightState.currentState == XR_FALSE);
+
+    // Bound sources contain only the left menu/click — the reserved right binding is
+    // accepted at suggest time but never bound, matching real runtimes.
+    uint32_t sourceCount = 0;
+    XrBoundSourcesForActionEnumerateInfo enumerateInfo = {
+        XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+    enumerateInfo.action = menuAction;
+    XR_CHECK(xrEnumerateBoundSourcesForAction(context.session, &enumerateInfo, 0, &sourceCount, nullptr));
+    CHECK(sourceCount == 1);
+
+    XR_CHECK(xrDestroyAction(menuAction));
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
@@ -1807,6 +2102,8 @@ TEST_CASE("Quest Touch profile reports float and vector inputs", "[runtime][acti
     XR_CHECK(context.setInputDeviceStateVector2fEXT(context.session, leftHandPath,
                                                     context.Path("/input/thumbstick"), {0.25f, -0.5f}));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -1928,6 +2225,8 @@ TEST_CASE("Quest Pico and simple profiles report float inputs through automation
     attachInfo.actionSets = &actionSet;
     XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2015,6 +2314,8 @@ TEST_CASE("Touch Plus extension profile is selectable for OpenXR 1.0 apps",
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/trigger/value"), 0.66f));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2090,6 +2391,8 @@ TEST_CASE("Touch Plus promoted profile is selectable for OpenXR 1.1 apps",
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/trigger/value"), 0.58f));
 
+    context.PumpToFocused();
+
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
     XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2157,6 +2460,8 @@ TEST_CASE("Inactive action spaces clear location flags", "[runtime][actions]")
 
     XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchControllerPath,
                                              leftHandPath, XR_FALSE));
+
+    context.PumpToFocused();
 
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
@@ -2251,6 +2556,8 @@ TEST_CASE("Hand interaction pose and value inputs work through automation", "[ru
                                                context.localSpace, pinchPose));
     XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
                                                  context.Path("/input/pinch_ext/value"), 0.8f));
+
+    context.PumpToFocused();
 
     XrActiveActionSet activeActionSet = {};
     activeActionSet.actionSet = actionSet;
@@ -2575,12 +2882,124 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
         },
         XR_ERROR_POSE_INVALID);
 
+    // OpenComposite (OpenVR->OpenXR) submits a bottom-left-origin Y-flipped rect:
+    // offset.y = height, extent.height = -height. That negative extent is out-of-spec
+    // but real runtimes tolerate it, so the runtime normalizes to a min/max region and
+    // accepts it as long as it stays in bounds (swapchain is 16x16).
+    runProjectionCase(
+        [](const RuntimeSessionContext&, XrSwapchain swapchain, XrCompositionLayerProjectionView (&views)[2])
+        {
+            uint32_t imageIndex = 0;
+            XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+            XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            waitInfo.timeout = 0;
+            XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+            XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+            views[0].subImage.imageRect.offset = {0, 16};
+            views[0].subImage.imageRect.extent = {16, -16};
+        },
+        XR_SUCCESS);
+
+    // A genuinely degenerate rect (zero extent) is still rejected — the normalization
+    // tolerates negative extents, not empty ones.
+    runProjectionCase(
+        [](const RuntimeSessionContext&, XrSwapchain swapchain, XrCompositionLayerProjectionView (&views)[2])
+        {
+            uint32_t imageIndex = 0;
+            XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+            XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            waitInfo.timeout = 0;
+            XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+            XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+            views[0].subImage.imageRect.extent = {16, 0};
+        },
+        XR_ERROR_SWAPCHAIN_RECT_INVALID);
+
     runQuadCase(
         [](const RuntimeSessionContext&, XrSwapchain, XrCompositionLayerQuad& quad)
         {
             quad.subImage.imageArrayIndex = 1;
         },
         XR_ERROR_VALIDATION_FAILURE);
+}
+
+TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[runtime][timespec]")
+{
+    // wineopenxr translates Win32 QPC through this extension for all frame timing, so
+    // both directions must be resolvable and round-trip losslessly. Exercise the
+    // no-session fallback epoch (process-global) and the active-session time base.
+
+    SECTION("No-session fallback rejects bad input and round-trips losslessly")
+    {
+        const char* extensions[] = {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+        XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+        std::strncpy(createInfo.applicationInfo.applicationName, "oxrsys_runtime_api_tests",
+                     XR_MAX_APPLICATION_NAME_SIZE);
+        createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+        createInfo.enabledExtensionCount = 1;
+        createInfo.enabledExtensionNames = extensions;
+        XrInstance instance = XR_NULL_HANDLE;
+        XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+        auto convertTimespecToTime = reinterpret_cast<PFN_xrConvertTimespecTimeToTimeKHR>(
+            GetProc(instance, "xrConvertTimespecTimeToTimeKHR"));
+        auto convertTimeToTimespec = reinterpret_cast<PFN_xrConvertTimeToTimespecTimeKHR>(
+            GetProc(instance, "xrConvertTimeToTimespecTimeKHR"));
+
+        // Out-of-range tv_nsec is rejected in both parameter forms.
+        struct timespec badTimespec{};
+        badTimespec.tv_sec = 100;
+        badTimespec.tv_nsec = 1'000'000'000L; // == 1e9 is out of [0, 1e9)
+        XrTime scratch = 0;
+        CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
+              XR_ERROR_VALIDATION_FAILURE);
+        badTimespec.tv_nsec = -1;
+        CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
+              XR_ERROR_VALIDATION_FAILURE);
+
+        struct timespec now{};
+        REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+        XrTime xrTime = 0;
+        XR_CHECK(convertTimespecToTime(instance, &now, &xrTime));
+        struct timespec roundTrip{};
+        XR_CHECK(convertTimeToTimespec(instance, xrTime, &roundTrip));
+        CHECK(roundTrip.tv_sec == now.tv_sec);
+        CHECK(roundTrip.tv_nsec == now.tv_nsec);
+
+        XR_CHECK(xrDestroyInstance(instance));
+    }
+
+    SECTION("Active session shares its time base with predicted display time")
+    {
+        RuntimeSessionContext context({
+            XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+            XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
+        });
+
+        auto convertTimespecToTime = reinterpret_cast<PFN_xrConvertTimespecTimeToTimeKHR>(
+            GetProc(context.instance, "xrConvertTimespecTimeToTimeKHR"));
+        auto convertTimeToTimespec = reinterpret_cast<PFN_xrConvertTimeToTimespecTimeKHR>(
+            GetProc(context.instance, "xrConvertTimeToTimespecTimeKHR"));
+
+        // Round-trip against the session's own time base.
+        struct timespec now{};
+        REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+        XrTime xrNow = 0;
+        XR_CHECK(convertTimespecToTime(context.instance, &now, &xrNow));
+        struct timespec roundTrip{};
+        XR_CHECK(convertTimeToTimespec(context.instance, xrNow, &roundTrip));
+        CHECK(roundTrip.tv_sec == now.tv_sec);
+        CHECK(roundTrip.tv_nsec == now.tv_nsec);
+
+        // Domain sanity: the XrTime for "now" must sit in the same base as the frame
+        // loop's predicted display time (within a generous few-second bound).
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        const int64_t deltaNs =
+            std::llabs(static_cast<int64_t>(frameState.predictedDisplayTime) -
+                       static_cast<int64_t>(xrNow));
+        CHECK(deltaNs < 5'000'000'000LL);
+    }
 }
 
 TEST_CASE("EndFrame accepts a released projection image while another swapchain image is acquired", "[runtime][frame][swapchain]")

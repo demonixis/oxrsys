@@ -4,10 +4,14 @@
 
 #include <openxr/openxr.h>
 #include "GraphicsTypes.h"
+#include "FocusEmulation.h"
+#include "ProfileChangeDebounce.h"
+#include <atomic>
 #include <memory>
 #include <vector>
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -16,7 +20,7 @@ class Instance;
 class Swapchain;
 class Space;
 class InputManager;
-class StreamingServer;
+class IStreamingBackend;
 
 class Session
 {
@@ -91,12 +95,23 @@ public:
         return exitRequested_;
     }
 
+    // Forward controller haptic feedback to the streaming backend.
+    // hand: 0 = left, 1 = right.
+    void ApplyHapticFeedback(int hand, float amplitude, int64_t durationNs, float frequencyHz);
+
     XrTime GetCurrentTime() const;
+    // XR_KHR_convert_timespec_time helpers. CLOCK_MONOTONIC is captured at the
+    // same instant startTime_ is set (monoStartNs_), so XrTime == mono_ns -
+    // monoStartNs_ and the mapping is a pure offset consistent with GetCurrentTime().
+    XrTime TimespecToXrTime(const struct timespec& ts) const;
+    void XrTimeToTimespec(XrTime time, struct timespec& ts) const;
     void BeginDebugUtilsLabelRegion(const XrDebugUtilsLabelEXT& labelInfo);
     void EndDebugUtilsLabelRegion();
     void InsertDebugUtilsLabel(const XrDebugUtilsLabelEXT& labelInfo);
     void GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std::vector<std::string>& labelNames) const;
-    void Shutdown();
+    // forProcessExit: called from the dylib destructor / process teardown, where the
+    // streaming backend must not join external runtimes (see StopForProcessExit()).
+    void Shutdown(bool forProcessExit = false);
 
 private:
     struct DebugUtilsLabelState
@@ -105,6 +120,11 @@ private:
     };
 
     void TransitionState(XrSessionState newState);
+    // Emit XrEventDataInteractionProfileChanged when the active controller interaction
+    // profile changes (e.g. a streaming client connects and the profile resolves from
+    // none/simple to oculus/touch). Unity's Input System relies on this event to switch
+    // from its KHR Simple Controller fallback device to the real controller device.
+    void MaybeEmitInteractionProfileChanged();
     void AdvanceSessionStateAfterFrameSubmission();
     bool IsFrameLoopRunningState() const;
     bool OwnsSwapchain(const Swapchain* swapchain) const;
@@ -117,16 +137,26 @@ private:
     Instance* instance_;
     GraphicsContext graphicsContext_ = {};
 
-    XrSessionState state_ = XR_SESSION_STATE_IDLE;
+    // Atomic: written on the frame thread (TransitionState), read from the app's input
+    // thread by xrSyncActions/haptics focus checks.
+    std::atomic<XrSessionState> state_{XR_SESSION_STATE_IDLE};
     bool running_ = false;
     bool exitRequested_ = false;
+    // Focus emulation (see AdvanceSessionStateAfterFrameSubmission): FOCUSED->VISIBLE
+    // while streaming input is gone (system overlay, controllers asleep, client
+    // disconnect), restored when input returns. Armed only after input has been seen
+    // active on the current connection so the connect window cannot suppress focus.
+    // The transition logic lives in EvaluateFocusEmulation (FocusEmulation.h); this
+    // is just the persisted state Session feeds it each frame.
+    oxrsys::FocusEmulationState focusEmulation_;
+    static constexpr std::chrono::milliseconds kFocusLossDelay{500};
     bool frameBegun_ = false;
     uint32_t waitedFrameCount_ = 0;
     mutable std::mutex frameStateMutex_;
     mutable std::mutex debugUtilsMutex_;
 
     std::unique_ptr<InputManager> inputManager_;
-    std::unique_ptr<StreamingServer> streamingServer_;
+    std::unique_ptr<IStreamingBackend> streamingServer_;
 
     // Head pose returned by the most recent xrLocateViews — the exact pose the application renders
     // the current frame for. Captured here so the streamed frame is tagged with it at submission.
@@ -136,7 +166,27 @@ private:
     std::vector<std::unique_ptr<Space>> spaces_;
 
     std::chrono::steady_clock::time_point startTime_;
+    // CLOCK_MONOTONIC nanoseconds sampled at the same instant as startTime_.
+    int64_t monoStartNs_ = 0;
+    // Interaction-profile-change debounce state (last announced (left|right)
+    // signature, the signature waiting to stabilize, and when it was first seen).
+    // The decision lives in EvaluateProfileChangeDebounce (ProfileChangeDebounce.h):
+    // a new signature must hold for kProfileChangeStableDelay before it is announced —
+    // transient flaps (connect handshake, one controller waking after the other,
+    // sub-second reconnect blips) must never reach the app, which destroys and
+    // recreates its input devices on every event (breaks Unity's legacy pause bridge).
+    // lastNotified starts at the both-hands-empty "|" signature so startup announces
+    // nothing until a real profile resolves.
+    oxrsys::ProfileChangeDebounceState interactionProfileDebounce_;
+    static constexpr std::chrono::milliseconds kProfileChangeStableDelay{1000};
     std::chrono::steady_clock::time_point lastFrameTime_;
+    // Absolute deadline for the next frame so pacing does not accumulate sleep drift.
+    std::chrono::steady_clock::time_point nextFrameDeadline_{};
+    // Refresh rate the pacing grid was built for; a change re-anchors the grid once.
+    uint32_t pacedRefreshHz_ = 0;
+    // Whether the previous WaitFrame used backend (client vsync) pacing. A false->true
+    // transition means the client just (re)connected: phase-lock the grid once.
+    bool backendPacedLastFrame_ = false;
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

@@ -25,6 +25,7 @@ struct ConfigValues
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     bool encoder10Bit = false;      // Encode HEVC Main10 for capable H.265 clients
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
+    std::string streamingProtocol = "oxrsys"; // "oxrsys" (own clients), "alvr" (stock ALVR client)
     std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling
@@ -33,6 +34,12 @@ struct ConfigValues
     std::string abrMode = "bitrate"; // "off", "bitrate", "full"
     bool passthroughEnabled = false;  // Keep headset passthrough available for streaming
     bool appAlphaBlendPassthrough = false; // Advertise OpenXR alpha blend for explicit MR apps
+    // Fabricate khr/simple_controller interaction profiles before a streaming client
+    // connects (client-less dev/testing only). Real runtimes report no profile until a
+    // physical controller is bound; fabricating one makes apps (Unity) create input
+    // devices against it and destroy/recreate them at connect, which breaks Unity's
+    // legacy XR-usage->joystick bridge (Beat Saber pause button).
+    bool simpleControllerFallback = false;
     std::string occlusionMode = "off"; // "off", "scene_mesh", "environment_depth"
     bool headsetAudio = false;       // Stream server audio to the headset
 

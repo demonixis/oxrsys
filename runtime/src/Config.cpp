@@ -403,6 +403,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.streamingTransport = value;
                 }
             }
+            else if (key == "protocol")
+            {
+                value = ParseString(value);
+                if (value == "oxrsys" || value == "alvr")
+                {
+                    values.streamingProtocol = value;
+                }
+            }
             else if (key == "foveated_encoding_preset")
             {
                 value = ParseString(value);
@@ -479,6 +487,10 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             else if (key == "headset_audio")
             {
                 values.headsetAudio = ParseBool(value);
+            }
+            else if (key == "simple_controller_fallback")
+            {
+                values.simpleControllerFallback = ParseBool(value);
             }
             else if (key == "enabled")
             {

@@ -15,6 +15,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 namespace oxrsys::runtime_platform
 {
 
@@ -151,6 +155,21 @@ uint64_t ProcessId()
     return static_cast<uint64_t>(GetCurrentProcessId());
 #else
     return static_cast<uint64_t>(getpid());
+#endif
+}
+
+bool RunningUnderRosetta()
+{
+#if defined(__APPLE__)
+    int translated = 0;
+    size_t size = sizeof(translated);
+    if (sysctlbyname("sysctl.proc_translated", &translated, &size, nullptr, 0) != 0)
+    {
+        return false; // sysctl absent => not translated
+    }
+    return translated == 1;
+#else
+    return false;
 #endif
 }
 

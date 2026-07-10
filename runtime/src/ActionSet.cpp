@@ -104,6 +104,20 @@ void ActionState::ApplySyncState(XrPath subactionPath, const AggregatedActionSta
     }
 }
 
+void ActionState::ApplyUnfocusedSync(XrPath subactionPath, XrTime syncTime)
+{
+    // The inactive (nullptr) ApplySyncState path, except boundSources is
+    // preserved. Per the OpenXR spec bound sources reflect the current bindings,
+    // not focus; the focus-emulation feature drops the session to VISIBLE
+    // whenever controllers idle, so this runs routinely and must not make
+    // xrEnumerateBoundSourcesForAction / xrGetInputSourceLocalizedName report
+    // zero sources while paused.
+    auto& data = GetSubactionData(subactionPath);
+    auto boundSources = std::move(data.boundSources);
+    ApplySyncState(subactionPath, nullptr, syncTime);
+    data.boundSources = std::move(boundSources);
+}
+
 std::vector<XrPath> ActionState::GetBoundSources() const
 {
     std::vector<XrPath> sources;

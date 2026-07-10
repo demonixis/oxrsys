@@ -35,6 +35,16 @@
 #endif
 #endif
 
+#if !defined(_WIN32)
+// Enable XR_KHR_convert_timespec_time declarations (xrConvertTimespecTimeToTimeKHR
+// et al.) in openxr_platform.h. wineopenxr substitutes the Win32 QPC extension the
+// app requests (XR_KHR_win32_convert_performance_counter_time) onto this one.
+#include <ctime>
+#ifndef XR_USE_TIMESPEC
+#define XR_USE_TIMESPEC
+#endif
+#endif
+
 #include <openxr/openxr_platform.h>
 
 #if defined(XR_USE_PLATFORM_XLIB) && defined(None)

@@ -248,12 +248,12 @@ static LUID GetAdapterLuidForD3D11Device(ID3D11Device* device)
 
 static bool IsAttachedActionSetHandle(uint64_t actionSetHandle);
 
-static void CleanupRuntimeState()
+static void CleanupRuntimeState(bool forProcessExit = false)
 {
     gHandTrackers.clear();
     if (gSession)
     {
-        gSession->Shutdown();
+        gSession->Shutdown(forProcessExit);
     }
     gSession.reset();
     gActions.clear();
@@ -340,6 +340,7 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
         {XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_metal_enable_SPEC_VERSION},
         {UNITY_METAL_ENABLE_EXTENSION_ALIAS, XR_KHR_metal_enable_SPEC_VERSION},
 #endif
+        {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME, XR_KHR_convert_timespec_time_SPEC_VERSION},
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
@@ -420,6 +421,11 @@ static const char* ExtensionForFunctionName(const char* functionName)
         std::strcmp(functionName, "xrSessionInsertDebugUtilsLabelEXT") == 0)
     {
         return XR_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    }
+    if (std::strcmp(functionName, "xrConvertTimespecTimeToTimeKHR") == 0 ||
+        std::strcmp(functionName, "xrConvertTimeToTimespecTimeKHR") == 0)
+    {
+        return XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME;
     }
 #ifdef XR_USE_GRAPHICS_API_METAL
     if (std::strcmp(functionName, "xrGetMetalGraphicsRequirementsKHR") == 0 ||
@@ -2459,6 +2465,18 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
         return;
     }
 
+    // /input/system/* is reserved by the platform on every supported device (the Quest
+    // OS consumes the system button; the client never transmits it). Real runtimes
+    // accept these suggested bindings but leave them unbound and inactive. Reporting
+    // an active state here feeds the app's device a fabricated value on a control that
+    // must be dead — Unity maps oculus/touch action state per device (left=menu/click,
+    // right=system/click on the SAME action), and an active right-hand feed broke its
+    // legacy MenuButton-usage->joystick bridge (Beat Saber's menu pause).
+    if (binding.componentPath.rfind("system/", 0) == 0)
+    {
+        return;
+    }
+
     InputManager::Hand hand = HandFromBindingPath(binding.bindingPathString);
     bool deviceActive = inputManager.IsInputDeviceActive(hand);
     if (inputManager.IsStreaming())
@@ -2535,7 +2553,7 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
     (void)subactionPath;
 }
 
-static std::string SelectCurrentInteractionProfileForInstance(
+std::string SelectCurrentInteractionProfileForInstance(
     const Instance* instance, const InputManager& inputManager, InputManager::Hand hand)
 {
     for (const std::string& profilePath : inputManager.GetCurrentInteractionProfileCandidates(hand))
@@ -2546,7 +2564,12 @@ static std::string SelectCurrentInteractionProfileForInstance(
         }
     }
 
-    if (inputManager.IsControllerTrackingActive(hand) &&
+    // HasResolvedControllerProfile keeps this fallback coherent with the sticky
+    // profile: when the candidates above are rejected by the instance-version filter
+    // (e.g. quest_2/quest_3 profiles on an OpenXR 1.0 instance), the reported profile
+    // must not flip to NULL while the controllers are merely idle (system overlay) —
+    // no event is emitted for that, and the getter must agree with the event stream.
+    if ((inputManager.IsControllerTrackingActive(hand) || inputManager.HasResolvedControllerProfile()) &&
         IsKnownInteractionProfilePath(instance, "/interaction_profiles/oculus/touch_controller"))
     {
         return "/interaction_profiles/oculus/touch_controller";
@@ -2615,6 +2638,30 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
     if (!gActionSetsAttached)
     {
         return XR_ERROR_ACTIONSET_NOT_ATTACHED;
+    }
+
+    // Spec: when the session is not focused, xrSyncActions must leave every action
+    // state inactive and return XR_SESSION_NOT_FOCUSED (a success code). ALL attached
+    // actions go inactive — not just the requested sets — so later xrGetActionState*
+    // reads cannot observe stale active data. Same focus source as the haptics checks.
+    if (sess->GetState() != XR_SESSION_STATE_FOCUSED)
+    {
+        const XrTime unfocusedSyncTime = sess->GetCurrentTime();
+        for (const auto& actionHolder : gActions)
+        {
+            ActionState* action = actionHolder.get();
+            if (!IsActionAttached(action))
+            {
+                continue;
+            }
+            for (XrPath subactionPath : action->GetResolvedSubactionPaths())
+            {
+                // Force state inactive but keep boundSources enumerable while
+                // unfocused (the focus-emulation feature pauses routinely).
+                action->ApplyUnfocusedSync(subactionPath, unfocusedSyncTime);
+            }
+        }
+        return XR_SESSION_NOT_FOCUSED;
     }
 
     const InputManager& inputManager = sess->GetInputManager();
@@ -2797,6 +2844,58 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
+// Resolve which controller(s) a haptic call targets. An explicit subaction
+// path drives only that hand. XR_NULL_PATH drives every hand the action is
+// scoped to via its declared subaction paths; an action that declared no
+// subaction paths is not hand-scoped and drives both. Shared by apply/stop so
+// the scope rules cannot drift between them.
+static void ResolveHapticHands(const ActionState* action, XrPath subactionPath,
+                               bool& left, bool& right)
+{
+    left = false;
+    right = false;
+    if (subactionPath != XR_NULL_PATH)
+    {
+        const std::string subactionString = Runtime::Get().GetPathString(subactionPath);
+        left = subactionString == "/user/hand/left";
+        right = subactionString == "/user/hand/right";
+        return;
+    }
+    for (XrPath resolved : action->GetResolvedSubactionPaths())
+    {
+        if (resolved == XR_NULL_PATH)
+        {
+            // No declared subaction paths: not hand-scoped, so target both.
+            left = true;
+            right = true;
+            continue;
+        }
+        const std::string resolvedString = Runtime::Get().GetPathString(resolved);
+        left = left || resolvedString == "/user/hand/left";
+        right = right || resolvedString == "/user/hand/right";
+    }
+}
+
+// Resolves the action's target hand(s) once and issues the per-hand vibration.
+// Stop passes a zero-amplitude pulse. Shared by apply/stop so the resolve +
+// dispatch cannot drift between them.
+static void ApplyHapticsForSubaction(Session* sess, const ActionState* action,
+                                     XrPath subactionPath, float amplitude,
+                                     XrDuration duration, float frequency)
+{
+    bool left = false;
+    bool right = false;
+    ResolveHapticHands(action, subactionPath, left, right);
+    if (left)
+    {
+        sess->ApplyHapticFeedback(0, amplitude, duration, frequency);
+    }
+    if (right)
+    {
+        sess->ApplyHapticFeedback(1, amplitude, duration, frequency);
+    }
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     XrSession session, const XrHapticActionInfo* hapticActionInfo,
     const XrHapticBaseHeader* hapticFeedback)
@@ -2832,6 +2931,18 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     if (sess->GetState() != XR_SESSION_STATE_FOCUSED)
     {
         return XR_SESSION_NOT_FOCUSED;
+    }
+
+    if (hapticFeedback->type == XR_TYPE_HAPTIC_VIBRATION)
+    {
+        const auto* vibration = reinterpret_cast<const XrHapticVibration*>(hapticFeedback);
+        // Resolve target hand(s): an explicit subaction path drives only that
+        // hand; XR_NULL_PATH drives every hand the action is scoped to, not
+        // unconditionally both. A left-only action must not buzz the right.
+        const float frequency =
+            vibration->frequency == XR_FREQUENCY_UNSPECIFIED ? 0.0f : vibration->frequency;
+        ApplyHapticsForSubaction(sess, action, hapticActionInfo->subactionPath,
+                                 vibration->amplitude, vibration->duration, frequency);
     }
 
     return XR_SUCCESS;
@@ -2871,6 +2982,13 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
     if (sess->GetState() != XR_SESSION_STATE_FOCUSED)
     {
         return XR_SESSION_NOT_FOCUSED;
+    }
+
+    {
+        // A zero-amplitude pulse cancels any queued vibration on the client.
+        // Same scope rules as apply: XR_NULL_PATH stops only the hands the
+        // action is scoped to, not unconditionally both.
+        ApplyHapticsForSubaction(sess, action, hapticActionInfo->subactionPath, 0.0f, 0, 0.0f);
     }
 
     return XR_SUCCESS;
@@ -4008,6 +4126,78 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // xrGetInstanceProcAddr — the main dispatch function
 // ============================================================================
 
+// ============================================================================
+// XR_KHR_convert_timespec_time (bridged to the app's Win32 QPC extension by
+// wineopenxr). CLOCK_MONOTONIC timespec <-> oxrsys XrTime. The session owns the
+// exact time base (monoStartNs_); before a session exists we fall back to a
+// process-global monotonic epoch so conversions never hard-fail.
+// ============================================================================
+static int64_t MonotonicFallbackEpochNs()
+{
+    // Function-local static: C++11 guarantees the initializer runs exactly once
+    // even under concurrent conversion calls before any session exists. Matches
+    // the PreferredVideoCodec() process-lifetime-constant idiom.
+    static const int64_t epochNs = []() -> int64_t {
+        struct timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+    }();
+    return epochNs;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
+    XrInstance instance, const struct timespec* timespecTime, XrTime* time)
+{
+    Instance* inst = GetInstance(instance);
+    if (inst == nullptr)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (timespecTime == nullptr || time == nullptr ||
+        timespecTime->tv_nsec < 0 || timespecTime->tv_nsec >= 1000000000L)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (Session* sess = inst->GetSession())
+    {
+        *time = sess->TimespecToXrTime(*timespecTime);
+    }
+    else
+    {
+        const int64_t monoNs =
+            static_cast<int64_t>(timespecTime->tv_sec) * 1000000000LL + timespecTime->tv_nsec;
+        *time = static_cast<XrTime>(monoNs - MonotonicFallbackEpochNs());
+    }
+    return XR_SUCCESS;
+}
+
+static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
+    XrInstance instance, XrTime time, struct timespec* timespecTime)
+{
+    Instance* inst = GetInstance(instance);
+    if (inst == nullptr)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (timespecTime == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    if (Session* sess = inst->GetSession())
+    {
+        sess->XrTimeToTimespec(time, *timespecTime);
+    }
+    else
+    {
+        const int64_t monoNs = static_cast<int64_t>(time) + MonotonicFallbackEpochNs();
+        timespecTime->tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
+        timespecTime->tv_nsec = static_cast<long>(monoNs % 1000000000LL);
+    }
+    return XR_SUCCESS;
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     XrInstance instance, const char* name, PFN_xrVoidFunction* function);
 
@@ -4136,6 +4326,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetInstanceProcAddr(
     DISPATCH(xrSessionEndDebugUtilsLabelRegionEXT, OxrSessionEndDebugUtilsLabelRegionEXT)
     DISPATCH(xrSessionInsertDebugUtilsLabelEXT, OxrSessionInsertDebugUtilsLabelEXT)
 
+    // Convert timespec time extension (bridged to Win32 QPC by wineopenxr)
+    DISPATCH(xrConvertTimespecTimeToTimeKHR, OxrConvertTimespecTimeToTimeKHR)
+    DISPATCH(xrConvertTimeToTimespecTimeKHR, OxrConvertTimeToTimespecTimeKHR)
+
     // Metal extension
 #ifdef XR_USE_GRAPHICS_API_METAL
     DISPATCH(xrGetMetalGraphicsRequirementsKHR, OxrGetMetalGraphicsRequirementsKHR)
@@ -4199,7 +4393,9 @@ extern "C"
     __attribute__((destructor))
     static void CleanupRuntimeOnUnload()
     {
-        CleanupRuntimeState();
+        // Dylib-unload path: skip backend teardown that joins external runtimes
+        // (alvr_shutdown() hangs here); the process is dying anyway.
+        CleanupRuntimeState(/*forProcessExit=*/true);
     }
 #endif
 

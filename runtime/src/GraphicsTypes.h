@@ -158,6 +158,9 @@ struct FrameSource
     FrameImageSource left = {};
     FrameImageSource right = {};
     bool alphaBlend = false;
+    // Timestamp of the tracking sample the app rendered this frame from
+    // (0 = unknown). Used by backends that pair frames to poses (ALVR).
+    int64_t trackingSampleTimestampNs = 0;
 
     bool IsStereoValid() const
     {
@@ -169,5 +172,6 @@ struct FrameSource
         left.Reset();
         right.Reset();
         alphaBlend = false;
+        trackingSampleTimestampNs = 0;
     }
 };

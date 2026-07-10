@@ -4,8 +4,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -19,7 +21,7 @@
  * use FFmpeg and keep backend-specific graphics readback state behind
  * GraphicsContext. macOS can opt into FFmpeg for codec/pipeline testing.
  */
-class VideoEncoder
+class VideoEncoder : public std::enable_shared_from_this<VideoEncoder>
 {
 public:
     struct FrameMetrics
@@ -101,8 +103,10 @@ public:
 private:
     struct BufferSlot
     {
-        void* pixelBuffer = nullptr;      // CVPixelBufferRef
-        void* metalTexture = nullptr;     // CVMetalTextureRef
+        void* pixelBuffer = nullptr;      // CVPixelBufferRef (NV12)
+        void* yTexture = nullptr;         // CVMetalTextureRef (plane 0, R8)
+        void* cbcrTexture = nullptr;      // CVMetalTextureRef (plane 1, RG8)
+        void* compositeTexture = nullptr; // id<MTLTexture> (BGRA compose target)
         void* tmpLeftTexture = nullptr;   // id<MTLTexture>
         void* tmpRightTexture = nullptr;  // id<MTLTexture>
         void* foveatedScratchTexture = nullptr; // id<MTLTexture>
@@ -128,6 +132,7 @@ private:
         void* scaler = nullptr;           // MPSImageBilinearScale*
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        void* nv12ConvertPipeline = nullptr; // id<MTLComputePipelineState>
     };
 
     struct FfmpegState

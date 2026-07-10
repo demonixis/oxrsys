@@ -14,6 +14,8 @@ set(OXRSYS_RUNTIME_SOURCES
     src/ActionSet.cpp
     src/InputManager.cpp
     src/HandTracker.cpp
+    src/AlvrStreamingBackend.cpp
+    src/AlvrSessionConfig.cpp
     src/StreamingServer.cpp
     src/TrackingReceiver.cpp
     src/VulkanDispatch.cpp
@@ -297,6 +299,9 @@ file(GENERATE
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/oxrsys-runtime.json
     INPUT ${CMAKE_CURRENT_BINARY_DIR}/oxrsys-runtime.json.in.configured
 )
+
+# ALVR server_core streaming backend (optional, macOS only)
+include(${CMAKE_SOURCE_DIR}/cmake/AlvrServerCore.cmake)
 
 # Copy default config file next to the dylib (if not already present)
 add_custom_command(TARGET oxrsys_runtime POST_BUILD

@@ -66,13 +66,13 @@ public final class VideoDecoder: @unchecked Sendable {
         switchCodecIfNeeded(codec)
 
         let nalUnits = splitNalUnits(nalData)
-        for nal in nalUnits {
-            guard !nal.isEmpty else { continue }
-            if codec == .h265 {
+        if codec == .h265 {
+            for nal in nalUnits {
+                guard !nal.isEmpty else { continue }
                 decodeH265Nal(nal, presentationTimeNs: presentationTimeNs)
-            } else {
-                decodeH264Nal(nal, presentationTimeNs: presentationTimeNs)
             }
+        } else {
+            decodeH264AccessUnit(nalUnits, presentationTimeNs: presentationTimeNs)
         }
     }
 
@@ -125,47 +125,64 @@ public final class VideoDecoder: @unchecked Sendable {
             if shouldDropWhileRecovering(isKeyframe: isIrap) {
                 invokeDecodeErrorCallback() // keep nudging for a keyframe (cooldown rate-limits)
             } else {
-                decodeSlice(nal, codec: .h265, presentationTimeNs: presentationTimeNs)
+                decodeAccessUnit([nal], codec: .h265, presentationTimeNs: presentationTimeNs)
             }
         default:
             break
         }
     }
 
-    private func decodeH264Nal(_ nal: Data, presentationTimeNs: Int64) {
-        let nalType = nal[0] & 0x1F
+    /// One decode() call carries one reassembled access unit (frame). Low-latency rate control can
+    /// split a frame into MULTIPLE VCL slice NALs; VideoToolbox must receive them all in a single
+    /// CMSampleBuffer, otherwise decoding each slice alone yields corrupt (green) pictures with no
+    /// decode error. So collect all VCL NALs and decode them together, and make keyframe-recovery
+    /// decisions per access unit.
+    private func decodeH264AccessUnit(_ nalUnits: [Data], presentationTimeNs: Int64) {
+        var vclNals: [Data] = []
+        var hasIdrSlice = false
 
-        switch nalType {
-        case 7:
-            let changed = locked { () -> Bool in
-                guard sps != nal else { return false }
-                sps = nal
-                paramSetsReady = false
-                return true
-            }
-            if changed { print("[VideoDecoder/H.264] Got SPS (\(nal.count) bytes)") }
-        case 8:
-            let shouldCreateSession = locked { () -> Bool in
-                if pps != nal {
-                    pps = nal
+        for nal in nalUnits {
+            guard nal.count > 1 else { continue }
+            let nalType = nal[0] & 0x1F
+
+            switch nalType {
+            case 7:
+                let changed = locked { () -> Bool in
+                    guard sps != nal else { return false }
+                    sps = nal
                     paramSetsReady = false
                     return true
                 }
-                return !paramSetsReady
+                if changed { print("[VideoDecoder/H.264] Got SPS (\(nal.count) bytes)") }
+            case 8:
+                let shouldCreateSession = locked { () -> Bool in
+                    if pps != nal {
+                        pps = nal
+                        paramSetsReady = false
+                        return true
+                    }
+                    return !paramSetsReady
+                }
+                if shouldCreateSession {
+                    print("[VideoDecoder/H.264] Got PPS (\(nal.count) bytes)")
+                    tryCreateFormatDescription()
+                }
+            case 1, 2, 3, 4, 5:
+                // VCL slices (non-IDR + IDR). H.264 IDR (type 5) is the random-access keyframe;
+                // the access unit is a keyframe if ANY of its slices is IDR.
+                if nalType == 5 { hasIdrSlice = true }
+                vclNals.append(nal)
+            default:
+                // AUD(9), SEI(6), etc. - not video data.
+                break
             }
-            if shouldCreateSession {
-                print("[VideoDecoder/H.264] Got PPS (\(nal.count) bytes)")
-                tryCreateFormatDescription()
-            }
-        case 1, 5:
-            // H.264 IDR (type 5) is the random-access keyframe; type 1 is a non-IDR (inter) slice.
-            if shouldDropWhileRecovering(isKeyframe: nalType == 5) {
-                invokeDecodeErrorCallback() // keep nudging for a keyframe (cooldown rate-limits)
-            } else {
-                decodeSlice(nal, codec: .h264, presentationTimeNs: presentationTimeNs)
-            }
-        default:
-            break
+        }
+
+        guard !vclNals.isEmpty else { return }
+        if shouldDropWhileRecovering(isKeyframe: hasIdrSlice) {
+            invokeDecodeErrorCallback() // keep nudging for a keyframe (cooldown rate-limits)
+        } else {
+            decodeAccessUnit(vclNals, codec: .h264, presentationTimeNs: presentationTimeNs)
         }
     }
 
@@ -327,14 +344,20 @@ public final class VideoDecoder: @unchecked Sendable {
         // Without this fallback a rejected 10-bit request fails session creation outright → black
         // screen. The renderer picks its color conversion from the buffer's actual format, so
         // whichever surface we get displays correctly.
+        //
+        // The 8-bit surface is FullRange (not VideoRange): VideoToolbox range-converts to the
+        // requested format, and Shaders.metal's stereoFragmentYCbCr does full-range BT.709 math
+        // (luma used directly, no 16..235 -> 0..255 expansion). Requesting FullRange here makes
+        // the decoded buffers match that shader; VideoRange rendered washed-out through it. Keep
+        // them in sync. The 10-bit Main10 surface stays VideoRange.
         let want10Bit = locked { prefer10Bit && codec == .h265 }
         let candidateFormats: [OSType] = want10Bit
             ? [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-               kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
-            : [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+               kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+            : [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
 
         var newSession: VTDecompressionSession?
-        var chosenFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        var chosenFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         var lastStatus: OSStatus = noErr
         for pixelFormat in candidateFormats {
             let (created, status) = makeDecompressionSession(formatDescription: fmt, pixelFormat: pixelFormat)
@@ -370,7 +393,12 @@ public final class VideoDecoder: @unchecked Sendable {
         print("[VideoDecoder/\(codec.logName)] Decoder session created - \(dim.width)x\(dim.height) (\(bitLabel))")
     }
 
-    private func decodeSlice(_ nalUnit: Data, codec: VideoCodec, presentationTimeNs: Int64) {
+    /// Decode one access unit made of one or more VCL slice NALs. All slices are packed into a
+    /// single CMSampleBuffer (4-byte length-prefixed, AVCC) and submitted as one frame. H.265
+    /// passes one NAL per call; H.264 passes a whole batched access unit.
+    private func decodeAccessUnit(_ vclNals: [Data], codec: VideoCodec, presentationTimeNs: Int64) {
+        guard let firstNal = vclNals.first else { return }
+
         let snapshot = locked { () -> (VTDecompressionSession, CMFormatDescription, Int)? in
             guard activeCodec == codec, let session, let formatDesc else {
                 return nil
@@ -378,8 +406,8 @@ public final class VideoDecoder: @unchecked Sendable {
             sliceCount += 1
             return (session, formatDesc, sliceCount)
         }
-        guard let (session, formatDesc, sliceNumber) = snapshot else {
-            let nalType = nalTypeDescription(nalUnit, codec: codec)
+        guard let (session, formatDesc, frameNumber) = snapshot else {
+            let nalType = nalTypeDescription(firstNal, codec: codec)
             let hasSeenSlices = locked { sliceCount > 0 }
             if !hasSeenSlices {
                 print("[VideoDecoder/\(codec.logName)] Dropping slice - no session yet (NAL type \(nalType))")
@@ -387,15 +415,21 @@ public final class VideoDecoder: @unchecked Sendable {
             return
         }
 
-        let totalSize = 4 + nalUnit.count
+        var totalSize = 0
+        for nal in vclNals { totalSize += 4 + nal.count }
         guard let rawBuffer = malloc(totalSize) else { return }
         let buf = rawBuffer.assumingMemoryBound(to: UInt8.self)
 
-        let len = UInt32(nalUnit.count).bigEndian
-        withUnsafeBytes(of: len) { src in
-            buf.initialize(from: src.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 4)
+        var offset = 0
+        for nal in vclNals {
+            let len = UInt32(nal.count).bigEndian
+            withUnsafeBytes(of: len) { src in
+                (buf + offset).initialize(from: src.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 4)
+            }
+            offset += 4
+            nal.copyBytes(to: buf + offset, count: nal.count)
+            offset += nal.count
         }
-        nalUnit.copyBytes(to: buf + 4, count: nalUnit.count)
 
         var blockBuffer: CMBlockBuffer?
         let bbStatus = CMBlockBufferCreateWithMemoryBlock(
@@ -448,17 +482,17 @@ public final class VideoDecoder: @unchecked Sendable {
             infoFlagsOut: &infoFlags
         )
 
-        let nalType = nalTypeDescription(nalUnit, codec: codec)
+        let nalType = nalTypeDescription(firstNal, codec: codec)
         if decStatus != noErr {
             let errorCount = locked { () -> Int in
                 decodeErrorCount += 1
                 return decodeErrorCount
             }
             if errorCount <= 5 || errorCount % 100 == 0 {
-                print("[VideoDecoder/\(codec.logName)] DecodeFrame error: \(decStatus) (slice #\(sliceNumber), NAL type \(nalType), \(nalUnit.count) bytes)")
+                print("[VideoDecoder/\(codec.logName)] DecodeFrame error: \(decStatus) (frame #\(frameNumber), NAL type \(nalType), \(vclNals.count) slice(s), \(totalSize) bytes)")
             }
-        } else if sliceNumber <= 3 || sliceNumber % 200 == 0 {
-            print("[VideoDecoder/\(codec.logName)] Decoded slice #\(sliceNumber) - NAL type \(nalType), \(nalUnit.count) bytes")
+        } else if frameNumber <= 3 || frameNumber % 200 == 0 {
+            print("[VideoDecoder/\(codec.logName)] Decoded frame #\(frameNumber) - NAL type \(nalType), \(vclNals.count) slice(s), \(totalSize) bytes")
         }
     }
 

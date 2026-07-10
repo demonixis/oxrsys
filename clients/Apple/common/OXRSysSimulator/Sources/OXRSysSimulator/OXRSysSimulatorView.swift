@@ -2,6 +2,7 @@
 
 // OXRSysSimulatorView.swift — Unified viewer UI for simulator and stereo modes.
 
+import Charts
 import MetalKit
 import OXRSysStreaming
 import SwiftUI
@@ -150,7 +151,83 @@ public struct OXRSysSimulatorView: View {
             }
 
             ViewerHUD(model: model, showSettings: $showSettings)
+
+            if model.showStats {
+                VStack {
+                    Spacer()
+                    PerfPlotView(model: model)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
+                }
+            }
         }
+    }
+}
+
+/// Live frame-time and FPS plots (per decoded frame) to visualize streaming stability.
+private struct PerfPlotView: View {
+    let model: SimulatorModel
+
+    private var targetFps: Double { Double(model.refreshRate) }
+    private var targetFrameMs: Double { targetFps > 0 ? 1000.0 / targetFps : 0 }
+
+    var body: some View {
+        let samples = model.frameSamples
+        HStack(spacing: 12) {
+            plotPanel(title: "FRAME TIME (ms)",
+                      samples: samples,
+                      value: { $0.frameTimeMs },
+                      target: targetFrameMs,
+                      color: .orange,
+                      latest: samples.last.map { String(format: "%.1f", $0.frameTimeMs) } ?? "—")
+            plotPanel(title: "FPS",
+                      samples: samples,
+                      value: { $0.fps },
+                      target: targetFps,
+                      color: .green,
+                      latest: samples.last.map { String(format: "%.0f", $0.fps) } ?? "—")
+        }
+        .frame(height: 130)
+    }
+
+    private func plotPanel(title: String,
+                           samples: [SimulatorModel.FrameSample],
+                           value: @escaping (SimulatorModel.FrameSample) -> Double,
+                           target: Double,
+                           color: Color,
+                           latest: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.8))
+                Spacer()
+                Text(latest).font(.caption.monospacedDigit().weight(.bold)).foregroundStyle(color)
+            }
+            Chart {
+                ForEach(Array(samples.enumerated()), id: \.offset) { pair in
+                    LineMark(x: .value("i", pair.offset), y: .value(title, value(pair.element)))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(color)
+                }
+                if target > 0 {
+                    RuleMark(y: .value("target", target))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+            // Fixed-width scope window: newest sample enters on the right, oldest
+            // scrolls off the left. Avoids the shrinking-domain artifact of plotting
+            // against absolute elapsed time.
+            .chartXScale(domain: 0...max(model.maxFrameSamples, 1))
+            .chartXAxis(.hidden)
+            .chartYAxis {
+                AxisMarks(position: .leading) { _ in
+                    AxisGridLine().foregroundStyle(.white.opacity(0.1))
+                    AxisValueLabel().foregroundStyle(.white.opacity(0.6))
+                }
+            }
+        }
+        .padding(10)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

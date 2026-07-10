@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "StreamingServer.h"
+#include "ClientLiveness.h"
+#include "CodecSelect.h"
 #include "Config.h"
+#include "RuntimePlatform.h"
 #include "RuntimeSockets.h"
 #include "RuntimeStatus.h"
 #include "StreamingTransportPolicy.h"
@@ -23,6 +26,17 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+namespace { inline void SetThreadRealtimeQoS() {
+    // Streaming encode/send threads are latency-critical; raise QoS so the scheduler
+    // (notably under Rosetta) does not add wakeup jitter to per-frame delivery.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+} }
+#else
+namespace { inline void SetThreadRealtimeQoS() {} }
+#endif
 
 #if !defined(_WIN32)
 #include <ifaddrs.h>
@@ -47,6 +61,10 @@ constexpr int64_t kStreamConfigAckTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::milliseconds(500)).count();
 constexpr uint32_t kStreamConfigMaxRetries = 2;
+// Treat a connected client as gone if it sends no tracking for this long (abrupt UDP kill).
+constexpr int64_t kClientLivenessTimeoutNs =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::seconds(3)).count();
 
 int64_t SteadyClockNowNs()
 {
@@ -163,81 +181,8 @@ const char* VideoCodecName(oxr::protocol::VideoCodec codec)
     }
 }
 
-uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
-{
-    switch (codec)
-    {
-        case oxr::protocol::VideoCodec::H264:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
-        case oxr::protocol::VideoCodec::AV1:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_AV1;
-        case oxr::protocol::VideoCodec::H265:
-        default:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H265;
-    }
-}
-
-bool RuntimeSupportsVideoCodec(oxr::protocol::VideoCodec codec)
-{
-    return codec == oxr::protocol::VideoCodec::H265 ||
-           codec == oxr::protocol::VideoCodec::H264;
-}
-
-bool ClientSupportsVideoCodec(const oxr::protocol::ClientConnect& clientConnect,
-                              oxr::protocol::VideoCodec codec)
-{
-    if (clientConnect.supportedCodecs == 0)
-    {
-        return codec == oxr::protocol::VideoCodec::H265;
-    }
-    return (clientConnect.supportedCodecs & VideoCodecCapabilityFlag(codec)) != 0;
-}
-
-oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
-{
-    if (value == "h264")
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
-
-oxr::protocol::VideoCodec SelectVideoCodec(const ConfigValues& config,
-                                           const oxr::protocol::ClientConnect& clientConnect)
-{
-    if (config.videoCodec == "auto")
-    {
-        const auto preferred = static_cast<oxr::protocol::VideoCodec>(clientConnect.preferredCodec);
-        if (RuntimeSupportsVideoCodec(preferred) && ClientSupportsVideoCodec(clientConnect, preferred))
-        {
-            return preferred;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-        {
-            return oxr::protocol::VideoCodec::H265;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-        {
-            return oxr::protocol::VideoCodec::H264;
-        }
-        return oxr::protocol::VideoCodec::H265;
-    }
-
-    const oxr::protocol::VideoCodec requested = ParseConfiguredVideoCodec(config.videoCodec);
-    if (RuntimeSupportsVideoCodec(requested) && ClientSupportsVideoCodec(clientConnect, requested))
-    {
-        return requested;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-    {
-        return oxr::protocol::VideoCodec::H265;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
+// Codec negotiation helpers (including the Rosetta H.264-only constraint)
+// live in CodecSelect.h so the ladder is unit-testable on either architecture.
 
 bool IsGraphicsContextValid(const GraphicsContext& context);
 
@@ -890,19 +835,32 @@ void StreamingServer::BroadcastThread()
 {
     oxr::protocol::ServerAnnounce announce = BuildServerAnnounce(false);
 
-    sockaddr_in broadcastAddr = {};
-    broadcastAddr.sin_family = AF_INET;
-    broadcastAddr.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
-    broadcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
+    // Beacon to the subnet broadcast and to loopback: macOS does not loop a
+    // 255.255.255.255 broadcast back to local listeners, so a same-machine client
+    // (the simulator, or a Rosetta/Wine-hosted setup) needs the explicit loopback copy.
+    auto makeTarget = [](in_addr_t addr) {
+        sockaddr_in sa = {};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(oxr::protocol::DISCOVERY_PORT);
+        sa.sin_addr.s_addr = addr;
+        return sa;
+    };
+    const sockaddr_in targets[] = {
+        makeTarget(INADDR_BROADCAST),
+        makeTarget(htonl(INADDR_LOOPBACK)),
+    };
 
     while (running_.load() && state_.load() == State::Broadcasting)
     {
-        oxrsys::runtime_socket::SendTo(broadcastSocket_,
-                                       &announce,
-                                       sizeof(announce),
-                                       0,
-                                       (sockaddr*)&broadcastAddr,
-                                       sizeof(broadcastAddr));
+        for (const sockaddr_in& target : targets)
+        {
+            oxrsys::runtime_socket::SendTo(broadcastSocket_,
+                                           &announce,
+                                           sizeof(announce),
+                                           0,
+                                           (const sockaddr*)&target,
+                                           sizeof(target));
+        }
 
         for (int i = 0; i < 10 && running_.load() && state_.load() == State::Broadcasting; i++)
         {
@@ -1352,6 +1310,7 @@ void StreamingServer::TcpSpatialThread()
 
 void StreamingServer::EncodeThread()
 {
+    SetThreadRealtimeQoS();
     auto telemetry = std::make_shared<EncodeTelemetry>();
     std::shared_ptr<PacketDispatchState> packetDispatchState = packetDispatchState_;
 
@@ -1713,6 +1672,9 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     UpdatePredictionHorizon();
 
     state_.store(State::Connected);
+    lastClientActivityNs_.store(SteadyClockNowNs(), std::memory_order_relaxed);
+    lastTrackingCountSeen_.store(
+        trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -1731,14 +1693,33 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            const oxr::protocol::VideoCodec selectedCodec = oxrsys::SelectVideoCodec(
+                config.videoCodec, clientConnect, oxrsys::runtime_platform::RunningUnderRosetta());
             if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+                selectedCodec != oxrsys::ParseConfiguredVideoCodec(config.videoCodec))
             {
                 spdlog::warn("StreamingServer: client '{}' does not support configured video_codec='{}'; using {}",
                              clientName,
                              config.videoCodec,
                              VideoCodecName(selectedCodec));
+            }
+            if (!oxrsys::ClientSupportsVideoCodec(clientConnect, selectedCodec))
+            {
+                if (clientConnect.supportedCodecs == 0)
+                {
+                    spdlog::warn("StreamingServer: legacy client '{}' predates codec negotiation and the "
+                                 "runtime can only encode {} on this machine; streaming it anyway",
+                                 clientName,
+                                 VideoCodecName(selectedCodec));
+                }
+                else
+                {
+                    spdlog::error("StreamingServer: client '{}' advertises codec capabilities 0x{:x} but the "
+                                  "runtime can only encode {} on this machine; video will likely not decode",
+                                  clientName,
+                                  clientConnect.supportedCodecs,
+                                  VideoCodecName(selectedCodec));
+                }
             }
             activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =
@@ -1876,6 +1857,9 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     UpdatePredictionHorizon();
 
     state_.store(State::Connected);
+    lastClientActivityNs_.store(SteadyClockNowNs(), std::memory_order_relaxed);
+    lastTrackingCountSeen_.store(
+        trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -1894,14 +1878,33 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            const oxr::protocol::VideoCodec selectedCodec = oxrsys::SelectVideoCodec(
+                config.videoCodec, clientConnect, oxrsys::runtime_platform::RunningUnderRosetta());
             if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+                selectedCodec != oxrsys::ParseConfiguredVideoCodec(config.videoCodec))
             {
                 spdlog::warn("StreamingServer: USB client '{}' does not support configured video_codec='{}'; using {}",
                              clientName,
                              config.videoCodec,
                              VideoCodecName(selectedCodec));
+            }
+            if (!oxrsys::ClientSupportsVideoCodec(clientConnect, selectedCodec))
+            {
+                if (clientConnect.supportedCodecs == 0)
+                {
+                    spdlog::warn("StreamingServer: legacy USB client '{}' predates codec negotiation and the "
+                                 "runtime can only encode {} on this machine; streaming it anyway",
+                                 clientName,
+                                 VideoCodecName(selectedCodec));
+                }
+                else
+                {
+                    spdlog::error("StreamingServer: USB client '{}' advertises codec capabilities 0x{:x} but the "
+                                  "runtime can only encode {} on this machine; video will likely not decode",
+                                  clientName,
+                                  clientConnect.supportedCodecs,
+                                  VideoCodecName(selectedCodec));
+                }
             }
             activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =
@@ -2176,8 +2179,16 @@ void StreamingServer::HandleLatencyReport(const oxr::protocol::LatencyReport& re
 
 void StreamingServer::HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request)
 {
+    // ABR counters see every request (they measure client distress); only the
+    // actual force is rate-limited.
     requestKeyframeCount_.fetch_add(1);
     requestKeyframeTotalForAbr_.fetch_add(1);
+
+    if (!keyframeRequestLimiter_.Accept(SteadyClockNowNs()))
+    {
+        spdlog::debug("StreamingServer: Suppressing keyframe request (<500ms since last)");
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(encoderMutex_);
     if (encoder_ != nullptr)
@@ -2541,10 +2552,36 @@ void StreamingServer::UpdatePredictionHorizon()
     trackingReceiver_->SetPredictionHorizonMs(horizonMs);
 }
 
+void StreamingServer::CheckClientLiveness(int64_t nowNs)
+{
+    // Only reached from SendFrame, so liveness is evaluated while the app is
+    // still submitting frames.
+    if (state_.load() != State::Connected)
+    {
+        return;
+    }
+    const uint64_t count = trackingReceiver_ ? trackingReceiver_->GetPacketCount() : 0;
+    const oxrsys::ClientLivenessState prev{
+        lastTrackingCountSeen_.load(std::memory_order_relaxed),
+        lastClientActivityNs_.load(std::memory_order_relaxed)};
+    const oxrsys::ClientLivenessDecision decision =
+        oxrsys::EvaluateClientLiveness(prev, count, nowNs, kClientLivenessTimeoutNs);
+    lastTrackingCountSeen_.store(decision.state.lastCountSeen, std::memory_order_relaxed);
+    lastClientActivityNs_.store(decision.state.lastActivityNs, std::memory_order_relaxed);
+    if (decision.disconnect)
+    {
+        spdlog::warn("StreamingServer: no client tracking for {} ms; treating client as "
+                     "disconnected and resuming broadcast",
+                     (nowNs - prev.lastActivityNs) / 1'000'000);
+        HandleClientDisconnect();
+    }
+}
+
 void StreamingServer::SendFrame(FrameSource frameSource,
                                 const float* renderHeadOrientation,
                                 const float* renderHeadPosition)
 {
+    CheckClientLiveness(SteadyClockNowNs());
     if (!frameSource.IsStereoValid() || state_.load() != State::Connected)
     {
         return;
@@ -2651,6 +2688,7 @@ void StreamingServer::ClearVideoSendQueue()
 
 void StreamingServer::VideoSendThread()
 {
+    SetThreadRealtimeQoS();
     while (running_.load())
     {
         TickPendingStreamConfigTimeout(SteadyClockNowNs());

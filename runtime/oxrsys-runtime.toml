@@ -14,6 +14,9 @@ runtime_enabled = true
 [streaming]
 # H.265 encoding bitrate in Mbps. Lower = less latency but more artifacts.
 # Try 20-30 for lower latency, 50+ for quality.
+# With protocol = "alvr" this value is also synced into ALVR's session.json
+# (video.bitrate.mode.ConstantMbps) at startup, so this file is the single
+# source of truth.
 bitrate_mbps = 50
 
 # Preferred headset display refresh rate. Supported values: 60, 72, 80, 90, 120.
@@ -27,6 +30,8 @@ resolution_scale = 0.75
 # Sets the resolution the runtime renders at (quest2=1440x1584, quest3=1512x1680,
 # avp=3024x3360 per eye). Pick the headset you are streaming to; use resolution_scale
 # above to trim how much of it is encoded and streamed.
+# Applies to the legacy oxrsys protocol; the ALVR backend sizes the stream from
+# its own session template (protocol = "alvr" below).
 render_device = "quest3"
 
 # Lowest encode scale that ABR "full" may request when a reliable USB TCP
@@ -41,6 +46,8 @@ keyframe_interval_sec = 2
 # Video codec: "h265", "h264", or "auto".
 # H.265 remains the default for headset compatibility; H.264 is useful for
 # FFmpeg/Qt simulator validation and clients that advertise H.264 support.
+# Under Rosetta (e.g. the Wine/D3D11 bridge) VideoToolbox cannot encode HEVC,
+# so the runtime negotiates H.264 there regardless of this setting.
 video_codec = "h265"
 
 # Encoder speed preset: "quality", "balanced", "speed"
