@@ -786,30 +786,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CompressionOutputCallback,
         nullptr,
         &compressionSession);
-    const bool lowLatencyRateControl = (status == noErr);
     if (status != noErr)
     {
-        spdlog::warn("VideoEncoder: Session create with low-latency RC failed ({}); retrying without it",
-                     (int)status);
-        NSDictionary* fallbackSpec = @{
-            (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
-            (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
-        };
-        status = VTCompressionSessionCreate(
-            kCFAllocatorDefault,
-            width,
-            height,
-            codecType,
-            (__bridge CFDictionaryRef)fallbackSpec,
-            nullptr,
-            kCFAllocatorDefault,
-            CompressionOutputCallback,
-            nullptr,
-            &compressionSession);
-    }
-    if (status != noErr)
-    {
-        spdlog::error("VideoEncoder: Failed to create compression session: {}", status);
+        // No fallback: a non-LL session has different latency and property
+        // behavior, and the LL create has never failed on supported hardware
+        // (evidence/vt-llrc-probe-rerun-*). Fail loudly instead of degrading.
+        spdlog::error("VideoEncoder: Failed to create low-latency compression session ({}); "
+                      "VideoToolbox low-latency rate control (macOS 13+) is required",
+                      (int)status);
         Shutdown();
         return false;
     }
@@ -916,18 +900,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     SetSessionProperty(compressionSession,
         kVTCompressionPropertyKey_ExpectedFrameRate, fpsRef);
     CFRelease(fpsRef);
-
-    // Sessions created with low-latency RC always reject MaxFrameDelayCount
-    // (-12900, and LL already implies no frame delay); only set it on the
-    // fallback (non-LL) session.
-    if (!lowLatencyRateControl)
-    {
-        int maxFrameDelay = 0;
-        CFNumberRef delayRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &maxFrameDelay);
-        SetSessionProperty(compressionSession,
-            kVTCompressionPropertyKey_MaxFrameDelayCount, delayRef);
-        CFRelease(delayRef);
-    }
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
