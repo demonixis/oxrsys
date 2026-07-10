@@ -934,19 +934,10 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     {
         CFBooleanRef usingHw = nullptr;
-        OSStatus hwStatus = VTSessionCopyProperty(compressionSession,
-            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
-            kCFAllocatorDefault, &usingHw);
-        if (hwStatus == noErr)
-        {
-            const bool hw = (usingHw != nullptr && CFBooleanGetValue(usingHw));
-            spdlog::info("VideoEncoder: hardware-accelerated encoder = {}", hw);
-        }
-        else
-        {
-            spdlog::info("VideoEncoder: hardware-acceleration query unsupported by this encoder (status={})",
-                         (int)hwStatus);
-        }
+        const OSStatus hwStatus = VTSessionCopyProperty(compressionSession,
+            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kCFAllocatorDefault, &usingHw);
+        spdlog::info("VideoEncoder: hardware-accelerated encoder = {}",
+            hwStatus != noErr ? "unknown (query unsupported)" : (usingHw && CFBooleanGetValue(usingHw)) ? "yes" : "no");
         if (usingHw) CFRelease(usingHw);
     }
 
