@@ -2,6 +2,7 @@
 
 #include "StreamingServer.h"
 #include "ClientLiveness.h"
+#include "CodecSelect.h"
 #include "Config.h"
 #include "RuntimePlatform.h"
 #include "RuntimeSockets.h"
@@ -180,94 +181,8 @@ const char* VideoCodecName(oxr::protocol::VideoCodec codec)
     }
 }
 
-uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
-{
-    switch (codec)
-    {
-        case oxr::protocol::VideoCodec::H264:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
-        case oxr::protocol::VideoCodec::AV1:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_AV1;
-        case oxr::protocol::VideoCodec::H265:
-        default:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H265;
-    }
-}
-
-bool RuntimeSupportsVideoCodec(oxr::protocol::VideoCodec codec)
-{
-    // VideoToolbox exposes no HEVC hardware encode under Rosetta, so an
-    // x86_64-translated runtime (the Wine/D3D11 path) can only deliver H.264.
-    if (oxrsys::runtime_platform::RunningUnderRosetta())
-    {
-        return codec == oxr::protocol::VideoCodec::H264;
-    }
-    return codec == oxr::protocol::VideoCodec::H265 ||
-           codec == oxr::protocol::VideoCodec::H264;
-}
-
-bool ClientSupportsVideoCodec(const oxr::protocol::ClientConnect& clientConnect,
-                              oxr::protocol::VideoCodec codec)
-{
-    if (clientConnect.supportedCodecs == 0)
-    {
-        return codec == oxr::protocol::VideoCodec::H265;
-    }
-    return (clientConnect.supportedCodecs & VideoCodecCapabilityFlag(codec)) != 0;
-}
-
-oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
-{
-    if (value == "h264")
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
-
-oxr::protocol::VideoCodec SelectVideoCodec(const ConfigValues& config,
-                                           const oxr::protocol::ClientConnect& clientConnect)
-{
-    if (oxrsys::runtime_platform::RunningUnderRosetta())
-    {
-        // The negotiation ladder below falls back to H.265 for legacy clients
-        // (supportedCodecs == 0); under Rosetta the runtime can only encode
-        // H.264, regardless of configuration or client preference.
-        return oxr::protocol::VideoCodec::H264;
-    }
-    if (config.videoCodec == "auto")
-    {
-        const auto preferred = static_cast<oxr::protocol::VideoCodec>(clientConnect.preferredCodec);
-        if (RuntimeSupportsVideoCodec(preferred) && ClientSupportsVideoCodec(clientConnect, preferred))
-        {
-            return preferred;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-        {
-            return oxr::protocol::VideoCodec::H265;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-        {
-            return oxr::protocol::VideoCodec::H264;
-        }
-        return oxr::protocol::VideoCodec::H265;
-    }
-
-    const oxr::protocol::VideoCodec requested = ParseConfiguredVideoCodec(config.videoCodec);
-    if (RuntimeSupportsVideoCodec(requested) && ClientSupportsVideoCodec(clientConnect, requested))
-    {
-        return requested;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-    {
-        return oxr::protocol::VideoCodec::H265;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
+// Codec negotiation helpers (including the Rosetta H.264-only constraint)
+// live in CodecSelect.h so the ladder is unit-testable on either architecture.
 
 bool IsGraphicsContextValid(const GraphicsContext& context);
 
@@ -1778,14 +1693,33 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            const oxr::protocol::VideoCodec selectedCodec = oxrsys::SelectVideoCodec(
+                config.videoCodec, clientConnect, oxrsys::runtime_platform::RunningUnderRosetta());
             if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+                selectedCodec != oxrsys::ParseConfiguredVideoCodec(config.videoCodec))
             {
                 spdlog::warn("StreamingServer: client '{}' does not support configured video_codec='{}'; using {}",
                              clientName,
                              config.videoCodec,
                              VideoCodecName(selectedCodec));
+            }
+            if (!oxrsys::ClientSupportsVideoCodec(clientConnect, selectedCodec))
+            {
+                if (clientConnect.supportedCodecs == 0)
+                {
+                    spdlog::warn("StreamingServer: legacy client '{}' predates codec negotiation and the "
+                                 "runtime can only encode {} on this machine; streaming it anyway",
+                                 clientName,
+                                 VideoCodecName(selectedCodec));
+                }
+                else
+                {
+                    spdlog::error("StreamingServer: client '{}' advertises codec capabilities 0x{:x} but the "
+                                  "runtime can only encode {} on this machine; video will likely not decode",
+                                  clientName,
+                                  clientConnect.supportedCodecs,
+                                  VideoCodecName(selectedCodec));
+                }
             }
             activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =
@@ -1944,14 +1878,33 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         {
             RenewCallbackAccess();
             const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
+            const oxr::protocol::VideoCodec selectedCodec = oxrsys::SelectVideoCodec(
+                config.videoCodec, clientConnect, oxrsys::runtime_platform::RunningUnderRosetta());
             if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+                selectedCodec != oxrsys::ParseConfiguredVideoCodec(config.videoCodec))
             {
                 spdlog::warn("StreamingServer: USB client '{}' does not support configured video_codec='{}'; using {}",
                              clientName,
                              config.videoCodec,
                              VideoCodecName(selectedCodec));
+            }
+            if (!oxrsys::ClientSupportsVideoCodec(clientConnect, selectedCodec))
+            {
+                if (clientConnect.supportedCodecs == 0)
+                {
+                    spdlog::warn("StreamingServer: legacy USB client '{}' predates codec negotiation and the "
+                                 "runtime can only encode {} on this machine; streaming it anyway",
+                                 clientName,
+                                 VideoCodecName(selectedCodec));
+                }
+                else
+                {
+                    spdlog::error("StreamingServer: USB client '{}' advertises codec capabilities 0x{:x} but the "
+                                  "runtime can only encode {} on this machine; video will likely not decode",
+                                  clientName,
+                                  clientConnect.supportedCodecs,
+                                  VideoCodecName(selectedCodec));
+                }
             }
             activeVideoCodec_.store(selectedCodec);
             uint32_t bitrateMbps =

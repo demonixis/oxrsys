@@ -161,6 +161,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestQuestShellInteraction.cpp
     tests/TestAlvrSessionConfig.cpp
     tests/TestClientLiveness.cpp
+    tests/TestCodecSelect.cpp
     tests/TestSessionStateMachines.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/Android/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
