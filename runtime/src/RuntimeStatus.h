@@ -14,12 +14,17 @@ public:
         uint32_t refreshRateHz = 0;
         uint32_t currentBitrateMbps = 0;
         uint32_t maxBitrateMbps = 0;
+        uint32_t configuredBitrateMbps = 0;
         uint32_t renderWidth = 0;
         uint32_t renderHeight = 0;
         uint32_t encodedWidth = 0;
         uint32_t encodedHeight = 0;
+        std::string videoCodec;
         std::string encoderPreset;
         std::string foveatedEncodingPreset;
+        std::string foveatedEncodingRequestedPreset;
+        std::string foveatedEncodingStatus;
+        bool foveatedEncodingActive = false;
         std::string clientFoveationPreset;
         bool clientUpscaling = false;
         std::string clientReprojectionMode;

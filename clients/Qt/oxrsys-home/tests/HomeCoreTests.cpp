@@ -70,13 +70,16 @@ void testServerConfigRoundTrip()
         resolution_scale = 0.50
         dynamic_resolution_min_scale = 0.55
         refresh_rate_hz = 120
+        video_codec = "h264"
         encoder_preset = "speed"
+        encoder_10bit = true
         foveated_encoding_preset = "medium"
         client_foveation_preset = "high"
         client_upscaling = true
         client_reprojection = "pose_warp"
         abr_mode = "full"
         passthrough_enabled = true
+        app_alpha_blend_passthrough = true
         occlusion_mode = "environment_depth"
         headset_audio = true
 
@@ -95,13 +98,16 @@ void testServerConfigRoundTrip()
     expect(parsed.resolutionScale == 0.50, "Expected resolution parse");
     expect(parsed.dynamicResolutionMinScale == 0.55, "Expected dynamic resolution parse");
     expect(parsed.refreshRateHz == 120, "Expected refresh parse");
+    expect(parsed.videoCodec == "h264", "Expected codec parse");
     expect(parsed.encoderPreset == "speed", "Expected preset parse");
+    expect(parsed.encoder10Bit, "Expected 10-bit encoder parse");
     expect(parsed.foveatedEncodingPreset == "medium", "Expected FFE parse");
     expect(parsed.clientFoveationPreset == "high", "Expected client foveation parse");
     expect(parsed.clientUpscaling, "Expected upscaling parse");
     expect(parsed.clientReprojection == "pose_warp", "Expected reprojection parse");
     expect(parsed.abrMode == "full", "Expected ABR parse");
     expect(parsed.passthroughEnabled, "Expected passthrough parse");
+    expect(parsed.appAlphaBlendPassthrough, "Expected app alpha blend parse");
     expect(parsed.occlusionMode == "environment_depth", "Expected occlusion parse");
     expect(parsed.headsetAudio, "Expected audio parse");
     expect(parsed.spatialEnabled, "Expected spatial enabled parse");
@@ -114,6 +120,8 @@ void testServerConfigRoundTrip()
     expect(merged.contains("transport = \"usb_adb\""), "Expected transport serialization");
     expect(merged.contains("bitrate_mbps = 85"), "Expected bitrate serialization");
     expect(merged.contains("refresh_rate_hz = 120"), "Expected refresh serialization");
+    expect(merged.contains("video_codec = \"h264\""), "Expected codec serialization");
+    expect(merged.contains("encoder_10bit = true"), "Expected 10-bit encoder serialization");
     expect(!merged.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
     expect(merged.contains("foveated_encoding_preset = \"medium\""), "Expected FFE serialization");
     expect(merged.contains("client_foveation_preset = \"high\""), "Expected FFR serialization");
@@ -123,6 +131,8 @@ void testServerConfigRoundTrip()
     expect(merged.contains("dynamic_resolution_min_scale = 0.55"),
            "Expected dynamic resolution serialization");
     expect(merged.contains("passthrough_enabled = true"), "Expected passthrough serialization");
+    expect(merged.contains("app_alpha_blend_passthrough = true"),
+           "Expected app alpha blend serialization");
     expect(!merged.contains("mixed_reality_mode"), "Expected legacy MR mode to be removed");
     expect(merged.contains("occlusion_mode = \"environment_depth\""),
            "Expected occlusion serialization");
@@ -188,6 +198,7 @@ quest_logcat = true
     expect(text.contains("bitrate_mbps = 50"), "Expected default bitrate serialization");
     expect(text.contains("transport = \"auto\""), "Expected default transport serialization");
     expect(text.contains("refresh_rate_hz = 72"), "Expected default refresh serialization");
+    expect(text.contains("video_codec = \"h265\""), "Expected default codec serialization");
     expect(!text.contains("fov_degrees"), "Expected simulator FOV to stay out of Home config");
     expect(!text.contains("Rendering FOV"), "Expected legacy simulator FOV comment removal");
     expect(text.contains("foveated_encoding_preset = \"off\""), "Expected default FFE serialization");
@@ -201,6 +212,8 @@ quest_logcat = true
            "Expected default dynamic resolution serialization");
     expect(text.contains("passthrough_enabled = false"),
            "Expected default passthrough serialization");
+    expect(text.contains("app_alpha_blend_passthrough = false"),
+           "Expected default app alpha blend serialization");
     expect(text.contains("occlusion_mode = \"off\""), "Expected default occlusion serialization");
     expect(text.contains("headset_audio = false"), "Expected default audio serialization");
     expect(text.contains("enabled = false"), "Expected default spatial serialization");
@@ -291,6 +304,15 @@ ABC unauthorized usb:1-1
     expect(devices.first().isUsable(), "Expected authorized adb device");
     expect(!devices.last().isUsable(), "Expected unauthorized adb device");
 
+    const QList<AdbDevice> serverDevices = AdbBridge::parseDevices(R"(
+1WMHH000000000 device usb:336592896X product:hollywood model:Quest_3
+ABC unauthorized usb:1-1
+)");
+    expect(serverDevices.size() == 2, "Expected two adb server devices without header");
+    expect(serverDevices.first().serial == "1WMHH000000000", "Expected adb server serial");
+    expect(serverDevices.first().isUsable(), "Expected authorized adb server device");
+    expect(!serverDevices.last().isUsable(), "Expected unauthorized adb server device");
+
     const QSet<int> ports = AdbBridge::parseReversePorts(R"(
 UsbFfs tcp:9944 tcp:9944
 UsbFfs tcp:9945 tcp:9945
@@ -351,20 +373,29 @@ void testCustomAdbPreferencePersistence()
 
     {
         HomeModel model(nullptr, organization, application);
+        expect(model.adbMode() == "internal", "Expected ADB mode to default to internal");
         model.setCustomAdbPath("/tmp/custom-adb");
+        expect(model.adbMode() == "custom",
+               "Expected setting a custom adb path to select custom mode");
         expect(model.customAdbPath() == "/tmp/custom-adb",
                "Expected custom adb path to update in model");
     }
     {
         HomeModel model(nullptr, organization, application);
+        expect(model.adbMode() == "custom",
+               "Expected custom adb mode to persist in settings");
         expect(model.customAdbPath() == "/tmp/custom-adb",
                "Expected custom adb path to persist in settings");
         model.clearCustomAdbPath();
+        expect(model.adbMode() == "internal",
+               "Expected clearing custom adb to restore internal mode");
         expect(model.customAdbPath().isEmpty(),
                "Expected custom adb path to clear in model");
     }
     {
         HomeModel model(nullptr, organization, application);
+        expect(model.adbMode() == "internal",
+               "Expected internal adb mode to persist");
         expect(model.customAdbPath().isEmpty(),
                "Expected cleared custom adb path to persist");
     }
@@ -426,17 +457,19 @@ void testHomeModelTransportRefreshIsAsyncWithSlowAdb()
 void testApplicationLogFilterDropsAppleShortcutNoise()
 {
     const QString filtered = filteredApplicationLogText(QString::fromUtf8(R"(boot ok
-Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
-Error registering app with intents framework: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
-Will NOT re-try to establish the connection
-real runtime error
-)"));
+	Unable to get synchronousRemoteObjectProxy, error: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+	Error registering app with intents framework: Error Domain=NSCocoaErrorDomain Code=4097 "connection to service named com.apple.linkd.autoShortcut"
+	Will NOT re-try to establish the connection
+	Unable to obtain a task name port right for pid 409: (os/kern) failure (0x5)
+	real runtime error
+	)"));
 
     expect(filtered.contains("boot ok"), "Expected ordinary application log line to remain");
     expect(filtered.contains("real runtime error"), "Expected real application error to remain");
     expect(!filtered.contains("autoShortcut"), "Expected Apple shortcut service noise to be dropped");
     expect(!filtered.contains("intents framework"), "Expected App Intents registration noise to be dropped");
     expect(!filtered.contains("Will NOT re-try"), "Expected retry footer noise to be dropped");
+    expect(!filtered.contains("task name port"), "Expected task-port diagnostic noise to be dropped");
 }
 
 void testRuntimeActivityParsing()
@@ -453,12 +486,17 @@ void testRuntimeActivityParsing()
         "refresh_rate_hz": 90,
         "current_bitrate_mbps": 42,
         "max_bitrate_mbps": 50,
+        "configured_bitrate_mbps": 80,
         "render_width": 3664,
         "render_height": 1920,
         "encoded_width": 2752,
         "encoded_height": 1440,
+        "video_codec": "h264",
         "encoder_preset": "quality",
         "foveated_encoding_preset": "medium",
+        "foveated_encoding_requested_preset": "medium",
+        "foveated_encoding_status": "active",
+        "foveated_encoding_active": true,
         "client_foveation_preset": "high",
         "client_upscaling": true,
         "client_reprojection_mode": "pose_warp",
@@ -498,8 +536,17 @@ void testRuntimeActivityParsing()
     expect(activity.deviceDisplayName() == "Quest", "Expected Quest device display");
     expect(activity.hasStreamingStats, "Expected stats");
     expect(activity.streamingStats.refreshRateHz == 90, "Expected refresh stats");
+    expect(activity.streamingStats.currentBitrateMbps == 42, "Expected bitrate stats");
+    expect(activity.streamingStats.maxBitrateMbps == 50, "Expected effective max bitrate stats");
+    expect(activity.streamingStats.configuredBitrateMbps == 80,
+           "Expected configured bitrate stats");
+    expect(activity.streamingStats.videoCodec == "h264", "Expected codec stats");
     expect(activity.streamingStats.encoderPreset == "quality", "Expected encoder preset stats");
     expect(activity.streamingStats.foveatedEncodingPreset == "medium", "Expected FFE stats");
+    expect(activity.streamingStats.foveatedEncodingRequestedPreset == "medium",
+           "Expected requested FFE stats");
+    expect(activity.streamingStats.foveatedEncodingStatus == "active", "Expected FFE status stats");
+    expect(activity.streamingStats.foveatedEncodingActive, "Expected FFE active stats");
     expect(activity.streamingStats.clientFoveationPreset == "high", "Expected FFR stats");
     expect(activity.streamingStats.clientUpscaling, "Expected upscaling stats");
     expect(activity.streamingStats.clientReprojectionMode == "pose_warp",

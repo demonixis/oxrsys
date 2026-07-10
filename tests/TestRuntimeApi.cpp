@@ -4,14 +4,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <openxr/openxr.h>
-// Enable the XR_KHR_convert_timespec_time function-pointer declarations
-// (PFN_xrConvertTimespecTimeToTimeKHR et al.) in openxr_platform.h, mirroring the
-// runtime's own EntryPoint.cpp so the loader-level conversion path can be tested.
-#include <ctime>
-#ifndef XR_USE_TIMESPEC
-#define XR_USE_TIMESPEC
-#endif
-#include <openxr/openxr_platform.h>
+#include "OpenXRPlatform.h"
 
 #include <algorithm>
 #include <array>
@@ -96,7 +89,7 @@ std::filesystem::path RuntimeConfigPath()
            "Library/Application Support/OXRSys/oxrsys-runtime.toml";
 }
 
-void WriteRuntimeConfig(bool passthroughEnabled)
+void WriteRuntimeConfig(bool passthroughEnabled, bool appAlphaBlendPassthrough = false)
 {
     const std::filesystem::path path = RuntimeConfigPath();
     std::filesystem::create_directories(path.parent_path());
@@ -105,6 +98,9 @@ void WriteRuntimeConfig(bool passthroughEnabled)
     file << "[streaming]\n"
          << "passthrough_enabled = "
          << (passthroughEnabled ? "true" : "false")
+         << "\n"
+         << "app_alpha_blend_passthrough = "
+         << (appAlphaBlendPassthrough ? "true" : "false")
          << "\n"
          << "[logging]\n"
          << "file_logging = false\n";
@@ -552,9 +548,9 @@ TEST_CASE("Instance view and blend APIs reject missing output pointers", "[runti
     xrDestroyInstance(instance);
 }
 
-TEST_CASE("Environment blend modes are stable for an instance after config reload", "[runtime][passthrough]")
+TEST_CASE("Alpha blend modes are stable for an instance after config reload", "[runtime][passthrough]")
 {
-    WriteRuntimeConfig(true);
+    WriteRuntimeConfig(true, true);
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(createInfo.applicationInfo.applicationName, "stable_blend_modes_test",
@@ -588,6 +584,30 @@ TEST_CASE("Environment blend modes are stable for an instance after config reloa
                     XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) == modes.end());
 
     xrDestroyInstance(nextInstance);
+}
+
+TEST_CASE("Passthrough underlay alone does not advertise alpha blend", "[runtime][passthrough]")
+{
+    WriteRuntimeConfig(true, false);
+
+    XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
+    std::strncpy(createInfo.applicationInfo.applicationName, "passthrough_underlay_test",
+                 XR_MAX_APPLICATION_NAME_SIZE);
+    createInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+
+    XrInstance instance = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateInstance(&createInfo, &instance));
+
+    XrSystemGetInfo systemGetInfo = {XR_TYPE_SYSTEM_GET_INFO};
+    systemGetInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    XrSystemId systemId = XR_NULL_SYSTEM_ID;
+    XR_CHECK(xrGetSystem(instance, &systemGetInfo, &systemId));
+
+    std::vector<XrEnvironmentBlendMode> modes = EnumerateBlendModes(instance, systemId);
+    CHECK(std::find(modes.begin(), modes.end(),
+                    XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) == modes.end());
+
+    xrDestroyInstance(instance);
 }
 
 TEST_CASE("Runtime accepts Unity metal extension alias", "[runtime][loader]")
@@ -3120,4 +3140,44 @@ TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime]
     XR_CHECK(xrReleaseSwapchainImage(staticSwapchain, nullptr));
     CHECK(xrAcquireSwapchainImage(staticSwapchain, nullptr, &extraIndex) == XR_ERROR_CALL_ORDER_INVALID);
     XR_CHECK(xrDestroySwapchain(staticSwapchain));
+}
+
+TEST_CASE("Swapchain creation propagates backend initialization failures", "[runtime][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = 0;
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+
+    XrSwapchain swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}
+
+TEST_CASE("Unsupported swapchain mip counts report feature unsupported", "[runtime][swapchain]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    createInfo.format = SelectColorSwapchainFormat(context.session);
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 2;
+
+    XrSwapchain swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
 }

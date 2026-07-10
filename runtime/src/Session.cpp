@@ -2,6 +2,7 @@
 
 #include "Session.h"
 #include "CompositionLayerAlpha.h"
+#include "Config.h"
 #include "Instance.h"
 #include "Runtime.h"
 #include "Swapchain.h"
@@ -12,7 +13,6 @@
 #ifdef OXRSYS_HAS_ALVR
 #include "AlvrStreamingBackend.h"
 #endif
-#include "Config.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -21,8 +21,6 @@
 #include <numeric>
 #include <thread>
 #include <utility>
-
-#include <openxr/openxr_platform.h>
 
 namespace
 {
@@ -158,7 +156,26 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     TransitionState(XR_SESSION_STATE_IDLE);
     TransitionState(XR_SESSION_STATE_READY);
 
-    spdlog::info("OXRSys: Vulkan session created");
+    const char* apiName = "unknown";
+    switch (graphicsContext_.api)
+    {
+        case GraphicsApi::Metal:
+            apiName = "Metal";
+            break;
+        case GraphicsApi::Vulkan:
+            apiName = "Vulkan";
+            break;
+        case GraphicsApi::OpenGL:
+            apiName = "OpenGL";
+            break;
+        case GraphicsApi::D3D11:
+            apiName = "D3D11";
+            break;
+        case GraphicsApi::D3D12:
+            apiName = "D3D12";
+            break;
+    }
+    spdlog::info("OXRSys: {} session created", apiName);
 }
 
 Session::~Session()
@@ -707,7 +724,21 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     {
         frameSource.trackingSampleTimestampNs = inputManager_->GetLastTrackingSampleTimestampNs();
         auto sendStart = Clock::now();
-        streamingServer_->SendFrame(std::move(frameSource));
+        if (lastRenderHasPose_)
+        {
+            const float renderHeadOrientation[4] = {
+                lastRenderHeadPose_.orientation.x, lastRenderHeadPose_.orientation.y,
+                lastRenderHeadPose_.orientation.z, lastRenderHeadPose_.orientation.w};
+            const float renderHeadPosition[3] = {
+                lastRenderHeadPose_.position.x, lastRenderHeadPose_.position.y,
+                lastRenderHeadPose_.position.z};
+            streamingServer_->SendFrame(std::move(frameSource), renderHeadOrientation,
+                                        renderHeadPosition);
+        }
+        else
+        {
+            streamingServer_->SendFrame(std::move(frameSource));
+        }
         double enqueueMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
             Clock::now() - sendStart).count();
 
@@ -817,6 +848,18 @@ XrResult Session::ValidateProjectionLayer(const XrCompositionLayerProjection& la
         auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(view.subImage.swapchain));
         FrameImageSource imageSource =
             swapchain->GetLastReleasedFrameImageSource(view.subImage.imageArrayIndex);
+        // Honor the per-view sub-rectangle: UE packs both eyes into one swapchain side-by-side.
+        // Normalize to the min/max covered region first: ValidateSwapchainSubImage tolerates
+        // Y-flipped rects (negative extent, OpenComposite), which would otherwise wrap to
+        // enormous unsigned crop dimensions and drop every frame.
+        const int64_t rectX0 = static_cast<int64_t>(view.subImage.imageRect.offset.x);
+        const int64_t rectY0 = static_cast<int64_t>(view.subImage.imageRect.offset.y);
+        const int64_t rectX1 = rectX0 + static_cast<int64_t>(view.subImage.imageRect.extent.width);
+        const int64_t rectY1 = rectY0 + static_cast<int64_t>(view.subImage.imageRect.extent.height);
+        imageSource.sourceX = static_cast<uint32_t>(std::min(rectX0, rectX1));
+        imageSource.sourceY = static_cast<uint32_t>(std::min(rectY0, rectY1));
+        imageSource.sourceWidth = static_cast<uint32_t>(std::max(rectX0, rectX1) - std::min(rectX0, rectX1));
+        imageSource.sourceHeight = static_cast<uint32_t>(std::max(rectY0, rectY1) - std::min(rectY0, rectY1));
         if (viewIndex == 0)
         {
             frameSource.left = std::move(imageSource);
@@ -900,6 +943,12 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     }
 
     inputManager_->GetEyeViews(views, 2);
+
+    // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
+    // tagged with it at submission instead of a later re-prediction.
+    lastRenderHeadPose_ = inputManager_->GetHeadPose();
+    lastRenderHasPose_ = true;
+
     return XR_SUCCESS;
 }
 
@@ -985,8 +1034,29 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    if (createInfo->type != XR_TYPE_SWAPCHAIN_CREATE_INFO ||
+        createInfo->width == 0 ||
+        createInfo->height == 0 ||
+        createInfo->faceCount != 1 ||
+        createInfo->arraySize == 0 ||
+        createInfo->sampleCount != 1)
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (createInfo->mipCount != 1)
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
 
+    *swapchain = XR_NULL_HANDLE;
     auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
+    XrResult initializationResult = sc->InitializationResult();
+    if (initializationResult != XR_SUCCESS)
+    {
+        return initializationResult;
+    }
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
     swapchains_.push_back(std::move(sc));
     return XR_SUCCESS;
@@ -1108,10 +1178,12 @@ void Session::StartStreamingIfNeeded()
     }
     streamingServer_->SetGraphicsContext(graphicsContext_);
 
-    // Use default resolution until first swapchain is created
-    // Will be updated when we know the actual render resolution
-    uint32_t width = 1512;
-    uint32_t height = 1680;
+    // Per-eye render resolution for the configured render_device — this must match the
+    // recommendedImageRect the app renders into (see RenderBaseEyeResolution), otherwise the
+    // encoder is sized off a stale default and the stream stays at that resolution.
+    uint32_t width = 0;
+    uint32_t height = 0;
+    RenderBaseEyeResolution(width, height);
     uint32_t refreshHz = std::max(Config::Get().GetValues().refreshRateHz, 1u);
 
     if (streamingServer_->Start(width, height, refreshHz))

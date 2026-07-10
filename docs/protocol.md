@@ -56,7 +56,7 @@ The handshake exposes:
 - refresh rate
 - server and device names; Android clients send the OpenXR `systemName` in
   `ClientConnect.deviceName`
-- preferred codec and bitrate limits
+- preferred codec, supported codec mask, and bitrate limits
 - server feature flags for foveated encoding, client foveation override, client upscaling, stream
   reconfiguration, passthrough, occlusion, spatial/scene support, and reserved headset audio
 - client capability flags for foveated encoding, client foveation, client upscaling, stream
@@ -85,11 +85,29 @@ no newly decoded video frame is ready:
 bitrate cap, so the runtime uses `streaming.bitrate_mbps` from its config. The
 runtime accepts configured bitrates from `1` to `200` Mbps.
 
+`ClientConnect.supportedCodecs` reuses the former v1.1 reserved field at byte offset 88.
+A value of `0` is the legacy behavior and means H.265-only. New clients set
+`CLIENT_CODEC_CAPABILITY_H265`, `CLIENT_CODEC_CAPABILITY_H264`, or future codec bits. The runtime
+keeps H.265 as the default and only selects H.264 when the client explicitly advertises H.264
+support. `ClientConnect.preferredCodec` is honored only when `streaming.video_codec = "auto"` and the
+preferred codec is implemented by both sides. Android and shared Apple clients advertise H.264 and
+H.265 support while keeping H.265 as their preferred codec. Each video packet/NAL header carries the
+selected `VideoCodec`, so the wire format does not need a codec-specific stream.
+
+`CLIENT_CAPABILITY_TEN_BIT_ENCODING` separately advertises HEVC Main10 decode support. The runtime
+uses Main10 only when this capability is present, `streaming.encoder_10bit` is enabled, and H.265 is
+the negotiated codec. H.264 and clients without the capability receive 8-bit video.
+
+Apple VideoToolbox streams use BT.709 SDR primaries, transfer function, and YCbCr matrix with
+limited/video-range samples. Clients that sample decoder planes directly must expand the applicable
+8-bit or 10-bit limited range before converting to RGB. This color contract does not change the
+codec negotiation or encoded bandwidth.
+
 The runtime announces the configured preferred headset refresh rate. Current Home-supported values
 are `60`, `72`, `80`, `90`, and `120` Hz. Quest clients request the announced value through
-`XR_FB_display_refresh_rate` when available and report the active rate back in
-`ClientConnect.refreshRateHz`; the runtime uses that reported value for encode cadence and pose
-prediction.
+`XR_FB_display_refresh_rate` when available, read the active headset rate again immediately before
+`ClientConnect`, and report that value in `ClientConnect.refreshRateHz`; the runtime uses the
+reported value for encode cadence and pose prediction.
 
 Foveated encoding uses an ALVR-style axis-aligned distortion transform before video encode on
 supported server paths. The announced presets currently map to:
@@ -123,6 +141,9 @@ Current codec identifiers:
 - `H264`
 - `AV1`
 
+`AV1` is reserved in the enum and packet headers but is not selected by the runtime until an encoder
+and client decoder path are implemented and verified.
+
 USB TCP video sends complete encoded NAL units as `VideoNal` records. It does not use UDP fragmentation, FEC, or NACK recovery.
 
 The runtime currently targets low-latency headset streaming. Frame submission and encoded-video
@@ -134,10 +155,12 @@ The current stream also includes two recovery and timing helpers:
 
 - `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
-- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by the app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. If passthrough is active and no alpha flags have appeared in the stream, Quest clients may temporarily use the same black-key fallback for transparent-clear AR demos.
+- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
 
 For passthrough, `SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH` means the desktop runtime is configured
-to allow app-requested passthrough. The headset still has to advertise
+to keep a headset passthrough underlay available while streaming. Separately,
+`streaming.app_alpha_blend_passthrough` controls whether the runtime advertises OpenXR alpha-blend
+environment modes and marks source-alpha frames for explicit MR apps. The headset still has to advertise
 `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH`, which the Android client sets only after its local
 OpenXR runtime exposes `XR_FB_passthrough`, reports `supportsPassthrough`, and successfully creates
 the passthrough objects. Runtime status reports `passthrough_ready` only when both sides are true.

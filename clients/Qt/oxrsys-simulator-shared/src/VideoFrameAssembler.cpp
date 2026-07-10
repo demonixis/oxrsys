@@ -146,6 +146,7 @@ void VideoFrameAssembler::reset()
     pendingReceivedPackets_ = 0;
     pendingPresentationTimeNs_ = 0;
     pendingLastPacketTimeNs_ = 0;
+    pendingCodec_ = oxr::protocol::VideoCodec::H265;
     pendingFrameData_.clear();
     pendingPacketSizes_.clear();
     pendingPacketReceived_.clear();
@@ -173,6 +174,7 @@ void VideoFrameAssembler::startFrame(const oxr::protocol::VideoPacketHeader& hea
     pendingReceivedPackets_ = 0;
     pendingPresentationTimeNs_ = header.presentationTimeNs;
     pendingLastPacketTimeNs_ = receiveTimeNs;
+    pendingCodec_ = static_cast<oxr::protocol::VideoCodec>(header.codec);
     pendingRecoveredWithFec_ = false;
     pendingFrameData_.fill(0, static_cast<qsizetype>(pendingTotalPackets_) *
                                   static_cast<qsizetype>(oxr::protocol::MAX_PACKET_PAYLOAD));
@@ -321,6 +323,7 @@ AssembledVideoFrame VideoFrameAssembler::deliverPendingFrame(int64_t receiveTime
         pendingFrameIndex_,
         pendingPresentationTimeNs_,
         receiveTimeNs,
+        pendingCodec_,
         pendingRecoveredWithFec_,
     };
 }

@@ -32,6 +32,11 @@ std::filesystem::path RuntimeStatusPathForHome(const std::filesystem::path& home
 #if defined(__APPLE__)
     return home / "Library/Application Support/OXRSys/runtime_status.json";
 #else
+    if (const char* xdgStateHome = std::getenv("XDG_STATE_HOME");
+        xdgStateHome != nullptr && xdgStateHome[0] != '\0')
+    {
+        return std::filesystem::path(xdgStateHome) / "oxrsys/runtime_status.json";
+    }
     return home / ".local/state/oxrsys/runtime_status.json";
 #endif
 }
@@ -56,12 +61,17 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     stats.refreshRateHz = 90;
     stats.currentBitrateMbps = 42;
     stats.maxBitrateMbps = 50;
+    stats.configuredBitrateMbps = 80;
     stats.renderWidth = 3664;
     stats.renderHeight = 1920;
     stats.encodedWidth = 2752;
     stats.encodedHeight = 1440;
+    stats.videoCodec = "h264";
     stats.encoderPreset = "quality";
     stats.foveatedEncodingPreset = "medium";
+    stats.foveatedEncodingRequestedPreset = "medium";
+    stats.foveatedEncodingStatus = "active";
+    stats.foveatedEncodingActive = true;
     stats.clientFoveationPreset = "high";
     stats.clientUpscaling = true;
     stats.clientReprojectionMode = "pose_warp";
@@ -118,8 +128,14 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(streamingStatus, "\"sample_unix_ms\": 1800000000000"));
     CHECK(Contains(streamingStatus, "\"refresh_rate_hz\": 90"));
     CHECK(Contains(streamingStatus, "\"current_bitrate_mbps\": 42"));
+    CHECK(Contains(streamingStatus, "\"max_bitrate_mbps\": 50"));
+    CHECK(Contains(streamingStatus, "\"configured_bitrate_mbps\": 80"));
+    CHECK(Contains(streamingStatus, "\"video_codec\": \"h264\""));
     CHECK(Contains(streamingStatus, "\"encoder_preset\": \"quality\""));
     CHECK(Contains(streamingStatus, "\"foveated_encoding_preset\": \"medium\""));
+    CHECK(Contains(streamingStatus, "\"foveated_encoding_requested_preset\": \"medium\""));
+    CHECK(Contains(streamingStatus, "\"foveated_encoding_status\": \"active\""));
+    CHECK(Contains(streamingStatus, "\"foveated_encoding_active\": true"));
     CHECK(Contains(streamingStatus, "\"client_foveation_preset\": \"high\""));
     CHECK(Contains(streamingStatus, "\"client_upscaling\": true"));
     CHECK(Contains(streamingStatus, "\"client_reprojection_mode\": \"pose_warp\""));

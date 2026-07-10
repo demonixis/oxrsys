@@ -9,6 +9,16 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+#ifndef OXRSYS_BUILD
+#define OXRSYS_BUILD 0
+#endif
+#ifndef OXRSYS_ANDROID_STABLE_RELEASE
+#define OXRSYS_ANDROID_STABLE_RELEASE 0
+#endif
+#ifndef OXRSYS_ANDROID_BUILD_PROFILE_LABEL
+#define OXRSYS_ANDROID_BUILD_PROFILE_LABEL "Unknown"
+#endif
+
 struct AppState
 {
     oxr::XrApp xrApp;
@@ -51,7 +61,10 @@ static void app_handle_cmd(struct android_app* app, int32_t cmd)
 
 void android_main(struct android_app* app)
 {
-    LOGI("OXRSys Android starting...");
+    LOGI("OXRSys Android starting (build=%d profile=%s stableRelease=%d)...",
+         OXRSYS_BUILD,
+         OXRSYS_ANDROID_BUILD_PROFILE_LABEL,
+         OXRSYS_ANDROID_STABLE_RELEASE);
 
     AppState appState;
 

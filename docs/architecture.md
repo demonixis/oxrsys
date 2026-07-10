@@ -2,7 +2,7 @@
 
 ## Overview
 
-OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux is being added through Vulkan + FFmpeg scaffolding, and Windows is still a runtime-backend scaffold. Shared platform, config, status, and socket helpers are kept portable so platform-specific backends can be added without spreading OS calls through the runtime. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
+OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux has Vulkan + FFmpeg streaming and a first OpenGL GLX backend, and Windows has Vulkan plus Direct3D 11/12 runtime backends. Shared platform, config, status, codec, and socket helpers are kept portable so platform-specific backends can be added without spreading OS calls through the runtime. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
 
 ## Repository Layout
 
@@ -42,7 +42,8 @@ The runtime keeps these internal boundaries explicit:
 
 - `RuntimePlatform`: config/state roots, module directory detection, and process ids.
 - `RuntimeSockets`: UDP/TCP socket creation, options, timeout, close, and best-effort send/receive wrappers.
-- `GraphicsContext`: typed Metal/Vulkan session context passed from OpenXR graphics bindings into sessions, swapchains, streaming, and encoders.
+- `GraphicsContext`: typed Metal, Vulkan, OpenGL, D3D11, and D3D12 session context passed from OpenXR graphics bindings into sessions, swapchains, streaming, and encoders.
+- `SwapchainCommon`: shared OpenXR swapchain state, acquire/wait/release ordering, and backend dispatch; graphics API files own only resource creation, image enumeration, destruction, and release-time snapshots.
 - `FrameSource`: the pair of backend-native frame resources owned by the latest-frame queue until the encoder consumes or replaces them.
 - `VulkanDispatch`: Vulkan function dispatch resolved from app-provided or already-loaded process entry points without linking the runtime to the Vulkan loader.
 
@@ -60,7 +61,21 @@ Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enab
 
 The v2 path stores the app's `pfnGetInstanceProcAddr`. The v1 path first reuses that dispatch if available, then looks for `vkGetInstanceProcAddr` only in already-loaded process modules: `dlsym(RTLD_DEFAULT, ...)` on POSIX and `GetModuleHandleW(L"vulkan-1.dll")` plus `GetProcAddress` on Windows. It intentionally does not load a Vulkan loader itself.
 
-On Apple, Vulkan images can use `VK_EXT_metal_objects` to bridge Vulkan-backed images to Metal textures. On Linux, the first-pass Vulkan swapchain allocates Vulkan images directly and the FFmpeg encoder path is wired, with real Vulkan image readback still pending.
+Vulkan swapchains allocate runtime-owned `VkImage` objects with transfer-source usage for color formats. When a color image is released, the runtime submits an image-to-buffer copy into a host-visible staging buffer and stores one `FrameImageSource` per array layer. The FFmpeg encoder waits on that source fence outside `Session::EndFrame()`, maps the staging buffer, converts RGBA/BGRA through `swscale`, and encodes H.264 or H.265. If readback resources or snapshot leases are unavailable, the streaming frame is dropped instead of blocking frame submission.
+
+On macOS, Vulkan is intended for MoltenVK applications and validation builds with `-DOXRSYS_VIDEO_ENCODER=FFMPEG`; the native Metal + VideoToolbox path remains the default Apple streaming path. `VK_EXT_metal_objects` interop remains optional and is not required for the Vulkan FFmpeg readback path.
+
+### OpenGL
+
+OpenGL support is Linux-first through `XR_KHR_opengl_enable` and `XrGraphicsBindingOpenGLXlibKHR`. The runtime creates `XrSwapchainImageOpenGLKHR` textures for common color and depth internal formats, snapshots released color layers through an FBO into per-layer PBO readback slots, and resolves only fences that are already signaled. Ready PBO data is copied into `FrameImageSource` CPU snapshots for the same FFmpeg RGBA/BGRA to YUV path used by Vulkan.
+
+macOS does not advertise OpenGL because `XR_KHR_opengl_enable` has no standard CGL binding. Windows OpenGL/WGL is intentionally left for a later backend milestone.
+
+### Direct3D
+
+Direct3D support is Windows-only through `XR_KHR_D3D11_enable` and `XR_KHR_D3D12_enable`. The runtime accepts app-owned D3D11 devices and D3D12 device/queue bindings, creates runtime-owned DXGI swapchain textures/resources, and exposes them through `XrSwapchainImageD3D11KHR` or `XrSwapchainImageD3D12KHR`.
+
+D3D11 snapshots copy the released array layer into a staging texture. D3D12 snapshots enqueue a copy into a readback buffer and signal a fence. The FFmpeg encoder waits/maps outside `Session::EndFrame()`, converts DXGI RGBA/BGRA readback data through the same `swscale` path as Vulkan/OpenGL, and encodes H.264 or H.265.
 
 ## Input And Actions
 
@@ -96,4 +111,4 @@ For terminal-launched applications, use `XR_RUNTIME_JSON`. On macOS, `scripts/ox
 
 The native Home app in `clients/Apple/oxrsys-home/` manages the macOS workflow. The Qt Home app in `clients/Qt/oxrsys-home/` owns Linux runtime registration and can manually launch apps with the user-selected `XR_RUNTIME_JSON` on other desktop platforms.
 
-The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart. Headset and simulator clients own their eye FOV and send it through tracking metadata; the runtime config only keeps an internal fallback for clients that omit it.
+The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart. `streaming.video_codec` selects `h265`, `h264`, or `auto`; H.265 remains the default and the runtime only selects H.264 when the connected client advertises support. Headset and simulator clients own their eye FOV and send it through tracking metadata; the runtime config only keeps an internal fallback for clients that omit it.

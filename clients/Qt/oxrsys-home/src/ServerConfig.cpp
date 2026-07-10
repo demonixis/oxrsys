@@ -67,6 +67,11 @@ bool isAbrMode(const QString& value)
     return value == "off" || value == "bitrate" || value == "full";
 }
 
+bool isVideoCodec(const QString& value)
+{
+    return value == "h265" || value == "h264" || value == "auto";
+}
+
 bool isOcclusionMode(const QString& value)
 {
     return value == "off" || value == "scene_mesh" || value == "environment_depth";
@@ -247,15 +252,20 @@ QString ServerConfig::defaultText()
         "refresh_rate_hz = 72\n"
         "resolution_scale = 0.75\n"
         "dynamic_resolution_min_scale = 0.50\n"
+        "render_device = \"quest3\"\n"
         "keyframe_interval_sec = 2\n"
+        "video_codec = \"h265\"\n"
         "encoder_preset = \"balanced\"\n"
+        "encoder_10bit = false\n"
         "transport = \"auto\"\n"
         "foveated_encoding_preset = \"off\"\n"
         "client_foveation_preset = \"auto\"\n"
         "client_upscaling = false\n"
+        "client_sharpening = 0.0\n"
         "client_reprojection = \"pose\"\n"
         "abr_mode = \"bitrate\"\n"
         "passthrough_enabled = false\n"
+        "app_alpha_blend_passthrough = false\n"
         "occlusion_mode = \"off\"\n"
         "headset_audio = false\n"
         "\n"
@@ -307,6 +317,12 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.dynamicResolutionMinScale = dynamicResolutionMinScale;
     }
 
+    const QString renderDevice = stringValue("render_device", text);
+    if (renderDevice == "quest2" || renderDevice == "quest3" || renderDevice == "avp")
+    {
+        config.renderDevice = renderDevice;
+    }
+
     const int keyframeInterval = rawValue("keyframe_interval_sec", text).toInt(&ok);
     if (ok && keyframeInterval >= 1 && keyframeInterval <= 10)
     {
@@ -317,6 +333,18 @@ ServerConfig ServerConfig::parse(const QString& text)
     if (preset == "quality" || preset == "balanced" || preset == "speed")
     {
         config.encoderPreset = preset;
+    }
+
+    const bool encoder10Bit = boolValue("encoder_10bit", text, &ok);
+    if (ok)
+    {
+        config.encoder10Bit = encoder10Bit;
+    }
+
+    const QString videoCodec = stringValue("video_codec", text);
+    if (isVideoCodec(videoCodec))
+    {
+        config.videoCodec = videoCodec;
     }
 
     const QString transportValue = stringValue("transport", text);
@@ -343,6 +371,12 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.clientUpscaling = clientUpscaling;
     }
 
+    const double clientSharpening = rawValue("client_sharpening", text).toDouble(&ok);
+    if (ok && clientSharpening >= 0.0 && clientSharpening <= 1.0)
+    {
+        config.clientSharpening = clientSharpening;
+    }
+
     const QString clientReprojection = stringValue("client_reprojection", text);
     if (isClientReprojection(clientReprojection))
     {
@@ -355,18 +389,30 @@ ServerConfig ServerConfig::parse(const QString& text)
         config.abrMode = abrMode;
     }
 
-    ok = false;
     const bool passthroughEnabled = boolValue("passthrough_enabled", text, &ok);
+    const bool hasPassthroughEnabled = ok;
     if (ok)
     {
         config.passthroughEnabled = passthroughEnabled;
     }
-    else
+
+    const bool appAlphaBlendPassthrough = boolValue("app_alpha_blend_passthrough", text, &ok);
+    const bool hasAppAlphaBlendPassthrough = ok;
+    if (ok)
     {
-        const QString mixedRealityMode = stringValue("mixed_reality_mode", text);
-        if (mixedRealityMode == "passthrough" || mixedRealityMode == "alpha")
+        config.appAlphaBlendPassthrough = appAlphaBlendPassthrough;
+    }
+
+    const QString mixedRealityMode = stringValue("mixed_reality_mode", text);
+    if (mixedRealityMode == "passthrough" || mixedRealityMode == "alpha" || mixedRealityMode == "off")
+    {
+        if (!hasPassthroughEnabled)
         {
-            config.passthroughEnabled = true;
+            config.passthroughEnabled = mixedRealityMode != "off";
+        }
+        if (!hasAppAlphaBlendPassthrough)
+        {
+            config.appAlphaBlendPassthrough = mixedRealityMode == "alpha";
         }
     }
 
@@ -425,7 +471,10 @@ QString ServerConfig::mergedInto(const QString& currentText) const
     {
         text = defaultText().trimmed();
     }
-    text = removeSectionKeys(text, "streaming", QStringList{QStringLiteral("fov_degrees")});
+    text = removeSectionKeys(text, "streaming", QStringList{
+        QStringLiteral("fov_degrees"),
+        QStringLiteral("mixed_reality_mode"),
+    });
 
     text = upsertSection(text, "general", {
         {"runtime_enabled", boolString(runtimeEnabled)},
@@ -435,15 +484,20 @@ QString ServerConfig::mergedInto(const QString& currentText) const
         {"refresh_rate_hz", QString::number(refreshRateHz)},
         {"resolution_scale", decimalString(resolutionScale)},
         {"dynamic_resolution_min_scale", decimalString(dynamicResolutionMinScale)},
+        {"render_device", QString("\"%1\"").arg(renderDevice)},
         {"keyframe_interval_sec", QString::number(keyframeIntervalSec)},
+        {"video_codec", QString("\"%1\"").arg(videoCodec)},
         {"encoder_preset", QString("\"%1\"").arg(encoderPreset)},
+        {"encoder_10bit", boolString(encoder10Bit)},
         {"transport", QString("\"%1\"").arg(transport)},
         {"foveated_encoding_preset", QString("\"%1\"").arg(foveatedEncodingPreset)},
         {"client_foveation_preset", QString("\"%1\"").arg(clientFoveationPreset)},
         {"client_upscaling", boolString(clientUpscaling)},
+        {"client_sharpening", decimalString(clientSharpening)},
         {"client_reprojection", QString("\"%1\"").arg(clientReprojection)},
         {"abr_mode", QString("\"%1\"").arg(abrMode)},
         {"passthrough_enabled", boolString(passthroughEnabled)},
+        {"app_alpha_blend_passthrough", boolString(appAlphaBlendPassthrough)},
         {"occlusion_mode", QString("\"%1\"").arg(occlusionMode)},
         {"headset_audio", boolString(headsetAudio)},
     });
@@ -472,6 +526,19 @@ QString encoderPresetDisplayName(const QString& value)
         return "Speed";
     }
     return "Balanced";
+}
+
+QString videoCodecDisplayName(const QString& value)
+{
+    if (value == "h264")
+    {
+        return "H.264";
+    }
+    if (value == "auto")
+    {
+        return "Auto";
+    }
+    return "H.265";
 }
 
 QString transportDisplayName(const QString& value)

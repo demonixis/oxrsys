@@ -55,6 +55,7 @@ private:
     void chooseCustomAdbExecutable();
     void openSimulatorWindow();
     void updateConfigFromControls();
+    void showRuntimeSetupGuidanceIfNeeded();
 
     HomeModel* model_ = nullptr;
     QTabWidget* tabs_ = nullptr;
@@ -85,6 +86,8 @@ private:
     QLabel* launchTargetLabel_ = nullptr;
     QPushButton* registerRuntimeButton_ = nullptr;
     QPushButton* unregisterRuntimeButton_ = nullptr;
+    QComboBox* adbModeCombo_ = nullptr;
+    QLineEdit* customAdbPathLineEdit_ = nullptr;
 
     QCheckBox* runtimeEnabledCheckBox_ = nullptr;
     QCheckBox* fileLoggingCheckBox_ = nullptr;
@@ -99,8 +102,12 @@ private:
     QLabel* dynamicResolutionValueLabel_ = nullptr;
     QSlider* keyframeSlider_ = nullptr;
     QLabel* keyframeValueLabel_ = nullptr;
+    QSlider* sharpeningSlider_ = nullptr;
+    QLabel* sharpeningValueLabel_ = nullptr;
     QComboBox* refreshRateCombo_ = nullptr;
+    QComboBox* renderDeviceCombo_ = nullptr;
     QComboBox* encoderPresetCombo_ = nullptr;
+    QComboBox* videoCodecCombo_ = nullptr;
     QComboBox* foveatedEncodingPresetCombo_ = nullptr;
     QComboBox* clientFoveationPresetCombo_ = nullptr;
     QComboBox* clientReprojectionCombo_ = nullptr;
@@ -108,6 +115,7 @@ private:
     QComboBox* occlusionModeCombo_ = nullptr;
     QComboBox* configTransportCombo_ = nullptr;
     QCheckBox* passthroughCheckBox_ = nullptr;
+    QCheckBox* encoder10BitCheckBox_ = nullptr;
     QCheckBox* spatialEnabledCheckBox_ = nullptr;
     QCheckBox* spatialAnchorsCheckBox_ = nullptr;
     QCheckBox* spatialSceneCheckBox_ = nullptr;
@@ -115,7 +123,7 @@ private:
     QComboBox* usbDeviceCombo_ = nullptr;
     QLabel* adbStatusLabel_ = nullptr;
     QLabel* usbStatusLabel_ = nullptr;
-    QPushButton* clearAdbPathButton_ = nullptr;
+    QPushButton* autoDetectAdbPathButton_ = nullptr;
     QPushButton* configureUsbButton_ = nullptr;
 
     QLabel* refreshRateMetricLabel_ = nullptr;
@@ -136,4 +144,5 @@ private:
     RuntimeStatsChart* pipelineChart_ = nullptr;
     RuntimeStatsChart* encodeChart_ = nullptr;
     QPointer<QMainWindow> simulatorWindow_;
+    bool runtimeSetupGuidancePresented_ = false;
 };

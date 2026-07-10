@@ -34,7 +34,14 @@ public:
     virtual void StopForProcessExit() { Stop(); }
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
-    virtual void SendFrame(FrameSource frameSource) = 0;
+    //
+    // renderHeadOrientation (xyzw) / renderHeadPosition (xyz) are the exact head pose the
+    // application rendered this frame for (from xrLocateViews). Backends that tag frames
+    // with a pose should prefer it over a later re-prediction; pass nullptr when the
+    // render pose is unavailable.
+    virtual void SendFrame(FrameSource frameSource,
+                           const float* renderHeadOrientation = nullptr,
+                           const float* renderHeadPosition = nullptr) = 0;
 
     virtual void SetGraphicsContext(const GraphicsContext& graphicsContext) = 0;
 

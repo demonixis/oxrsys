@@ -2,7 +2,70 @@
 
 This file tracks user-facing, integration-facing, and runtime-relevant changes for OXRSys.
 
-## 1.2.0 - TBD
+## 1.3.0 - TBD
+
+### Added
+
+- Added a visionOS "Emulate controllers" toggle so controller-only PCVR games are playable without physical spatial controllers: hand-tracking gestures synthesize VR controllers (index pinch → trigger, middle/ring pinch → face buttons, three-finger curl → grip, wrist → 6DOF pose), and when an Xbox-style gamepad is connected the hand pose plus gamepad buttons/sticks/triggers emulate Meta Touch controllers (compatibility mode takes priority). Emulated controllers are corrected to the Meta/Touch orientation and flow through the existing tracking path.
+- Added headset contrast-adaptive sharpening: a `client_sharpening` (0.0-1.0) server setting is carried to the client in the announce, and the visionOS client applies a near-free luma-only contrast-adaptive sharpen in source (video) space — four extra luma taps in the same pass, no second render pass and no added latency — with matching SwiftUI Home and Qt Home sliders.
+- Added foveated-stream decode to the visionOS client: it now advertises `CLIENT_CAPABILITY_FOVEATED_ENCODING` and inverse-warps the server's AADT layout in the fragment shader using a closed-form inverse of the server warp (exact to fp32, replacing per-pixel bisection), so `foveated_encoding_preset` takes effect on Vision Pro (previously the client did not advertise support, so the server sent non-foveated video).
+- Added per-device render-resolution presets: `render_device = "quest2" | "quest3" | "avp"` selects the per-eye render resolution the runtime advertises to the app (1440x1584 / 1512x1680 / 3024x3360), with matching SwiftUI Home and Qt Home controls. The default (`quest3`) matches the previous fixed 1512x1680; use the existing `resolution_scale` to trim how much of it is encoded and streamed.
+- Added negotiated 10-bit H.265 streaming: the visionOS client advertises HEVC Main10 decode support, the runtime requests Main10 only when `streaming.encoder_10bit = true`, the selected codec is H.265, and the connected client supports it, and SwiftUI Home and Qt Home expose the setting. H.264 and legacy clients remain on the 8-bit path.
+- Improved the visionOS control window with explicit discovery and connection states, optional automatic immersive entry, immersive re-entry and disconnect actions, configurable window visibility while immersed, and visible-hands control.
+- Added runtime video codec selection with `streaming.video_codec = "h265"`, `"h264"`, or `"auto"`, plus matching SwiftUI Home and Qt Home controls.
+- Added conservative codec capability negotiation through `ClientConnect.supportedCodecs`, keeping legacy clients H.265-only while allowing H.264-capable clients to opt in.
+- Added H.264 decode support to the Android VR client and shared Apple streaming path, with Android, Apple simulator, and visionOS clients advertising H.264/H.265 while keeping H.265 preferred.
+- Added a codec-aware VideoToolbox decoder for Apple clients, including H.264 SPS/PPS and H.265 VPS/SPS/PPS parameter-set handling.
+- Added an `OXRSYS_VIDEO_ENCODER` CMake option so macOS can use the default VideoToolbox path or an explicit FFmpeg encoder build for codec/pipeline validation.
+- Added a first Linux OpenGL GLX backend through `XR_KHR_opengl_enable`, including OpenGL swapchain image enumeration and bounded FBO/PBO readback into the shared FFmpeg encode path.
+- Added Windows Direct3D 11 and Direct3D 12 runtime backends through `XR_KHR_D3D11_enable` and `XR_KHR_D3D12_enable`, including DXGI swapchain images, bounded readback snapshots, FFmpeg conversion, and loader-backed WARP tests.
+- Added loader-backed tests for host graphics extension exposure, including Vulkan everywhere, OpenGL only on Linux builds, and D3D11/D3D12 only on Windows builds.
+- Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`) for reliable USB TCP, dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved optional spatial TCP channel on `9948`, and matching SwiftUI/Qt Home controls and status display.
+- Added runtime status fields for configured bitrate versus effective client-capped bitrate, and for requested/active foveated encoding state so Home can show when a preset is inactive because of `resolution_scale` or client support.
+- Added a native USB ADB backend to SwiftUI Home so Quest USB reverse setup can run without Android Studio, the Android SDK, Homebrew, or an `adb` executable.
+- Added Settings-based Internal/Custom ADB selection to SwiftUI Home and Qt Home, including editable custom executable paths and auto-detected external `adb` prefills.
+- Added world-space rotational reprojection to the visionOS viewer, reprojecting each streamed frame from its runtime render pose into the live head pose every vsync so the view stays locked to the world while turning.
+
+### Changed
+
+- Merged upstream develop `86bde247` into this fork, bringing codec capability negotiation, the per-backend swapchain source split, the low-latency client decode path, and the v1.3.0 feature set. The Wine/Rosetta streaming path is unchanged: it continues to encode H.264 only through VideoToolbox low-latency rate control, regardless of `video_codec` or client H.265/Main10 capabilities.
+- The visionOS client now measures real decode-to-photon latency (renderer pickup wait + in-flight queue + compositor present) per displayed frame and reports it in place of the previous one-refresh compositor guess, so the runtime's pose-prediction horizon covers the actual client display path; the displayed-frame-age field is now populated too.
+- The visionOS client now reports measured head linear/angular velocity (differenced from consecutive ARKit samples with light smoothing) in the tracking packet, activating the runtime's preferred client-velocity path for bounded pose prediction instead of its noisier finite differencing of received UDP poses — frames arrive rendered closer to the actual head position.
+- Extended visionOS reprojection from rotation-only to a full 6-DOF planar timewarp: the echoed render-pose position (previously discarded) is now kept, and the fragment shader compensates head translation against the shared 2 m reprojection plane for the entire render-to-display latency — up/down/sway no longer lags the full round-trip. Includes the per-eye rotation-induced offset (IPD lever arm) and a clamped delta so a bad pose match cannot distort the warp.
+- Replaced the deprecated `LayerRenderer.Drawable.View.tangents` API (visionOS 2.0) with frustum tangents derived from `computeProjection`, keeping the exact (left, right, up, down) magnitudes used by the reprojection shader and the FOV sent to the runtime.
+- Marked the visionOS decode/render helper state types `nonisolated` so their off-main access (decode callback, render actor, UDP threads) compiles cleanly under the target's MainActor default isolation, silencing the Swift concurrency warnings. Behavior is unchanged — the types were already lock-guarded `@unchecked Sendable`.
+- Reduced visionOS present latency by ~1 frame by lowering the immersive renderer's in-flight buffer count from 3 to 2; the CompositorServices frame clock is the pacer, so the third buffer only added latency for a video blit.
+- Reduced visionOS decode latency by preferring the VideoToolbox hardware decoder and enabling real-time decode, and by splitting received NAL units in place instead of copying each whole frame into an array on the decode path.
+- Corrected visionOS streamed-video color conversion by defining a BT.709 SDR encoder contract and expanding VideoToolbox limited-range YCbCr with exact 8-bit and 10-bit code ranges before RGB conversion, restoring proper black levels and color balance without changing stream bandwidth.
+
+- Split non-Apple swapchain implementation by backend so Vulkan, Linux OpenGL, D3D11, and D3D12 resources live in separate files behind explicit platform/API guards.
+- Promoted Linux Vulkan/FFmpeg runtime support from scaffolding to Vulkan swapchains, release-time staging readback, H.264/H.265 encode, and backend readback metadata shared by the existing FFmpeg encoder path.
+- Updated Qt simulator video preview with H.264/H.265 decode selection.
+- Updated the Quest/PICO shell to keep passthrough active only when global passthrough is enabled and the headset reports `XR_FB_passthrough` support, while keeping app alpha-blend passthrough behind the explicit `app_alpha_blend_passthrough` opt-in instead of the normal passthrough toggle.
+- Updated SwiftUI Home and Qt Home setup flows with first-launch runtime registration guidance, automatic USB reverse configuration when USB is selected, packaged-runtime manifest preference, and native ADB host-server protocol support before falling back to an external `adb` executable.
+- Updated documentation for video codec selection, Linux Vulkan/OpenGL streaming, protocol v1.2, passthrough/MR, native ADB setup, and visionOS reprojection.
+
+### Fixed
+
+- Contained decode-error corruption on the Apple streaming clients: after a decode failure the decoder drops inter frames and re-requests a keyframe until an IRAP (H.265) or IDR (H.264) arrives, so packet loss shows a brief clean freeze instead of propagating green/blocky corruption.
+- Fixed a potential visionOS black screen when the server streams 8-bit H.265 while the client requests a 10-bit decode surface, by falling back to an 8-bit output surface when 10-bit session creation is rejected; the renderer already selects its color conversion from the buffer's actual pixel format.
+- Fixed SwiftUI Home USB ADB readiness oscillation by moving USB refresh/setup off the view update path, ignoring stale ADB results after source or device changes, preserving verified reverse ports across transient mapping-read failures, and running persisted USB startup reverse setup only once.
+- Fixed Quest shader upscaling sampling so edge-aware neighbor taps stay inside the visible decoded region for each eye instead of sampling the opposite eye, decoder padding, or cropped pixels.
+- Fixed Quest passthrough alpha handling so black/dark VR content is no longer treated as transparent by default; only protocol alpha frames use shader alpha unless an explicit compatibility fallback is added.
+- Fixed Quest refresh-rate reporting before `ClientConnect` by reading the active display rate after the async Meta refresh request and logging requested versus negotiated rates on both client and server.
+- Fixed Quest Android release sideload stability by making `assembleRelease` a debug-signed,
+  debuggable stable APK with conservative native flags, and by adding `assembleOptimizedRelease` for
+  diagnosing the old optimized/non-debuggable profile.
+- Fixed a Unity editor crash on session shutdown by invalidating stale VideoToolbox encode callbacks before the streaming server is destroyed and by catching callback exceptions inside the encoder.
+- Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
+- Fixed visionOS eye projection by sending the device's real per-eye FOV and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
+- Fixed Vision Pro head-rotation jitter at the source by tagging each streamed frame with the exact head pose captured at `xrLocateViews`, and by dropping out-of-order or duplicate UDP tracking packets before finite-difference prediction.
+
+### Known Limits
+
+- Vulkan, OpenGL, and D3D desktop streaming still need regular manual validation on real Linux/Windows hardware and with MoltenVK apps; Windows OpenGL/WGL remains separate follow-up work.
+
+## 1.2.0 - 2026-06-19
 
 ### Added
 
@@ -23,7 +86,6 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added configurable Quest client reprojection modes (`off`, `pose`, `pose_warp`) for short decode/network gaps, with displayed-frame-age and reprojection counters in latency reports and runtime status.
 - Added a local Quest/PICO shell that replaces standby/loading color clears with a 3D grid, upright status panel, reset button, optional `XR_FB_passthrough` mode, controller laser interaction, hand laser/pinch interaction, and visible hand-joint markers.
 - Added a runtime ABR controller with `off`, `bitrate`, and `full` modes, sliding-window hysteresis, fast bitrate downshift, slow recovery, and profile reporting for future session-safe resolution/foveation/upscaling transitions.
-- Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`) for reliable USB TCP, dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved optional spatial TCP channel on `9948`, and matching SwiftUI/Qt Home controls and status display.
 
 ### Changed
 
@@ -44,7 +106,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated the Quest USB ADB client to defer bitrate limits to the server/Home configuration instead of imposing an extra 100 Mbps cap.
 - Updated the Quest decoder path to drain MediaCodec output on a decoder thread instead of the XR frame loop.
 - Updated the Quest MediaCodec input sizing to keep bounded headroom for high-bitrate foveated-encoding IDR frames.
-- Updated the Quest/PICO shell to pause passthrough during normal streaming, keep passthrough active only when the global passthrough feature is enabled and the headset reports `XR_FB_passthrough` support, key app-requested alpha-blend/source-alpha video backgrounds for current AR demo scenes, use the same black-key fallback when passthrough is active but no alpha flags have arrived yet, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
+- Updated the Quest video shader to run foveated decompression once per pixel and linearize upscale neighbor taps instead of repeating binary-search warps for each tap.
+- Updated the Quest/PICO shell to pause passthrough, stop local shell interactions, and release shell GL resources while streaming video is actively rendered.
 - Updated SwiftUI Home and Qt Home with ABR and Quest client reprojection controls plus runtime status display for frame age, ABR state, and reprojection reuse.
 - Updated FFmpeg encoder preset mapping so Linux scaffolding maps `speed`, `balanced`, and `quality` to low-latency FFmpeg presets instead of always using `ultrafast`.
 - Updated macOS Home for direct distribution workflows, selected-runtime app launching, runtime registration, package-compatible runtime paths, runtime activity display, and shared Developer simulator integration.
@@ -53,6 +116,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 ### Fixed
 
 - Fixed Metal streaming frame snapshots so the async encoder reads a release-time staging texture instead of a swapchain slot that the app may already have reused.
+- Fixed side-by-side swapchain eye packing by honoring `subImage.imageRect` when compositing each eye for video encode (Unreal Engine and similar clients).
 - Fixed server-side foveated encoding on Metal by running the AADT pass through a compute shader into a private GPU scratch texture before blitting into the VideoToolbox pixel buffer, avoiding render-encoder validation aborts on the first encoded frame.
 - Fixed Quest connection recovery when a server is discovered but no first video frame arrives, returning the client to discovery/retry instead of leaving the standby/loading screen stuck.
 - Fixed controller pose handling so streaming packets only update controller poses when the corresponding controller-active flag is present.
@@ -65,7 +129,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Hardened Quest headset foveation shutdown by detaching the foveation profile from swapchains before destroying it.
 - Hardened runtime-managed Quest logcat capture so it remains optional, bounded, and best-effort during startup.
 - Fixed render-pose matching on headset clients so decoded frames are submitted with the pose used to render that frame.
-- Fixed a Unity editor crash on session shutdown by invalidating stale VideoToolbox encode callbacks before the streaming server is destroyed and by catching callback exceptions inside the encoder.
+- Fixed Quest refresh-rate reporting by trusting the successful `xrRequestDisplayRefreshRateFB` value instead of immediately querying the asynchronous runtime readback.
 - Filtered known macOS `linkd.autoShortcut` App Intents diagnostics from Home captured app logs.
 - Fixed and covered `xrLocateSpacesKHR` as an alias for the OpenXR 1.1 `xrLocateSpaces` entry point.
 

@@ -82,6 +82,21 @@ namespace
 constexpr auto kUsbAdbRetryInterval = std::chrono::seconds(1);
 constexpr uint32_t kUsbAdbRetryLogInterval = 10;
 
+const char* VideoCodecName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "H.264";
+        case oxr::protocol::VideoCodec::H265:
+            return "H.265";
+        case oxr::protocol::VideoCodec::AV1:
+            return "AV1";
+        default:
+            return "unknown";
+    }
+}
+
 } // namespace
 
 // Foveated decompression follows ALVR's AADT inverse mapping (MIT licensed).
@@ -129,11 +144,18 @@ float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeR
     return center;
 }
 
-float decompressAxis(float targetUv, float centerSize, float centerShift, float edgeRatio) {
+// Binary search inverse of compressAxis. Also returns the warp's local derivative
+// (via one extra cheap finite-difference eval) so callers sampling a few texels away
+// from targetUv can place those neighbor taps with a linear extrapolation instead of
+// re-running the full 10-iteration search -- the warp is smooth, so this is accurate
+// to well within a texel for the tiny offsets used by the upscale sharpen kernel.
+float decompressAxisAndSlope(float targetUv, float centerSize, float centerShift,
+                              float edgeRatio, out float invSlope) {
     float lo = 0.0;
     float hi = 1.0;
+    float mid = 0.5;
     for (int i = 0; i < 10; ++i) {
-        float mid = (lo + hi) * 0.5;
+        mid = (lo + hi) * 0.5;
         float mapped = compressAxis(mid, centerSize, centerShift, edgeRatio);
         if (mapped < targetUv) {
             lo = mid;
@@ -141,29 +163,29 @@ float decompressAxis(float targetUv, float centerSize, float centerShift, float 
             hi = mid;
         }
     }
-    return (lo + hi) * 0.5;
-}
-
-vec2 mapEyeUvToSource(vec2 eyeUv) {
-    vec2 corrected = eyeUv;
-    if (uFoveatedEncodingEnabled != 0) {
-        corrected.x = decompressAxis(eyeUv.x, uFoveationCenterSize.x,
-                                     uFoveationCenterShift.x,
-                                     uFoveationEdgeRatio.x) * uFoveationEyeSizeRatio.x;
-        corrected.y = decompressAxis(eyeUv.y, uFoveationCenterSize.y,
-                                     uFoveationCenterShift.y,
-                                     uFoveationEdgeRatio.y) * uFoveationEyeSizeRatio.y;
-    }
-    corrected = clamp(corrected, vec2(0.0), vec2(1.0));
-    return mix(uEyeSourceMin, uEyeSourceMax, corrected);
-}
-
-vec3 sampleVideo(vec2 eyeUv) {
-    return texture(uTexture, mapEyeUvToSource(clamp(eyeUv, vec2(0.0), vec2(1.0)))).rgb;
+    mid = (lo + hi) * 0.5;
+    const float eps = 0.001;
+    float fPlus = compressAxis(min(mid + eps, 1.0), centerSize, centerShift, edgeRatio);
+    float fMinus = compressAxis(max(mid - eps, 0.0), centerSize, centerShift, edgeRatio);
+    float slope = (fPlus - fMinus) / (2.0 * eps);
+    invSlope = abs(slope) > 0.0001 ? 1.0 / slope : 1.0;
+    return mid;
 }
 
 float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+vec2 clampSourceUv(vec2 uv) {
+    vec2 sourceMin = min(uEyeSourceMin, uEyeSourceMax);
+    vec2 sourceMax = max(uEyeSourceMin, uEyeSourceMax);
+    vec2 inset = min(max(uLogicalTexelSize, vec2(0.00001)) * 0.5,
+                     max((sourceMax - sourceMin) * 0.5, vec2(0.0)));
+    return clamp(uv, sourceMin + inset, sourceMax - inset);
+}
+
+vec3 sampleSource(vec2 uv) {
+    return texture(uTexture, clampSourceUv(uv)).rgb;
 }
 
 void main() {
@@ -174,13 +196,37 @@ void main() {
         eyeUv = clamp(eyeUv + uReprojectionWarpOffset * edgeWeight,
                       vec2(0.0), vec2(1.0));
     }
-    vec3 color = sampleVideo(eyeUv);
+
+    // Expensive iterative de-foveation warp: evaluated once, at the center sample only.
+    vec2 corrected;
+    vec2 invSlope;
+    if (uFoveatedEncodingEnabled != 0) {
+        corrected.x = decompressAxisAndSlope(eyeUv.x, uFoveationCenterSize.x,
+                                              uFoveationCenterShift.x,
+                                              uFoveationEdgeRatio.x, invSlope.x)
+                      * uFoveationEyeSizeRatio.x;
+        corrected.y = decompressAxisAndSlope(eyeUv.y, uFoveationCenterSize.y,
+                                              uFoveationCenterShift.y,
+                                              uFoveationEdgeRatio.y, invSlope.y)
+                      * uFoveationEyeSizeRatio.y;
+        invSlope *= uFoveationEyeSizeRatio;
+    } else {
+        corrected = eyeUv;
+        invSlope = vec2(1.0);
+    }
+    corrected = clamp(corrected, vec2(0.0), vec2(1.0));
+    vec2 sourceRange = uEyeSourceMax - uEyeSourceMin;
+    vec2 sourceUv = clampSourceUv(mix(uEyeSourceMin, uEyeSourceMax, corrected));
+    vec3 color = sampleSource(sourceUv);
+
     if (uClientUpscalingEnabled != 0) {
         vec2 stepUv = max(uLogicalTexelSize, vec2(0.00001));
-        vec3 left = sampleVideo(eyeUv + vec2(-stepUv.x, 0.0));
-        vec3 right = sampleVideo(eyeUv + vec2(stepUv.x, 0.0));
-        vec3 up = sampleVideo(eyeUv + vec2(0.0, -stepUv.y));
-        vec3 down = sampleVideo(eyeUv + vec2(0.0, stepUv.y));
+        // Linearized neighbor placement -- no extra binary searches.
+        vec2 sourceStep = stepUv * invSlope * sourceRange;
+        vec3 left = sampleSource(sourceUv - vec2(sourceStep.x, 0.0));
+        vec3 right = sampleSource(sourceUv + vec2(sourceStep.x, 0.0));
+        vec3 up = sampleSource(sourceUv - vec2(0.0, sourceStep.y));
+        vec3 down = sampleSource(sourceUv + vec2(0.0, sourceStep.y));
         float edgeVote = abs(luma(left) - luma(right)) + abs(luma(up) - luma(down));
         if (edgeVote > uUpscaleEdgeThreshold) {
             vec3 detail = color * 4.0 - left - right - up - down;
@@ -1458,12 +1504,7 @@ bool XrApp::InitializeDisplayRefreshRate(float preferredRefreshRateHz)
              preferredRefreshRateHz);
         if (xrGetDisplayRefreshRateFB_ != nullptr)
         {
-            float currentRate = 0.0f;
-            if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
-            {
-                LOGI("Current display refresh rate: %.1fHz", currentRate);
-                clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
-            }
+            RefreshCurrentDisplayRate("preferred rate unavailable", true);
         }
         return true;
     }
@@ -1479,26 +1520,50 @@ bool XrApp::InitializeDisplayRefreshRate(float preferredRefreshRateHz)
 
     LOGI("Requested display refresh rate: %.1fHz", preferredRefreshRateHz);
 
-    if (xrGetDisplayRefreshRateFB_ != nullptr)
+    RefreshCurrentDisplayRate("after refresh request", false);
+
+    return true;
+}
+
+bool XrApp::RefreshCurrentDisplayRate(const char* context, bool logIfUnavailable)
+{
+    if (session_ == XR_NULL_HANDLE || xrGetDisplayRefreshRateFB_ == nullptr)
     {
-        float currentRate = 0.0f;
-        if (XR_SUCCEEDED(xrGetDisplayRefreshRateFB_(session_, &currentRate)))
+        if (logIfUnavailable)
         {
-            LOGI("Current display refresh rate after request: %.1fHz", currentRate);
-            clientRefreshRateHz_ = static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
+            LOGW("Display refresh read unavailable before %s; keeping %uHz",
+                 context != nullptr ? context : "refresh update",
+                 clientRefreshRateHz_);
         }
-        else
-        {
-            clientRefreshRateHz_ =
-                static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
-        }
-    }
-    else
-    {
-        clientRefreshRateHz_ =
-            static_cast<uint32_t>(std::max(1.0f, std::round(preferredRefreshRateHz)));
+        return false;
     }
 
+    float currentRate = 0.0f;
+    const XrResult result = xrGetDisplayRefreshRateFB_(session_, &currentRate);
+    if (XR_FAILED(result) || currentRate <= 0.0f)
+    {
+        if (logIfUnavailable)
+        {
+            LOGW("Failed to read active display refresh before %s: result=%d rate=%.1f; keeping %uHz",
+                 context != nullptr ? context : "refresh update",
+                 result,
+                 currentRate,
+                 clientRefreshRateHz_);
+        }
+        return false;
+    }
+
+    const uint32_t activeRefreshRateHz =
+        static_cast<uint32_t>(std::max(1.0f, std::round(currentRate)));
+    if (activeRefreshRateHz != clientRefreshRateHz_ || logIfUnavailable)
+    {
+        LOGI("Active display refresh before %s: %.1fHz (reported %uHz, previous %uHz)",
+             context != nullptr ? context : "refresh update",
+             currentRate,
+             activeRefreshRateHz,
+             clientRefreshRateHz_);
+    }
+    clientRefreshRateHz_ = activeRefreshRateHz;
     return true;
 }
 
@@ -2070,6 +2135,9 @@ void XrApp::StartNetworking()
     lastFrameAcquireTimeNs_ = 0;
     lastReportedAcquireTimeNs_ = 0;
     skippedDecodedFrames_ = 0;
+    decoderEncodedWidth_ = 0;
+    decoderEncodedHeight_ = 0;
+    activeVideoCodec_.store(protocol::VideoCodec::H265);
     presentedVideoFrame_ = {};
     hasObservedProtocolAlphaFrame_ = false;
     loggedTransparentClearFallback_ = false;
@@ -2610,30 +2678,14 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
          foveationEyeWidthRatio_,
          foveationEyeHeightRatio_);
 
-    // CRITICAL: Start video receiver and decoder BEFORE sending ClientConnect.
+    // CRITICAL: Start video receiver BEFORE sending ClientConnect.
     // The server starts encoding immediately upon receiving ClientConnect.
     // If we send ClientConnect first, the initial keyframe packets arrive at port 9944
     // before we've bound the socket, and they're silently dropped by the OS.
-
-    // Initialize video decoder at the actual encoded resolution
-    if (videoDecoder_ && !videoDecoder_->IsInitialized())
-    {
-        std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-        // Start on the codec we advertise in ClientConnect (H.265). If the server
-        // actually streams H.264 (it runs under Rosetta, e.g. the wineopenxr D3D11
-        // bridge), OnNalUnitReceived re-initializes the decoder from the packet's
-        // codec byte on the first NAL.
-        const uint8_t initialCodec = static_cast<uint8_t>(protocol::VideoCodec::H265);
-        if (videoDecoder_->Initialize(decoderWidth, decoderHeight, initialCodec))
-        {
-            LOGI("Video decoder initialized: %ux%u (encoded), render %ux%u",
-                 decoderWidth, decoderHeight, videoWidth_, videoHeight_);
-        }
-        else
-        {
-            LOGE("Failed to initialize video decoder");
-        }
-    }
+    decoderEncodedWidth_ = decoderWidth;
+    decoderEncodedHeight_ = decoderHeight;
+    LOGI("Video decoder will initialize from first NAL codec: %ux%u (encoded), render %ux%u",
+         decoderWidth, decoderHeight, videoWidth_, videoHeight_);
 
     // Start receiving video packets (bind socket BEFORE telling server we're ready)
     bool receivingStarted = false;
@@ -2704,6 +2756,8 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
         OpenUsbSpatialSocket(serverSpatialPort_);
     }
 
+    RefreshCurrentDisplayRate("ClientConnect", true);
+
     // NOW send ClientConnect — server will start sending video, and we're already listening
     SendClientConnect(serverIp);
     StartControlReceiver();
@@ -2735,6 +2789,9 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.versionMajor = 1;
     connect.versionMinor = 2;
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
+    connect.supportedCodecs =
+        protocol::CLIENT_CODEC_CAPABILITY_H265 |
+        protocol::CLIENT_CODEC_CAPABILITY_H264;
     connect.maxBitrateMbps = usbAdb
         ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
         : 100;
@@ -2767,7 +2824,7 @@ void XrApp::SendClientConnect(const char* serverIp)
 
     LOGI("Sent ClientConnect via %s to %s:%d (device='%s' refresh=%uHz maxBitrate=%u capabilities=0x%x passthrough=%d)",
          usbAdb ? "USB ADB" : "WiFi", serverIp, protocol::CONTROL_PORT,
-         connect.deviceName, clientRefreshRateHz_, connect.maxBitrateMbps,
+         connect.deviceName, connect.refreshRateHz, connect.maxBitrateMbps,
          connect.clientCapabilities,
          (connect.clientCapabilities & protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH) != 0
              ? 1
@@ -2990,9 +3047,14 @@ void XrApp::StreamConfigWorkerMain()
             std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
             if (videoDecoder_)
             {
-                const uint8_t codec = videoDecoder_->CodecType();
+                const protocol::VideoCodec codec = activeVideoCodec_.load();
                 videoDecoder_->Shutdown();
                 accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
+                if (accepted)
+                {
+                    decoderEncodedWidth_ = update.encodedWidth;
+                    decoderEncodedHeight_ = update.encodedHeight;
+                }
             }
         }
 
@@ -3402,19 +3464,29 @@ void XrApp::UpdateReprojectionWarp(bool reusingFrame)
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
-                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags,
-                              uint8_t codec)
+                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags, uint8_t codec)
 {
     nalUnitsReceived_++;
+    const auto videoCodec = static_cast<protocol::VideoCodec>(codec);
+    if (videoCodec != protocol::VideoCodec::H265 && videoCodec != protocol::VideoCodec::H264)
+    {
+        if (nalUnitsReceived_ <= 10)
+        {
+            LOGW("Dropping NAL unit with unsupported codec=%u (%s)",
+                 codec, VideoCodecName(videoCodec));
+        }
+        return;
+    }
 
     if (nalUnitsReceived_ <= 10 || nalUnitsReceived_ % 300 == 0)
     {
         const char* nalType = "unknown";
         if (size > 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1)
         {
-            if (codec == static_cast<uint8_t>(protocol::VideoCodec::H264))
+            if (videoCodec == protocol::VideoCodec::H264)
             {
-                switch (data[4] & 0x1F)  // H.264 type = bits 0-4 of the header byte
+                uint8_t nalTypeId = data[4] & 0x1F;
+                switch (nalTypeId)
                 {
                     case 7: nalType = "SPS"; break;
                     case 8: nalType = "PPS"; break;
@@ -3425,7 +3497,8 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
             }
             else
             {
-                switch ((data[4] >> 1) & 0x3F)  // H.265 type = bits 1-6
+                uint8_t nalTypeId = (data[4] >> 1) & 0x3F;
+                switch (nalTypeId)
                 {
                     case 32: nalType = "VPS"; break;
                     case 33: nalType = "SPS"; break;
@@ -3436,29 +3509,29 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
                 }
             }
         }
-        LOGI("NAL unit #%u: size=%zu codec=%u type=%s ts=%lld",
-             nalUnitsReceived_, size, codec, nalType, (long long)timestampNs);
+        LOGI("NAL unit #%u: size=%zu codec=%s type=%s ts=%lld",
+             nalUnitsReceived_, size,
+             VideoCodecName(videoCodec), nalType, (long long)timestampNs);
     }
 
     std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-
-    // The server stamps the real codec on every packet. If it differs from what the
-    // decoder was initialized with (e.g. an H.264 Rosetta server vs. our H.265
-    // default), rebuild the decoder for the actual codec. Happens once, on the first NAL.
-    // IsInitialized() already guarantees valid dimensions, so read them from the decoder
-    // (authoritative) before Shutdown() rather than tracking a parallel copy.
-    if (videoDecoder_ && videoDecoder_->IsInitialized() &&
-        videoDecoder_->CodecType() != codec)
+    if (videoDecoder_ && (!videoDecoder_->IsInitialized() || videoDecoder_->GetCodec() != videoCodec))
     {
-        LOGI("Server stream codec=%u differs from decoder codec=%u; re-initializing decoder",
-             codec, videoDecoder_->CodecType());
-        const uint32_t w = videoDecoder_->GetWidth();
-        const uint32_t h = videoDecoder_->GetHeight();
-        videoDecoder_->Shutdown();
-        if (!videoDecoder_->Initialize(w, h, codec))
+        const uint32_t decoderWidth = decoderEncodedWidth_ > 0 ? decoderEncodedWidth_ : videoWidth_;
+        const uint32_t decoderHeight = decoderEncodedHeight_ > 0 ? decoderEncodedHeight_ : videoHeight_;
+        if (videoDecoder_->IsInitialized())
         {
-            LOGE("Failed to re-initialize decoder for codec=%u", codec);
+            LOGW("Video codec changed from %u to %u; recreating decoder",
+                 static_cast<uint32_t>(videoDecoder_->GetCodec()),
+                 static_cast<uint32_t>(videoCodec));
         }
+        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, videoCodec))
+        {
+            LOGE("Failed to initialize decoder for codec=%u (%s)",
+                 codec, VideoCodecName(videoCodec));
+            return;
+        }
+        activeVideoCodec_.store(videoCodec);
     }
 
     if (videoDecoder_ && videoDecoder_->IsInitialized())
@@ -3474,7 +3547,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
     }
     else if (nalUnitsReceived_ <= 5)
     {
-        LOGW("NAL unit received but decoder not initialized");
+        LOGW("NAL unit received but decoder is unavailable");
     }
 }
 
@@ -3555,8 +3628,15 @@ void XrApp::RunFrame()
     if (frameState.predictedDisplayPeriod > 0)
     {
         predictedDisplayPeriodNs_ = frameState.predictedDisplayPeriod;
-        clientRefreshRateHz_ = static_cast<uint32_t>(
+        const uint32_t frameRefreshRateHz = static_cast<uint32_t>(
             std::max(1.0, std::round(1.0e9 / static_cast<double>(predictedDisplayPeriodNs_))));
+        if (frameRefreshRateHz != clientRefreshRateHz_)
+        {
+            LOGI("Frame timing display refresh changed: %uHz -> %uHz",
+                 clientRefreshRateHz_,
+                 frameRefreshRateHz);
+            clientRefreshRateHz_ = frameRefreshRateHz;
+        }
     }
 
     // xrBeginFrame
@@ -4046,7 +4126,7 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
             if (alphaKey.usingTransparentClearFallback &&
                 !loggedTransparentClearFallback_)
             {
-                LOGW("Passthrough stream has no alpha flags; using black-key fallback");
+                LOGW("Explicit passthrough black-key compatibility fallback is active");
                 loggedTransparentClearFallback_ = true;
             }
 
@@ -4558,6 +4638,7 @@ quest_passthrough::AlphaKeyDecision XrApp::EvaluatePassthroughAlphaKey() const
         serverMixedRealityPassthroughEnabled_ && CanUseShellPassthrough(),
         presentedVideoFrame_.alphaBlend,
         hasObservedProtocolAlphaFrame_,
+        false,
     });
 }
 

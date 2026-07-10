@@ -8,8 +8,24 @@ public final class LatencyReporter: @unchecked Sendable {
     private var receiveToDecodeSamplesMs: [Double] = []
     private var totalClientSamplesMs: [Double] = []
     private var lastReportTimeNs: Int64 = 0
+    // Measured decode-to-photon time (EMA), fed by the renderer when it first draws each frame.
+    // 0 = no measurement yet; the report then falls back to a one-refresh compositor budget.
+    private var measuredDisplayLatencyMs: Double = 0
 
     public init() {}
+
+    /// Record the measured decode-to-photon time for a newly displayed frame. This captures what
+    /// the compositor-budget guess cannot: the wait until the render loop picks the frame up, the
+    /// in-flight buffer queue, and the compositor's own present pipeline — so the server's pose
+    /// prediction horizon covers the real client display path.
+    public func noteFrameDisplayed(displayLatencyMs: Double) {
+        guard displayLatencyMs > 0, displayLatencyMs < 200 else { return } // reject garbage/startup spikes
+        queue.async { [self] in
+            measuredDisplayLatencyMs = measuredDisplayLatencyMs == 0
+                ? displayLatencyMs
+                : measuredDisplayLatencyMs * 0.9 + displayLatencyMs * 0.1
+        }
+    }
 
     public func noteFrameReceived(presentationTimeNs: Int64, receiveTimeNs: Int64) {
         guard presentationTimeNs != 0 else { return }
@@ -40,9 +56,12 @@ public final class LatencyReporter: @unchecked Sendable {
 
             let receiveToDecodeMs = Double(decodeTimeNs - receiveTimeNs) / 1_000_000.0
             let compositorBudgetMs = 1_000.0 / Double(max(refreshRateHz, 1))
+            // Prefer the measured decode-to-photon time over the one-refresh guess: it includes
+            // the pickup wait, the in-flight buffer queue, and the compositor present pipeline.
+            let displayMs = measuredDisplayLatencyMs > 0 ? measuredDisplayLatencyMs : compositorBudgetMs
 
             receiveToDecodeSamplesMs.append(receiveToDecodeMs)
-            totalClientSamplesMs.append(receiveToDecodeMs + compositorBudgetMs)
+            totalClientSamplesMs.append(receiveToDecodeMs + displayMs)
 
             if lastReportTimeNs == 0 {
                 lastReportTimeNs = decodeTimeNs
@@ -61,7 +80,8 @@ public final class LatencyReporter: @unchecked Sendable {
             var report = LatencyReport()
             report.receiveToDecoderSubmitMs = 0
             report.decodeLatencyMs = Float(Self.average(receiveToDecodeSamplesMs))
-            report.compositorLatencyMs = Float(compositorBudgetMs)
+            report.compositorLatencyMs = Float(displayMs)
+            report.displayedFrameAgeMs = Float(measuredDisplayLatencyMs)
             report.totalClientLatencyMs = Float(Self.average(totalClientSamplesMs))
             controlChannel.sendLatencyReport(report)
 
@@ -77,6 +97,7 @@ public final class LatencyReporter: @unchecked Sendable {
             receiveToDecodeSamplesMs.removeAll(keepingCapacity: false)
             totalClientSamplesMs.removeAll(keepingCapacity: false)
             lastReportTimeNs = 0
+            measuredDisplayLatencyMs = 0
         }
     }
 

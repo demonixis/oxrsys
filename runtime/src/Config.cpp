@@ -280,6 +280,11 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
 {
     ConfigValues values = defaults;
     std::string line;
+    bool hasExplicitPassthroughEnabled = false;
+    bool hasExplicitAppAlphaBlendPassthrough = false;
+    bool hasLegacyMixedRealityMode = false;
+    bool legacyPassthroughEnabled = false;
+    bool legacyAppAlphaBlendPassthrough = false;
     while (std::getline(input, line))
     {
         line = Trim(line);
@@ -354,12 +359,28 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.dynamicResolutionMinScale = val;
                 }
             }
+            else if (key == "render_device")
+            {
+                value = ParseString(value);
+                if (value == "quest2" || value == "quest3" || value == "avp")
+                {
+                    values.renderDevice = value;
+                }
+            }
             else if (key == "keyframe_interval_sec")
             {
                 int val = std::stoi(value);
                 if (val >= 1 && val <= 10)
                 {
                     values.keyframeIntervalSec = val;
+                }
+            }
+            else if (key == "video_codec")
+            {
+                value = ParseString(value);
+                if (value == "h265" || value == "h264" || value == "auto")
+                {
+                    values.videoCodec = value;
                 }
             }
             else if (key == "encoder_preset")
@@ -369,6 +390,10 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                 {
                     values.encoderPreset = value;
                 }
+            }
+            else if (key == "encoder_10bit")
+            {
+                values.encoder10Bit = ParseBool(value);
             }
             else if (key == "transport")
             {
@@ -407,6 +432,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.clientUpscaling = ParseBool(value);
             }
+            else if (key == "client_sharpening")
+            {
+                float val = std::stof(value);
+                if (val >= 0.0f && val <= 1.0f)
+                {
+                    values.clientSharpening = val;
+                }
+            }
             else if (key == "client_reprojection")
             {
                 value = ParseString(value);
@@ -426,13 +459,21 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             else if (key == "passthrough_enabled")
             {
                 values.passthroughEnabled = ParseBool(value);
+                hasExplicitPassthroughEnabled = true;
+            }
+            else if (key == "app_alpha_blend_passthrough")
+            {
+                values.appAlphaBlendPassthrough = ParseBool(value);
+                hasExplicitAppAlphaBlendPassthrough = true;
             }
             else if (key == "mixed_reality_mode")
             {
                 value = ParseString(value);
                 if (value == "off" || value == "passthrough" || value == "alpha")
                 {
-                    values.passthroughEnabled = value != "off";
+                    hasLegacyMixedRealityMode = true;
+                    legacyPassthroughEnabled = value != "off";
+                    legacyAppAlphaBlendPassthrough = value == "alpha";
                 }
             }
             else if (key == "occlusion_mode")
@@ -472,6 +513,15 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         {
             // Ignore malformed values and keep the last valid/default setting.
         }
+    }
+
+    if (hasLegacyMixedRealityMode && !hasExplicitPassthroughEnabled)
+    {
+        values.passthroughEnabled = legacyPassthroughEnabled;
+    }
+    if (hasLegacyMixedRealityMode && !hasExplicitAppAlphaBlendPassthrough)
+    {
+        values.appAlphaBlendPassthrough = legacyAppAlphaBlendPassthrough;
     }
 
     return values;
@@ -564,23 +614,27 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} render_device={} dyn_min={:.2f} keyframe={}s codec={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
             newValues.fovDegrees,
             newValues.refreshRateHz,
             newValues.resolutionScale,
+            newValues.renderDevice,
             newValues.dynamicResolutionMinScale,
             newValues.keyframeIntervalSec,
+            newValues.videoCodec,
             newValues.encoderPreset,
             newValues.streamingTransport,
             newValues.foveatedEncodingPreset,
             newValues.clientFoveationPreset,
             newValues.clientUpscaling,
+            newValues.clientSharpening,
             newValues.clientReprojectionMode,
             newValues.abrMode,
             newValues.passthroughEnabled,
+            newValues.appAlphaBlendPassthrough,
             newValues.occlusionMode,
             newValues.spatialEnabled,
             newValues.spatialAnchors,
@@ -604,6 +658,38 @@ void Config::RefreshIfNeeded()
     }
     lastReloadCheck_ = now;
     ReloadIfChangedLocked(false);
+}
+
+namespace
+{
+struct EyeResolution
+{
+    uint32_t width;
+    uint32_t height;
+};
+
+// Per-eye base render resolution for each supported target headset. The render scale is applied
+// on top of this; the device choice sets the resolution, the scale sets how much of it we stream.
+EyeResolution DeviceBaseEyeResolution(const std::string& device)
+{
+    if (device == "quest2")
+    {
+        return {1440, 1584};
+    }
+    if (device == "avp")
+    {
+        return {3024, 3360};
+    }
+    // "quest3" and any unknown value fall back to the default base.
+    return {1512, 1680};
+}
+} // namespace
+
+void RenderBaseEyeResolution(uint32_t& width, uint32_t& height)
+{
+    const EyeResolution base = DeviceBaseEyeResolution(Config::Get().GetValues().renderDevice);
+    width = base.width;
+    height = base.height;
 }
 
 ConfigValues Config::GetValues()
@@ -653,14 +739,15 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} reprojection={} abr={} passthrough={} occlusion={} spatial={}/{}/{}/{} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
                   values_.resolutionScale, values_.dynamicResolutionMinScale,
                   values_.keyframeIntervalSec,
                   values_.encoderPreset, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
-                  values_.clientUpscaling, values_.clientReprojectionMode,
-                  values_.abrMode, values_.passthroughEnabled, values_.occlusionMode,
+                  values_.clientUpscaling, values_.clientSharpening, values_.clientReprojectionMode,
+                  values_.abrMode, values_.passthroughEnabled,
+                  values_.appAlphaBlendPassthrough, values_.occlusionMode,
                   values_.spatialEnabled, values_.spatialAnchors, values_.spatialScene,
                   values_.spatialPersistence, values_.headsetAudio);
 }

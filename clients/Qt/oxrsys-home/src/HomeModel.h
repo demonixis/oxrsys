@@ -54,6 +54,7 @@ public:
     QString statusMessage() const;
     QString questUsbStatus() const;
     const AdbStatus& adbStatus() const;
+    QString adbMode() const;
     QString customAdbPath() const;
     QString selectedQuestUsbSerial() const;
     QString selectedLogAppId() const;
@@ -68,7 +69,9 @@ public slots:
     void setRuntimeManifestPath(const QString& path);
     void setDeveloperModeEnabled(bool enabled);
     void setSelectedQuestUsbSerial(const QString& serial);
+    void setAdbMode(const QString& mode);
     void setCustomAdbPath(const QString& path);
+    void prefillCustomAdbPathFromDetectedExecutable();
     void clearCustomAdbPath();
     void setSelectedLogAppId(const QString& appId);
     void setMainTransportSelection(const QString& transport);
@@ -135,6 +138,7 @@ private:
     QString questUsbStatus_ = "USB ADB transport is not configured.";
     QSet<int> selectedQuestUsbReversePorts_;
     AdbStatus adbStatus_;
+    QString adbMode_ = "internal";
     QString customAdbPath_;
     bool wifiReady_ = true;
     QString wifiStatus_ = "WiFi transport readiness has not been checked.";

@@ -9,12 +9,15 @@ This page covers the native visionOS viewer in `clients/Apple/oxrsys-visionos/`.
 The visionOS target is a first-pass native viewer that fits the Apple platform model rather than reusing the Android headset client unchanged. It currently provides:
 
 - runtime discovery on the local network
-- a minimal floating control window with a `Search` action
+- a compact floating control window with explicit server search, connect, immersive entry, disconnect, and session toggles
 - UDP stream connection through the shared `OXRSysStreaming` package
-- immersive stereo presentation through a native Metal compositor layer
-- automatic immersive VR entry once the stream is connected
-- 6DOF head-pose return while the immersive space is open
-- hand-joint streaming through the shared 26-joint tracking payload
+- negotiated H.264/H.265 stream decoding through the shared VideoToolbox decoder, including 10-bit HEVC Main10 output, with H.265 kept as the preferred codec
+- limited-range BT.709 YCbCr conversion with bit-depth-specific 8-bit and 10-bit normalization for correct SDR black levels and color balance
+- immersive stereo presentation through a native Metal compositor layer, on a single shared ARKit world-tracking session with a depth-backed drawable so the compositor can reproject
+- world-space (rotational) reprojection of each streamed frame from the runtime's per-frame render pose into the live head pose, so the view stays locked to the world as the head turns
+- optional automatic immersive VR entry once the stream is connected, with the control window hidden by default while immersed and restored when the immersive space is dismissed
+- 6DOF head-pose return while the immersive space is open, including the device's real per-eye FOV and IPD so the runtime renders a matching frustum
+- hand-joint streaming through the shared 26-joint tracking payload, plus a user toggle for visible hands in the immersive space
 - first-pass accessory controller pose and input streaming when a tracked spatial controller is available
 
 ## Build
@@ -50,12 +53,14 @@ apply.
 
 1. Launch the runtime on macOS.
 2. Build and run `OXRSys visionOS` on visionOS Simulator or device.
-3. In the floating app window, press `Search`.
-4. When the runtime is found, the viewer connects automatically.
-5. Once the stream is active, the app dismisses the control window, opens its immersive space automatically, presents the stereo stream directly in VR, and starts returning headset pose.
-6. On supported hardware, hand joints and tracked accessory controllers are folded into the same outbound tracking stream.
+3. In the floating app window, press `Find Server`.
+4. If `Auto-enter immersive` is enabled, the viewer connects to the first discovered runtime and opens its immersive space once the stream is active; otherwise, press `Connect` after discovery.
+5. If the stream is active and the immersive space is not open, press `Enter Immersive`.
+6. By default, the control window hides after immersive entry. Disable this with `Keep window in immersive` before connecting if you want the control window to remain open while immersed.
+7. If the immersive space is dismissed, the control window reappears with `Enter Immersive` and `Disconnect` actions while the server connection remains active.
+8. On supported hardware, hand joints and tracked accessory controllers are folded into the same outbound tracking stream. The `Show hands` toggle controls visionOS upper-limb visibility while immersed.
 
-The current path is intentionally minimal: a floating launch window before connection, then full VR once streaming starts.
+The current path is intentionally minimal: a floating launch window before connection, then a compact return menu around the immersive stream.
 
 ## Why It Is Separate
 

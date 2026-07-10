@@ -49,7 +49,11 @@ public:
     bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz) override;
     void Stop() override;
     void StopForProcessExit() override;
-    void SendFrame(FrameSource frameSource) override;
+    // The render-pose arguments are unused: ALVR pairs frames to poses by
+    // trackingSampleTimestampNs, not by an explicit pose tag.
+    void SendFrame(FrameSource frameSource,
+                   const float* renderHeadOrientation,
+                   const float* renderHeadPosition) override;
     void SetGraphicsContext(const GraphicsContext& graphicsContext) override
     {
         graphicsContext_ = graphicsContext;

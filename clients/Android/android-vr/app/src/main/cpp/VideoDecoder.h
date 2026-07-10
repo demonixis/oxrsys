@@ -9,6 +9,7 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 #include <mutex>
+#include <oxrsys/protocol/Protocol.h>
 #include <thread>
 
 struct ANativeWindow;
@@ -18,11 +19,7 @@ namespace oxr
 {
 
 /**
- * Hardware H.264/H.265 video decoder using Android MediaCodec.
- *
- * The codec is selected at Initialize() from the codec byte the server stamps on
- * every video packet — H.265 natively, H.264 when the server runs under Rosetta
- * (where HEVC hardware encode is unavailable), e.g. the wineopenxr D3D11 bridge.
+ * Hardware video decoder using Android MediaCodec.
  *
  * Receives NAL units from the network, feeds them to the hardware decoder,
  * and outputs decoded frames via AImageReader → AHardwareBuffer for zero-copy
@@ -41,14 +38,10 @@ public:
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
-    // codec is protocol::VideoCodec cast to u8 (0 = H.265, 1 = H.264).
-    bool Initialize(uint32_t width, uint32_t height, uint8_t codec);
+    bool Initialize(uint32_t width, uint32_t height, protocol::VideoCodec codec);
     void Shutdown();
 
-    // The codec this decoder was initialized with (protocol::VideoCodec as u8).
-    uint8_t CodecType() const { return codecType_; }
-
-    // Feed a NAL unit to the decoder
+    // Feed an encoded video NAL unit to the decoder.
     bool SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
                        int64_t receiveTimeNs, bool alphaBlend);
 
@@ -77,6 +70,7 @@ public:
     void ReleaseFrame();
 
     bool IsInitialized() const { return codec_ != nullptr; }
+    protocol::VideoCodec GetCodec() const { return activeCodec_; }
 
     uint32_t GetWidth() const { return width_; }
     uint32_t GetHeight() const { return height_; }
@@ -99,7 +93,7 @@ private:
     bool ConsumeSubmittedFrameMetadata(int64_t presentationTimeUs, PendingFrameMetadata* outMetadata);
 
     AMediaCodec* codec_ = nullptr;
-    uint8_t codecType_ = 0;                     // protocol::VideoCodec as u8
+    protocol::VideoCodec activeCodec_ = protocol::VideoCodec::H265;
     AImageReader* imageReader_ = nullptr;
     ANativeWindow* outputWindow_ = nullptr;     // Owned by AImageReader, do not release
     AImage* currentImage_ = nullptr;

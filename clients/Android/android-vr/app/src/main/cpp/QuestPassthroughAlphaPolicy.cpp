@@ -13,7 +13,9 @@ AlphaKeyDecision EvaluateAlphaKey(const AlphaKeyInput& input)
     }
 
     const bool usingFallback =
-        !input.frameHasProtocolAlpha && !input.streamHasObservedProtocolAlpha;
+        input.allowTransparentClearFallback &&
+        !input.frameHasProtocolAlpha &&
+        !input.streamHasObservedProtocolAlpha;
     return {
         input.frameHasProtocolAlpha || usingFallback,
         usingFallback,

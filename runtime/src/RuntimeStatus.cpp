@@ -146,12 +146,17 @@ void WriteStreamingStats(std::ofstream& file, const RuntimeStatus::StreamingStat
     file << "    \"refresh_rate_hz\": " << stats.refreshRateHz << ",\n";
     file << "    \"current_bitrate_mbps\": " << stats.currentBitrateMbps << ",\n";
     file << "    \"max_bitrate_mbps\": " << stats.maxBitrateMbps << ",\n";
+    file << "    \"configured_bitrate_mbps\": " << stats.configuredBitrateMbps << ",\n";
     file << "    \"render_width\": " << stats.renderWidth << ",\n";
     file << "    \"render_height\": " << stats.renderHeight << ",\n";
     file << "    \"encoded_width\": " << stats.encodedWidth << ",\n";
     file << "    \"encoded_height\": " << stats.encodedHeight << ",\n";
+    file << "    \"video_codec\": \"" << JsonEscape(stats.videoCodec) << "\",\n";
     file << "    \"encoder_preset\": \"" << JsonEscape(stats.encoderPreset) << "\",\n";
     file << "    \"foveated_encoding_preset\": \"" << JsonEscape(stats.foveatedEncodingPreset) << "\",\n";
+    file << "    \"foveated_encoding_requested_preset\": \"" << JsonEscape(stats.foveatedEncodingRequestedPreset) << "\",\n";
+    file << "    \"foveated_encoding_status\": \"" << JsonEscape(stats.foveatedEncodingStatus) << "\",\n";
+    file << "    \"foveated_encoding_active\": " << (stats.foveatedEncodingActive ? "true" : "false") << ",\n";
     file << "    \"client_foveation_preset\": \"" << JsonEscape(stats.clientFoveationPreset) << "\",\n";
     file << "    \"client_upscaling\": " << (stats.clientUpscaling ? "true" : "false") << ",\n";
     file << "    \"client_reprojection_mode\": \"" << JsonEscape(stats.clientReprojectionMode) << "\",\n";

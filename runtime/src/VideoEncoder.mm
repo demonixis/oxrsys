@@ -2,7 +2,6 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
-#import "CodecSelect.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -23,15 +22,6 @@
 namespace
 {
 
-// H.264 when the runtime runs under Rosetta (HEVC HW encode unavailable there).
-// Rosetta status is fixed for the process lifetime and PreferredVideoCodec()
-// caches it, so each site resolves the codec locally rather than via a mutable
-// global (which would carry stale cross-session state into output callbacks).
-inline bool UsesH264()
-{
-    return oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264;
-}
-
 using Clock = std::chrono::steady_clock;
 
 double ToMilliseconds(Clock::duration duration)
@@ -46,6 +36,7 @@ struct EncodeFrameContext
     std::function<void(size_t)> releaseSlot;
     FrameSource frameSource;
     VideoEncoder::FrameMetrics metrics;
+    oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
     size_t slotIndex = 0;
     Clock::time_point encodeStart;
     Clock::time_point encodeSubmitFinished;
@@ -223,7 +214,80 @@ bool IsKeyframeSample(CMSampleBufferRef sampleBuffer)
     return !CFBooleanGetValue(notSync);
 }
 
+const char* VideoCodecName(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return "H.264";
+        case oxr::protocol::VideoCodec::AV1:
+            return "AV1";
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return "H.265";
+    }
+}
+
+CMVideoCodecType VideoToolboxCodecType(oxr::protocol::VideoCodec codec)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return kCMVideoCodecType_H264;
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return kCMVideoCodecType_HEVC;
+    }
+}
+
+CFStringRef VideoToolboxProfileLevel(oxr::protocol::VideoCodec codec, bool tenBit)
+{
+    switch (codec)
+    {
+        case oxr::protocol::VideoCodec::H264:
+            return kVTProfileLevel_H264_High_AutoLevel;
+        case oxr::protocol::VideoCodec::H265:
+        default:
+            return tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel;
+    }
+}
+
+bool EmitParameterSetNalUnit(CMFormatDescriptionRef formatDesc,
+                             oxr::protocol::VideoCodec codec,
+                             size_t index,
+                             int64_t timestampNs,
+                             const VideoEncoder::OnNalUnitCallback& callback)
+{
+    const uint8_t* paramSet = nullptr;
+    size_t paramSetSize = 0;
+    OSStatus status = noErr;
+    if (codec == oxr::protocol::VideoCodec::H264)
+    {
+        status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
+    }
+    else
+    {
+        status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
+    }
+    if (status != noErr || paramSet == nullptr || paramSetSize == 0)
+    {
+        return false;
+    }
+
+    std::vector<uint8_t> nalUnit(4 + paramSetSize);
+    nalUnit[0] = 0x00;
+    nalUnit[1] = 0x00;
+    nalUnit[2] = 0x00;
+    nalUnit[3] = 0x01;
+    memcpy(nalUnit.data() + 4, paramSet, paramSetSize);
+    callback(nalUnit.data(), nalUnit.size(), true, timestampNs);
+    return true;
+}
+
 void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
+                        oxr::protocol::VideoCodec codec,
                         const VideoEncoder::OnNalUnitCallback& callback)
 {
     if (!callback)
@@ -239,9 +303,8 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
         CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
         if (formatDesc != nullptr)
         {
-            const bool useH264 = UsesH264();
             size_t paramSetCount = 0;
-            if (useH264)
+            if (codec == oxr::protocol::VideoCodec::H264)
             {
                 CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                     formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
@@ -254,25 +317,7 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
 
             for (size_t i = 0; i < paramSetCount; i++)
             {
-                const uint8_t* paramSet = nullptr;
-                size_t paramSetSize = 0;
-                OSStatus status = useH264
-                    ? CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                          formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr)
-                    : CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                          formatDesc, i, &paramSet, &paramSetSize, nullptr, nullptr);
-                if (status != noErr || paramSet == nullptr || paramSetSize == 0)
-                {
-                    continue;
-                }
-
-                std::vector<uint8_t> nalUnit(4 + paramSetSize);
-                nalUnit[0] = 0x00;
-                nalUnit[1] = 0x00;
-                nalUnit[2] = 0x00;
-                nalUnit[3] = 0x01;
-                memcpy(nalUnit.data() + 4, paramSet, paramSetSize);
-                callback(nalUnit.data(), nalUnit.size(), true, timestampNs);
+                EmitParameterSetNalUnit(formatDesc, codec, i, timestampNs, callback);
             }
         }
     }
@@ -458,7 +503,7 @@ static void CompressionOutputCallback(void* /*outputCallbackRefCon*/,
     context->metrics.keyframe = isKeyframe;
     try
     {
-        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->nalCallback);
+        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->codec, context->nalCallback);
     }
     catch (const std::exception& error)
     {
@@ -499,9 +544,16 @@ bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsConte
 }
 
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext)
+                               uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
+                               oxr::protocol::VideoCodec codec)
 {
     Shutdown();
+
+    if (codec == oxr::protocol::VideoCodec::AV1)
+    {
+        spdlog::error("VideoEncoder: AV1 is not implemented in the VideoToolbox path");
+        return false;
+    }
 
     width_ = width;
     height_ = height;
@@ -516,6 +568,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
     fps_ = fps;
     bitrateMbps_ = bitrateMbps;
+    codec_ = codec;
     graphicsContext_ = graphicsContext;
     videoToolbox_.metalDevice = graphicsContext.metalDevice;
     shuttingDown_.store(false);
@@ -707,8 +760,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].inUse = false;
     }
 
-    const bool useH264 = UsesH264();
-    const CMVideoCodecType codecType = useH264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
+    const CMVideoCodecType codecType = VideoToolboxCodecType(codec_);
 
     // Low-latency rate control halves encode latency (33 -> 10.6ms measured)
     // and fixes the ~30% bitrate overshoot of the default RC. Its Rosetta
@@ -769,15 +821,27 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     const ConfigValues config = Config::Get().GetValues();
     const std::string& preset = config.encoderPreset;
-    SetSessionProperty(compressionSession,
+    const OSStatus profileStatus = SetSessionProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
-        useH264 ? kVTProfileLevel_H264_High_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel);
-    if (useH264)
+        VideoToolboxProfileLevel(codec_, tenBit_ && codec_ == oxr::protocol::VideoCodec::H265));
+    if (codec_ == oxr::protocol::VideoCodec::H264)
     {
         // CABAC buys ~10% quality over the CAVLC default at the same bitrate;
         // High profile already implies the decoder supports it.
         SetSessionProperty(compressionSession,
             kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC);
+    }
+    if (tenBit_ && codec_ == oxr::protocol::VideoCodec::H265)
+    {
+        if (profileStatus == noErr)
+        {
+            spdlog::info("VideoEncoder: Using HEVC Main10 (10-bit) profile");
+        }
+        else
+        {
+            spdlog::warn("VideoEncoder: HEVC Main10 profile unavailable ({}); falling back to encoder default",
+                         profileStatus);
+        }
     }
     if (preset == "speed")
     {
@@ -878,8 +942,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
-                  useH264 ? "H.264" : "H.265",
-                  width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
+                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
 }
 
@@ -1064,6 +1127,70 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     if (stereo)
     {
         EncodeWaitForFrameImage(cmdBuf, frameSource.right);
+    }
+
+    // Crop each eye out of its swapchain sub-rectangle (subImage.imageRect). UE packs both eyes
+    // side-by-side in one swapchain, so without this both eyes would receive the full [L|R] frame.
+    // The crop target is cached per-eye and only reallocated when size/format actually changes
+    // (session start, or a resolution/foveation reconfigure) -- not on every single frame.
+    {
+        id<MTLDevice> cropDev = queue.device;
+        auto cropEye = [&](id<MTLTexture> tex, const FrameImageSource& src, void** cachedTexture) -> id<MTLTexture> {
+            if (tex == nil || !src.HasSourceRect()) return tex;
+            if (src.sourceX == 0 && src.sourceY == 0 &&
+                src.sourceWidth == (uint32_t)tex.width &&
+                src.sourceHeight == (uint32_t)tex.height) return tex;
+
+            id<MTLTexture> eye = (__bridge id<MTLTexture>)*cachedTexture;
+            if (eye == nil || eye.pixelFormat != tex.pixelFormat ||
+                eye.width != (NSUInteger)src.sourceWidth ||
+                eye.height != (NSUInteger)src.sourceHeight)
+            {
+                MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:tex.pixelFormat
+                                                                                              width:src.sourceWidth
+                                                                                             height:src.sourceHeight
+                                                                                          mipmapped:NO];
+                d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+                d.storageMode = MTLStorageModePrivate;
+                id<MTLTexture> newEye = [cropDev newTextureWithDescriptor:d];
+                if (newEye == nil)
+                {
+                    return nil;
+                }
+                if (eye != nil)
+                {
+                    [eye release];
+                }
+                eye = newEye;
+                *cachedTexture = (void*)eye;
+            }
+
+            id<MTLBlitCommandEncoder> cb = [cmdBuf blitCommandEncoder];
+            if (cb == nil)
+            {
+                return nil;
+            }
+            [cb copyFromTexture:tex sourceSlice:0 sourceLevel:0
+                   sourceOrigin:MTLOriginMake(src.sourceX, src.sourceY, 0)
+                     sourceSize:MTLSizeMake(src.sourceWidth, src.sourceHeight, 1)
+                      toTexture:eye destinationSlice:0 destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [cb endEncoding];
+            return eye;
+        };
+        leftTex = cropEye(leftTex, frameSource.left, &slot.leftCropTexture);
+        if (leftTex == nil)
+        {
+            return dropAcquiredSlot("failed to crop left eye texture");
+        }
+        if (stereo)
+        {
+            rightTex = cropEye(rightTex, frameSource.right, &slot.rightCropTexture);
+            if (rightTex == nil)
+            {
+                return dropAcquiredSlot("failed to crop right eye texture");
+            }
+        }
     }
 
     forceKeyframe = forceKeyframe_.exchange(false);
@@ -1296,6 +1423,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
     context->metrics.timestampNs = timestampNs;
     context->metrics.keyframe = forceKeyframe;
+    context->codec = codec_;
     context->encodeStart = Clock::now();
     context->encodeSubmitFinished = context->encodeStart;
 
@@ -1434,6 +1562,16 @@ void VideoEncoder::DestroySlots()
         {
             [(id<MTLTexture>)slot.foveatedScratchTexture release];
             slot.foveatedScratchTexture = nullptr;
+        }
+        if (slot.leftCropTexture != nullptr)
+        {
+            [(id<MTLTexture>)slot.leftCropTexture release];
+            slot.leftCropTexture = nullptr;
+        }
+        if (slot.rightCropTexture != nullptr)
+        {
+            [(id<MTLTexture>)slot.rightCropTexture release];
+            slot.rightCropTexture = nullptr;
         }
         if (slot.compositeTexture != nullptr)
         {

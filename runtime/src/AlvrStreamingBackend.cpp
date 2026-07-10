@@ -193,7 +193,9 @@ void AlvrStreamingBackend::StopInternal(bool skipAlvrShutdown)
     spdlog::info("OXRSys/ALVR: shut down");
 }
 
-void AlvrStreamingBackend::SendFrame(FrameSource frameSource)
+void AlvrStreamingBackend::SendFrame(FrameSource frameSource,
+                                     const float* /*renderHeadOrientation*/,
+                                     const float* /*renderHeadPosition*/)
 {
     StreamingFrame frame = {};
     // ALVR requires the video timestamp to equal a tracking sample timestamp
@@ -289,12 +291,13 @@ bool AlvrStreamingBackend::EnsureEncoder()
         return false;
     }
 
-    encoderUsesH264_ = (oxrsys::PreferredVideoCodec() == oxr::protocol::VideoCodec::H264);
+    const oxr::protocol::VideoCodec codec = oxrsys::PreferredVideoCodec();
+    encoderUsesH264_ = (codec == oxr::protocol::VideoCodec::H264);
     encoder_ = std::make_shared<VideoEncoder>();
     const uint32_t totalWidth = eyeWidth * 2; // side-by-side stereo
     const uint32_t bitrateMbps = Config::Get().GetValues().bitrateMbps;
     if (!encoder_->Initialize(totalWidth, eyeHeight, targetRefreshRateHz_.load(),
-                              bitrateMbps, graphicsContext_))
+                              bitrateMbps, graphicsContext_, codec))
     {
         spdlog::error("OXRSys/ALVR: encoder init failed ({}x{} @{}Hz)", totalWidth,
                       eyeHeight, targetRefreshRateHz_.load());

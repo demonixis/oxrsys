@@ -290,6 +290,7 @@ enum HomeApplicationLogFilter {
     private static let ignoredSystemNoiseMarkers = [
         "com.apple.linkd.autoShortcut",
         "Error registering app with intents framework",
+        "Unable to obtain a task name port right for pid",
     ]
 
     private static let ignoredSystemNoiseLines: Set<String> = [

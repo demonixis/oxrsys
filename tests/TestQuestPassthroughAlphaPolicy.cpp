@@ -12,25 +12,28 @@ TEST_CASE("Quest passthrough alpha policy requires active passthrough", "[quest]
         false,
         false,
         false,
+        false,
     });
 
     REQUIRE_FALSE(decision.useBlackKeyAlpha);
     REQUIRE_FALSE(decision.usingTransparentClearFallback);
 }
 
-TEST_CASE("Quest passthrough alpha policy falls back until protocol alpha is observed", "[quest][passthrough]")
+TEST_CASE("Quest passthrough alpha policy uses only protocol alpha by default", "[quest][passthrough]")
 {
-    AlphaKeyDecision noAlphaYet = EvaluateAlphaKey({
+    AlphaKeyDecision noProtocolAlpha = EvaluateAlphaKey({
         true,
         false,
         false,
+        false,
     });
-    REQUIRE(noAlphaYet.useBlackKeyAlpha);
-    REQUIRE(noAlphaYet.usingTransparentClearFallback);
+    REQUIRE_FALSE(noProtocolAlpha.useBlackKeyAlpha);
+    REQUIRE_FALSE(noProtocolAlpha.usingTransparentClearFallback);
 
     AlphaKeyDecision firstProtocolAlphaFrame = EvaluateAlphaKey({
         true,
         true,
+        false,
         false,
     });
     REQUIRE(firstProtocolAlphaFrame.useBlackKeyAlpha);
@@ -40,6 +43,7 @@ TEST_CASE("Quest passthrough alpha policy falls back until protocol alpha is obs
         true,
         false,
         true,
+        false,
     });
     REQUIRE_FALSE(laterOpaqueFrame.useBlackKeyAlpha);
     REQUIRE_FALSE(laterOpaqueFrame.usingTransparentClearFallback);
@@ -48,7 +52,29 @@ TEST_CASE("Quest passthrough alpha policy falls back until protocol alpha is obs
         true,
         true,
         true,
+        false,
     });
     REQUIRE(laterProtocolAlphaFrame.useBlackKeyAlpha);
     REQUIRE_FALSE(laterProtocolAlphaFrame.usingTransparentClearFallback);
+}
+
+TEST_CASE("Quest passthrough alpha policy keeps transparent-clear fallback explicit", "[quest][passthrough]")
+{
+    AlphaKeyDecision fallback = EvaluateAlphaKey({
+        true,
+        false,
+        false,
+        true,
+    });
+    REQUIRE(fallback.useBlackKeyAlpha);
+    REQUIRE(fallback.usingTransparentClearFallback);
+
+    AlphaKeyDecision laterOpaqueFrame = EvaluateAlphaKey({
+        true,
+        false,
+        true,
+        true,
+    });
+    REQUIRE_FALSE(laterOpaqueFrame.useBlackKeyAlpha);
+    REQUIRE_FALSE(laterOpaqueFrame.usingTransparentClearFallback);
 }

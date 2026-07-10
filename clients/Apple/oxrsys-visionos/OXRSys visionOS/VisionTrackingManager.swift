@@ -7,6 +7,23 @@ import OXRSysStreaming
 import QuartzCore
 import simd
 
+/// Orientation correction for emulated (hand-derived) controller poses. The hand frame points
+/// +Z toward the fingertips, opposite the OpenXR grip pose's forward (−Z), so an uncorrected
+/// controller can appear to point the wrong way. `.meta` applies the flip that matches Touch.
+enum ControllerOrientationLayout: String, CaseIterable, Sendable {
+    case khronos
+    case meta
+
+    var correction: simd_quatf {
+        switch self {
+        case .khronos:
+            return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) // identity (raw hand frame)
+        case .meta:
+            return simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)) // 180° yaw flip
+        }
+    }
+}
+
 struct VisionHandState: Sendable {
     let wristPosition: SIMD3<Float>
     let wristRotation: simd_quatf
@@ -25,6 +42,11 @@ struct VisionControllerState: Sendable {
 struct VisionTrackingSnapshot: Sendable {
     var position: SIMD3<Float> = .zero
     var orientation: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    /// Measured head velocities (world frame, m/s and rad/s) from consecutive ARKit samples.
+    /// The runtime prefers these over its own finite differencing of received UDP poses for
+    /// bounded pose prediction; angular velocity uses the pre-multiply convention it applies.
+    var linearVelocity: SIMD3<Float> = .zero
+    var angularVelocity: SIMD3<Float> = .zero
     var timestampNs: Int64 = 0
     var isTracking = false
     var leftHand: VisionHandState?
@@ -34,9 +56,13 @@ struct VisionTrackingSnapshot: Sendable {
 }
 
 final class VisionTrackingManager: @unchecked Sendable {
-    private let session = ARKitSession()
-    private let worldTracking = WorldTrackingProvider()
-    private let handTracking = HandTrackingProvider()
+    // ARKit sessions and data providers are single-use: once a provider stops (e.g. the
+    // immersive space closes) the same instance can't be re-run — it returns no anchors.
+    // These are recreated by `prepareForNewSession()` before each (re)entry so reconnecting
+    // gets live tracking instead of a permanently-stopped provider.
+    private var session = ARKitSession()
+    private(set) var worldTracking = WorldTrackingProvider()
+    private var handTracking = HandTrackingProvider()
     private let queue = DispatchQueue(label: "oxr.visionos.tracking", qos: .userInteractive)
 
     private var runTask: Task<Void, Never>?
@@ -45,7 +71,38 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var accessoryTrackingProvider: Any?
     private var lastHeadOrientation: simd_quatf?
 
+    // Previous sample for head-velocity measurement (all access on `queue`), plus a light EMA so
+    // the reported velocities don't carry per-sample tracking noise into the server's prediction.
+    private var lastSamplePosition: SIMD3<Float>?
+    private var lastSampleOrientation: simd_quatf?
+    private var lastSampleTime: Double = 0
+    private var smoothedLinearVelocity: SIMD3<Float> = .zero
+    private var smoothedAngularVelocity: SIMD3<Float> = .zero
+
+    // Controller emulation from hands / gamepad. All access is on `queue` (with sampleTracking).
+    private var gestureEmulator = HandGestureEmulator()
+    private var gestureEmulationEnabled = false
+    // Compatibility mode: hand poses + a connected gamepad (e.g. Xbox) emulate Touch controllers.
+    // Takes priority over gesture emulation when a gamepad is present.
+    private var controllerCompatibilityEnabled = false
+    private var controllerLayout: ControllerOrientationLayout = .meta
+
     var onTrackingUpdate: (@Sendable (VisionTrackingSnapshot) -> Void)?
+
+    /// Enable hand-gesture controller emulation (pinch/curl → buttons/trigger/grip, wrist → pose).
+    func setGestureEmulationEnabled(_ enabled: Bool) {
+        queue.async { [self] in gestureEmulationEnabled = enabled }
+    }
+
+    /// Enable hands+gamepad compatibility mode (hand pose + gamepad buttons emulate Touch).
+    func setControllerCompatibilityEnabled(_ enabled: Bool) {
+        queue.async { [self] in controllerCompatibilityEnabled = enabled }
+    }
+
+    /// Select the emulated-controller orientation layout.
+    func setControllerLayout(_ layout: ControllerOrientationLayout) {
+        queue.async { [self] in controllerLayout = layout }
+    }
 
     func start() {
         queue.async { [self] in
@@ -69,15 +126,40 @@ final class VisionTrackingManager: @unchecked Sendable {
     func stop() {
         queue.async { [self] in
             guard running else { return }
-            running = false
-            sampleTimer?.cancel()
-            sampleTimer = nil
-            runTask?.cancel()
-            runTask = nil
-            accessoryTrackingProvider = nil
-            lastHeadOrientation = nil
+            tearDownLocked()
             print("[VisionTracking] Stopped")
         }
+    }
+
+    /// Recreate the ARKit session and data providers so the next `start()` runs on fresh,
+    /// runnable instances. ARKit providers are single-use — reusing a stopped provider yields
+    /// no anchors (no tracking) until the app is relaunched. Call on the main thread before
+    /// (re)opening the immersive space so the renderer captures the new world-tracking provider.
+    func prepareForNewSession() {
+        queue.sync { [self] in
+            tearDownLocked()
+            session = ARKitSession()
+            worldTracking = WorldTrackingProvider()
+            handTracking = HandTrackingProvider()
+        }
+    }
+
+    /// Stop the running session and cancel work. Must be called on `queue`.
+    private func tearDownLocked() {
+        running = false
+        sampleTimer?.cancel()
+        sampleTimer = nil
+        runTask?.cancel()
+        runTask = nil
+        session.stop()
+        accessoryTrackingProvider = nil
+        lastHeadOrientation = nil
+        lastSamplePosition = nil
+        lastSampleOrientation = nil
+        lastSampleTime = 0
+        smoothedLinearVelocity = .zero
+        smoothedAngularVelocity = .zero
+        gestureEmulator.reset()
     }
 
     private func runSession() async {
@@ -174,9 +256,50 @@ final class VisionTrackingManager: @unchecked Sendable {
         )
         lastHeadOrientation = orientation
 
+        // Measure head velocity from consecutive ARKit samples on this steady timer — a far
+        // cleaner signal than the server finite-differencing poses off jittery UDP arrival.
+        var linearVelocity = SIMD3<Float>.zero
+        var angularVelocity = SIMD3<Float>.zero
+        if deviceAnchor.isTracked {
+            if let prevPosition = lastSamplePosition,
+               let prevOrientation = lastSampleOrientation {
+                let dt = Float(timestamp - lastSampleTime)
+                if dt > 0.001, dt < 0.1 {
+                    let rawLinear = (position - prevPosition) / dt
+                    // World-frame angular velocity from the pre-multiply delta (q_now = Δq·q_prev),
+                    // the convention the runtime's PredictOrientationFromVelocity applies.
+                    var delta = simd_normalize(orientation * prevOrientation.inverse)
+                    if delta.real < 0 { delta = simd_quatf(vector: -delta.vector) } // shortest arc
+                    var rawAngular = SIMD3<Float>.zero
+                    let imagLength = simd_length(delta.imag)
+                    if imagLength > 1e-6 {
+                        let angle = 2 * atan2(imagLength, delta.real)
+                        rawAngular = (delta.imag / imagLength) * (angle / dt)
+                    }
+                    // Light EMA (~2 samples): strips per-sample noise without adding real lag.
+                    let alpha: Float = 0.5
+                    smoothedLinearVelocity = smoothedLinearVelocity * (1 - alpha) + rawLinear * alpha
+                    smoothedAngularVelocity = smoothedAngularVelocity * (1 - alpha) + rawAngular * alpha
+                }
+            }
+            lastSamplePosition = position
+            lastSampleOrientation = orientation
+            lastSampleTime = timestamp
+            linearVelocity = smoothedLinearVelocity
+            angularVelocity = smoothedAngularVelocity
+        } else {
+            // Tracking lost: report zero and restart the measurement on reacquisition.
+            lastSamplePosition = nil
+            lastSampleOrientation = nil
+            smoothedLinearVelocity = .zero
+            smoothedAngularVelocity = .zero
+        }
+
         var snapshot = VisionTrackingSnapshot(
             position: position,
             orientation: orientation,
+            linearVelocity: linearVelocity,
+            angularVelocity: angularVelocity,
             timestampNs: Int64(timestamp * 1_000_000_000),
             isTracking: deviceAnchor.isTracked
         )
@@ -207,7 +330,94 @@ final class VisionTrackingManager: @unchecked Sendable {
             }
         }
 
+        // Fill controllers for hands without a physical spatial controller. Compatibility mode
+        // (hand pose + gamepad buttons) wins when a gamepad is connected; otherwise fall back to
+        // gesture emulation. The hand skeleton is still sent alongside.
+        let compatGamepad = controllerCompatibilityEnabled ? connectedGamepad() : nil
+        if let compatGamepad {
+            if snapshot.leftController == nil, let leftHand = snapshot.leftHand {
+                snapshot.leftController = applyLayout(makeCompatibilityController(hand: leftHand, gamepad: compatGamepad, isLeft: true))
+            }
+            if snapshot.rightController == nil, let rightHand = snapshot.rightHand {
+                snapshot.rightController = applyLayout(makeCompatibilityController(hand: rightHand, gamepad: compatGamepad, isLeft: false))
+            }
+        } else if gestureEmulationEnabled {
+            if snapshot.leftController == nil, let leftHand = snapshot.leftHand {
+                snapshot.leftController = applyLayout(gestureEmulator.emulate(from: leftHand, chirality: .left))
+            }
+            if snapshot.rightController == nil, let rightHand = snapshot.rightHand {
+                snapshot.rightController = applyLayout(gestureEmulator.emulate(from: rightHand, chirality: .right))
+            }
+        }
+
         onTrackingUpdate?(snapshot)
+    }
+
+    /// Applies the selected orientation-layout correction to an emulated controller's pose.
+    private func applyLayout(_ state: VisionControllerState) -> VisionControllerState {
+        let corrected = simd_normalize(state.orientation * controllerLayout.correction)
+        return VisionControllerState(
+            position: state.position,
+            orientation: corrected,
+            buttonState: state.buttonState,
+            trigger: state.trigger,
+            grip: state.grip,
+            thumbstick: state.thumbstick
+        )
+    }
+
+    /// First connected non-spatial gamepad (e.g. an Xbox controller) for compatibility mode.
+    /// Spatial controllers are skipped — they are handled by the accessory-tracking path.
+    private func connectedGamepad() -> GCExtendedGamepad? {
+        for controller in GCController.controllers() {
+            if #available(visionOS 26.0, *),
+               controller.productCategory == GCProductCategorySpatialController {
+                continue
+            }
+            if let gamepad = controller.extendedGamepad {
+                return gamepad
+            }
+        }
+        return nil
+    }
+
+    /// Emulates one Touch controller: 6DOF pose from the hand wrist, inputs from the gamepad.
+    /// Left gets X/Y + menu + left stick/trigger/bumper; right gets A/B + right stick/trigger/bumper.
+    private func makeCompatibilityController(hand: VisionHandState,
+                                             gamepad: GCExtendedGamepad,
+                                             isLeft: Bool) -> VisionControllerState {
+        var buttons: UInt32 = 0
+        let trigger: Float
+        let grip: Float
+        let thumbstick: SIMD2<Float>
+
+        if isLeft {
+            if gamepad.buttonX.isPressed { buttons |= ButtonFlags.x }
+            if gamepad.buttonY.isPressed { buttons |= ButtonFlags.y }
+            if gamepad.buttonMenu.isPressed || gamepad.buttonOptions?.isPressed == true {
+                buttons |= ButtonFlags.menu
+            }
+            trigger = gamepad.leftTrigger.value
+            grip = gamepad.leftShoulder.value
+            thumbstick = SIMD2<Float>(gamepad.leftThumbstick.xAxis.value,
+                                      gamepad.leftThumbstick.yAxis.value)
+        } else {
+            if gamepad.buttonA.isPressed { buttons |= ButtonFlags.a }
+            if gamepad.buttonB.isPressed { buttons |= ButtonFlags.b }
+            trigger = gamepad.rightTrigger.value
+            grip = gamepad.rightShoulder.value
+            thumbstick = SIMD2<Float>(gamepad.rightThumbstick.xAxis.value,
+                                      gamepad.rightThumbstick.yAxis.value)
+        }
+
+        return VisionControllerState(
+            position: hand.wristPosition,
+            orientation: hand.wristRotation,
+            buttonState: buttons,
+            trigger: trigger,
+            grip: grip,
+            thumbstick: thumbstick
+        )
     }
 
     private func stabilized(_ orientation: simd_quatf, previous: simd_quatf?) -> simd_quatf {

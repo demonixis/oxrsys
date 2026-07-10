@@ -69,11 +69,41 @@ android {
     buildTypes {
         debug {
             isDebuggable = true
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DOXRSYS_ANDROID_BUILD_PROFILE=Debug",
+                        "-DOXRSYS_ANDROID_STABLE_RELEASE=OFF"
+                    )
+                }
+            }
         }
         release {
             isMinifyEnabled = false
-            isDebuggable = false
+            isDebuggable = true
             signingConfig = signingConfigs.getByName("debug") // Use debug key for sideloading
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DOXRSYS_ANDROID_BUILD_PROFILE=ReleaseStable",
+                        "-DOXRSYS_ANDROID_STABLE_RELEASE=ON"
+                    )
+                }
+            }
+        }
+        create("optimizedRelease") {
+            isMinifyEnabled = false
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DOXRSYS_ANDROID_BUILD_PROFILE=OptimizedRelease",
+                        "-DOXRSYS_ANDROID_STABLE_RELEASE=OFF"
+                    )
+                }
+            }
         }
     }
 

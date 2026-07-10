@@ -11,8 +11,40 @@ private struct RuntimeStatsStreamIdentity: Equatable {
     let clientName: String?
 }
 
+enum HomeTab: Hashable {
+    case apps
+    case settings
+    case streaming
+    case developer
+}
+
+private struct UsbTransportSetupResult: Sendable {
+    enum Outcome: Sendable {
+        case configured
+        case needsDeviceSelection
+        case failed(message: String, showAdbInstallGuidance: Bool)
+    }
+
+    var outcome: Outcome
+    var adbStatus: HomeAdbStatus
+    var devices: [QuestUsbDevice]
+    var selectedSerial: String?
+    var reversePorts: Set<Int>
+    var statusMessage: String
+}
+
+private struct UsbTransportRefreshResult: Sendable {
+    var adbStatus: HomeAdbStatus
+    var devices: [QuestUsbDevice]
+    var selectedSerial: String?
+    var reversePorts: Set<Int>
+    var statusMessage: String
+    var reverseReadErrorMessage: String?
+}
+
 @MainActor
 final class HomeAppModel: ObservableObject, @unchecked Sendable {
+    @Published var selectedTab: HomeTab = .apps
     @Published var runtimeManifestPath: String
     @Published var serverConfig = OXRSysServerConfig()
     @Published var runtimeStatus = RuntimeRegistrationStatus()
@@ -27,8 +59,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     @Published var selectedQuestUsbReversePorts: Set<Int> = []
     @Published var wifiStatus = MacWifiStatus.unknown
     @Published var adbStatus = HomeAdbStatus.unknown
+    @Published var adbMode: HomeAdbMode = .internalAutomatic
     @Published var customAdbPath: String = ""
     @Published var isAdbInstallGuidancePresented = false
+    @Published var isRuntimeSetupGuidancePresented = false
+    @Published var isUsbSetupInProgress = false
     @Published var runtimeActivity = HomeRuntimeActivity.idle
     @Published private(set) var runtimeStatsHistory: [HomeRuntimeStreamingStats] = []
     @Published private(set) var activeLaunchedAppID: String?
@@ -38,6 +73,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private let fileManager = FileManager.default
     private let defaults = UserDefaults.standard
     private let runtimeManifestPathKey = "runtimeManifestPath"
+    private let adbModeKey = "adbMode"
     private let customAdbPathKey = "customAdbPath"
     private let launcherScanner = LauncherAppScanner()
     private let maxLogCharacters = 30_000
@@ -49,14 +85,26 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private var lastKnownConfigModificationDate: Date?
     private var lastTransportHealthRefreshDate = Date.distantPast
     private var mainTransportOverride: HomePrimaryTransport?
+    private var nextUsbRequestID = 0
+    private var latestUsbRefreshRequestID = 0
+    private var latestUsbSetupRequestID = 0
+    private var isUsbRefreshInProgress = false
     private var pollTask: Task<Void, Never>?
     private var runtimeStatsStreamIdentity: RuntimeStatsStreamIdentity?
+    private var hasPresentedRuntimeSetupGuidanceThisLaunch = false
     private let maxRuntimeStatsSamples = 60
 
     init() {
         runtimeManifestPath = defaults.string(forKey: runtimeManifestPathKey) ?? SourceDefaults.defaultRuntimeManifestPath()
         customAdbPath = defaults.string(forKey: customAdbPathKey) ?? ""
+        if let rawMode = defaults.string(forKey: adbModeKey),
+           let storedMode = HomeAdbMode(rawValue: rawMode) {
+            adbMode = storedMode
+        } else if !customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            adbMode = .custom
+        }
         loadAll()
+        configureUsbOnStartupIfNeeded()
         startPolling()
     }
 
@@ -89,6 +137,21 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             return false
         }
         return normalizedPath(target) == normalizedPath(runtimeManifestPath)
+    }
+
+    var canRegisterSelectedRuntime: Bool {
+        fileManager.fileExists(atPath: normalizedPath(runtimeManifestPath))
+    }
+
+    var runtimeSetupGuidanceMessage: String {
+        if canRegisterSelectedRuntime {
+            return """
+            OXRSys is not registered as the active OpenXR runtime. Register the selected runtime so compatible apps can find it outside this launcher.
+            """
+        }
+        return """
+        OXRSys is not registered as the active OpenXR runtime, and the selected runtime JSON does not exist. Choose the packaged OXRSys runtime JSON, then register it.
+        """
     }
 
     var registrationButtonTitle: String {
@@ -144,6 +207,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 message: wifiStatus.message
             )
         case .usbAdb:
+            if isUsbSetupInProgress {
+                return HomeTransportReadiness(
+                    isReady: false,
+                    message: "Configuring USB ADB reverse..."
+                )
+            }
             guard adbStatus.isAvailable else {
                 return HomeTransportReadiness(
                     isReady: false,
@@ -184,8 +253,47 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     }
 
     private var effectiveCustomAdbPath: String? {
+        guard adbMode == .custom else {
+            return nil
+        }
         let trimmed = customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var adbSelectionIdentity: String {
+        let path = adbMode == .custom
+            ? customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+        return "\(adbMode.rawValue)|\(path)"
+    }
+
+    func presentRuntimeSetupGuidanceIfNeeded() {
+        refreshRuntimeStatus()
+        guard !hasPresentedRuntimeSetupGuidanceThisLaunch, !isSelectedRuntimeRegistered else {
+            return
+        }
+        hasPresentedRuntimeSetupGuidanceThisLaunch = true
+        selectedTab = .settings
+        isRuntimeSetupGuidancePresented = true
+    }
+
+    func dismissRuntimeSetupGuidance() {
+        isRuntimeSetupGuidancePresented = false
+    }
+
+    func registerRuntimeFromGuidance() {
+        isRuntimeSetupGuidancePresented = false
+        selectedTab = .settings
+        registerRuntime()
+    }
+
+    func chooseRuntimeManifestFromGuidance() {
+        isRuntimeSetupGuidancePresented = false
+        selectedTab = .settings
+        chooseRuntimeManifest()
+        if canRegisterSelectedRuntime {
+            registerRuntime()
+        }
     }
 
     func loadAll() {
@@ -194,6 +302,35 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         refreshRuntimeActivity()
         reloadLauncherApps()
         refreshTransportHealth(force: true)
+    }
+
+    private func configureUsbOnStartupIfNeeded() {
+        guard serverConfig.transport == .usbAdb else {
+            return
+        }
+        startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: false)
+    }
+
+    private func nextUsbRequestIdentifier() -> Int {
+        nextUsbRequestID += 1
+        return nextUsbRequestID
+    }
+
+    private func invalidateUsbRequests() {
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbRefreshRequestID = requestID
+        latestUsbSetupRequestID = requestID
+        isUsbRefreshInProgress = false
+        isUsbSetupInProgress = false
+    }
+
+    private func resetUsbStateForAdbSourceChange() {
+        invalidateUsbRequests()
+        questUsbDevices = []
+        selectedQuestUsbSerial = nil
+        selectedQuestUsbReversePorts = []
+        adbStatus = adbMode == .custom && effectiveCustomAdbPath == nil ? .emptyCustomPath : .unknown
+        questUsbStatus = adbStatus.message
     }
 
     func loadConfigFromDisk() {
@@ -282,98 +419,23 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         }
         lastTransportHealthRefreshDate = now
         wifiStatus = MacWifiBridge.status()
-        refreshQuestUsbDevices()
+        if !isUsbSetupInProgress {
+            startUsbTransportRefresh(showCheckingStatus: force)
+        }
     }
 
     func refreshQuestUsbDevices() {
-        guard refreshAdbStatus() else {
-            questUsbDevices = []
-            selectedQuestUsbSerial = nil
-            selectedQuestUsbReversePorts = []
-            questUsbStatus = adbStatus.message
-            return
-        }
-
-        do {
-            questUsbDevices = try QuestUsbBridge.devices(customAdbPath: effectiveCustomAdbPath)
-            let usableDevices = questUsbDevices.filter(\.isUsable)
-            if let selectedQuestUsbSerial,
-               !usableDevices.contains(where: { $0.serial == selectedQuestUsbSerial }) {
-                self.selectedQuestUsbSerial = usableDevices.first?.serial
-            } else if selectedQuestUsbSerial == nil {
-                selectedQuestUsbSerial = usableDevices.first?.serial
-            }
-
-            selectedQuestUsbReversePorts = []
-            if let selectedQuestUsbSerial {
-                selectedQuestUsbReversePorts =
-                    (try? QuestUsbBridge.reverseMappings(
-                        for: selectedQuestUsbSerial,
-                        customAdbPath: effectiveCustomAdbPath
-                    )) ?? []
-            }
-
-            if questUsbDevices.isEmpty {
-                questUsbStatus = "No Quest device reported by adb."
-            } else if usableDevices.isEmpty {
-                questUsbStatus = "ADB sees device(s), but none are authorized for reverse tunneling."
-            } else if usableDevices.count > 1, selectedQuestUsbSerial == nil {
-                questUsbStatus = "Multiple Quest devices found; select one before configuring USB."
-            } else {
-                questUsbStatus = "Ready to configure USB ADB reverse for \(usableDevices.count) authorized device\(usableDevices.count == 1 ? "" : "s")."
-                if !selectedQuestUsbReversePorts.isEmpty {
-                    questUsbStatus += " Active reverse ports: \(selectedQuestUsbReversePorts.sorted().map(String.init).joined(separator: ", "))."
-                }
-            }
-        } catch {
-            questUsbDevices = []
-            selectedQuestUsbSerial = nil
-            selectedQuestUsbReversePorts = []
-            questUsbStatus = "adb is unavailable or failed: \(error.localizedDescription)"
-        }
-    }
-
-    @discardableResult
-    private func refreshAdbStatus() -> Bool {
-        adbStatus = QuestUsbBridge.status(customPath: effectiveCustomAdbPath)
-        return adbStatus.isAvailable
+        startUsbTransportRefresh(showCheckingStatus: true, force: true)
     }
 
     func configureQuestUsbReverse() {
-        guard refreshAdbStatus() else {
-            questUsbStatus = adbStatus.message
-            if effectiveCustomAdbPath == nil {
-                presentAdbInstallGuidance()
-            }
-            return
-        }
-
-        guard let serial = selectedQuestUsbSerial,
-              questUsbDevices.contains(where: { $0.serial == serial && $0.isUsable }) else {
-            questUsbStatus = "Select an authorized Quest device before configuring USB."
-            return
-        }
-
-        do {
-            let configuredPorts = try QuestUsbBridge.configureReverse(
-                for: serial,
-                customAdbPath: effectiveCustomAdbPath
-            )
-            selectedQuestUsbReversePorts = configuredPorts
-            questUsbStatus = "Verified adb reverse for \(serial) on ports \(configuredPorts.sorted().map(String.init).joined(separator: ", "))."
-            statusMessage = "Configured Quest USB ADB transport."
-        } catch {
-            questUsbStatus = "Failed to configure adb reverse: \(error.localizedDescription)"
-            errorMessage = questUsbStatus
-        }
+        startUsbTransportSetup(requireSelectedDevice: true, persistTransportOnSuccess: mainTransportSelection == .usbAdb)
     }
 
     func setMainTransportSelection(_ selection: HomePrimaryTransport) {
-        if selection == .usbAdb, !refreshAdbStatus() {
-            questUsbStatus = adbStatus.message
-            if effectiveCustomAdbPath == nil {
-                presentAdbInstallGuidance()
-            }
+        if selection == .usbAdb {
+            mainTransportOverride = .usbAdb
+            startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: true)
             return
         }
 
@@ -381,6 +443,384 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         serverConfig.transport = selection.configTransport
         saveStructuredConfig()
         refreshTransportHealth(force: true)
+    }
+
+    func setAdbMode(_ mode: HomeAdbMode) {
+        guard adbMode != mode else {
+            return
+        }
+
+        adbMode = mode
+        defaults.set(mode.rawValue, forKey: adbModeKey)
+        if mode == .custom,
+           customAdbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let detectedPath = QuestUsbBridge.resolveAdbExecutablePath() {
+            customAdbPath = detectedPath
+            defaults.set(detectedPath, forKey: customAdbPathKey)
+        }
+        resetUsbStateForAdbSourceChange()
+        statusMessage = mode == .custom ? "Using custom ADB executable." : "Using internal ADB setup."
+        refreshTransportHealth(force: true)
+    }
+
+    func setSelectedQuestUsbSerial(_ serial: String?) {
+        let normalized = serial?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = normalized?.isEmpty == true ? nil : normalized
+        guard selectedQuestUsbSerial != selected else {
+            return
+        }
+
+        invalidateUsbRequests()
+        selectedQuestUsbSerial = selected
+        selectedQuestUsbReversePorts = []
+        questUsbStatus = selected == nil ? "No Quest device selected." : "Checking USB reverse mappings..."
+        refreshTransportHealth(force: true)
+    }
+
+    func setCustomAdbPathText(_ path: String) {
+        if adbMode != .custom {
+            adbMode = .custom
+            defaults.set(HomeAdbMode.custom.rawValue, forKey: adbModeKey)
+        }
+        customAdbPath = path
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: customAdbPathKey)
+        } else {
+            defaults.set(trimmed, forKey: customAdbPathKey)
+        }
+        resetUsbStateForAdbSourceChange()
+        questUsbStatus = trimmed.isEmpty ? HomeAdbStatus.emptyCustomPath.message : "Custom ADB path changed. Refresh USB devices to validate it."
+    }
+
+    func commitCustomAdbPath() {
+        refreshTransportHealth(force: true)
+    }
+
+    func prefillCustomAdbPathFromDetectedExecutable() {
+        adbMode = .custom
+        defaults.set(HomeAdbMode.custom.rawValue, forKey: adbModeKey)
+        if let detectedPath = QuestUsbBridge.resolveAdbExecutablePath() {
+            customAdbPath = detectedPath
+            defaults.set(detectedPath, forKey: customAdbPathKey)
+            statusMessage = "Detected ADB executable."
+        } else {
+            statusMessage = "No external ADB executable was detected."
+        }
+        resetUsbStateForAdbSourceChange()
+        refreshTransportHealth(force: true)
+    }
+
+    private func startUsbTransportRefresh(showCheckingStatus: Bool, force: Bool = false) {
+        if isUsbSetupInProgress {
+            return
+        }
+        if isUsbRefreshInProgress && !force {
+            return
+        }
+
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbRefreshRequestID = requestID
+        isUsbRefreshInProgress = true
+        if showCheckingStatus {
+            questUsbStatus = "Checking USB ADB devices..."
+        }
+
+        let mode = adbMode
+        let customPath = effectiveCustomAdbPath
+        let selectionIdentity = adbSelectionIdentity
+        let requestedSerial = selectedQuestUsbSerial
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                Self.collectUsbTransportRefresh(
+                    adbMode: mode,
+                    customAdbPath: customPath,
+                    requestedSerial: requestedSerial
+                )
+            }.value
+
+            guard let self else { return }
+            guard requestID == self.latestUsbRefreshRequestID else { return }
+            guard self.adbSelectionIdentity == selectionIdentity else {
+                self.isUsbRefreshInProgress = false
+                return
+            }
+            self.applyUsbTransportRefreshResult(result)
+        }
+    }
+
+    nonisolated private static func collectUsbTransportRefresh(
+        adbMode: HomeAdbMode,
+        customAdbPath: String?,
+        requestedSerial: String?
+    ) -> UsbTransportRefreshResult {
+        let adbStatus: HomeAdbStatus
+        if adbMode == .custom, customAdbPath == nil {
+            adbStatus = .emptyCustomPath
+        } else {
+            adbStatus = QuestUsbBridge.status(customPath: customAdbPath)
+        }
+        guard adbStatus.isAvailable else {
+            return UsbTransportRefreshResult(
+                adbStatus: adbStatus,
+                devices: [],
+                selectedSerial: nil,
+                reversePorts: [],
+                statusMessage: adbStatus.message,
+                reverseReadErrorMessage: nil
+            )
+        }
+
+        do {
+            let devices = try QuestUsbBridge.devices(customAdbPath: customAdbPath)
+            let usableDevices = devices.filter(\.isUsable)
+            let selectedSerial: String?
+            if let requestedSerial,
+               usableDevices.contains(where: { $0.serial == requestedSerial }) {
+                selectedSerial = requestedSerial
+            } else if usableDevices.count == 1 {
+                selectedSerial = usableDevices.first?.serial
+            } else {
+                selectedSerial = nil
+            }
+
+            var reversePorts: Set<Int> = []
+            var reverseReadErrorMessage: String?
+            if let selectedSerial {
+                do {
+                    reversePorts = try QuestUsbBridge.reverseMappings(
+                        for: selectedSerial,
+                        customAdbPath: customAdbPath
+                    )
+                } catch {
+                    reverseReadErrorMessage = error.localizedDescription
+                }
+            }
+
+            let statusMessage: String
+            if devices.isEmpty {
+                statusMessage = "No Quest device reported over USB debugging."
+            } else if usableDevices.isEmpty {
+                statusMessage = "USB debugging sees device(s), but none are authorized for reverse tunneling."
+            } else if usableDevices.count > 1, selectedSerial == nil {
+                statusMessage = "Multiple Quest devices found; select one before configuring USB."
+            } else if let reverseReadErrorMessage {
+                statusMessage = "Failed to read USB reverse mappings: \(reverseReadErrorMessage)"
+            } else {
+                var message = "Ready to configure USB ADB reverse for \(usableDevices.count) authorized device\(usableDevices.count == 1 ? "" : "s")."
+                if !reversePorts.isEmpty {
+                    message += " Active reverse ports: \(reversePorts.sorted().map(String.init).joined(separator: ", "))."
+                }
+                statusMessage = message
+            }
+
+            return UsbTransportRefreshResult(
+                adbStatus: adbStatus,
+                devices: devices,
+                selectedSerial: selectedSerial,
+                reversePorts: reversePorts,
+                statusMessage: statusMessage,
+                reverseReadErrorMessage: reverseReadErrorMessage
+            )
+        } catch {
+            return UsbTransportRefreshResult(
+                adbStatus: adbStatus,
+                devices: [],
+                selectedSerial: nil,
+                reversePorts: [],
+                statusMessage: "adb is unavailable or failed: \(error.localizedDescription)",
+                reverseReadErrorMessage: nil
+            )
+        }
+    }
+
+    private func applyUsbTransportRefreshResult(_ result: UsbTransportRefreshResult) {
+        isUsbRefreshInProgress = false
+        let previousSerial = selectedQuestUsbSerial
+        let previousPorts = selectedQuestUsbReversePorts
+        adbStatus = result.adbStatus
+        questUsbDevices = result.devices
+        selectedQuestUsbSerial = result.selectedSerial
+
+        let canPreservePreviousPorts =
+            result.reverseReadErrorMessage != nil &&
+            result.selectedSerial == previousSerial &&
+            result.selectedSerial != nil &&
+            !previousPorts.isEmpty &&
+            result.devices.contains(where: { $0.serial == previousSerial && $0.isUsable })
+
+        if canPreservePreviousPorts {
+            selectedQuestUsbReversePorts = previousPorts
+            questUsbStatus = "Using previously verified USB reverse ports. Latest refresh failed: \(result.reverseReadErrorMessage ?? "unknown error")"
+        } else {
+            selectedQuestUsbReversePorts = result.reversePorts
+            questUsbStatus = result.statusMessage
+        }
+    }
+
+    private func startUsbTransportSetup(requireSelectedDevice: Bool, persistTransportOnSuccess: Bool) {
+        guard !isUsbSetupInProgress else {
+            return
+        }
+
+        isUsbRefreshInProgress = false
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbRefreshRequestID = requestID
+        latestUsbSetupRequestID = requestID
+        isUsbSetupInProgress = true
+        questUsbStatus = "Configuring USB ADB reverse..."
+        statusMessage = "Checking USB ADB transport."
+
+        let mode = adbMode
+        let customPath = effectiveCustomAdbPath
+        let selectionIdentity = adbSelectionIdentity
+        let requestedSerial = selectedQuestUsbSerial
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Self.collectUsbTransportSetup(
+                    adbMode: mode,
+                    customAdbPath: customPath,
+                    requestedSerial: requestedSerial,
+                    requireSelectedDevice: requireSelectedDevice
+                )
+            }.value
+
+            guard let self else { return }
+            guard requestID == self.latestUsbSetupRequestID else { return }
+            guard self.adbSelectionIdentity == selectionIdentity else {
+                self.isUsbSetupInProgress = false
+                return
+            }
+            self.applyUsbTransportSetupResult(result, persistTransportOnSuccess: persistTransportOnSuccess)
+        }
+    }
+
+    nonisolated private static func collectUsbTransportSetup(
+        adbMode: HomeAdbMode,
+        customAdbPath: String?,
+        requestedSerial: String?,
+        requireSelectedDevice: Bool
+    ) -> UsbTransportSetupResult {
+        let adbStatus: HomeAdbStatus
+        if adbMode == .custom, customAdbPath == nil {
+            adbStatus = .emptyCustomPath
+        } else {
+            adbStatus = QuestUsbBridge.status(customPath: customAdbPath)
+        }
+        guard adbStatus.isAvailable else {
+            return UsbTransportSetupResult(
+                outcome: .failed(
+                    message: adbStatus.message,
+                    showAdbInstallGuidance: adbMode == .internalAutomatic
+                ),
+                adbStatus: adbStatus,
+                devices: [],
+                selectedSerial: nil,
+                reversePorts: [],
+                statusMessage: adbStatus.message
+            )
+        }
+
+        do {
+            let devices = try QuestUsbBridge.devices(customAdbPath: customAdbPath)
+            let usableDevices = devices.filter(\.isUsable)
+            let selectedSerial: String?
+            if let requestedSerial,
+               usableDevices.contains(where: { $0.serial == requestedSerial }) {
+                selectedSerial = requestedSerial
+            } else if !requireSelectedDevice, usableDevices.count == 1 {
+                selectedSerial = usableDevices.first?.serial
+            } else {
+                selectedSerial = nil
+            }
+
+            guard let selectedSerial else {
+                let message: String
+                if devices.isEmpty {
+                    message = "No Quest device reported over USB debugging."
+                } else if usableDevices.isEmpty {
+                    message = "USB debugging sees device(s), but none are authorized for reverse tunneling."
+                } else if usableDevices.count > 1 {
+                    message = "Multiple Quest devices found; select one before configuring USB."
+                } else {
+                    message = "Select an authorized Quest device before configuring USB."
+                }
+                return UsbTransportSetupResult(
+                    outcome: .needsDeviceSelection,
+                    adbStatus: adbStatus,
+                    devices: devices,
+                    selectedSerial: nil,
+                    reversePorts: [],
+                    statusMessage: message
+                )
+            }
+
+            let existingPorts = try QuestUsbBridge.reverseMappings(
+                for: selectedSerial,
+                customAdbPath: customAdbPath
+            )
+            let expectedPorts = Set(QuestUsbBridge.reversePorts)
+            let configuredPorts = expectedPorts.isSubset(of: existingPorts)
+                ? existingPorts
+                : try QuestUsbBridge.configureReverse(
+                    for: selectedSerial,
+                    customAdbPath: customAdbPath
+                )
+            let portsText = configuredPorts.sorted().map(String.init).joined(separator: ", ")
+            return UsbTransportSetupResult(
+                outcome: .configured,
+                adbStatus: adbStatus,
+                devices: devices,
+                selectedSerial: selectedSerial,
+                reversePorts: configuredPorts,
+                statusMessage: "Verified USB reverse for \(selectedSerial) on ports \(portsText)."
+            )
+        } catch {
+            return UsbTransportSetupResult(
+                outcome: .failed(
+                    message: "Failed to configure USB reverse: \(error.localizedDescription)",
+                    showAdbInstallGuidance: false
+                ),
+                adbStatus: adbStatus,
+                devices: [],
+                selectedSerial: requestedSerial,
+                reversePorts: [],
+                statusMessage: "Failed to configure USB reverse: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func applyUsbTransportSetupResult(
+        _ result: UsbTransportSetupResult,
+        persistTransportOnSuccess: Bool
+    ) {
+        isUsbSetupInProgress = false
+        adbStatus = result.adbStatus
+        questUsbDevices = result.devices
+        selectedQuestUsbSerial = result.selectedSerial
+        selectedQuestUsbReversePorts = result.reversePorts
+        questUsbStatus = result.statusMessage
+
+        switch result.outcome {
+        case .configured:
+            if persistTransportOnSuccess {
+                serverConfig.transport = .usbAdb
+                saveStructuredConfig(statusMessage: "Selected USB ADB transport.")
+            } else {
+                statusMessage = "Configured Quest USB ADB transport."
+            }
+        case .needsDeviceSelection:
+            statusMessage = "Select a Quest device for USB ADB transport."
+        case let .failed(message, showAdbInstallGuidance):
+            if serverConfig.transport != .usbAdb {
+                mainTransportOverride = nil
+            }
+            questUsbStatus = message
+            errorMessage = message
+            if showAdbInstallGuidance {
+                presentAdbInstallGuidance()
+            }
+        }
     }
 
     func presentAdbInstallGuidance() {
@@ -398,8 +838,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     func chooseCustomAdbExecutable() {
         if let selected = chooseExecutableFile(prompt: "Choose ADB", startingAt: customAdbPath) {
+            adbMode = .custom
+            defaults.set(HomeAdbMode.custom.rawValue, forKey: adbModeKey)
             customAdbPath = selected
             defaults.set(selected, forKey: customAdbPathKey)
+            resetUsbStateForAdbSourceChange()
             statusMessage = "Selected custom ADB executable."
             refreshTransportHealth(force: true)
         }
@@ -408,7 +851,10 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     func clearCustomAdbPath() {
         customAdbPath = ""
         defaults.removeObject(forKey: customAdbPathKey)
-        statusMessage = "ADB will be auto-detected."
+        adbMode = .internalAutomatic
+        defaults.set(HomeAdbMode.internalAutomatic.rawValue, forKey: adbModeKey)
+        resetUsbStateForAdbSourceChange()
+        statusMessage = "Using internal ADB setup."
         refreshTransportHealth(force: true)
     }
 

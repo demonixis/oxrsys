@@ -12,12 +12,14 @@
 #include <vector>
 
 #include "GraphicsTypes.h"
+#include <oxrsys/protocol/Protocol.h>
 
 /**
- * H.265 video encoder facade.
+ * Low-latency video encoder facade.
  *
- * Apple builds use VideoToolbox with Metal textures. Linux builds use FFmpeg
- * and keep backend-specific graphics readback state behind GraphicsContext.
+ * Apple builds use VideoToolbox with Metal textures by default. Linux builds
+ * use FFmpeg and keep backend-specific graphics readback state behind
+ * GraphicsContext. macOS can opt into FFmpeg for codec/pipeline testing.
  */
 class VideoEncoder : public std::enable_shared_from_this<VideoEncoder>
 {
@@ -62,9 +64,12 @@ public:
     VideoEncoder& operator=(const VideoEncoder&) = delete;
 
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
-                    uint32_t bitrateMbps, const GraphicsContext& graphicsContext);
+                    uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
+                    oxr::protocol::VideoCodec codec);
     void Shutdown();
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
+    // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
+    void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
     static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
 
     // Encode one backend-native texture/image source.
@@ -83,6 +88,7 @@ public:
     // Update encoding bitrate mid-stream (VideoToolbox supports this live)
     void SetBitrate(uint32_t bitrateMbps);
     uint32_t GetBitrateMbps() const { return bitrateMbps_; }
+    oxr::protocol::VideoCodec GetCodec() const { return codec_; }
 
     bool IsInitialized() const
     {
@@ -104,6 +110,8 @@ private:
         void* tmpLeftTexture = nullptr;   // id<MTLTexture>
         void* tmpRightTexture = nullptr;  // id<MTLTexture>
         void* foveatedScratchTexture = nullptr; // id<MTLTexture>
+        void* leftCropTexture = nullptr;   // id<MTLTexture>, lazily (re)sized to sourceWidth/sourceHeight
+        void* rightCropTexture = nullptr;  // id<MTLTexture>, lazily (re)sized to sourceWidth/sourceHeight
         bool inUse = false;
     };
 
@@ -132,6 +140,7 @@ private:
         void* codecContext = nullptr; // AVCodecContext*
         void* frame = nullptr;        // AVFrame*
         void* packet = nullptr;       // AVPacket*
+        void* readbackState = nullptr;
     };
 
     GraphicsContext graphicsContext_ = {};
@@ -143,7 +152,9 @@ private:
     uint32_t eyeWidth_ = 0;   // Single eye width (width_/2 for stereo)
     uint32_t fps_ = 90;
     uint32_t bitrateMbps_ = 50;
+    oxr::protocol::VideoCodec codec_ = oxr::protocol::VideoCodec::H265;
     FoveationSettings foveationSettings_ = {};
+    bool tenBit_ = false;
     uint32_t frameCount_ = 0;
     // Rate-limit state for explicit ForceKeyframe() calls. The first
     // ForcedKeyframeWarmupCount accepted forces after Initialize() bypass the

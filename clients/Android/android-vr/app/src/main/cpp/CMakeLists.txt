@@ -10,8 +10,21 @@ set(OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ "72" CACHE STRING
     "Preferred headset display refresh rate requested by the Android client")
 set(OXRSYS_BUILD "1" CACHE STRING
     "Global OXRSys build number used by the Android client")
+set(OXRSYS_ANDROID_STABLE_RELEASE OFF CACHE BOOL
+    "Build the Android client release variant with Quest-stable native flags")
+set(OXRSYS_ANDROID_BUILD_PROFILE "Custom" CACHE STRING
+    "Android client build profile label logged at startup")
 if(NOT "${OXRSYS_BUILD}" MATCHES "^[0-9]+$")
     message(FATAL_ERROR "OXRSYS_BUILD must be an integer")
+endif()
+if(OXRSYS_ANDROID_BUILD_PROFILE STREQUAL "Debug")
+    set(OXRSYS_ANDROID_BUILD_PROFILE_LABEL "Debug")
+elseif(OXRSYS_ANDROID_BUILD_PROFILE STREQUAL "ReleaseStable")
+    set(OXRSYS_ANDROID_BUILD_PROFILE_LABEL "Release stable")
+elseif(OXRSYS_ANDROID_BUILD_PROFILE STREQUAL "OptimizedRelease")
+    set(OXRSYS_ANDROID_BUILD_PROFILE_LABEL "OptimizedRelease")
+else()
+    set(OXRSYS_ANDROID_BUILD_PROFILE_LABEL "${OXRSYS_ANDROID_BUILD_PROFILE}")
 endif()
 
 # ─── OpenXR SDK (headers + loader) ──────────────────────────────────────────
@@ -71,9 +84,25 @@ target_link_libraries(oxrsys_android PRIVATE
     openxr_loader
 )
 
+if(OXRSYS_ANDROID_STABLE_RELEASE)
+    target_compile_options(oxrsys_android PRIVATE
+        -O0
+        -g
+        -fno-omit-frame-pointer
+        -UNDEBUG
+    )
+elseif(OXRSYS_ANDROID_BUILD_PROFILE STREQUAL "OptimizedRelease")
+    target_compile_options(oxrsys_android PRIVATE
+        -O2
+        -DNDEBUG
+    )
+endif()
+
 target_compile_definitions(oxrsys_android PRIVATE
     XR_USE_PLATFORM_ANDROID
     XR_USE_GRAPHICS_API_OPENGL_ES
     OXRSYS_BUILD=${OXRSYS_BUILD}
     OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ=${OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ}
+    OXRSYS_ANDROID_STABLE_RELEASE=$<IF:$<BOOL:${OXRSYS_ANDROID_STABLE_RELEASE}>,1,0>
+    OXRSYS_ANDROID_BUILD_PROFILE_LABEL="${OXRSYS_ANDROID_BUILD_PROFILE_LABEL}"
 )

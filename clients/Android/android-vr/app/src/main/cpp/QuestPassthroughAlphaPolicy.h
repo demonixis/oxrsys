@@ -10,6 +10,7 @@ struct AlphaKeyInput
     bool passthroughStreamingActive = false;
     bool frameHasProtocolAlpha = false;
     bool streamHasObservedProtocolAlpha = false;
+    bool allowTransparentClearFallback = false;
 };
 
 struct AlphaKeyDecision

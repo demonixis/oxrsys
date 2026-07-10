@@ -153,7 +153,8 @@ public final class DiscoveryClient: @unchecked Sendable {
         to server: DiscoveredServer,
         deviceName: String = "OXRSys Client",
         maxBitrateMbps: UInt32 = OXRProtocol.clientMaxBitrateUseServerConfig,
-        refreshRateHz: UInt32 = 0
+        refreshRateHz: UInt32 = 0,
+        clientCapabilities: UInt32 = 0
     ) {
         // Send on a separate socket — no dependency on the discovery thread.
         let fd = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
@@ -163,8 +164,11 @@ public final class DiscoveryClient: @unchecked Sendable {
         }
 
         var connect = ClientConnect()
+        connect.preferredCodec = VideoCodec.h265.rawValue
+        connect.supportedCodecs = ClientCodecCapability.h265 | ClientCodecCapability.h264
         connect.maxBitrateMbps = maxBitrateMbps
         connect.refreshRateHz = refreshRateHz
+        connect.clientCapabilities = clientCapabilities
         connect.setDeviceName(deviceName)
 
         var addr = sockaddr_in()

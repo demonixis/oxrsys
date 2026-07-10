@@ -10,9 +10,9 @@ Current responsibilities:
   Godot/Unity candidates
 - create terminal launch scripts for app cards on macOS and Linux without changing the runtime
   manifest selection model
-- edit the shared runtime TOML keys for streaming, logging, encoder preset, transport, refresh
-  rate, foveation, upscaling, ABR dynamic resolution, mixed reality, occlusion, spatial toggles,
-  and reserved headset-audio configuration
+- edit the shared runtime TOML keys for streaming, logging, video codec, encoder preset,
+  transport, refresh rate, foveation, upscaling, ABR dynamic resolution, mixed reality, occlusion,
+  spatial toggles, and reserved headset-audio configuration
 - detect adb devices and configure Quest USB reverse mappings on ports `9944`, `9945`, `9946`, and `9948`
 - report macOS WiFi readiness through `networksetup`; Linux keeps the lightweight transport message
 - run WiFi readiness, ADB status, device listing, reverse mapping reads, and reverse mapping
@@ -22,7 +22,8 @@ Current responsibilities:
 - register the selected OpenXR runtime on Linux through `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json`
 - launch apps with the manually selected runtime manifest
 - open the shared Qt simulator widget from the Developer tab in a reusable `1280x720` window,
-  including H.265 video preview when FFmpeg is available and mouse-driven synthetic head tracking
+  including H.265/H.264 video preview when FFmpeg is available and mouse-driven synthetic head
+  tracking
 
 Build with the top-level CMake project:
 
@@ -39,7 +40,7 @@ for example `~/Qt/6.10.2/macos`, in addition to Homebrew, MacPorts, `QTDIR`, and
 The simulator shared target also has internal tests for UDP frame assembly, FEC recovery, partial
 frame drops, ignored render-pose packets, tracking flags, and shift-modified controller movement.
 
-The Settings tab owns runtime selection and registration. `Update Registration` writes
+The Settings tab owns runtime selection, registration, and ADB setup. `Update Registration` writes
 `${XDG_CONFIG_HOME:-~/.config}/openxr/1/active_runtime.json` to the selected manifest. Home-launched
 apps always use the same selected manifest path; Qt Home does not install, embed, or prefer another
 runtime copy.
@@ -48,15 +49,18 @@ The Streaming tab autosaves TOML edits after a short debounce. `Default` restore
 streaming, general runtime-enabled, and logging keys to their built-in defaults and writes the file
 immediately. `Reveal Runtime Logs` opens the platform state directory that contains
 `oxrsys-runtime.log`, `oxrsys-headset.log`, and `runtime_status.json` when those files exist.
-The bitrate slider uses the shared runtime range, `1` to `200` Mbps. The Qt simulator sends
-`ClientConnect.maxBitrateMbps = 0`, so it does not add a client-side bitrate cap and the runtime
-status `max_bitrate_mbps` follows the server config when the simulator connects.
+The bitrate slider uses the shared runtime range, `1` to `200` Mbps. Runtime status reports
+`configured_bitrate_mbps` for the Home/server value and `max_bitrate_mbps` for the effective cap after
+client negotiation. The Qt simulator sends `ClientConnect.maxBitrateMbps = 0`, so it does not add a
+client-side bitrate cap and both values should match when the simulator connects.
 
 The Streaming tab also exposes the shared refresh-rate choices `60`, `72`, `80`, `90`, and `120`
-Hz, encoder presets `speed`, `balanced`, and `quality`, and server-side foveated encoding presets
-`off`, `light`, `medium`, and `high`. It also exposes `abr_mode` with `off`, `bitrate`, and `full`,
-`dynamic_resolution_min_scale`, passthrough enablement, occlusion mode, and the `[spatial]` feature
-toggles.
+Hz, video codec choices `h265`, `h264`, and `auto`, encoder presets `speed`, `balanced`, and
+`quality`, negotiated `encoder_10bit` HEVC Main10 streaming for capable H.265 clients, and
+server-side foveated encoding presets `off`, `light`, `medium`, and `high`. It also
+exposes `abr_mode` with `off`, `bitrate`, and `full`, `dynamic_resolution_min_scale`, passthrough
+enablement, occlusion mode, and the `[spatial]` feature toggles. The runtime stats view shows when a
+requested foveated encoding preset is inactive, including the `resolution_scale < 1` guard.
 The runtime stats view separates the global passthrough setting from headset support: `unsupported`
 means the selected client did not advertise `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` after
 querying its local OpenXR runtime.
@@ -73,8 +77,8 @@ smoothing with `off`, `pose`, and `pose_warp`. Audio is not reported active by t
 real capture/playback stream is implemented.
 
 Transport readiness work is asynchronous. Qt Home shows checking/configuring status while the
-worker is running, ignores stale results after ADB path, selected serial, or transport changes, and
-keeps the previous main transport selection if USB validation fails.
+worker is running, ignores stale results after ADB mode, ADB path, selected serial, or transport
+changes, and keeps the previous main transport selection if USB validation fails.
 
 Platform behavior:
 
@@ -87,14 +91,26 @@ Platform behavior:
 - Windows can build the launcher scaffold later, but runtime registration and app-card
   terminal actions are intentionally not implemented yet.
 
-If USB mode reports missing ADB on macOS, install `adb-enhanced` with Homebrew:
+Selecting USB in the header validates the selected or single authorized Quest device and configures
+missing reverse mappings automatically before persisting `streaming.transport = "usb_adb"`. If
+multiple authorized devices are present, pick one in the Settings ADB panel first.
+
+In `Internal` ADB mode, Qt Home first talks directly to a running local ADB server on
+`127.0.0.1:5037`. This avoids launching an `adb` executable for reverse setup when another Android
+tool has already started the server. If no server responds, Qt Home falls back to SDK, Homebrew, and
+`PATH` executable discovery. The SDK-free native USB ADB backend currently belongs to the macOS
+SwiftUI Home app; Qt Home keeps the portable server/executable path. In `Custom` mode, Qt Home tries
+only the configured executable path; `Auto Detect` pre-fills that path from the detected external
+`adb` executable when one is available.
+
+If USB mode reports missing ADB in Qt Home on macOS and no ADB server is already running, install
+the optional `adb-enhanced` fallback with Homebrew:
 
 ```bash
 brew install adb-enhanced
 ```
 
-The error message lists the candidate paths that were checked. The Quest USB ADB panel also has
-`Select ADB` and `Auto Detect` actions. A selected custom path is stored in Qt Home `QSettings`,
-is not shared with the SwiftUI Home, and must be executable and pass `adb version`. If it becomes
-invalid, Qt Home reports that selected path and does not silently fall back until `Auto Detect` clears
-the setting.
+The error message lists the candidate paths that were checked. The Settings ADB panel has `Browse`
+and `Auto Detect` actions. A selected custom path is stored in Qt Home `QSettings`, is not shared
+with the SwiftUI Home, and must be executable and pass `adb version`. If it becomes empty or invalid,
+Qt Home reports that selected path and does not silently fall back to Internal mode.

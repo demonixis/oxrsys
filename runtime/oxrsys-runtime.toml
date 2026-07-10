@@ -26,6 +26,12 @@ refresh_rate_hz = 72
 # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
 resolution_scale = 0.75
 
+# Target headset for the per-eye render resolution: "quest2", "quest3", or "avp".
+# Sets the resolution the runtime renders at (quest2=1440x1584, quest3=1512x1680,
+# avp=3024x3360 per eye). Pick the headset you are streaming to; use resolution_scale
+# above to trim how much of it is encoded and streamed.
+render_device = "quest3"
+
 # Lowest encode scale that ABR "full" may request when a reliable USB TCP
 # headset client supports live stream reconfiguration. The OpenXR app's own
 # swapchain/render resolution is unchanged.
@@ -35,11 +41,20 @@ dynamic_resolution_min_scale = 0.50
 # Default 2 is a good balance. Use 1 for lossy WiFi, 5+ for USB.
 keyframe_interval_sec = 2
 
+# Video codec: "h265", "h264", or "auto".
+# H.265 remains the default for headset compatibility; H.264 is useful for
+# FFmpeg/Qt simulator validation and clients that advertise H.264 support.
+video_codec = "h265"
+
 # Encoder speed preset: "quality", "balanced", "speed"
 # speed  = lowest latency, fastest encode, lower quality
 # balanced = default, good mix
 # quality  = best visual quality, slightly higher latency
 encoder_preset = "balanced"
+
+# Encode HEVC Main10 for H.265 clients that advertise 10-bit decode support.
+# H.264 and clients without the capability continue to receive 8-bit video.
+encoder_10bit = false
 
 # Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
 # listeners, and "usb_adb" disables WiFi discovery fallback.
@@ -57,6 +72,10 @@ client_foveation_preset = "auto"
 # Enable Quest shader upscaling after video decode.
 client_upscaling = false
 
+# Headset contrast-adaptive sharpening strength (0.0-1.0). 0 = off. A little (0.3-0.5)
+# counteracts encode/upscale softness on the headset. Applied by the client after decode.
+client_sharpening = 0.0
+
 # Quest client reprojection for short decode/network gaps: "off", "pose", or "pose_warp".
 client_reprojection = "pose"
 
@@ -64,9 +83,12 @@ client_reprojection = "pose"
 # "full" may select live streaming resolution profiles on reliable USB TCP.
 abr_mode = "bitrate"
 
-# Enable headset passthrough as a runtime feature. Apps still choose opaque or
-# alpha blend through OpenXR environment blend modes.
+# Enable headset passthrough as a runtime feature.
 passthrough_enabled = false
+
+# Advanced MR opt-in: expose OpenXR alpha-blend environment modes to apps.
+# Keep false for normal VR apps so dark reflective content stays opaque.
+app_alpha_blend_passthrough = false
 
 # Occlusion mode: "off", "scene_mesh", or "environment_depth".
 # Occlusion is enabled only when a compatible depth or scene source is available.

@@ -38,11 +38,12 @@ The viewer connects to the runtime as a streaming client, using the same UDP pro
 - Displays a single-eye preview across the full screen
 
 The Qt simulator uses the same UDP discovery, video, control, and tracking ports. With FFmpeg
-development libraries available at build time, the Qt widget decodes the H.265 stream into its
-preview surface. That surface is also the interaction target for click, drag, scroll, keyboard focus,
-and mouse capture. If no decoded frame is available yet, it shows a synthetic pose preview with a
-`Waiting for video` status. If FFmpeg was not enabled, it shows `Video preview unavailable: FFmpeg
-support was not enabled` and keeps synthetic tracking available.
+development libraries available at build time, the Qt widget advertises H.265 and H.264 support and
+decodes the selected stream into its preview surface. That surface is also the interaction target
+for click, drag, scroll, keyboard focus, and mouse capture. If no decoded frame is available yet, it
+shows a synthetic pose preview with a `Waiting for video` status. If FFmpeg was not enabled, it
+shows `Video preview unavailable: FFmpeg support was not enabled` and keeps synthetic tracking
+available.
 
 The Qt video path uses an internal UDP frame assembler with duplicate-packet filtering, partial-frame
 timeouts, existing XOR FEC recovery, dropped-frame counters, and keyframe requests after repeated
