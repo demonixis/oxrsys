@@ -819,6 +819,23 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     SetSessionProperty(compressionSession,
         kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
 
+    // Define one deterministic SDR color contract for every encoded stream. VideoToolbox embeds
+    // these values in H.264/H.265 metadata and uses the matching matrix for RGB-to-YCbCr conversion.
+    const OSStatus primariesStatus = VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_ColorPrimaries,
+        kCVImageBufferColorPrimaries_ITU_R_709_2);
+    const OSStatus transferStatus = VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_TransferFunction,
+        kCVImageBufferTransferFunction_ITU_R_709_2);
+    const OSStatus matrixStatus = VTSessionSetProperty(compressionSession,
+        kVTCompressionPropertyKey_YCbCrMatrix,
+        kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+    if (primariesStatus != noErr || transferStatus != noErr || matrixStatus != noErr)
+    {
+        spdlog::warn("VideoEncoder: failed to apply complete BT.709 color metadata (primaries={} transfer={} matrix={})",
+                     primariesStatus, transferStatus, matrixStatus);
+    }
+
     const ConfigValues config = Config::Get().GetValues();
     const std::string& preset = config.encoderPreset;
     const OSStatus profileStatus = SetSessionProperty(compressionSession,
@@ -911,14 +928,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             kVTCompressionPropertyKey_MaxFrameDelayCount, delayRef);
         CFRelease(delayRef);
     }
-
-    // Explicit output color space (matches the input attachments + client BT.709 shader).
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
     videoToolbox_.session = compressionSession;
