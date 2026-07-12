@@ -25,6 +25,7 @@
 
 class VideoEncoder;
 class TrackingReceiver;
+class FramePacer;
 
 /**
  * Streaming server that broadcasts its presence and streams VR content
@@ -86,6 +87,9 @@ public:
     // Access to tracking receiver (for InputManager integration)
     TrackingReceiver* GetTrackingReceiver() { return trackingReceiver_.get(); }
 
+    // Sets the frame pacer that receives client feedback and timesync samples
+    void SetFramePacer(FramePacer* framePacer) { framePacer_.store(framePacer); }
+
 private:
     using SocketHandle = oxrsys::runtime_socket::SocketHandle;
 
@@ -113,6 +117,7 @@ private:
     {
         uint32_t frameIndex = 0;
         int64_t timestampNs = 0;
+        int64_t targetDisplayClientNs = 0;
         oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
         bool alphaBlend = false;
         bool hasPose = false;
@@ -177,6 +182,8 @@ private:
     std::atomic<uint64_t> lastTrackingCountSeen_{0};
     std::atomic<int64_t> lastClientActivityNs_{0};
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
+    void HandleFrameFeedback(const oxr::protocol::FrameFeedback& feedback);
+    void HandleTimesyncResponse(const oxr::protocol::TimesyncResponse& response);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
     void HandleStreamConfigAck(const oxr::protocol::StreamConfigAck& ack);
     void HandleNackRequest(const oxr::protocol::NackRequest& request);
@@ -218,6 +225,29 @@ private:
     std::atomic<uint32_t> targetRefreshRateHz_{90};
     std::atomic<float> clientPipelineLatencyMs_{18.0f};
     std::atomic<float> serverPipelineLatencyMs_{10.0f};
+    std::atomic<FramePacer*> framePacer_{nullptr};
+
+    // Pose targets of recent frames keyed by presentation time. Feedback
+    // arrives a pipeline later, and the ring lets it be compared against
+    // the target its frame was rendered for
+    struct PoseTargetRecord
+    {
+        int64_t presentationTimeUs = 0;
+        int64_t poseTargetClientNs = 0;
+    };
+
+    std::mutex poseTargetMutex_;
+
+    std::array<PoseTargetRecord, 128> poseTargetRing_ = {};
+
+    uint32_t feedbackSessionEpoch_ = 0;
+    uint64_t lastFeedbackSequence_ = 0;
+    uint32_t feedbackWindowTotal_ = 0;
+    uint32_t feedbackWindowFreshCount_ = 0;
+    uint32_t feedbackWindowStaleCount_ = 0;
+    int64_t feedbackWindowLogNs_ = 0;
+    uint32_t timesyncResponseCount_ = 0;
+
     std::atomic<float> clientReceiveToSubmitMs_{0.0f};
     std::atomic<float> clientDecodeLatencyMs_{0.0f};
     std::atomic<float> clientCompositorLatencyMs_{0.0f};
@@ -304,7 +334,7 @@ private:
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
                      bool isKeyframe, bool alphaBlend, int64_t timestampNs,
-                     oxr::protocol::VideoCodec codec);
+                     int64_t targetDisplayClientNs, oxr::protocol::VideoCodec codec);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
     static bool SendTcpRecordParts(SocketHandle socket, oxr::protocol::TcpRecordType type,

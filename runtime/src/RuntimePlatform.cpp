@@ -2,8 +2,11 @@
 
 #include "RuntimePlatform.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <thread>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -16,6 +19,9 @@
 #endif
 
 #if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
 #include <pthread/qos.h>
 #elif defined(__linux__)
 #include <pthread.h>
@@ -175,5 +181,93 @@ void SetCurrentThreadTimeSensitive()
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
 #endif
 }
+
+int64_t SteadyNowNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+#if defined(__APPLE__)
+
+namespace
+{
+
+uint64_t NanosecondsToMachTicks(int64_t ns)
+{
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t info = {};
+        mach_timebase_info(&info);
+
+        return info;
+    }();
+
+    return static_cast<uint64_t>(ns) * timebase.denom / timebase.numer;
+}
+
+} // namespace
+
+bool PromoteCurrentThreadToRealtime(int64_t periodNs)
+{
+    if (periodNs <= 0)
+    {
+        return false;
+    }
+
+    // The policy is a contract and the kernel demotes threads that overrun
+    // it, so both budgets are loose. The constraint bounds wake to completion
+    // latency, well above the observed worst case and capped at half a period
+    // to keep the deadline clear of the next tick. The computation claims far
+    // more than the microseconds of real tick work, so preemption hiccups do
+    // not count as overruns
+    const int64_t constraintNs = std::min<int64_t>(2'000'000, periodNs / 2);
+    const int64_t computationNs = std::min<int64_t>(500'000, constraintNs / 2);
+
+    thread_time_constraint_policy_data_t policy = {};
+
+    policy.period = static_cast<uint32_t>(NanosecondsToMachTicks(periodNs));
+    policy.computation = static_cast<uint32_t>(NanosecondsToMachTicks(computationNs));
+    policy.constraint = static_cast<uint32_t>(NanosecondsToMachTicks(constraintNs));
+    policy.preemptible = TRUE;
+
+    const thread_port_t thread = mach_thread_self();
+
+    const kern_return_t result = thread_policy_set(
+        thread,
+        THREAD_TIME_CONSTRAINT_POLICY,
+        reinterpret_cast<thread_policy_t>(&policy),
+        THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+
+    mach_port_deallocate(mach_task_self(), thread);
+
+    return result == KERN_SUCCESS;
+}
+
+void WaitUntilSteadyNs(int64_t deadlineNs)
+{
+    const int64_t nowNs = SteadyNowNs();
+
+    // The remaining duration is rebased onto the mach clock per call, which
+    // keeps the deadline exact even if the steady clock epoch differs
+    if (deadlineNs > nowNs)
+    {
+        mach_wait_until(mach_absolute_time() + NanosecondsToMachTicks(deadlineNs - nowNs));
+    }
+}
+
+#else
+
+bool PromoteCurrentThreadToRealtime(int64_t periodNs)
+{
+    (void)periodNs;
+
+    return false;
+}
+
+void WaitUntilSteadyNs(int64_t deadlineNs)
+{
+    std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadlineNs)));
+}
+
+#endif
 
 } // namespace oxrsys::runtime_platform

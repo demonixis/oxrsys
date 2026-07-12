@@ -41,9 +41,11 @@ public:
     bool Initialize(uint32_t width, uint32_t height, protocol::VideoCodec codec);
     void Shutdown();
 
-    // Feed an encoded video NAL unit to the decoder.
+    // Feeds an encoded video NAL unit to the decoder. targetDisplayClientNs
+    // names the display slot the server aimed the frame at, or 0 when the
+    // server has not settled on a target
     bool SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
-                       int64_t receiveTimeNs, bool alphaBlend);
+                       int64_t targetDisplayClientNs, int64_t receiveTimeNs, bool alphaBlend);
 
     // Decoded frame providing an AHardwareBuffer for GPU rendering
     struct DecodedFrame
@@ -59,14 +61,18 @@ public:
         int32_t cropBottom = 0;
         int64_t localReceiveTimeNs = 0;
         int64_t localSubmitTimeNs = 0;
+        int64_t localDecodeDoneTimeNs = 0;
         int64_t localAcquireTimeNs = 0;
+        int64_t targetDisplayClientNs = 0;   // Display slot named by the server, 0 = unknown
         uint32_t skippedFramesBeforeAcquire = 0;
         bool alphaBlend = false;
     };
 
-    // Get the next decoded frame (returns false if no frame ready).
-    // The AHardwareBuffer is valid until ReleaseFrame() is called.
-    bool AcquireFrame(DecodedFrame* outFrame);
+    // Latches the decoded frame due for the given display tick. Frames aimed
+    // at later ticks wait in an internal queue until their slot arrives.
+    // Returns false when no frame is due. The AHardwareBuffer stays valid
+    // until the next successful AcquireFrame call
+    bool AcquireFrame(DecodedFrame* outFrame, int64_t displayTimeNs, int64_t displayPeriodNs);
     void ReleaseFrame();
 
     bool IsInitialized() const { return codec_ != nullptr; }
@@ -80,16 +86,34 @@ private:
     struct PendingFrameMetadata
     {
         int64_t presentationTimeUs = 0;
+        int64_t targetDisplayClientNs = 0;
         int64_t receiveTimeNs = 0;
         int64_t submitTimeNs = 0;
+        int64_t decodeDoneTimeNs = 0;
         bool alphaBlend = false;
     };
+
+    // A decoded image waiting in the latch queue, together with the frame
+    // metadata consumed when the image was drained from the reader
+    struct QueuedImage
+    {
+        AImage* image = nullptr;
+        int64_t presentationTimeUs = 0;
+        PendingFrameMetadata metadata = {};
+        bool metadataValid = false;
+    };
+
+    // Three frames absorb delivery jitter, a deeper queue only adds latency
+    static constexpr size_t MaxLatchQueueDepth = 3;
 
     // Dequeue all available output buffers and render them to the surface
     uint32_t FlushOutputToSurface(int64_t timeoutUs);
     void OutputThreadMain();
-    void RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs, int64_t submitTimeNs,
-                                bool alphaBlend);
+    void RememberSubmittedFrame(int64_t presentationTimeUs, int64_t targetDisplayClientNs,
+                                int64_t receiveTimeNs, int64_t submitTimeNs, bool alphaBlend);
+
+    // Stamps decode completion time onto the pending frame metadata
+    void RecordDecodeDone(int64_t presentationTimeUs, int64_t decodeDoneTimeNs);
     bool ConsumeSubmittedFrameMetadata(int64_t presentationTimeUs, PendingFrameMetadata* outMetadata);
 
     AMediaCodec* codec_ = nullptr;
@@ -97,9 +121,9 @@ private:
     AImageReader* imageReader_ = nullptr;
     ANativeWindow* outputWindow_ = nullptr;     // Owned by AImageReader, do not release
     AImage* currentImage_ = nullptr;
+    std::deque<QueuedImage> latchQueue_;
     std::thread outputThread_;
     std::atomic<bool> outputThreadRunning_{false};
-    std::atomic<uint32_t> outputFramesReleasedSinceAcquire_{0};
 
     uint32_t width_ = 0;
     uint32_t height_ = 0;

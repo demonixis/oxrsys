@@ -2,6 +2,8 @@
 
 #include "TrackingReceiver.h"
 
+#include "FramePacer.h"
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -213,26 +215,31 @@ void TrackingReceiver::ReceiveThread()
         oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
         int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
-        if (received < static_cast<int>(sizeof(oxr::protocol::TrackingPacket)))
+
+        if (received < static_cast<int>(oxr::protocol::TRACKING_PACKET_BASE_SIZE))
         {
             continue;
         }
 
         oxr::protocol::TrackingPacket packet = {};
-        memcpy(&packet, buffer, sizeof(packet));
+
+        memcpy(&packet, buffer, std::min(static_cast<size_t>(received), sizeof(packet)));
+
         StorePacket(packet, SteadyClockNowNs());
     }
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
 {
-    if (size < sizeof(oxr::protocol::TrackingPacket))
+    if (size < oxr::protocol::TRACKING_PACKET_BASE_SIZE)
     {
         return;
     }
 
     oxr::protocol::TrackingPacket packet = {};
-    memcpy(&packet, data, sizeof(packet));
+
+    memcpy(&packet, data, std::min(size, sizeof(packet)));
+
     StorePacket(packet, SteadyClockNowNs());
 }
 
@@ -267,14 +274,31 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
         return true;
     }
 
-    float horizonMs = std::clamp(predictionHorizonMs_.load(), 0.0f, 80.0f);
+    const HistorySample& previous = history_[history_.size() - 2];
+    const HistorySample& current = history_.back();
+
+    // Beyond this horizon extrapolation error dominates the predicted pose
+    constexpr float MaxPredictionHorizonMs = 80.0f;
+
+    float horizonMs = std::clamp(predictionHorizonMs_.load(), 0.0f, MaxPredictionHorizonMs);
+
+    if (FramePacer* framePacer = framePacer_.load())
+    {
+        const int64_t targetDisplayClientNs = framePacer->GetCurrentTargetDisplayClientNs();
+
+        if (targetDisplayClientNs > 0 && current.packet.timestampNs > 0)
+        {
+            horizonMs = std::clamp(
+                static_cast<float>(targetDisplayClientNs - current.packet.timestampNs) / 1.0e6f,
+                0.0f,
+                MaxPredictionHorizonMs);
+        }
+    }
+
     if (horizonMs <= 0.01f)
     {
         return true;
     }
-
-    const HistorySample& previous = history_[history_.size() - 2];
-    const HistorySample& current = history_.back();
 
     int64_t packetDeltaNs = current.packet.timestampNs - previous.packet.timestampNs;
     if (packetDeltaNs <= 0)
@@ -375,6 +399,17 @@ void TrackingReceiver::SetPredictionHorizonMs(float predictionHorizonMs)
 
 void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs)
 {
+    if (packet.predictedDisplayPeriodNs > 0)
+    {
+        if (FramePacer* framePacer = framePacer_.load())
+        {
+            framePacer->OnClientTiming(
+                packet.sessionEpoch,
+                packet.predictedDisplayTimeNs,
+                packet.predictedDisplayPeriodNs);
+        }
+    }
+
     oxr::protocol::TrackingPacket normalizedPacket = packet;
 
     {

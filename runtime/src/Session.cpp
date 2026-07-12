@@ -9,6 +9,8 @@
 #include "Space.h"
 #include "InputManager.h"
 #include "StreamingServer.h"
+#include "TrackingReceiver.h"
+#include "RuntimePlatform.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -16,7 +18,6 @@
 #include <cstring>
 #include <ctime>
 #include <numeric>
-#include <thread>
 #include <utility>
 
 namespace
@@ -418,16 +419,15 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         targetRefreshHz = std::max(streamingServer_->GetTargetRefreshRateHz(), 1u);
     }
 
-    // Throttle to the negotiated headset refresh rate when available.
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - lastFrameTime_;
-    auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
+    const int64_t nominalPeriodNs = 1000000000ll / targetRefreshHz;
 
-    if (elapsed < targetFrameTime)
-    {
-        std::this_thread::sleep_for(targetFrameTime - elapsed);
-        now = std::chrono::steady_clock::now();
-    }
+    framePacer_.SetNominalPeriod(nominalPeriodNs);
+
+    const FramePacer::Release release = framePacer_.WaitForRelease(oxrsys::runtime_platform::SteadyNowNs());
+
+    const auto now = std::chrono::steady_clock::now();
+
+    const int64_t periodNs = release.periodNs > 0 ? release.periodNs : nominalPeriodNs;
 
     auto dt = std::chrono::duration<float>(now - lastFrameTime_).count();
     lastFrameTime_ = now;
@@ -435,11 +435,20 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // Update input
     inputManager_->Update(dt);
 
-    auto displayTime = std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime_).count();
+    const int64_t startNs =std::chrono::duration_cast<std::chrono::nanoseconds>(startTime_.time_since_epoch()).count();
+
+    // The paced tick can step backwards when the timeline relocks, and
+    // predicted display times must keep growing frame to frame, so the
+    // value is clamped monotonic
+    int64_t displayTimeXrNs = release.displayTimeNs - startNs;
+
+    displayTimeXrNs = std::max(displayTimeXrNs, lastPredictedDisplayTimeXrNs_ + periodNs);
+
+    lastPredictedDisplayTimeXrNs_ = displayTimeXrNs;
 
     frameState->type = XR_TYPE_FRAME_STATE;
-    frameState->predictedDisplayTime = static_cast<XrTime>(displayTime);
-    frameState->predictedDisplayPeriod = static_cast<XrDuration>(targetFrameTime.count());
+    frameState->predictedDisplayTime = static_cast<XrTime>(displayTimeXrNs);
+    frameState->predictedDisplayPeriod = static_cast<XrDuration>(periodNs);
     frameState->shouldRender = running_ && !exitRequested_ ? XR_TRUE : XR_FALSE;
 
     {
@@ -1007,6 +1016,13 @@ void Session::CheckStreamingConnection()
     {
         std::string clientName = streamingServer_->GetClientName();
         inputManager_->SetTrackingReceiver(streamingServer_->GetTrackingReceiver());
+
+        if (TrackingReceiver* trackingReceiver = streamingServer_->GetTrackingReceiver())
+        {
+            trackingReceiver->SetFramePacer(&framePacer_);
+        }
+
+        streamingServer_->SetFramePacer(&framePacer_);
         inputManager_->SetStreamingClientName(clientName);
         spdlog::info("OXRSys: Client connected ({}), receiving tracking",
                       clientName);

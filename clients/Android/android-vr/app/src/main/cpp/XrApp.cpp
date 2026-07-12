@@ -82,6 +82,11 @@ namespace
 constexpr auto kUsbAdbRetryInterval = std::chrono::seconds(1);
 constexpr uint32_t kUsbAdbRetryLogInterval = 10;
 
+// Acquire allowance, overruns cut fast and clean frames grow it back slowly
+constexpr int64_t kAllowanceCutGuardNs = 2'000'000;
+constexpr int64_t kAllowanceGrowNs = 10'000;
+constexpr int64_t kAllowanceMinimumNs = 1'000'000;
+
 const char* VideoCodecName(oxr::protocol::VideoCodec codec)
 {
     switch (codec)
@@ -2692,10 +2697,10 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     if (networkReceiver_)
     {
         auto nalCallback = [this](const uint8_t* data, size_t size,
-                                  int64_t timestampNs, int64_t receiveTimeNs,
-                                  uint8_t flags, uint8_t codec)
+                                  int64_t timestampNs, int64_t targetDisplayClientNs,
+                                  int64_t receiveTimeNs, uint8_t flags, uint8_t codec)
         {
-            OnNalUnitReceived(data, size, timestampNs, receiveTimeNs, flags, codec);
+            OnNalUnitReceived(data, size, timestampNs, targetDisplayClientNs, receiveTimeNs, flags, codec);
         };
         if (usbAdb)
         {
@@ -2786,8 +2791,22 @@ void XrApp::SendClientConnect(const char* serverIp)
 
     protocol::ClientConnect connect = {};
     connect.type = protocol::MessageType::ClientConnect;
-    connect.versionMajor = 1;
-    connect.versionMinor = 2;
+    connect.versionMajor = 2;
+    connect.versionMinor = 0;
+
+    // Every connection opens a fresh feedback epoch. The steady clock keeps
+    // epochs unique across reconnects, and the reset below drops feedback
+    // state left over from the previous session
+    sessionEpoch_ = static_cast<uint32_t>(SteadyClockNowNs() / 1000000);
+    feedbackSequence_ = 0;
+    lastFeedbackPresentationTimeUs_ = -1;
+    lastFeedbackConsecutiveReuses_ = 0;
+    pendingMissedAcquireDeadlineNs_ = 0;
+    pendingMissedPredictedDisplayNs_ = 0;
+
+    // The allowance starts at half a display period and the AIMD walks it from there
+    acquireAllowanceNs_ = std::max(predictedDisplayPeriodNs_ / 2, kAllowanceMinimumNs);
+
     connect.preferredCodec = static_cast<uint32_t>(protocol::VideoCodec::H265);
     connect.supportedCodecs =
         protocol::CLIENT_CODEC_CAPABILITY_H265 |
@@ -2942,6 +2961,20 @@ void XrApp::HandleControlPayload(const uint8_t* data, size_t size)
         protocol::StreamConfigUpdate update = {};
         memcpy(&update, data, sizeof(update));
         HandleStreamConfigUpdate(update);
+    }
+    else if (type == protocol::ControlType::TimesyncQuery &&
+             size >= sizeof(protocol::TimesyncQuery))
+    {
+        protocol::TimesyncQuery query = {};
+
+        memcpy(&query, data, sizeof(query));
+
+        protocol::TimesyncResponse response = {};
+
+        response.serverTimeNs = query.serverTimeNs;
+        response.clientTimeNs = SteadyClockNowNs();
+
+        SendControlPayload(&response, sizeof(response));
     }
 }
 
@@ -3281,6 +3314,65 @@ void XrApp::SendLatencyReport()
     lastLatencyReportTime_ = now;
 }
 
+void XrApp::SendControlPayload(const void* payload, size_t size)
+{
+    if (transportMode_ == TransportMode::UsbAdbTcp)
+    {
+        SendTcpRecord(controlTcpSocket_, protocol::TcpRecordType::Control, payload, size);
+    }
+    else
+    {
+        send(controlSocket_, payload, size, MSG_DONTWAIT);
+    }
+}
+
+void XrApp::SendFrameFeedback(XrTime predictedDisplayTime)
+{
+    const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
+
+    if ((!usbAdb && controlSocket_ < 0) || (usbAdb && controlTcpSocket_ < 0))
+    {
+        return;
+    }
+
+    if (!presentedVideoFrame_.valid)
+    {
+        return;
+    }
+
+    // One feedback per vsync outcome: skip when neither the displayed frame nor
+    // its reuse count changed since the previous report
+    if (presentedVideoFrame_.presentationTimeUs == lastFeedbackPresentationTimeUs_ &&
+        presentedVideoFrame_.consecutiveReuses == lastFeedbackConsecutiveReuses_)
+    {
+        return;
+    }
+
+    lastFeedbackPresentationTimeUs_ = presentedVideoFrame_.presentationTimeUs;
+    lastFeedbackConsecutiveReuses_ = presentedVideoFrame_.consecutiveReuses;
+
+    protocol::FrameFeedback feedback = {};
+    feedback.sessionEpoch = sessionEpoch_;
+    feedback.feedbackSequence = ++feedbackSequence_;
+    feedback.serverPresentationTimeUs = presentedVideoFrame_.presentationTimeUs;
+    feedback.decodeDoneTimeNs = presentedVideoFrame_.localDecodeDoneTimeNs;
+    feedback.acquireSlackNs = presentedVideoFrame_.acquireSlackNs;
+    feedback.predictedDisplayTimeNs = predictedDisplayTime;
+    feedback.timesDisplayed = presentedVideoFrame_.consecutiveReuses + 1;
+
+    if (presentedVideoFrame_.consecutiveReuses == 0)
+    {
+        feedback.flags |= protocol::FRAME_FEEDBACK_FLAG_FRESH;
+    }
+
+    if (presentedVideoFrame_.acquireSlackValid)
+    {
+        feedback.flags |= protocol::FRAME_FEEDBACK_FLAG_SLACK_VALID;
+    }
+
+    SendControlPayload(&feedback, sizeof(feedback));
+}
+
 void XrApp::RequestKeyframe(uint32_t reasonFlags, uint32_t detail)
 {
     const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
@@ -3464,7 +3556,8 @@ void XrApp::UpdateReprojectionWarp(bool reusingFrame)
 }
 
 void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
-                              int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags, uint8_t codec)
+                              int64_t timestampNs, int64_t targetDisplayClientNs,
+                              int64_t receiveTimeNs, uint8_t flags, uint8_t codec)
 {
     nalUnitsReceived_++;
     const auto videoCodec = static_cast<protocol::VideoCodec>(codec);
@@ -3538,7 +3631,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
     {
         const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;
         bool submitted = videoDecoder_->SubmitNalUnit(
-            data, size, timestampNs / 1000, receiveTimeNs, alphaBlend);
+            data, size, timestampNs / 1000, targetDisplayClientNs, receiveTimeNs, alphaBlend);
         if (!submitted && nalUnitsReceived_ <= 10)
         {
             LOGW("Failed to submit NAL unit #%u to decoder (no input buffer available)",
@@ -3625,6 +3718,8 @@ void XrApp::RunFrame()
         return;
     }
 
+    frameLoopStartNs_ = SteadyClockNowNs();
+
     if (frameState.predictedDisplayPeriod > 0)
     {
         predictedDisplayPeriodNs_ = frameState.predictedDisplayPeriod;
@@ -3699,8 +3794,11 @@ void XrApp::RunFrame()
         uint32_t viewCount = 2;
         xrLocateViews(session_, &viewLocateInfo, &viewState, 2, &viewCount, views_);
 
-        protocol::TrackingPacket trackingPacket =
-            BuildTrackingPacket(frameState.predictedDisplayTime);
+        protocol::TrackingPacket trackingPacket = BuildTrackingPacket(frameState);
+
+        // Send before RenderFrame. The acquire wait inside it would otherwise
+        // age the pose by up to the whole wait budget
+        SendTracking(trackingPacket);
 
         // Render to swapchains
         const bool renderedVideo = RenderFrame(frameState.predictedDisplayTime);
@@ -3788,9 +3886,6 @@ void XrApp::RunFrame()
         projectionLayer.views = projectionViews;
         layers[layerCount++] =
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
-
-        // Send tracking data
-        SendTracking(trackingPacket);
     }
 
     // xrEndFrame
@@ -3819,6 +3914,32 @@ void XrApp::RunFrame()
             latencySamples_.totalClientMs.push_back(totalClientMs);
         }
         lastReportedAcquireTimeNs_ = lastFrameAcquireTimeNs_;
+    }
+
+    if (XR_SUCCEEDED(endResult))
+    {
+        // AIMD on the acquire allowance. A frame that ran past its slot cuts
+        // the allowance by the overrun plus a guard, clean frames grow it back
+        // slowly, so submit lateness hovers near zero without a latch model
+        if (frameLoopStartNs_ > 0 && predictedDisplayPeriodNs_ > 0)
+        {
+            const int64_t frameElapsedNs = SteadyClockNowNs() - frameLoopStartNs_;
+            const int64_t overrunNs = frameElapsedNs - predictedDisplayPeriodNs_;
+
+            if (overrunNs > 0)
+            {
+                acquireAllowanceNs_ -= overrunNs + kAllowanceCutGuardNs;
+            }
+            else
+            {
+                acquireAllowanceNs_ += kAllowanceGrowNs;
+            }
+
+            acquireAllowanceNs_ = std::clamp(acquireAllowanceNs_, kAllowanceMinimumNs,
+                                             predictedDisplayPeriodNs_);
+        }
+
+        SendFrameFeedback(frameState.predictedDisplayTime);
     }
 
     if (IsConnected() && networkReceiver_)
@@ -3856,8 +3977,79 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
     {
         VideoDecoder::DecodedFrame frame;
 
-        if (videoDecoder_->AcquireFrame(&frame))
+        bool acquired = videoDecoder_->AcquireFrame(&frame, predictedDisplayTime, predictedDisplayPeriodNs_);
+
+        // The decoder output races this once-per-vsync poll, so wait for it up
+        // to an allowance past the frame loop wake. The allowance self tunes
+        // against observed slot overruns, so it always leaves room for the
+        // render tail without assuming where the compositor latch is
+        const int64_t acquireDeadlineNs = frameLoopStartNs_ + acquireAllowanceNs_;
+
+        if (!acquired && hasVideoTexture_ && presentedVideoFrame_.valid)
         {
+            while (!acquired && SteadyClockNowNs() < acquireDeadlineNs)
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
+
+                acquired = videoDecoder_->AcquireFrame(&frame, predictedDisplayTime, predictedDisplayPeriodNs_);
+            }
+        }
+
+        int64_t acquireSlackNs = 0;
+        bool acquireSlackValid = false;
+
+        if (!acquired)
+        {
+            if (hasVideoTexture_ && presentedVideoFrame_.valid &&
+                pendingMissedAcquireDeadlineNs_ == 0)
+            {
+                pendingMissedAcquireDeadlineNs_ = acquireDeadlineNs;
+                pendingMissedPredictedDisplayNs_ = predictedDisplayTime;
+            }
+        }
+
+        if (acquired)
+        {
+            // Slack of decode completion against the acquire deadline. A frame
+            // that decoded after an earlier missed deadline reports its lateness
+            // against that deadline as negative slack
+            if (frame.localDecodeDoneTimeNs > 0)
+            {
+                int64_t deadlineNs = acquireDeadlineNs;
+                int64_t deadlineDisplayNs = predictedDisplayTime;
+
+                if (pendingMissedAcquireDeadlineNs_ != 0 &&
+                    frame.localDecodeDoneTimeNs > pendingMissedAcquireDeadlineNs_)
+                {
+                    deadlineNs = pendingMissedAcquireDeadlineNs_;
+                    deadlineDisplayNs = pendingMissedPredictedDisplayNs_;
+                }
+
+                acquireSlackNs = deadlineNs - frame.localDecodeDoneTimeNs;
+
+                // Latest-wins can latch an early frame a whole slot before its
+                // intended tick, so slack is only trustworthy when rebased
+                // onto the intended slot the server named in the frame
+                // header. Frames without a target and frames sitting near a
+                // slot boundary stay marked invalid
+                if (frame.targetDisplayClientNs > 0 && deadlineDisplayNs > 0 && predictedDisplayPeriodNs_ > 0)
+                {
+                    const double slotShift = static_cast<double>(frame.targetDisplayClientNs - deadlineDisplayNs) / static_cast<double>(predictedDisplayPeriodNs_);
+
+                    const double nearestSlotShift = std::round(slotShift);
+
+                    if (std::abs(slotShift - nearestSlotShift) <= 0.35)
+                    {
+                        acquireSlackNs += static_cast<int64_t>(nearestSlotShift) * predictedDisplayPeriodNs_;
+
+                        acquireSlackValid = true;
+                    }
+                }
+            }
+
+            pendingMissedAcquireDeadlineNs_ = 0;
+            pendingMissedPredictedDisplayNs_ = 0;
+
             decodedFrameCount_++;
             if (decodedFrameCount_ <= 5 || decodedFrameCount_ % 300 == 0)
             {
@@ -3990,7 +4182,10 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                         presentedVideoFrame_.presentationTimeUs = frame.presentationTimeUs;
                         presentedVideoFrame_.localReceiveTimeNs = frame.localReceiveTimeNs;
                         presentedVideoFrame_.localSubmitTimeNs = frame.localSubmitTimeNs;
+                        presentedVideoFrame_.localDecodeDoneTimeNs = frame.localDecodeDoneTimeNs;
                         presentedVideoFrame_.localAcquireTimeNs = frame.localAcquireTimeNs;
+                        presentedVideoFrame_.acquireSlackNs = acquireSlackNs;
+                        presentedVideoFrame_.acquireSlackValid = acquireSlackValid;
                         presentedVideoFrame_.renderPose = matchedRenderPose;
                         presentedVideoFrame_.hasRenderPose = hasMatchedRenderPose;
                         presentedVideoFrame_.alphaBlend = frame.alphaBlend;
@@ -4715,8 +4910,10 @@ const char* XrApp::ShellStatusText() const
     }
 }
 
-protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
+protocol::TrackingPacket XrApp::BuildTrackingPacket(const XrFrameState& frameState)
 {
+    const XrTime predictedDisplayTime = frameState.predictedDisplayTime;
+
     for (auto& controller : shellControllers_)
     {
         controller.active = false;
@@ -4734,6 +4931,9 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
 
     protocol::TrackingPacket packet = {};
     packet.timestampNs = predictedDisplayTime;
+    packet.sessionEpoch = sessionEpoch_;
+    packet.predictedDisplayTimeNs = frameState.predictedDisplayTime;
+    packet.predictedDisplayPeriodNs = frameState.predictedDisplayPeriod;
 
     // Head pose — compute center head position from the two eye views
     // (average of left and right eye positions gives the head center)

@@ -665,10 +665,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         return false;
     }
 
-    VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-    VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+    VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_RealTime, kCFBooleanFalse);
+    VTSessionSetProperty(compressionSession, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
 
     // Define one deterministic SDR color contract for every encoded stream. VideoToolbox embeds
     // these values in H.264/H.265 metadata and uses the matching matrix for RGB-to-YCbCr conversion.

@@ -38,4 +38,26 @@ uint64_t ProcessId();
 // platform: failures just keep the default policy.
 void SetCurrentThreadTimeSensitive();
 
+/** Returns the steady clock now in nanoseconds since its epoch. */
+int64_t SteadyNowNs();
+
+/**
+ * Promotes the calling thread to the platform realtime scheduling class.
+ *
+ * periodNs declares the expected wake cadence to the scheduler. The class
+ * is a contract. Per wake computation must stay short or the scheduler
+ * demotes the thread. Returns false when the platform offers no such
+ * class or rejects the request.
+ */
+bool PromoteCurrentThreadToRealtime(int64_t periodNs);
+
+/**
+ * Blocks the calling thread until the steady clock reaches deadlineNs.
+ *
+ * Returns immediately for deadlines in the past. Wake precision follows
+ * the calling thread's scheduling class. Plain threads are subject to
+ * timer coalescing in the millisecond range on macOS.
+ */
+void WaitUntilSteadyNs(int64_t deadlineNs);
+
 } // namespace oxrsys::runtime_platform

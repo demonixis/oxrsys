@@ -3,6 +3,7 @@
 #pragma once
 
 #include <openxr/openxr.h>
+#include "FramePacer.h"
 #include "GraphicsTypes.h"
 #include <memory>
 #include <vector>
@@ -133,6 +134,7 @@ private:
     mutable std::mutex frameStateMutex_;
     mutable std::mutex debugUtilsMutex_;
 
+    FramePacer framePacer_;
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<StreamingServer> streamingServer_;
 
@@ -149,6 +151,8 @@ private:
     int64_t monoStartNs_ = 0;
 #endif
     std::chrono::steady_clock::time_point lastFrameTime_;
+
+    int64_t lastPredictedDisplayTimeXrNs_ = 0;
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

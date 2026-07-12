@@ -505,7 +505,7 @@ void SimulatorWidget::connectToDiscoveredRuntime()
 
     oxr::protocol::ClientConnect connectPacket = {};
     connectPacket.type = oxr::protocol::MessageType::ClientConnect;
-    connectPacket.versionMajor = 1;
+    connectPacket.versionMajor = 2;
     connectPacket.versionMinor = 0;
     connectPacket.preferredCodec = static_cast<uint32_t>(oxr::protocol::VideoCodec::H265);
     connectPacket.supportedCodecs =

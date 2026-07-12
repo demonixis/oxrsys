@@ -118,10 +118,18 @@ private:
     void ApplyCompletedStreamConfigUpdate();
     void SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status);
     void SendLatencyReport();
+
+    // Sends one control payload to the server over the active transport
+    void SendControlPayload(const void* payload, size_t size);
+
+    // Reports the latest composited frame outcome, at most one report per vsync outcome
+    void SendFrameFeedback(XrTime predictedDisplayTime);
+
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
     float GetCurrentRefreshRateHz() const;
     void OnNalUnitReceived(const uint8_t* data, size_t size,
-                           int64_t timestampNs, int64_t receiveTimeNs, uint8_t flags, uint8_t codec);
+                           int64_t timestampNs, int64_t targetDisplayClientNs,
+                           int64_t receiveTimeNs, uint8_t flags, uint8_t codec);
 
     bool RenderFrame(XrTime predictedDisplayTime);
     void BlitVideoToSwapchain(int eye);
@@ -137,7 +145,9 @@ private:
                                    NetworkReceiver::RenderPose* renderPose,
                                    bool* usedFallback);
     void UpdateReprojectionWarp(bool reusingFrame);
-    protocol::TrackingPacket BuildTrackingPacket(XrTime predictedDisplayTime);
+
+    protocol::TrackingPacket BuildTrackingPacket(const XrFrameState& frameState);
+
     void SendTracking(const protocol::TrackingPacket& packet);
     void UpdateShellPose();
     void UpdateShellInteractions();
@@ -327,6 +337,20 @@ private:
     std::atomic<uint32_t> streamConfigWorkerSequence_{0};
     std::atomic<uint32_t> streamConfigSequence_{0};
     int64_t predictedDisplayPeriodNs_ = 11111111;
+
+    uint32_t sessionEpoch_ = 0;
+    uint64_t feedbackSequence_ = 0;
+    int64_t lastFeedbackPresentationTimeUs_ = -1;
+    uint32_t lastFeedbackConsecutiveReuses_ = 0;
+    int64_t acquireAllowanceNs_ = 0;
+
+    // Acquire deadline and display time of the first missed vsync, kept so
+    // a frame that lands later reports lateness against the slot it missed
+    int64_t pendingMissedAcquireDeadlineNs_ = 0;
+
+    int64_t pendingMissedPredictedDisplayNs_ = 0;
+    int64_t frameLoopStartNs_ = 0;
+
     int64_t lastFrameReceiveTimeNs_ = 0;
     int64_t lastFrameSubmitTimeNs_ = 0;
     int64_t lastFrameAcquireTimeNs_ = 0;
@@ -339,7 +363,10 @@ private:
         int64_t presentationTimeUs = 0;
         int64_t localReceiveTimeNs = 0;
         int64_t localSubmitTimeNs = 0;
+        int64_t localDecodeDoneTimeNs = 0;
         int64_t localAcquireTimeNs = 0;
+        int64_t acquireSlackNs = 0;
+        bool acquireSlackValid = false;   // True when acquireSlackNs references the server named slot
         NetworkReceiver::RenderPose renderPose = {};
         bool hasRenderPose = false;
         bool alphaBlend = false;

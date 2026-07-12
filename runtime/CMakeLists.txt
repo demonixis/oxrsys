@@ -10,6 +10,7 @@ set(OXRSYS_RUNTIME_SOURCES
     src/StreamingFrameQueue.cpp
     src/Instance.cpp
     src/Session.cpp
+    src/FramePacer.cpp
     src/Space.cpp
     src/ActionSet.cpp
     src/InputManager.cpp
