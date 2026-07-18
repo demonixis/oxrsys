@@ -15,6 +15,7 @@ struct StreamingFrame
     FrameSource source = {};
     uint32_t frameIndex = 0;
     int64_t timestampNs = 0;
+    int64_t targetDisplayClientNs = 0;
     bool valid = false;
     bool alphaBlend = false;
 

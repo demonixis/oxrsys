@@ -3,6 +3,7 @@
 #include "StreamingServer.h"
 #include "ClientLiveness.h"
 #include "Config.h"
+#include "FramePacer.h"
 #include "RuntimePlatform.h"
 #include "RuntimeSockets.h"
 #include "RuntimeStatus.h"
@@ -952,8 +953,8 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
     oxr::protocol::ServerAnnounce announce = {};
     const StreamLayoutState layoutState = GetStreamLayoutState();
     announce.type = oxr::protocol::MessageType::ServerAnnounce;
-    announce.versionMajor = 1;
-    announce.versionMinor = 2;
+    announce.versionMajor = 2;
+    announce.versionMinor = 0;
     announce.videoPort = oxr::protocol::VIDEO_PORT;
     announce.trackingPort = oxr::protocol::TRACKING_PORT;
     announce.renderWidth = renderWidth_ * 2;
@@ -1288,7 +1289,7 @@ void StreamingServer::TcpTrackingThread()
                 break;
             }
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
-                payload.size() >= sizeof(oxr::protocol::TrackingPacket) &&
+                payload.size() >= oxr::protocol::TRACKING_PACKET_BASE_SIZE &&
                 trackingReceiver_ != nullptr)
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
@@ -1438,6 +1439,7 @@ void StreamingServer::EncodeThread()
         auto encodedFrame = std::make_shared<EncodedVideoFrame>();
         encodedFrame->frameIndex = frame.frameIndex;
         encodedFrame->timestampNs = frame.timestampNs;
+        encodedFrame->targetDisplayClientNs = frame.targetDisplayClientNs;
         encodedFrame->codec = activeVideoCodec_.load();
         encodedFrame->alphaBlend = frame.alphaBlend;
         encodedFrame->hasPose = frame.hasPose;
@@ -2561,6 +2563,154 @@ void StreamingServer::HandleControlPayload(const uint8_t* data, size_t size)
     {
         HandleStreamConfigAck(*reinterpret_cast<const oxr::protocol::StreamConfigAck*>(data));
     }
+    else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::FrameFeedback) &&
+             size >= sizeof(oxr::protocol::FrameFeedback))
+    {
+        oxr::protocol::FrameFeedback feedback = {};
+
+        memcpy(&feedback, data, sizeof(feedback));
+
+        HandleFrameFeedback(feedback);
+    }
+    else if (type == static_cast<uint8_t>(oxr::protocol::ControlType::TimesyncResponse) &&
+             size >= sizeof(oxr::protocol::TimesyncResponse))
+    {
+        oxr::protocol::TimesyncResponse response = {};
+
+        memcpy(&response, data, sizeof(response));
+
+        HandleTimesyncResponse(response);
+    }
+}
+
+void StreamingServer::HandleFrameFeedback(const oxr::protocol::FrameFeedback& feedback)
+{
+    if (feedback.sessionEpoch != feedbackSessionEpoch_)
+    {
+        feedbackSessionEpoch_ = feedback.sessionEpoch;
+        lastFeedbackSequence_ = 0;
+        feedbackWindowTotal_ = 0;
+        feedbackWindowFreshCount_ = 0;
+        feedbackWindowStaleCount_ = 0;
+        feedbackWindowLogNs_ = 0;
+    }
+
+    if (feedback.feedbackSequence <= lastFeedbackSequence_)
+    {
+        return;
+    }
+
+    lastFeedbackSequence_ = feedback.feedbackSequence;
+
+    const bool fresh = (feedback.flags & oxr::protocol::FRAME_FEEDBACK_FLAG_FRESH) != 0;
+
+    feedbackWindowTotal_++;
+
+    if (fresh)
+    {
+        feedbackWindowFreshCount_++;
+    }
+    else
+    {
+        feedbackWindowStaleCount_++;
+    }
+
+    const int64_t nowNs = SteadyClockNowNs();
+    double renderLeadMs = 0.0;
+    double leadFloorMs = 0.0;
+
+    if (FramePacer* framePacer = framePacer_.load())
+    {
+        FramePacer::FeedbackSample sample = {};
+
+        sample.fresh = fresh;
+        // Slack is usable only when the client measured decode completion
+        // and rebased it onto a carried target
+        sample.slackValid =
+            feedback.decodeDoneTimeNs > 0 &&
+            (feedback.flags & oxr::protocol::FRAME_FEEDBACK_FLAG_SLACK_VALID) != 0;
+
+        sample.acquireSlackNs = feedback.acquireSlackNs;
+
+        if (fresh && feedback.predictedDisplayTimeNs > 0)
+        {
+            int64_t poseTargetClientNs = 0;
+            {
+                std::lock_guard<std::mutex> lock(poseTargetMutex_);
+
+                const PoseTargetRecord& record = poseTargetRing_[
+                    static_cast<size_t>(feedback.serverPresentationTimeUs) %
+                    poseTargetRing_.size()];
+
+                if (record.presentationTimeUs == feedback.serverPresentationTimeUs)
+                {
+                    poseTargetClientNs = record.poseTargetClientNs;
+                }
+            }
+
+            if (poseTargetClientNs > 0)
+            {
+                framePacer->OnDisplayLag(feedback.predictedDisplayTimeNs - poseTargetClientNs);
+            }
+        }
+
+        framePacer->OnFrameFeedback(sample, nowNs);
+
+        renderLeadMs = static_cast<double>(framePacer->GetRenderLeadNs()) / 1.0e6;
+        leadFloorMs = static_cast<double>(framePacer->GetLeadFloorNs()) / 1.0e6;
+
+        if (framePacer->ClaimTimesyncQuerySlot(nowNs))
+        {
+            oxr::protocol::TimesyncQuery query = {};
+
+            query.serverTimeNs = SteadyClockNowNs();
+
+            SendControlPayload(&query, sizeof(query));
+        }
+    }
+
+    if (feedbackWindowLogNs_ == 0)
+    {
+        feedbackWindowLogNs_ = nowNs;
+    }
+    else if (nowNs - feedbackWindowLogNs_ >= 1000000000ll)
+    {
+        spdlog::info(
+            "StreamingServer: frame feedback epoch={} total={} fresh={} stale={} lead={:.2f}ms floor={:.2f}ms seq={}",
+            feedback.sessionEpoch,
+            feedbackWindowTotal_,
+            feedbackWindowFreshCount_,
+            feedbackWindowStaleCount_,
+            renderLeadMs,
+            leadFloorMs,
+            feedback.feedbackSequence);
+
+        feedbackWindowTotal_ = 0;
+        feedbackWindowFreshCount_ = 0;
+        feedbackWindowStaleCount_ = 0;
+        feedbackWindowLogNs_ = nowNs;
+    }
+}
+
+void StreamingServer::HandleTimesyncResponse(const oxr::protocol::TimesyncResponse& response)
+{
+    const int64_t receiveNs = SteadyClockNowNs();
+
+    if (FramePacer* framePacer = framePacer_.load())
+    {
+        framePacer->OnTimesyncSample(response.serverTimeNs, response.clientTimeNs, receiveNs);
+    }
+
+    timesyncResponseCount_++;
+
+    if (timesyncResponseCount_ <= 3)
+    {
+        spdlog::info(
+            "StreamingServer: timesync response count={} rtt={:.2f}ms clientTime={}",
+            timesyncResponseCount_,
+            static_cast<double>(receiveNs - response.serverTimeNs) / 1.0e6,
+            response.clientTimeNs);
+    }
 }
 
 void StreamingServer::UpdatePredictionHorizon()
@@ -2625,6 +2775,26 @@ void StreamingServer::SendFrame(FrameSource frameSource,
     frame.alphaBlend = frameSource.alphaBlend;
     frame.valid = true;
     pendingFrameDepthMax_.store(std::max(pendingFrameDepthMax_.load(), 1u));
+
+    // The pose lag servo needs a target for every frame, so the ring records
+    // the current value. The video header carries the settled value only,
+    // otherwise the client would rebase slack against a servo still converging
+    if (FramePacer* framePacer = framePacer_.load())
+    {
+        const int64_t poseTargetClientNs = framePacer->GetCurrentTargetDisplayClientNs();
+
+        if (poseTargetClientNs > 0)
+        {
+            frame.targetDisplayClientNs = framePacer->GetSettledTargetDisplayClientNs();
+
+            const int64_t presentationTimeUs = frame.timestampNs / 1000;
+            std::lock_guard<std::mutex> lock(poseTargetMutex_);
+            PoseTargetRecord& record =
+                poseTargetRing_[static_cast<size_t>(presentationTimeUs) % poseTargetRing_.size()];
+            record.presentationTimeUs = presentationTimeUs;
+            record.poseTargetClientNs = poseTargetClientNs;
+        }
+    }
 
     // Tag the frame with the exact head pose it was rendered for. The application's render pose
     // (from xrLocateViews) is preferred so the client reprojects against the pose the pixels were
@@ -2778,7 +2948,8 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec);
+                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs,
+                    frame.targetDisplayClientNs, frame.codec);
     }
 }
 
@@ -2853,7 +3024,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
                                   bool isKeyframe, bool alphaBlend, int64_t timestampNs,
-                                  oxr::protocol::VideoCodec codec)
+                                  int64_t targetDisplayClientNs, oxr::protocol::VideoCodec codec)
 {
     std::string clientIp;
     SocketHandle videoSocket = oxrsys::runtime_socket::InvalidSocket;
@@ -2888,6 +3059,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 
         oxr::protocol::TcpVideoNalHeader nalHeader = {};
         nalHeader.presentationTimeNs = timestampNs;
+        nalHeader.targetDisplayClientNs = targetDisplayClientNs;
         nalHeader.frameIndex = frameIndex;
         nalHeader.payloadSize = static_cast<uint32_t>(size);
         nalHeader.flags = oxr::protocol::VIDEO_FLAG_STEREO;
@@ -2978,6 +3150,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         }
         header.codec = static_cast<uint8_t>(codec);
         header.presentationTimeNs = timestampNs;
+        header.targetDisplayClientNs = targetDisplayClientNs;
 
         size_t packetSize = sizeof(header) + payloadSize;
         memcpy(packetBuffer, &header, sizeof(header));

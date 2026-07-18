@@ -81,23 +81,28 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
     // We use AHardwareBuffer from the decoded AImage for zero-copy GPU rendering
     // via EGLImage + GL_TEXTURE_EXTERNAL_OES. This avoids CPU YUV access which
     // doesn't work on Quest (Qualcomm UBWC format hides UV plane data).
-    media_status_t imgStatus = AImageReader_new(
+
+    // The reader holds the latch queue, the displayed image and two decodes in flight at once
+    const int32_t maxImages = static_cast<int32_t>(MaxLatchQueueDepth) + 3;
+
+    media_status_t imageReaderStatus = AImageReader_new(
         width, height,
         AIMAGE_FORMAT_YUV_420_888,
-        3,  // maxImages — allows a decoder output thread plus one held render image
+        maxImages,
         &imageReader_);
 
-    if (imgStatus != AMEDIA_OK || imageReader_ == nullptr)
+    if (imageReaderStatus != AMEDIA_OK || imageReader_ == nullptr)
     {
-        LOGE("Failed to create AImageReader: %d", imgStatus);
+        LOGE("Failed to create AImageReader: %d", imageReaderStatus);
         return false;
     }
 
     // Get the ANativeWindow from the image reader (used as MediaCodec output surface)
-    imgStatus = AImageReader_getWindow(imageReader_, &outputWindow_);
-    if (imgStatus != AMEDIA_OK || outputWindow_ == nullptr)
+    imageReaderStatus = AImageReader_getWindow(imageReader_, &outputWindow_);
+
+    if (imageReaderStatus != AMEDIA_OK || outputWindow_ == nullptr)
     {
-        LOGE("Failed to get ANativeWindow from AImageReader: %d", imgStatus);
+        LOGE("Failed to get ANativeWindow from AImageReader: %d", imageReaderStatus);
         AImageReader_delete(imageReader_);
         imageReader_ = nullptr;
         return false;
@@ -183,6 +188,13 @@ void VideoDecoder::Shutdown()
         currentImage_ = nullptr;
     }
 
+    for (QueuedImage& queued : latchQueue_)
+    {
+        AImage_delete(queued.image);
+    }
+
+    latchQueue_.clear();
+
     if (codec_ != nullptr)
     {
         AMediaCodec_stop(codec_);
@@ -199,11 +211,11 @@ void VideoDecoder::Shutdown()
         imageReader_ = nullptr;
     }
     pendingFrames_.clear();
-    outputFramesReleasedSinceAcquire_.store(0);
 }
 
 bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t presentationTimeUs,
-                                 int64_t receiveTimeNs, bool alphaBlend)
+                                 int64_t targetDisplayClientNs, int64_t receiveTimeNs,
+                                 bool alphaBlend)
 {
     if (codec_ == nullptr)
     {
@@ -229,7 +241,9 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
     memcpy(buffer, data, size);
     int64_t submitTimeNs = SteadyClockNowNs();
     AMediaCodec_queueInputBuffer(codec_, bufferIndex, 0, size, presentationTimeUs, 0);
-    RememberSubmittedFrame(presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend);
+
+    RememberSubmittedFrame(presentationTimeUs, targetDisplayClientNs, receiveTimeNs, submitTimeNs, alphaBlend);
+
     return true;
 }
 
@@ -266,10 +280,11 @@ uint32_t VideoDecoder::FlushOutputToSurface(int64_t timeoutUs)
             break;  // No more output buffers available
         }
 
+        RecordDecodeDone(info.presentationTimeUs, SteadyClockNowNs());
+
         // Release to surface (render = true) so AImageReader receives the frame
         AMediaCodec_releaseOutputBuffer(codec_, bufferIndex, true);
         releasedCount++;
-        outputFramesReleasedSinceAcquire_.fetch_add(1);
     }
 
     return releasedCount;
@@ -289,32 +304,100 @@ void VideoDecoder::OutputThreadMain()
     LOGI("Decoder output thread ended");
 }
 
-bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
+bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame, int64_t displayTimeNs, int64_t displayPeriodNs)
 {
     if (codec_ == nullptr || imageReader_ == nullptr || outFrame == nullptr)
     {
         return false;
     }
 
-    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
+    // Move every newly decoded image into the latch queue in decode order
+    for (;;)
+    {
+        AImage* image = nullptr;
 
-    // Release previous image if still held
+        if (AImageReader_acquireNextImage(imageReader_, &image) != AMEDIA_OK || image == nullptr)
+        {
+            break;
+        }
+
+        QueuedImage queued = {};
+
+        queued.image = image;
+
+        int64_t queuedTimestampNs = 0;
+
+        AImage_getTimestamp(image, &queuedTimestampNs);
+
+        queued.presentationTimeUs = queuedTimestampNs / 1000;
+        queued.metadataValid = ConsumeSubmittedFrameMetadata(queued.presentationTimeUs, &queued.metadata);
+
+        latchQueue_.push_back(queued);
+    }
+
+    uint32_t discarded = 0;
+
+    while (latchQueue_.size() > MaxLatchQueueDepth)
+    {
+        AImage_delete(latchQueue_.front().image);
+
+        latchQueue_.pop_front();
+
+        discarded++;
+    }
+
+    // Latch the newest frame whose intended display tick is this vsync or
+    // earlier. Frames aimed at a later tick wait in the queue for their slot
+    int dueIndex = -1;
+
+    for (size_t index = 0; index < latchQueue_.size(); index++)
+    {
+        const QueuedImage& queued = latchQueue_[index];
+        const int64_t targetNs = queued.metadataValid ? queued.metadata.targetDisplayClientNs : 0;
+
+        // An untargeted frame is due only at the queue front, so it can
+        // never evict a targeted frame that waits for a later slot
+        const bool due = targetNs == 0 || displayPeriodNs <= 0 ? index == 0 : targetNs <= displayTimeNs + displayPeriodNs / 2;
+
+        if (due)
+        {
+            dueIndex = static_cast<int>(index);
+        }
+    }
+
+    if (dueIndex < 0)
+    {
+        skippedFramesBeforeAcquire_.fetch_add(discarded);
+
+        return false;
+    }
+
+    for (int index = 0; index < dueIndex; index++)
+    {
+        AImage_delete(latchQueue_.front().image);
+
+        latchQueue_.pop_front();
+
+        discarded++;
+    }
+    skippedFramesBeforeAcquire_.fetch_add(discarded);
+
+    const QueuedImage latched = latchQueue_.front();
+
+    latchQueue_.pop_front();
+
     if (currentImage_ != nullptr)
     {
         AImage_delete(currentImage_);
-        currentImage_ = nullptr;
     }
 
-    // Acquire the latest decoded image (drops older images automatically)
-    media_status_t status = AImageReader_acquireLatestImage(imageReader_, &currentImage_);
-    if (status != AMEDIA_OK || currentImage_ == nullptr)
-    {
-        return false;  // No image available yet
-    }
+    currentImage_ = latched.image;
 
     // Get AHardwareBuffer for zero-copy GPU rendering
     AHardwareBuffer* hwBuffer = nullptr;
-    status = AImage_getHardwareBuffer(currentImage_, &hwBuffer);
+
+    const media_status_t status = AImage_getHardwareBuffer(currentImage_, &hwBuffer);
+
     if (status != AMEDIA_OK || hwBuffer == nullptr)
     {
         LOGE("Failed to get AHardwareBuffer from AImage: %d", status);
@@ -322,10 +405,6 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
         currentImage_ = nullptr;
         return false;
     }
-
-    // Get timestamp
-    int64_t timestampNs = 0;
-    AImage_getTimestamp(currentImage_, &timestampNs);
 
     int32_t imageWidth = 0;
     int32_t imageHeight = 0;
@@ -360,11 +439,11 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
              frameCount, desc.width, desc.height, desc.format, desc.stride,
              desc.layers, (unsigned long long)desc.usage,
              cropRect.left, cropRect.top, cropRect.right, cropRect.bottom,
-             (long long)(timestampNs / 1000));
+             (long long)latched.presentationTimeUs);
     }
 
     outFrame->hardwareBuffer = hwBuffer;
-    outFrame->presentationTimeUs = timestampNs / 1000;  // ns → us
+    outFrame->presentationTimeUs = latched.presentationTimeUs;
     outFrame->bufferWidth = desc.width;
     outFrame->bufferHeight = desc.height;
     outFrame->bufferStride = desc.stride;
@@ -373,15 +452,15 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
     outFrame->cropRight = cropRect.right;
     outFrame->cropBottom = cropRect.bottom;
     outFrame->localAcquireTimeNs = SteadyClockNowNs();
-    outFrame->skippedFramesBeforeAcquire = outputFramesReleased > 0 ? (outputFramesReleased - 1) : 0;
-    skippedFramesBeforeAcquire_.fetch_add(outFrame->skippedFramesBeforeAcquire);
+    outFrame->skippedFramesBeforeAcquire = discarded;
 
-    PendingFrameMetadata metadata = {};
-    if (ConsumeSubmittedFrameMetadata(outFrame->presentationTimeUs, &metadata))
+    if (latched.metadataValid)
     {
-        outFrame->localReceiveTimeNs = metadata.receiveTimeNs;
-        outFrame->localSubmitTimeNs = metadata.submitTimeNs;
-        outFrame->alphaBlend = metadata.alphaBlend;
+        outFrame->localReceiveTimeNs = latched.metadata.receiveTimeNs;
+        outFrame->localSubmitTimeNs = latched.metadata.submitTimeNs;
+        outFrame->localDecodeDoneTimeNs = latched.metadata.decodeDoneTimeNs;
+        outFrame->targetDisplayClientNs = latched.metadata.targetDisplayClientNs;
+        outFrame->alphaBlend = latched.metadata.alphaBlend;
     }
 
     return true;
@@ -396,7 +475,8 @@ void VideoDecoder::ReleaseFrame()
     }
 }
 
-void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs, int64_t receiveTimeNs,
+void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs,
+                                          int64_t targetDisplayClientNs, int64_t receiveTimeNs,
                                           int64_t submitTimeNs, bool alphaBlend)
 {
     std::lock_guard<std::mutex> lock(metadataMutex_);
@@ -410,14 +490,44 @@ void VideoDecoder::RememberSubmittedFrame(int64_t presentationTimeUs, int64_t re
                 : std::min(metadata.receiveTimeNs, receiveTimeNs);
             metadata.submitTimeNs = std::max(metadata.submitTimeNs, submitTimeNs);
             metadata.alphaBlend = metadata.alphaBlend || alphaBlend;
+
+            if (metadata.targetDisplayClientNs == 0)
+            {
+                metadata.targetDisplayClientNs = targetDisplayClientNs;
+            }
+
             return;
         }
     }
 
-    pendingFrames_.push_back({presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend});
+    PendingFrameMetadata pending = {};
+
+    pending.presentationTimeUs = presentationTimeUs;
+    pending.targetDisplayClientNs = targetDisplayClientNs;
+    pending.receiveTimeNs = receiveTimeNs;
+    pending.submitTimeNs = submitTimeNs;
+    pending.alphaBlend = alphaBlend;
+
+    pendingFrames_.push_back(pending);
+
     while (pendingFrames_.size() > 64)
     {
         pendingFrames_.pop_front();
+    }
+}
+
+void VideoDecoder::RecordDecodeDone(int64_t presentationTimeUs, int64_t decodeDoneTimeNs)
+{
+    std::lock_guard<std::mutex> lock(metadataMutex_);
+
+    for (PendingFrameMetadata& metadata : pendingFrames_)
+    {
+        if (metadata.presentationTimeUs == presentationTimeUs)
+        {
+            metadata.decodeDoneTimeNs = decodeDoneTimeNs;
+
+            return;
+        }
     }
 }
 

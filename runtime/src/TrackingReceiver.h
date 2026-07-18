@@ -13,6 +13,8 @@
 
 #include <oxrsys/protocol/Protocol.h>
 
+class FramePacer;
+
 /**
  * Receives 6DOF tracking data from the headset client via UDP.
  *
@@ -43,6 +45,8 @@ public:
     void SetPredictionHorizonMs(float predictionHorizonMs);
     float GetPredictionHorizonMs() const { return predictionHorizonMs_.load(); }
 
+    void SetFramePacer(FramePacer* framePacer) { framePacer_.store(framePacer); }
+
     // Check if we're receiving tracking data
     bool IsReceiving() const { return hasData_.load(); }
     bool IsRunning() const { return running_.load(); }
@@ -72,6 +76,7 @@ private:
     oxr::protocol::TrackingPacket latestPacket_ = {};
     std::deque<HistorySample> history_;
     std::atomic<float> predictionHorizonMs_{0.0f};
+    std::atomic<FramePacer*> framePacer_{nullptr};
     mutable std::atomic<int64_t> lastPredictionDiagnosticNs_{0};
 
     static constexpr size_t MaxHistorySamples = 8;

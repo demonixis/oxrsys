@@ -60,6 +60,7 @@ public struct TcpVideoNalHeader: Sendable {
     public var codec: UInt8 = 0
     public var reserved: UInt16 = 0
     public var reserved2: UInt32 = 0
+    public var targetDisplayClientNs: Int64 = 0
 
     public init() {}
 }
@@ -153,7 +154,7 @@ public enum AudioSampleFormat: UInt16, Sendable {
 
 public struct ServerAnnounce: Sendable {
     public var type: UInt8 = MessageType.serverAnnounce.rawValue
-    public var versionMajor: UInt8 = 1
+    public var versionMajor: UInt8 = 2
     public var versionMinor: UInt8 = 0
     public var reserved: UInt8 = 0
     public var videoPort: UInt16 = OXRProtocol.videoPort
@@ -208,7 +209,7 @@ public struct ServerAnnounce: Sendable {
 
 public struct ClientConnect: Sendable {
     public var type: UInt8 = MessageType.clientConnect.rawValue
-    public var versionMajor: UInt8 = 1
+    public var versionMajor: UInt8 = 2
     public var versionMinor: UInt8 = 0
     public var reserved: UInt8 = 0
     public var preferredCodec: UInt32 = VideoCodec.h265.rawValue
@@ -272,6 +273,7 @@ public struct VideoPacketHeader: Sendable {
     public var fecGroupLastPacketPayloadSize: UInt16 = 0
     public var reserved: UInt16 = 0
     public var presentationTimeNs: Int64 = 0
+    public var targetDisplayClientNs: Int64 = 0
 
     public init() {}
 }

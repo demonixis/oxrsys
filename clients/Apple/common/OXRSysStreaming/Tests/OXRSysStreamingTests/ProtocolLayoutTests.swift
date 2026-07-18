@@ -29,12 +29,14 @@ final class ProtocolLayoutTests: XCTestCase {
     }
 
     func testVideoAndControlLayoutsMatchCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.size, 24)
+        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.size, 32)
+        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.targetDisplayClientNs), 24)
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.fecGroupLastPacketPayloadSize), 12)
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.reserved), 14)
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.presentationTimeNs), 16)
         XCTAssertEqual(MemoryLayout<TcpRecordHeader>.size, 12)
-        XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.size, 24)
+        XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.size, 32)
+        XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.offset(of: \.targetDisplayClientNs), 24)
         XCTAssertEqual(MemoryLayout<TcpRenderPose>.size, 48)
         XCTAssertEqual(MemoryLayout<TcpAudioHeader>.size, 24)
         XCTAssertEqual(OXRProtocol.tcpRecordMagic, 0x4f585255)

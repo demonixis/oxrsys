@@ -25,6 +25,7 @@ constexpr uint32_t CLIENT_MAX_BITRATE_USE_SERVER_CONFIG = 0;
 constexpr uint32_t SERVER_ANNOUNCE_BASE_SIZE = 92;
 constexpr uint32_t CLIENT_CONNECT_BASE_SIZE = 80;
 constexpr uint32_t LATENCY_REPORT_BASE_SIZE = 20;
+constexpr uint32_t TRACKING_PACKET_BASE_SIZE = 1008;
 
 enum class StreamingTransport : uint8_t
 {
@@ -69,6 +70,7 @@ struct TcpVideoNalHeader
     uint8_t codec = 0;
     uint16_t reserved = 0;
     uint32_t reserved2 = 0;
+    int64_t targetDisplayClientNs = 0; // Display tick the frame is aimed at, client clock, 0 = unknown
 };
 
 struct TcpRenderPose
@@ -245,6 +247,7 @@ struct VideoPacketHeader
     uint16_t fecGroupLastPacketPayloadSize; // FEC packets: payload size of this group's last data packet
     uint16_t reserved = 0;
     int64_t presentationTimeNs; // Server-side timestamp
+    int64_t targetDisplayClientNs = 0; // Display tick the frame is aimed at, client clock, 0 = unknown
 };
 
 enum VideoFlags : uint8_t
@@ -320,6 +323,13 @@ struct TrackingPacket
     // Optional hand tracking payload per joint: x, y, z, radius
     float leftHandJoints[HAND_JOINT_COUNT][4];
     float rightHandJoints[HAND_JOINT_COUNT][4];
+
+    // The first TRACKING_PACKET_BASE_SIZE bytes are the stable prefix. Shorter
+    // packets are accepted and zero filled
+    uint32_t sessionEpoch;            // Identifies one client connection
+    uint32_t reservedTiming;
+    int64_t predictedDisplayTimeNs;   // xrWaitFrame predicted display time, client clock
+    int64_t predictedDisplayPeriodNs; // xrWaitFrame display period, 0 = no client pacing
 };
 
 enum ButtonFlags : uint32_t
@@ -358,6 +368,54 @@ enum class ControlType : uint8_t
     NackRequest = 0x85,        // Client → Server: retransmit specific packets
     StreamConfigUpdate = 0x86, // Server → Client: live encoded stream dimensions changed
     StreamConfigAck = 0x87,    // Client → Server: decoder accepted/rejected the update
+    FrameFeedback = 0x88,      // Client → Server: per-displayed-frame outcome
+    TimesyncQuery = 0x89,      // Server → Client: clock offset probe
+    TimesyncResponse = 0x8A,   // Client → Server: clock offset probe echo
+};
+
+enum FrameFeedbackFlags : uint32_t
+{
+    FRAME_FEEDBACK_FLAG_FRESH = 0x0001,
+    // acquireSlackNs references the intended display slot unambiguously.
+    // Cleared when the frame sat near a slot boundary and its attribution
+    // would be a coin flip
+    FRAME_FEEDBACK_FLAG_SLACK_VALID = 0x0002,
+};
+
+// Outcome of one composited video frame. Sent after every frame submission whose
+// displayed video frame or reuse count changed, so a reused frame produces one
+// feedback per extra vsync it covered
+struct FrameFeedback
+{
+    ControlType type = ControlType::FrameFeedback;
+    uint8_t reserved[3] = {};
+    uint32_t sessionEpoch = 0;
+    uint64_t feedbackSequence = 0;        // Monotone per session, rejects reordering
+    int64_t serverPresentationTimeUs = 0; // Frame identity, echoes VideoPacketHeader timing
+    int64_t decodeDoneTimeNs = 0;         // Decoder output time, client clock, 0 = unknown
+    int64_t acquireSlackNs = 0;           // Decode slack against the client acquire deadline,
+                                          // negative = the frame was late by that amount.
+                                          // Valid only when decodeDoneTimeNs is known
+    int64_t predictedDisplayTimeNs = 0;   // Display tick the frame was composited for, client clock
+    uint32_t timesDisplayed = 0;          // 1 = fresh, N = shown for N consecutive vsyncs
+    uint32_t flags = 0;                   // FrameFeedbackFlags
+    uint32_t reserved1 = 0;
+    uint32_t reserved2 = 0;
+};
+
+struct TimesyncQuery
+{
+    ControlType type = ControlType::TimesyncQuery;
+    uint8_t reserved[7] = {};
+    int64_t serverTimeNs = 0;
+};
+
+struct TimesyncResponse
+{
+    ControlType type = ControlType::TimesyncResponse;
+    uint8_t reserved[7] = {};
+    int64_t serverTimeNs = 0; // Echoed from the query
+    int64_t clientTimeNs = 0; // Client clock at echo time
 };
 
 enum StreamConfigUpdateFlags : uint32_t
