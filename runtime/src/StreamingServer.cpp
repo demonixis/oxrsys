@@ -1788,7 +1788,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                                  bitrateMbps,
                                  bitrateMbps,
                                  config.resolutionScale,
-                                 config.dynamicResolutionMinScale);
+                                 config.dynamicResolutionMinScale,
+                                 negotiatedRefresh);
             {
                 std::lock_guard<std::mutex> abrLock(abrStateMutex_);
                 abrModeName_ = oxrsys::streaming_abr::ToString(
@@ -1954,7 +1955,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                                  bitrateMbps,
                                  bitrateMbps,
                                  config.resolutionScale,
-                                 config.dynamicResolutionMinScale);
+                                 config.dynamicResolutionMinScale,
+                                 negotiatedRefresh);
             {
                 std::lock_guard<std::mutex> abrLock(abrStateMutex_);
                 abrModeName_ = oxrsys::streaming_abr::ToString(
