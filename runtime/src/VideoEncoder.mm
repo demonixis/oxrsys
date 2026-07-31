@@ -2,6 +2,7 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
+#import "RuntimePlatform.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -51,8 +52,9 @@ struct MetalFoveationUniforms
 };
 
 // Encoder compute library: axis-aligned foveated encoding shader logic adapted
-// from ALVR's AADT compression shader (MIT licensed), plus the BGRA->NV12
-// conversion kernel that feeds VideoToolbox pre-converted YCbCr planes.
+// from ALVR's AADT compression shader (MIT licensed). The composed BGRA frame
+// goes to VideoToolbox as-is; VT performs the RGB->YCbCr conversion internally
+// (BT.709 video-range, declared via the session/buffer color attachments).
 constexpr const char* kFoveationMetalSource = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
@@ -120,43 +122,6 @@ kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[text
         ? rightTexture.sample(linearSampler, compressedUv)
         : leftTexture.sample(linearSampler, compressedUv);
     outputTexture.write(color, gid);
-}
-
-constant float3 kBt709Luma = float3(0.2126, 0.7152, 0.0722);
-
-// BT.709 video-range BGRA -> NV12. One thread per CHROMA texel: writes the
-// 2x2 luma quad and one CbCr sample averaged over the 2x2 RGB block.
-kernel void rgb_to_nv12(texture2d<float, access::read> rgbTexture [[texture(0)]],
-                        texture2d<float, access::write> yTexture [[texture(1)]],
-                        texture2d<float, access::write> cbcrTexture [[texture(2)]],
-                        uint2 gid [[thread_position_in_grid]])
-{
-    uint chromaWidth = cbcrTexture.get_width();
-    uint chromaHeight = cbcrTexture.get_height();
-    if (gid.x >= chromaWidth || gid.y >= chromaHeight)
-    {
-        return;
-    }
-
-    uint2 lumaBase = gid * 2;
-    float3 rgbSum = float3(0.0);
-    for (uint dy = 0; dy < 2; dy++)
-    {
-        for (uint dx = 0; dx < 2; dx++)
-        {
-            uint2 coord = lumaBase + uint2(dx, dy);
-            float3 rgb = rgbTexture.read(coord).rgb;
-            float luma = dot(rgb, kBt709Luma);
-            yTexture.write(float4((16.0 + 219.0 * luma) / 255.0), coord);
-            rgbSum += rgb;
-        }
-    }
-
-    float3 avgRgb = rgbSum * 0.25;
-    float avgLuma = dot(avgRgb, kBt709Luma);
-    float cb = (128.0 + 224.0 * (avgRgb.b - avgLuma) / 1.8556) / 255.0;
-    float cr = (128.0 + 224.0 * (avgRgb.r - avgLuma) / 1.5748) / 255.0;
-    cbcrTexture.write(float4(cb, cr, 0.0, 0.0), gid);
 }
 )METAL";
 
@@ -558,11 +523,11 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     width_ = width;
     height_ = height;
     eyeWidth_ = width / 2;
-    // NV12 output: the 4:2:0 chroma plane and the 2x2 conversion kernel both
-    // require even dimensions (2496x1312 in practice).
+    // 4:2:0 H.264 output and the side-by-side eye split both want even
+    // dimensions (2496x1312 in practice).
     if (width_ == 0 || height_ == 0 || (width_ % 2u) != 0 || (height_ % 2u) != 0)
     {
-        spdlog::error("VideoEncoder: NV12 encoding requires even dimensions, got {}x{}",
+        spdlog::error("VideoEncoder: encoding requires even dimensions, got {}x{}",
                       width_, height_);
         return false;
     }
@@ -598,12 +563,16 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
     }
-    videoToolbox_.nv12ConvertPipeline = (void*)CreateComputePipeline(device, @"rgb_to_nv12");
-    if (videoToolbox_.nv12ConvertPipeline == nullptr)
+    // The encoder is fed BGRA directly; VT converts to YCbCr internally. Under
+    // Rosetta that internal conversion emitted all-zero chroma (green video)
+    // before macOS 27 — the old rgb_to_nv12 pre-convert kernel existed for
+    // that. Correctness on 27+ is verified by wine-vr's vt-llrc-probe --matrix.
+    if (oxrsys::runtime_platform::RunningUnderRosetta() &&
+        oxrsys::runtime_platform::MacOSMajorVersion() < 27)
     {
-        spdlog::error("VideoEncoder: NV12 conversion pipeline unavailable");
-        Shutdown();
-        return false;
+        spdlog::warn("VideoEncoder: BGRA-direct encode under Rosetta requires macOS 27+ "
+                     "(VT zero-chroma bug on older builds) — expect green video on macOS {}",
+                     oxrsys::runtime_platform::MacOSMajorVersion());
     }
 
     CVMetalTextureCacheRef cache = nullptr;
@@ -622,7 +591,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     NSDictionary* poolAttrs = @{
         (NSString*)kCVPixelBufferWidthKey: @(width),
         (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
         (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
         (NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
@@ -661,15 +630,14 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         foveatedScratchDesc.storageMode = MTLStorageModePrivate;
     }
 
-    // Compose target: all paths write BGRA here, then rgb_to_nv12 reads it
-    // (shaderRead) and the MPS mono-downscale path writes it (shaderWrite).
-    MTLTextureDescriptor* compositeDesc = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                     width:width_
-                                    height:height_
-                                 mipmapped:NO];
-    compositeDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    compositeDesc.storageMode = MTLStorageModePrivate;
+    // Compose target: all paths write BGRA here. The texture is a view of the
+    // slot's CVPixelBuffer (IOSurface-backed), so composing IS producing the
+    // encoder input — no conversion or copy afterwards. shaderWrite covers the
+    // MPS mono-downscale path writing it directly.
+    NSDictionary* compositeTexAttrs = @{
+        (NSString*)kCVMetalTextureUsage:
+            @(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite),
+    };
 
     for (size_t i = 0; i < SlotCount; i++)
     {
@@ -683,9 +651,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
 
-        // The buffer already holds BT.709 video-range YCbCr (rgb_to_nv12 does the
-        // conversion in Metal); with NV12 input VT converts nothing, these tags
-        // just describe the content for the bitstream/decoder side.
+        // BGRA input: these tags declare the color space VT's internal
+        // RGB->YCbCr conversion must target (BT.709 video-range), matching the
+        // session properties and the client's decode contract.
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
             kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
@@ -693,55 +661,27 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
             kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
 
-        CVMetalTextureRef yTexture = nullptr;
+        CVMetalTextureRef compositeTexture = nullptr;
         cvResult = CVMetalTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault,
             (CVMetalTextureCacheRef)videoToolbox_.textureCache,
             pixelBuffer,
-            nullptr,
-            MTLPixelFormatR8Unorm,
+            (__bridge CFDictionaryRef)compositeTexAttrs,
+            MTLPixelFormatBGRA8Unorm,
             width_,
             height_,
             0,
-            &yTexture);
-        if (cvResult != kCVReturnSuccess || yTexture == nullptr)
+            &compositeTexture);
+        if (cvResult != kCVReturnSuccess || compositeTexture == nullptr)
         {
-            spdlog::error("VideoEncoder: Failed to create luma plane texture for slot {}", i);
-            CVPixelBufferRelease(pixelBuffer);
-            Shutdown();
-            return false;
-        }
-
-        CVMetalTextureRef cbcrTexture = nullptr;
-        cvResult = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            (CVMetalTextureCacheRef)videoToolbox_.textureCache,
-            pixelBuffer,
-            nullptr,
-            MTLPixelFormatRG8Unorm,
-            width_ / 2,
-            height_ / 2,
-            1,
-            &cbcrTexture);
-        if (cvResult != kCVReturnSuccess || cbcrTexture == nullptr)
-        {
-            spdlog::error("VideoEncoder: Failed to create chroma plane texture for slot {}", i);
-            CFRelease(yTexture);
+            spdlog::error("VideoEncoder: Failed to create composite texture for slot {}", i);
             CVPixelBufferRelease(pixelBuffer);
             Shutdown();
             return false;
         }
 
         slots_[i].pixelBuffer = pixelBuffer;
-        slots_[i].yTexture = yTexture;
-        slots_[i].cbcrTexture = cbcrTexture;
-        slots_[i].compositeTexture = (void*)[device newTextureWithDescriptor:compositeDesc];
-        if (slots_[i].compositeTexture == nullptr)
-        {
-            spdlog::error("VideoEncoder: Failed to create composite texture for slot {}", i);
-            Shutdown();
-            return false;
-        }
+        slots_[i].compositeTexture = compositeTexture;
         slots_[i].tmpLeftTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
         slots_[i].tmpRightTexture = (void*)[device newTextureWithDescriptor:tmpDesc];
         if (foveatedScratchDesc != nil)
@@ -761,11 +701,11 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     const CMVideoCodecType codecType = VideoToolboxCodecType(codec_);
 
     // Low-latency rate control halves encode latency (33 -> 10.6ms measured)
-    // and fixes the ~30% bitrate overshoot of the default RC. Its Rosetta
-    // all-zero-chroma bug (green image) lives in VT's internal RGB->YCbCr
-    // conversion of BGRA input, which the NV12 input path above bypasses
-    // entirely — proven offline in tools/vt-llrc-probe (LL-RC+BGRA = zero
-    // chroma, LL-RC+NV12 = healthy chroma).
+    // and fixes the ~30% bitrate overshoot of the default RC. Historically its
+    // Rosetta all-zero-chroma bug (green image, VT's internal RGB->YCbCr of
+    // BGRA) forced an rgb_to_nv12 pre-convert; Apple fixed that in macOS 27
+    // and BGRA is fed directly (BT.709 match verified by vt-llrc-probe
+    // --matrix; the macOS<27 warning is logged at the top of Initialize).
     NSDictionary* encoderSpec = @{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
@@ -958,11 +898,6 @@ void VideoEncoder::Shutdown()
         [(id<MTLSamplerState>)videoToolbox_.foveationSampler release];
         videoToolbox_.foveationSampler = nullptr;
     }
-    if (videoToolbox_.nv12ConvertPipeline != nullptr)
-    {
-        [(id<MTLComputePipelineState>)videoToolbox_.nv12ConvertPipeline release];
-        videoToolbox_.nv12ConvertPipeline = nullptr;
-    }
     if (videoToolbox_.commandQueue != nullptr)
     {
         [(id<MTLCommandQueue>)videoToolbox_.commandQueue release];
@@ -1030,17 +965,11 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
     BufferSlot& slot = slots_[slotIndex];
     CVPixelBufferRef pixelBuffer = (CVPixelBufferRef)slot.pixelBuffer;
-    // Compose in BGRA into the slot's composite texture; a compute pass then
-    // converts it into the pixel buffer's NV12 planes for VideoToolbox.
-    id<MTLTexture> dstTexture = (id<MTLTexture>)slot.compositeTexture;
-    id<MTLTexture> lumaTexture = slot.yTexture != nullptr
-        ? CVMetalTextureGetTexture((CVMetalTextureRef)slot.yTexture) : nil;
-    id<MTLTexture> chromaTexture = slot.cbcrTexture != nullptr
-        ? CVMetalTextureGetTexture((CVMetalTextureRef)slot.cbcrTexture) : nil;
-    id<MTLComputePipelineState> nv12Pipeline =
-        (id<MTLComputePipelineState>)videoToolbox_.nv12ConvertPipeline;
-    if (pixelBuffer == nullptr || dstTexture == nil ||
-        lumaTexture == nil || chromaTexture == nil || nv12Pipeline == nil)
+    // Compose in BGRA directly into the slot's composite texture — a view of
+    // the pixel buffer's IOSurface — which then goes to VideoToolbox as-is.
+    id<MTLTexture> dstTexture = slot.compositeTexture != nullptr
+        ? CVMetalTextureGetTexture((CVMetalTextureRef)slot.compositeTexture) : nil;
+    if (pixelBuffer == nullptr || dstTexture == nil)
     {
         ReleaseSlot(slotIndex);
         return false;
@@ -1344,37 +1273,6 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         [blit endEncoding];
     }
 
-    // Convert the composed BGRA frame into the pixel buffer's NV12 planes.
-    // Doing this conversion ourselves (instead of handing VT BGRA) is what
-    // makes low-latency RC safe under Rosetta; see the encoder-spec comment.
-    {
-        id<MTLComputeCommandEncoder> convertEncoder = [cmdBuf computeCommandEncoder];
-        if (convertEncoder == nil)
-        {
-            return dropAcquiredSlot("failed to create NV12 convert encoder");
-        }
-        [convertEncoder setComputePipelineState:nv12Pipeline];
-        [convertEncoder setTexture:dstTexture atIndex:0];
-        [convertEncoder setTexture:lumaTexture atIndex:1];
-        [convertEncoder setTexture:chromaTexture atIndex:2];
-
-        // One thread per chroma texel; each writes a 2x2 luma quad.
-        const NSUInteger chromaWidth = (NSUInteger)(width_ / 2);
-        const NSUInteger chromaHeight = (NSUInteger)(height_ / 2);
-        const NSUInteger threadsX = std::max<NSUInteger>(
-            1, std::min<NSUInteger>(nv12Pipeline.threadExecutionWidth, 16));
-        const NSUInteger threadsY = std::max<NSUInteger>(
-            1,
-            std::min<NSUInteger>(nv12Pipeline.maxTotalThreadsPerThreadgroup / threadsX, 16));
-        const MTLSize threadsPerGroup = MTLSizeMake(threadsX, threadsY, 1);
-        const MTLSize threadgroups = MTLSizeMake(
-            (chromaWidth + threadsX - 1) / threadsX,
-            (chromaHeight + threadsY - 1) / threadsY,
-            1);
-        [convertEncoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-        [convertEncoder endEncoding];
-    }
-
     auto* context = new EncodeFrameContext();
     context->nalCallback = std::move(callback);
     context->frameCallback = std::move(frameCallback);
@@ -1545,18 +1443,8 @@ void VideoEncoder::DestroySlots()
         }
         if (slot.compositeTexture != nullptr)
         {
-            [(id<MTLTexture>)slot.compositeTexture release];
+            CFRelease(slot.compositeTexture);
             slot.compositeTexture = nullptr;
-        }
-        if (slot.yTexture != nullptr)
-        {
-            CFRelease(slot.yTexture);
-            slot.yTexture = nullptr;
-        }
-        if (slot.cbcrTexture != nullptr)
-        {
-            CFRelease(slot.cbcrTexture);
-            slot.cbcrTexture = nullptr;
         }
         if (slot.pixelBuffer != nullptr)
         {

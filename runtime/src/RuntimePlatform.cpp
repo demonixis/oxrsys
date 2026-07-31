@@ -173,4 +173,19 @@ bool RunningUnderRosetta()
 #endif
 }
 
+int MacOSMajorVersion()
+{
+#if defined(__APPLE__)
+    char version[32] = {};
+    size_t size = sizeof(version) - 1;
+    if (sysctlbyname("kern.osproductversion", version, &size, nullptr, 0) != 0)
+    {
+        return 0;
+    }
+    return std::atoi(version);
+#else
+    return 0;
+#endif
+}
+
 } // namespace oxrsys::runtime_platform
