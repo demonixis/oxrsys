@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 
+#include <oxrsys/protocol/Protocol.h>
+
 // Pure session.json logic for the ALVR backend, factored out of
 // AlvrStreamingBackend so the template, the toml->session.json rewrite, and the
 // negotiated-config parse are unit-testable without the alvr dylib. These guard
@@ -18,13 +20,17 @@ namespace oxrsys::alvr
 // ApplySessionSettings rewrites it from the toml before alvr_initialize.
 const char* MinimalSessionJson();
 
-// Rewrites the bitrate (ConstantMbps) and caps max_buffering_frames in an
-// existing session.json via targeted key regexes (no JSON library, matching the
-// style of the negotiated-config parse). Returns the updated document; the
-// result equals the input when both keys already hold the target values (the
-// caller uses that equality to skip rewriting the file). A missing key is left
-// untouched. Idempotent: applying the result again returns it unchanged.
-std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps);
+// Rewrites the bitrate (ConstantMbps), the preferred video codec
+// (video.preferred_codec {"variant": "H264"|"Hevc"} — what server_core
+// announces to the client and echoes into openvr_config/codec), and caps
+// max_buffering_frames in an existing session.json via targeted key regexes
+// (no JSON library, matching the style of the negotiated-config parse).
+// Returns the updated document; the result equals the input when all keys
+// already hold the target values (the caller uses that equality to skip
+// rewriting the file). A missing key is left untouched. Idempotent: applying
+// the result again returns it unchanged.
+std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps,
+                                 oxr::protocol::VideoCodec preferredCodec);
 
 // Post-handshake stream config server_core negotiated with the client, read from
 // session.json's openvr_config. width/height/fps are 0 when their key is absent.

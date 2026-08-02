@@ -87,6 +87,36 @@ TEST_CASE("Codec select: client without H.265 negotiates H.264 natively", "[code
     CHECK(SelectVideoCodec("auto", client, /*underRosetta=*/false) == VideoCodec::H264);
 }
 
+TEST_CASE("ALVR codec select: native helper honors the configured codec", "[codec-select]")
+{
+    using oxrsys::SelectAlvrVideoCodec;
+    // With the helper available the parent's translation status is irrelevant:
+    // the helper hardware-encodes both codecs, and "auto" prefers HEVC.
+    for (const bool rosetta : {false, true})
+    {
+        CHECK(SelectAlvrVideoCodec("auto", /*helper=*/true, rosetta) == VideoCodec::H265);
+        CHECK(SelectAlvrVideoCodec("h265", /*helper=*/true, rosetta) == VideoCodec::H265);
+        CHECK(SelectAlvrVideoCodec("h264", /*helper=*/true, rosetta) == VideoCodec::H264);
+    }
+}
+
+TEST_CASE("ALVR codec select: no helper keeps the Rosetta H.264 gate", "[codec-select]")
+{
+    using oxrsys::SelectAlvrVideoCodec;
+    // In-process VideoToolbox under Rosetta is H.264-only, regardless of config.
+    CHECK(SelectAlvrVideoCodec("auto", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
+    CHECK(SelectAlvrVideoCodec("h265", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
+    CHECK(SelectAlvrVideoCodec("h264", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
+}
+
+TEST_CASE("ALVR codec select: no helper on a native runtime honors the config", "[codec-select]")
+{
+    using oxrsys::SelectAlvrVideoCodec;
+    CHECK(SelectAlvrVideoCodec("auto", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
+    CHECK(SelectAlvrVideoCodec("h265", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
+    CHECK(SelectAlvrVideoCodec("h264", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H264);
+}
+
 TEST_CASE("Codec select: AV1-only client falls back to the runtime preference", "[codec-select]")
 {
     // The runtime never encodes AV1; with no common codec the historic H.265

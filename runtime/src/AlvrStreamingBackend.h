@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "AlvrEncoderSelection.h"
 #include "AlvrNalFraming.h"
 #include "KeyframeRequestLimiter.h"
 #include "IStreamingBackend.h"
@@ -21,6 +22,11 @@
 #include "VideoEncoder.h"
 
 class TrackingReceiver;
+
+namespace oxrsys::encoder
+{
+class NativeHelperEncoderTransport;
+}
 
 /**
  * Streaming backend that embeds ALVR's server_core (libalvr_server_core.dylib,
@@ -114,6 +120,9 @@ private:
     void EventThread();
     void EncodeThread();
     bool EnsureEncoder();
+    // Shuts down + drops the current encoder generation (and its helper
+    // transport) and clears the config-NAL/identity state. EncodeThread only.
+    void RetireEncoder();
     void InitInputIds();
     void DrainButtons();
     void InjectTrackingSample(uint64_t sampleTimestampNs);
@@ -168,6 +177,28 @@ private:
     StreamingFrameQueue frameQueue_;
     std::shared_ptr<VideoEncoder> encoder_;
     bool encoderUsesH264_ = true;
+
+    // Native-helper transport of the CURRENT encoder generation (null when the
+    // encoder is in-process or absent). Restart-per-generation: every encoder
+    // rebuild retires it and spawns a fresh one when the decision is Native.
+    // Created/destroyed on EncodeThread only.
+    std::shared_ptr<oxrsys::encoder::NativeHelperEncoderTransport> nativeTransport_;
+    // Identity the current encoder was built with (EncodeThread only). Any
+    // drift — dims/fps, codec, bit depth, pixel format, transport mode —
+    // forces a rebuild instead of inheriting the encoder.
+    oxrsys::alvr::EncoderIdentity encoderIdentity_ = {};
+    bool encoderIdentityValid_ = false; // EncodeThread only
+    // Cached helper handshake result for HEVC (EncodeThread only): keeps the
+    // caps-driven H.264 downgrade stable across identity checks so it cannot
+    // oscillate into a rebuild loop. Machine property, so caching is safe.
+    bool helperHevcCapKnown_ = false;
+    bool helperSupportsHevc_ = true;
+    // Helper spawn/crash failures within the current connected session;
+    // written by EncodeThread, cleared by EventThread on client disconnect.
+    std::atomic<uint32_t> helperFailures_{0};
+    std::chrono::steady_clock::time_point lastHelperSpawnAttempt_{}; // EncodeThread only
+    bool helperRetryLaterLogged_ = false;         // EncodeThread only
+    std::atomic<bool> helperPinLogged_{false};    // set EncodeThread, cleared EventThread
 
     // ALVR device/input ids (pure path hashes, filled at Start).
     uint64_t headId_ = 0;

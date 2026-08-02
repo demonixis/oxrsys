@@ -13,13 +13,16 @@
 
 #include <spdlog/spdlog.h>
 
+#include "AlvrEncoderSelection.h"
 #include "AlvrNalFraming.h"
 #include "AlvrSessionConfig.h"
 #include "CodecSelect.h"
 #include "Config.h"
+#include "RuntimePlatform.h"
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
 #include "alvr_server_core.h"
+#include "encoder/NativeHelperEncoderTransport.h"
 
 namespace fs = std::filesystem;
 
@@ -69,8 +72,18 @@ void AlvrStreamingBackend::SyncSessionSettings()
         return;
     }
 
-    const uint32_t bitrateMbps = std::max(Config::Get().GetValues().bitrateMbps, 1u);
-    const std::string updated = oxrsys::alvr::ApplySessionSettings(json, bitrateMbps);
+    const ConfigValues config = Config::Get().GetValues();
+    const uint32_t bitrateMbps = std::max(config.bitrateMbps, 1u);
+    // The codec the first encoder generation will select (zero helper failures
+    // at Start): sync it into session.json so server_core announces to the
+    // client exactly what the encoder produces. A later mid-session crash-pin
+    // to in-process H.264 can diverge from this until the next reconnect.
+    const bool helperWouldRun =
+        config.encoderProcess != "inproc" &&
+        oxrsys::encoder::NativeHelperEncoderTransport::HelperBinaryAvailable();
+    const oxr::protocol::VideoCodec codec = oxrsys::SelectAlvrVideoCodec(
+        config.videoCodec, helperWouldRun, oxrsys::runtime_platform::RunningUnderRosetta());
+    const std::string updated = oxrsys::alvr::ApplySessionSettings(json, bitrateMbps, codec);
 
     if (updated == json)
     {
@@ -83,9 +96,10 @@ void AlvrStreamingBackend::SyncSessionSettings()
         return;
     }
     out << updated;
-    spdlog::info(
-        "OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, max_buffering_frames=1.5)",
-        bitrateMbps);
+    spdlog::info("OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, "
+                 "preferred_codec={}, max_buffering_frames=1.5)",
+                 bitrateMbps,
+                 codec == oxr::protocol::VideoCodec::H264 ? "H264" : "Hevc");
 }
 
 bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
@@ -172,10 +186,23 @@ void AlvrStreamingBackend::StopInternal(bool skipAlvrShutdown)
     }
     if (encoder_)
     {
-        // Flushes in-flight VideoToolbox frames; our submit callbacks may
-        // still run during this call, so it precedes alvr_shutdown().
-        encoder_->Shutdown();
-        encoder_.reset();
+        if (skipAlvrShutdown && nativeTransport_ != nullptr)
+        {
+            // Process exit with the out-of-process encoder: use the transport's
+            // bounded fast path (close + SIGTERM, no waits) instead of the full
+            // drain/teardown, and deliberately leave encoder_ alive — its Metal
+            // state and the helper's SIGTERM handling die with the process.
+            nativeTransport_->StopForProcessExit();
+        }
+        else
+        {
+            // Flushes in-flight VideoToolbox frames; our submit callbacks may
+            // still run during this call, so it precedes alvr_shutdown()
+            // (drain BEFORE alvr_shutdown).
+            encoder_->Shutdown();
+            encoder_.reset();
+            nativeTransport_.reset();
+        }
     }
     connected_.store(false);
     if (skipAlvrShutdown)
@@ -272,18 +299,47 @@ void AlvrStreamingBackend::RefreshNegotiatedConfig()
     }
 }
 
-bool AlvrStreamingBackend::EnsureEncoder()
+void AlvrStreamingBackend::RetireEncoder()
 {
-    if (encoderResetPending_.exchange(false) && encoder_)
+    if (encoder_)
     {
+        // Drains in-flight frames; for the helper transport this also tears
+        // the helper process down (restart-per-generation by design).
         encoder_->Shutdown();
         encoder_.reset();
-        submittedConfigNals_.clear();
     }
-    if (encoder_ && encoder_->IsInitialized())
+    nativeTransport_.reset();
+    // The next generation must re-send its parameter sets — mandatory when the
+    // codec changed, harmless otherwise.
+    submittedConfigNals_.clear();
+    encoderIdentityValid_ = false;
+}
+
+bool AlvrStreamingBackend::EnsureEncoder()
+{
+    using oxrsys::alvr::EncoderIdentity;
+    using oxrsys::alvr::EncoderTransportMode;
+    using oxrsys::alvr::TransportDecision;
+    using oxrsys::encoder::NativeHelperEncoderTransport;
+
+    // Crash detection: the helper transport flags death via IsHealthy() (EOF /
+    // FatalError / reap); its in-flight frames were already reclaimed as
+    // dropped (slots released). Count the failure, queue a rebuild, and re-arm
+    // the keyframe the client will need after the gap.
+    const bool helperHealthy = nativeTransport_ != nullptr && nativeTransport_->IsHealthy();
+    if (nativeTransport_ != nullptr && !helperHealthy)
     {
-        return true;
+        const uint32_t failures = helperFailures_.fetch_add(1) + 1;
+        spdlog::error("OXRSys/ALVR: encoder helper died (failure {} this session)", failures);
+        keyframeRequested_.store(true);
+        encoderResetPending_.store(true);
     }
+
+    if (encoderResetPending_.exchange(false) && encoder_)
+    {
+        RetireEncoder();
+    }
+
     const uint32_t eyeWidth = streamWidth_.load();
     const uint32_t eyeHeight = streamHeight_.load();
     if (eyeWidth == 0 || eyeHeight == 0)
@@ -291,21 +347,173 @@ bool AlvrStreamingBackend::EnsureEncoder()
         return false;
     }
 
-    const oxr::protocol::VideoCodec codec = oxrsys::PreferredVideoCodec();
-    encoderUsesH264_ = (codec == oxr::protocol::VideoCodec::H264);
-    encoder_ = std::make_shared<VideoEncoder>();
-    const uint32_t totalWidth = eyeWidth * 2; // side-by-side stereo
-    const uint32_t bitrateMbps = Config::Get().GetValues().bitrateMbps;
-    if (!encoder_->Initialize(totalWidth, eyeHeight, targetRefreshRateHz_.load(),
-                              bitrateMbps, graphicsContext_, codec))
+    const ConfigValues config = Config::Get().GetValues();
+    const bool underRosetta = oxrsys::runtime_platform::RunningUnderRosetta();
+    const bool helperPresent = NativeHelperEncoderTransport::HelperBinaryAvailable();
+    const auto now = std::chrono::steady_clock::now();
+    const bool respawnBudgetElapsed =
+        lastHelperSpawnAttempt_ == std::chrono::steady_clock::time_point{} ||
+        now - lastHelperSpawnAttempt_ >= std::chrono::seconds(30);
+    const TransportDecision decision = oxrsys::alvr::DecideEncoderTransport(
+        config.encoderProcess, helperPresent, helperFailures_.load(), respawnBudgetElapsed,
+        helperHealthy && encoder_ != nullptr);
+
+    if (decision == TransportDecision::RetryLater)
     {
-        spdlog::error("OXRSys/ALVR: encoder init failed ({}x{} @{}Hz)", totalWidth,
-                      eyeHeight, targetRefreshRateHz_.load());
-        encoder_.reset();
+        // encoder_process = "native" with no usable helper right now: fail
+        // loudly, build no encoder (frames drop), and keep retrying on this
+        // lazy-recreate cadence. Never silently pin to in-process.
+        if (!helperRetryLaterLogged_)
+        {
+            if (!helperPresent)
+            {
+                spdlog::error("OXRSys/ALVR: encoder_process=\"native\" but the helper binary is "
+                              "missing (expected next to the runtime dylib, or set "
+                              "OXRSYS_ENCODER_HELPER) — no encoder until it appears");
+            }
+            else
+            {
+                spdlog::error("OXRSys/ALVR: encoder_process=\"native\" — helper failed; retrying "
+                              "after the 30s respawn budget (no in-process fallback)");
+            }
+            helperRetryLaterLogged_ = true;
+        }
         return false;
     }
-    spdlog::info("OXRSys/ALVR: encoder ready {}x{} @{}Hz {}Mbps ({})", totalWidth, eyeHeight,
-                 targetRefreshRateHz_.load(), bitrateMbps, encoderUsesH264_ ? "H.264" : "HEVC");
+    helperRetryLaterLogged_ = false;
+
+    if (decision == TransportDecision::InProcessPinned && !helperPinLogged_.exchange(true))
+    {
+        spdlog::error("OXRSys/ALVR: encoder helper failed twice this session — pinned to "
+                      "in-process H.264 until the next client reconnect");
+    }
+
+    EncoderTransportMode mode = decision == TransportDecision::Native
+                                    ? EncoderTransportMode::NativeHelper
+                                    : EncoderTransportMode::InProcess;
+    oxr::protocol::VideoCodec codec =
+        decision == TransportDecision::InProcessPinned
+            ? oxr::protocol::VideoCodec::H264
+            : oxrsys::SelectAlvrVideoCodec(config.videoCodec,
+                                           mode == EncoderTransportMode::NativeHelper,
+                                           underRosetta);
+    // Apply the cached helper handshake caps so the codec in the identity is
+    // stable (a caps-driven downgrade must not flap the identity comparison).
+    if (mode == EncoderTransportMode::NativeHelper && helperHevcCapKnown_ &&
+        !helperSupportsHevc_ && codec == oxr::protocol::VideoCodec::H265)
+    {
+        codec = oxr::protocol::VideoCodec::H264;
+    }
+
+    EncoderIdentity desired;
+    desired.totalWidth = eyeWidth * 2; // side-by-side stereo
+    desired.height = eyeHeight;
+    desired.fps = targetRefreshRateHz_.load();
+    desired.codec = codec;
+    desired.bitDepth = 8; // the ALVR path never negotiates Main10
+    desired.transport = mode;
+
+    if (encoder_ && encoder_->IsInitialized())
+    {
+        if (encoderIdentityValid_ && desired == encoderIdentity_)
+        {
+            return true;
+        }
+        // Identity drift (codec/transport/bit-depth/format or negotiated
+        // stream shape): never inherit the previous generation's encoder.
+        spdlog::info("OXRSys/ALVR: encoder identity changed — rebuilding");
+        RetireEncoder();
+    }
+
+    // Build the transport for this generation.
+    std::shared_ptr<NativeHelperEncoderTransport> native;
+    if (mode == EncoderTransportMode::NativeHelper)
+    {
+        native = std::make_shared<NativeHelperEncoderTransport>();
+        lastHelperSpawnAttempt_ = now;
+        if (!native->StartHelper())
+        {
+            native.reset();
+            const uint32_t failures = helperFailures_.fetch_add(1) + 1;
+            if (config.encoderProcess == "native")
+            {
+                spdlog::error("OXRSys/ALVR: helper spawn/handshake failed (failure {}); "
+                              "encoder_process=\"native\" keeps retrying, no fallback",
+                              failures);
+                return false;
+            }
+            spdlog::warn("OXRSys/ALVR: helper spawn/handshake failed (failure {}); falling back "
+                         "to the in-process encoder",
+                         failures);
+            mode = EncoderTransportMode::InProcess;
+            codec = oxrsys::SelectAlvrVideoCodec(config.videoCodec, false, underRosetta);
+            desired.codec = codec;
+            desired.transport = mode;
+        }
+        else
+        {
+            helperHevcCapKnown_ = true;
+            helperSupportsHevc_ = native->SupportsCodec(oxr::protocol::VideoCodec::H265);
+            if (codec == oxr::protocol::VideoCodec::H265 && !helperSupportsHevc_)
+            {
+                spdlog::warn("OXRSys/ALVR: helper lacks HW low-latency HEVC; using H.264");
+                codec = oxr::protocol::VideoCodec::H264;
+                desired.codec = codec;
+            }
+            if (!native->SupportsCodec(codec))
+            {
+                // No hardware low-latency codec at all: unusable helper.
+                spdlog::error("OXRSys/ALVR: helper advertises no usable HW low-latency codec");
+                native->Shutdown();
+                native.reset();
+                const uint32_t failures = helperFailures_.fetch_add(1) + 1;
+                if (config.encoderProcess == "native")
+                {
+                    spdlog::error("OXRSys/ALVR: encoder_process=\"native\" keeps retrying "
+                                  "(failure {}), no fallback",
+                                  failures);
+                    return false;
+                }
+                spdlog::warn("OXRSys/ALVR: falling back to the in-process encoder (failure {})",
+                             failures);
+                mode = EncoderTransportMode::InProcess;
+                codec = oxrsys::SelectAlvrVideoCodec(config.videoCodec, false, underRosetta);
+                desired.codec = codec;
+                desired.transport = mode;
+            }
+        }
+    }
+
+    encoderUsesH264_ = (codec == oxr::protocol::VideoCodec::H264);
+    encoder_ = std::make_shared<VideoEncoder>();
+    if (native != nullptr)
+    {
+        encoder_->SetEncoderTransport(native);
+    }
+    const uint32_t totalWidth = desired.totalWidth;
+    const uint32_t bitrateMbps = config.bitrateMbps;
+    if (!encoder_->Initialize(totalWidth, eyeHeight, desired.fps, bitrateMbps, graphicsContext_,
+                              codec))
+    {
+        spdlog::error("OXRSys/ALVR: encoder init failed ({}x{} @{}Hz, {})", totalWidth, eyeHeight,
+                      desired.fps,
+                      mode == EncoderTransportMode::NativeHelper ? "native helper" : "in-process");
+        encoder_.reset();
+        if (native != nullptr)
+        {
+            // Configure/generation failure counts toward the helper budget so
+            // "auto" can fall back on the next pass.
+            helperFailures_.fetch_add(1);
+            native->Shutdown();
+        }
+        return false;
+    }
+    nativeTransport_ = native;
+    encoderIdentity_ = desired;
+    encoderIdentityValid_ = true;
+    spdlog::info("OXRSys/ALVR: encoder ready {}x{} @{}Hz {}Mbps ({}, {})", totalWidth, eyeHeight,
+                 desired.fps, bitrateMbps, encoderUsesH264_ ? "H.264" : "HEVC",
+                 mode == EncoderTransportMode::NativeHelper ? "native helper" : "in-process");
     return true;
 }
 
@@ -668,11 +876,19 @@ void AlvrStreamingBackend::EventThread()
         {
             case ALVR_EVENT_CLIENT_CONNECTED:
                 RefreshNegotiatedConfig();
+                // Restart-per-generation: even a same-resolution reconnect
+                // re-runs codec/transport selection and re-sends config NALs —
+                // the new connection never inherits the previous encoder.
+                encoderResetPending_.store(true);
                 connected_.store(true);
                 spdlog::info("OXRSys/ALVR: client connected");
                 break;
             case ALVR_EVENT_CLIENT_DISCONNECTED:
                 connected_.store(false);
+                // The helper failure budget (and any in-process H.264 pin) is
+                // scoped to one connected session.
+                helperFailures_.store(0);
+                helperPinLogged_.store(false);
                 lastTrackingArrival = {};
                 trackingStaleWarned = false;
                 spdlog::info("OXRSys/ALVR: client disconnected");

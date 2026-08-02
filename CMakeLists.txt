@@ -159,6 +159,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
+    tests/TestAlvrEncoderSelection.cpp
     tests/TestAlvrSessionConfig.cpp
     tests/TestClientLiveness.cpp
     tests/TestCodecSelect.cpp
@@ -239,6 +240,15 @@ set_tests_properties(oxrsys_alvr_session_config PROPERTIES
 )
 # StreamingServer client-liveness watchdog decision (pure); runs the tagged
 # subset of oxrsys_runtime_tests as its own reportable entry.
+# ALVR encoder transport decision + generation identity + codec selection
+# (pure, dylib-free); own reportable entry like the session-config subset.
+add_test(NAME oxrsys_alvr_encoder_selection
+    COMMAND oxrsys_runtime_tests "[encoder-selection],[codec-select]"
+)
+set_tests_properties(oxrsys_alvr_encoder_selection PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
 add_test(NAME oxrsys_client_liveness
     COMMAND oxrsys_runtime_tests "[client-liveness]"
 )

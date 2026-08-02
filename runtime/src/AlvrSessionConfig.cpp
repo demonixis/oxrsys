@@ -28,6 +28,7 @@ const char* MinimalSessionJson()
       "client_discovery": { "enabled": true, "content": { "auto_trust_clients": true } }
     },
     "video": {
+      "preferred_codec": { "variant": "H264" },
       "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } },
       "max_buffering_frames": 1.5,
       "transcoding_view_resolution": {
@@ -49,20 +50,33 @@ const char* MinimalSessionJson()
     return kMinimalSessionJson;
 }
 
-std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps)
+std::string ApplySessionSettings(const std::string& json, uint32_t bitrateMbps,
+                                 oxr::protocol::VideoCodec preferredCodec)
 {
     // Targeted key rewrites instead of a JSON library: ALVR rewrites the file
-    // with its full settings tree, so both keys exist after first run.
+    // with its full settings tree, so all keys exist after first run (and the
+    // minimal seed carries preferred_codec explicitly so the very first
+    // alvr_initialize already sees the selected codec).
     // "variant": "ConstantMbps" does not match — the regex requires the key
     // position (quote before the colon).
     static const std::regex bitrateRe("\"ConstantMbps\"\\s*:\\s*[0-9.]+");
     static const std::regex bufferingRe("\"max_buffering_frames\"\\s*:\\s*[0-9.]+");
+    static const std::regex codecRe(
+        "\"preferred_codec\"\\s*:\\s*\\{\\s*\"variant\"\\s*:\\s*\"[A-Za-z0-9]+\"\\s*\\}");
 
     std::string updated =
         std::regex_replace(json, bitrateRe, "\"ConstantMbps\": " + std::to_string(bitrateMbps));
     // Cap client-side frame queueing: larger values let server pacing drift pool
     // into standing latency before the vsync queue overflows into stutter.
     updated = std::regex_replace(updated, bufferingRe, "\"max_buffering_frames\": 1.5");
+    // server_core sends this codec to the client in the stream config; it must
+    // match what the oxrsys encoder actually produces (SelectAlvrVideoCodec).
+    // ALVR's CodecType variants are "H264" / "Hevc" (AV1 is never selected).
+    const char* variant =
+        preferredCodec == oxr::protocol::VideoCodec::H264 ? "H264" : "Hevc";
+    updated = std::regex_replace(
+        updated, codecRe,
+        std::string("\"preferred_codec\": { \"variant\": \"") + variant + "\" }");
     return updated;
 }
 

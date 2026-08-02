@@ -29,6 +29,33 @@ inline oxr::protocol::VideoCodec PreferredVideoCodec()
     return codec;
 }
 
+// Codec for the embedded-ALVR streaming path. ALVR v20.14.1 clients decode
+// H.264 and HEVC unconditionally (VideoStreamingCapabilities only gates
+// AV1/10-bit/high-profile), so no client capability check applies here; the
+// selected codec is echoed to the client through ALVR's session
+// (session_settings video.preferred_codec -> openvr_config codec).
+// Deliberately non-cached: helper availability can change across encoder
+// generations (crash fallback), unlike process translation status.
+inline oxr::protocol::VideoCodec SelectAlvrVideoCodec(const std::string& configuredCodec,
+                                                      bool helperAvailable, bool underRosetta)
+{
+    if (helperAvailable)
+    {
+        // The native-arm64 helper hardware-encodes both codecs regardless of
+        // the parent's translation status; honor the configured codec and let
+        // "auto" prefer HEVC.
+        return configuredCodec == "h264" ? oxr::protocol::VideoCodec::H264
+                                         : oxr::protocol::VideoCodec::H265;
+    }
+    if (underRosetta)
+    {
+        // In-process VideoToolbox under Rosetta exposes no HEVC hardware encode.
+        return oxr::protocol::VideoCodec::H264;
+    }
+    return configuredCodec == "h264" ? oxr::protocol::VideoCodec::H264
+                                     : oxr::protocol::VideoCodec::H265;
+}
+
 inline uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
 {
     switch (codec)

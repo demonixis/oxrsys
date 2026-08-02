@@ -14,6 +14,7 @@ using oxrsys::alvr::ApplySessionSettings;
 using oxrsys::alvr::MinimalSessionJson;
 using oxrsys::alvr::ParseNegotiatedConfig;
 using oxrsys::alvr::PendingEncodedFrame;
+using oxr::protocol::VideoCodec;
 
 namespace
 {
@@ -40,6 +41,9 @@ TEST_CASE("MinimalSessionJson seeds auto-trust, bitrate, and absolute resolution
 {
     const std::string json = MinimalSessionJson();
     CHECK(Contains(json, "\"auto_trust_clients\": true"));
+    // The codec key must exist in the seed so the very first ApplySessionSettings
+    // (before ALVR ever extrapolated the full tree) can rewrite it.
+    CHECK(Contains(json, "\"preferred_codec\""));
     CHECK(Contains(json, "\"variant\": \"ConstantMbps\""));
     CHECK(Contains(json, "\"ConstantMbps\": 60"));
     // Absolute transcoding resolution, not a scale factor.
@@ -50,7 +54,7 @@ TEST_CASE("MinimalSessionJson seeds auto-trust, bitrate, and absolute resolution
 
 TEST_CASE("ApplySessionSettings rewrites the bitrate seed from the toml", "[alvr-session]")
 {
-    const std::string synced = ApplySessionSettings(MinimalSessionJson(), 40);
+    const std::string synced = ApplySessionSettings(MinimalSessionJson(), 40, VideoCodec::H265);
     // Seed 60 -> 40, but the variant tag must survive (regex keyed on position).
     CHECK(Contains(synced, "\"ConstantMbps\": 40"));
     CHECK_FALSE(Contains(synced, "\"ConstantMbps\": 60"));
@@ -63,7 +67,7 @@ TEST_CASE("ApplySessionSettings caps a large max_buffering_frames", "[alvr-sessi
 {
     const std::string json = R"({ "video": { "max_buffering_frames": 4.0,
         "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 100 } } } })";
-    const std::string synced = ApplySessionSettings(json, 30);
+    const std::string synced = ApplySessionSettings(json, 30, VideoCodec::H265);
     CHECK(Contains(synced, "\"max_buffering_frames\": 1.5"));
     CHECK_FALSE(Contains(synced, "\"max_buffering_frames\": 4.0"));
     CHECK(Contains(synced, "\"ConstantMbps\": 30"));
@@ -71,17 +75,45 @@ TEST_CASE("ApplySessionSettings caps a large max_buffering_frames", "[alvr-sessi
 
 TEST_CASE("ApplySessionSettings is idempotent", "[alvr-session]")
 {
-    const std::string once = ApplySessionSettings(MinimalSessionJson(), 40);
-    const std::string twice = ApplySessionSettings(once, 40);
+    const std::string once = ApplySessionSettings(MinimalSessionJson(), 40, VideoCodec::H265);
+    const std::string twice = ApplySessionSettings(once, 40, VideoCodec::H265);
     // Re-applying the same bitrate must not perturb the already-synced document
     // (this equality is what SyncSessionSettings uses to skip rewriting the file).
     CHECK(twice == once);
 }
 
-TEST_CASE("ApplySessionSettings leaves a document with neither key unchanged", "[alvr-session]")
+TEST_CASE("ApplySessionSettings leaves a document with no known key unchanged", "[alvr-session]")
 {
     const std::string json = R"({ "session_settings": { "connection": {} } })";
-    CHECK(ApplySessionSettings(json, 55) == json);
+    CHECK(ApplySessionSettings(json, 55, VideoCodec::H264) == json);
+}
+
+TEST_CASE("ApplySessionSettings rewrites preferred_codec to the selected codec", "[alvr-session]")
+{
+    // Seed carries H264; an HEVC selection must flip it (ALVR variant "Hevc").
+    const std::string hevc = ApplySessionSettings(MinimalSessionJson(), 40, VideoCodec::H265);
+    CHECK(Contains(hevc, "\"preferred_codec\": { \"variant\": \"Hevc\" }"));
+    CHECK_FALSE(Contains(hevc, "\"variant\": \"H264\""));
+
+    // And back: an H.264 selection over an Hevc document lands on "H264".
+    const std::string h264 = ApplySessionSettings(hevc, 40, VideoCodec::H264);
+    CHECK(Contains(h264, "\"preferred_codec\": { \"variant\": \"H264\" }"));
+    CHECK_FALSE(Contains(h264, "\"variant\": \"Hevc\""));
+
+    // Idempotent for the codec key too.
+    CHECK(ApplySessionSettings(hevc, 40, VideoCodec::H265) == hevc);
+}
+
+TEST_CASE("ApplySessionSettings codec rewrite tolerates ALVR's own spacing", "[alvr-session]")
+{
+    // ALVR rewrites the file compactly ({"variant": "H264"}); the regex must
+    // still match, and the variant tag of OTHER enums must not be touched.
+    const std::string json = R"({ "video": {
+        "preferred_codec": {"variant": "H264"},
+        "bitrate": { "mode": { "variant": "ConstantMbps", "ConstantMbps": 60 } } } })";
+    const std::string synced = ApplySessionSettings(json, 60, VideoCodec::H265);
+    CHECK(Contains(synced, "\"preferred_codec\": { \"variant\": \"Hevc\" }"));
+    CHECK(Contains(synced, "\"variant\": \"ConstantMbps\""));
 }
 
 TEST_CASE("ParseNegotiatedConfig extracts eye resolution and refresh rate", "[alvr-session]")
