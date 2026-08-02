@@ -22,6 +22,7 @@ struct ConfigValues
     std::string renderDevice = "quest3"; // Per-eye render resolution target: "quest2", "quest3", "avp"
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string videoCodec = "h265"; // "h265", "h264", "auto"
+    std::string encoderProcess = "auto"; // "auto", "native", "inproc" (ALVR path encode process)
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     bool encoder10Bit = false;      // Encode HEVC Main10 for capable H.265 clients
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"

@@ -383,6 +383,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.videoCodec = value;
                 }
             }
+            else if (key == "encoder_process")
+            {
+                value = ParseString(value);
+                if (value == "auto" || value == "native" || value == "inproc")
+                {
+                    values.encoderProcess = value;
+                }
+            }
             else if (key == "encoder_preset")
             {
                 value = ParseString(value);
@@ -614,7 +622,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     if (!force)
     {
         spdlog::info(
-            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} render_device={} dyn_min={:.2f} keyframe={}s codec={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
+            "OXRSys: Reloaded config from {} (runtime_enabled={} bitrate={}Mbps fov={} refresh={}Hz res_scale={:.2f} render_device={} dyn_min={:.2f} keyframe={}s codec={} encoder_process={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={} quest_logcat={})",
             configFilePath,
             newValues.runtimeEnabled,
             newValues.bitrateMbps,
@@ -625,6 +633,7 @@ bool Config::ReloadIfChangedLocked(bool force)
             newValues.dynamicResolutionMinScale,
             newValues.keyframeIntervalSec,
             newValues.videoCodec,
+            newValues.encoderProcess,
             newValues.encoderPreset,
             newValues.streamingTransport,
             newValues.foveatedEncodingPreset,
@@ -739,11 +748,11 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s encoder_process={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
                   values_.resolutionScale, values_.dynamicResolutionMinScale,
                   values_.keyframeIntervalSec,
-                  values_.encoderPreset, values_.streamingTransport,
+                  values_.encoderProcess, values_.encoderPreset, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
                   values_.clientUpscaling, values_.clientSharpening, values_.clientReprojectionMode,
                   values_.abrMode, values_.passthroughEnabled,

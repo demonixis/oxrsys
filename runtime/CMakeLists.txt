@@ -316,7 +316,19 @@ include(${CMAKE_SOURCE_DIR}/cmake/AlvrServerCore.cmake)
 # Staging next to the installed runtime is the packaging scripts' job; the
 # transport falls back to the OXRSYS_ENCODER_HELPER env override in tests.
 if(APPLE)
-    option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" ON)
+    # The helper only makes sense as a native arm64 binary; an x86_64 configure
+    # (e.g. the Wine/Rosetta runtime tree) would build a translated helper into
+    # the same runtime/ output dir and clobber a staged arm64 one. Default ON
+    # only when this tree targets arm64; still explicitly overridable.
+    set(_oxrsys_helper_arch "${CMAKE_OSX_ARCHITECTURES}")
+    if(NOT _oxrsys_helper_arch)
+        set(_oxrsys_helper_arch "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    if(_oxrsys_helper_arch MATCHES "arm64")
+        option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" ON)
+    else()
+        option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" OFF)
+    endif()
 else()
     option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" OFF)
 endif()

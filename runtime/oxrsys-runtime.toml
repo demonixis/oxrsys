@@ -46,9 +46,22 @@ keyframe_interval_sec = 2
 # Video codec: "h265", "h264", or "auto".
 # H.265 remains the default for headset compatibility; H.264 is useful for
 # FFmpeg/Qt simulator validation and clients that advertise H.264 support.
-# Under Rosetta (e.g. the Wine/D3D11 bridge) VideoToolbox cannot encode HEVC,
-# so the runtime negotiates H.264 there regardless of this setting.
+# Under Rosetta (e.g. the Wine/D3D11 bridge) the runtime process itself cannot
+# encode HEVC in-process, but the native encoder helper (encoder_process below)
+# can: with the helper active this setting is honored ("auto" prefers H.265);
+# without it a Rosetta runtime still negotiates H.264.
 video_codec = "h265"
+
+# Encoder process for the ALVR streaming path: "auto", "native", or "inproc".
+#   native = encode out-of-process in the native-arm64 oxrsys-encoder-helper
+#            (hardware low-latency VideoToolbox incl. HW HEVC, even when the
+#            runtime itself runs x86_64 under Rosetta); fails loudly when the
+#            helper binary is missing instead of degrading.
+#   inproc = legacy in-process VideoToolbox encode (under Rosetta this is the
+#            H.264-only path).
+#   auto   = use the native helper when its binary is present next to the
+#            runtime dylib, otherwise fall back to in-process.
+encoder_process = "auto"
 
 # Encoder speed preset: "quality", "balanced", "speed"
 # speed  = lowest latency, fastest encode, lower quality
