@@ -276,6 +276,9 @@ if(TARGET oxrsys_encoder_helper)
         ENVIRONMENT
             "${OXRSYS_ISOLATED_TEST_ENV};OXRSYS_ENCODER_HELPER=$<TARGET_FILE:oxrsys_encoder_helper>"
         TIMEOUT 90
+        # Catch2 exits 4 when every selected test SKIPped (no Metal device or
+        # a non-arm64 helper, e.g. the x86_64 tree) — report as skipped.
+        SKIP_RETURN_CODE 4
     )
 endif()
 
