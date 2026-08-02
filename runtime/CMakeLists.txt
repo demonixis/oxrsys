@@ -47,6 +47,9 @@ if(APPLE)
             src/VideoEncoder.mm
             src/encoder/VideoToolboxEncodeEngine.mm
             src/encoder/InProcessEncoderTransport.mm
+            src/encoder/EncoderIpcSocket.cpp
+            src/encoder/EncoderMachSurface.mm
+            src/encoder/NativeHelperEncoderTransport.mm
         )
     endif()
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -265,6 +268,7 @@ if(APPLE)
         "-framework VideoToolbox"
         "-framework CoreMedia"
         "-framework CoreVideo"
+        "-framework IOSurface"
     )
 endif()
 
@@ -304,6 +308,45 @@ file(GENERATE
 
 # ALVR server_core streaming backend (optional, macOS only)
 include(${CMAKE_SOURCE_DIR}/cmake/AlvrServerCore.cmake)
+
+# --- Out-of-process encoder helper (macOS only) ---
+# The native-arm64 encode process spawned by NativeHelperEncoderTransport.
+# It shares VideoToolboxEncodeEngine with the in-process transport (the engine
+# was extracted for exactly this) and must never reference ALVR symbols.
+# Staging next to the installed runtime is the packaging scripts' job; the
+# transport falls back to the OXRSYS_ENCODER_HELPER env override in tests.
+if(APPLE)
+    option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" ON)
+else()
+    option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" OFF)
+endif()
+
+if(OXRSYS_BUILD_ENCODER_HELPER AND APPLE)
+    add_executable(oxrsys_encoder_helper
+        helper/main.mm
+        helper/EncoderHelperServer.mm
+        src/encoder/VideoToolboxEncodeEngine.mm
+        src/encoder/EncoderIpcSocket.cpp
+        src/encoder/EncoderMachSurface.mm
+    )
+    target_include_directories(oxrsys_encoder_helper PRIVATE
+        src
+        ${CMAKE_SOURCE_DIR}/common/protocol/include
+    )
+    target_link_libraries(oxrsys_encoder_helper PRIVATE
+        spdlog::spdlog
+        "-framework Foundation"
+        "-framework CoreFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework IOSurface"
+        "-framework Metal"
+        "-framework VideoToolbox"
+    )
+    set_target_properties(oxrsys_encoder_helper PROPERTIES
+        OUTPUT_NAME oxrsys-encoder-helper
+    )
+endif()
 
 # Copy default config file next to the dylib (if not already present)
 add_custom_command(TARGET oxrsys_runtime POST_BUILD

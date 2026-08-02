@@ -196,6 +196,22 @@ if(APPLE)
     target_compile_definitions(oxrsys_runtime_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL
     )
+    # Encoder IPC protocol/socket tests + the out-of-process helper smoke.
+    target_sources(oxrsys_runtime_tests PRIVATE
+        tests/TestEncoderIpc.cpp
+        tests/TestEncoderHelperSmoke.mm
+        runtime/src/encoder/EncoderIpcSocket.cpp
+        runtime/src/encoder/EncoderMachSurface.mm
+        runtime/src/encoder/NativeHelperEncoderTransport.mm
+    )
+    target_link_libraries(oxrsys_runtime_tests PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework IOSurface"
+        "-framework VideoToolbox"
+    )
 endif()
 target_compile_definitions(oxrsys_runtime_tests PRIVATE
     XR_USE_GRAPHICS_API_VULKAN
@@ -239,6 +255,29 @@ set_tests_properties(oxrsys_session_state_machines PROPERTIES
     ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
     TIMEOUT 30
 )
+
+# Encoder IPC wire protocol + socket framing (pure, no helper process); runs
+# the tagged subset of oxrsys_runtime_tests as its own reportable entry.
+add_test(NAME oxrsys_encoder_ipc
+    COMMAND oxrsys_runtime_tests "[encoder-ipc]"
+)
+set_tests_properties(oxrsys_encoder_ipc PROPERTIES
+    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
+    TIMEOUT 30
+)
+# Out-of-process encoder helper smoke: spawns the helper built in this tree.
+# Skips itself when Metal is unavailable or the helper is not native arm64.
+if(TARGET oxrsys_encoder_helper)
+    add_dependencies(oxrsys_runtime_tests oxrsys_encoder_helper)
+    add_test(NAME oxrsys_encoder_helper_smoke
+        COMMAND oxrsys_runtime_tests "[encoder-helper]"
+    )
+    set_tests_properties(oxrsys_encoder_helper_smoke PROPERTIES
+        ENVIRONMENT
+            "${OXRSYS_ISOLATED_TEST_ENV};OXRSYS_ENCODER_HELPER=$<TARGET_FILE:oxrsys_encoder_helper>"
+        TIMEOUT 90
+    )
+endif()
 
 add_executable(oxrsys_runtime_status_tests
     tests/TestRuntimeStatus.cpp
