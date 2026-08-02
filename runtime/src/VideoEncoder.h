@@ -12,29 +12,24 @@
 #include <vector>
 
 #include "GraphicsTypes.h"
+#include "encoder/EncoderTransport.h"
 #include <oxrsys/protocol/Protocol.h>
 
 /**
  * Low-latency video encoder facade.
  *
- * Apple builds use VideoToolbox with Metal textures by default. Linux builds
- * use FFmpeg and keep backend-specific graphics readback state behind
- * GraphicsContext. macOS can opt into FFmpeg for codec/pipeline testing.
+ * Apple builds compose with Metal and encode through the transport seam in
+ * encoder/EncoderTransport.h (today: InProcessEncoderTransport wrapping the
+ * VideoToolbox engine). Linux builds use FFmpeg and keep backend-specific
+ * graphics readback state behind GraphicsContext. macOS can opt into FFmpeg
+ * for codec/pipeline testing.
  */
 class VideoEncoder : public std::enable_shared_from_this<VideoEncoder>
 {
 public:
-    struct FrameMetrics
-    {
-        uint64_t frameNumber = 0;
-        int64_t timestampNs = 0;
-        double gpuCopyMs = 0.0;
-        double encodeSubmitMs = 0.0;
-        double callbackLatencyMs = 0.0;
-        double totalLatencyMs = 0.0;
-        bool frameDropped = false;
-        bool keyframe = false;
-    };
+    // Field-for-field the transport-side metrics struct; kept as a nested
+    // name for existing callers.
+    using FrameMetrics = oxrsys::encoder::EncodedFrameMetrics;
 
     struct FoveationSettings
     {
@@ -92,7 +87,7 @@ public:
 
     bool IsInitialized() const
     {
-        return videoToolbox_.session != nullptr || ffmpeg_.codecContext != nullptr;
+        return transport_ != nullptr || ffmpeg_.codecContext != nullptr;
     }
 
     // Stats
@@ -120,9 +115,10 @@ private:
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();
 
+    // Metal compose infrastructure only; the VTCompressionSession lives in
+    // the encode engine behind transport_.
     struct VideoToolboxState
     {
-        void* session = nullptr;          // VTCompressionSessionRef
         void* pixelBufferPool = nullptr;  // CVPixelBufferPoolRef
         void* textureCache = nullptr;     // CVMetalTextureCacheRef
         void* metalDevice = nullptr;      // id<MTLDevice>
@@ -143,6 +139,8 @@ private:
     GraphicsContext graphicsContext_ = {};
     VideoToolboxState videoToolbox_ = {};
     FfmpegState ffmpeg_ = {};
+    // Encode seam (Apple/VideoToolbox builds); null until Initialize succeeds.
+    std::shared_ptr<oxrsys::encoder::IEncoderTransport> transport_;
 
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
     uint32_t height_ = 0;

@@ -45,6 +45,8 @@ if(APPLE)
     else()
         list(APPEND OXRSYS_RUNTIME_SOURCES
             src/VideoEncoder.mm
+            src/encoder/VideoToolboxEncodeEngine.mm
+            src/encoder/InProcessEncoderTransport.mm
         )
     endif()
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")

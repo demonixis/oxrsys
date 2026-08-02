@@ -3,45 +3,23 @@
 #import "VideoEncoder.h"
 #import "Config.h"
 #import "RuntimePlatform.h"
+#import "encoder/InProcessEncoderTransport.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
-#import <VideoToolbox/VideoToolbox.h>
 #import <simd/simd.h>
 
 #import <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <exception>
-#include <thread>
 #include <utility>
 
 namespace
 {
-
-using Clock = std::chrono::steady_clock;
-
-double ToMilliseconds(Clock::duration duration)
-{
-    return std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(duration).count();
-}
-
-struct EncodeFrameContext
-{
-    VideoEncoder::OnNalUnitCallback nalCallback;
-    VideoEncoder::OnFrameEncodedCallback frameCallback;
-    std::function<void(size_t)> releaseSlot;
-    FrameSource frameSource;
-    VideoEncoder::FrameMetrics metrics;
-    oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
-    size_t slotIndex = 0;
-    Clock::time_point encodeStart;
-    Clock::time_point encodeSubmitFinished;
-};
 
 struct MetalFoveationUniforms
 {
@@ -125,60 +103,6 @@ kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[text
 }
 )METAL";
 
-void FinalizeEncodeFrame(EncodeFrameContext* context, bool frameDropped)
-{
-    if (context == nullptr)
-    {
-        return;
-    }
-
-    auto now = Clock::now();
-    context->metrics.frameDropped = frameDropped;
-    context->metrics.callbackLatencyMs = ToMilliseconds(now - context->encodeSubmitFinished);
-    context->metrics.totalLatencyMs = ToMilliseconds(now - context->encodeStart);
-
-    if (context->frameCallback)
-    {
-        try
-        {
-            context->frameCallback(context->metrics);
-        }
-        catch (const std::exception& error)
-        {
-            spdlog::warn("VideoEncoder: frame callback threw: {}", error.what());
-        }
-        catch (...)
-        {
-            spdlog::warn("VideoEncoder: frame callback threw an unknown exception");
-        }
-    }
-
-    if (context->releaseSlot)
-    {
-        context->releaseSlot(context->slotIndex);
-    }
-
-    delete context;
-}
-
-bool IsKeyframeSample(CMSampleBufferRef sampleBuffer)
-{
-    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, false);
-    if (attachments == nullptr || CFArrayGetCount(attachments) == 0)
-    {
-        return true;
-    }
-
-    CFDictionaryRef dict = (CFDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
-    CFBooleanRef notSync = nullptr;
-    if (!CFDictionaryGetValueIfPresent(dict, kCMSampleAttachmentKey_NotSync, (const void**)&notSync))
-    {
-        return true;
-    }
-
-    return !CFBooleanGetValue(notSync);
-}
-
 const char* VideoCodecName(oxr::protocol::VideoCodec codec)
 {
     switch (codec)
@@ -190,139 +114,6 @@ const char* VideoCodecName(oxr::protocol::VideoCodec codec)
         case oxr::protocol::VideoCodec::H265:
         default:
             return "H.265";
-    }
-}
-
-CMVideoCodecType VideoToolboxCodecType(oxr::protocol::VideoCodec codec)
-{
-    switch (codec)
-    {
-        case oxr::protocol::VideoCodec::H264:
-            return kCMVideoCodecType_H264;
-        case oxr::protocol::VideoCodec::H265:
-        default:
-            return kCMVideoCodecType_HEVC;
-    }
-}
-
-CFStringRef VideoToolboxProfileLevel(oxr::protocol::VideoCodec codec, bool tenBit)
-{
-    switch (codec)
-    {
-        case oxr::protocol::VideoCodec::H264:
-            return kVTProfileLevel_H264_High_AutoLevel;
-        case oxr::protocol::VideoCodec::H265:
-        default:
-            return tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel;
-    }
-}
-
-bool EmitParameterSetNalUnit(CMFormatDescriptionRef formatDesc,
-                             oxr::protocol::VideoCodec codec,
-                             size_t index,
-                             int64_t timestampNs,
-                             const VideoEncoder::OnNalUnitCallback& callback)
-{
-    const uint8_t* paramSet = nullptr;
-    size_t paramSetSize = 0;
-    OSStatus status = noErr;
-    if (codec == oxr::protocol::VideoCodec::H264)
-    {
-        status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
-    }
-    else
-    {
-        status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-            formatDesc, index, &paramSet, &paramSetSize, nullptr, nullptr);
-    }
-    if (status != noErr || paramSet == nullptr || paramSetSize == 0)
-    {
-        return false;
-    }
-
-    std::vector<uint8_t> nalUnit(4 + paramSetSize);
-    nalUnit[0] = 0x00;
-    nalUnit[1] = 0x00;
-    nalUnit[2] = 0x00;
-    nalUnit[3] = 0x01;
-    memcpy(nalUnit.data() + 4, paramSet, paramSetSize);
-    callback(nalUnit.data(), nalUnit.size(), true, timestampNs);
-    return true;
-}
-
-void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
-                        oxr::protocol::VideoCodec codec,
-                        const VideoEncoder::OnNalUnitCallback& callback)
-{
-    if (!callback)
-    {
-        return;
-    }
-
-    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-    int64_t timestampNs = (int64_t)(CMTimeGetSeconds(pts) * 1e9);
-
-    if (isKeyframe)
-    {
-        CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-        if (formatDesc != nullptr)
-        {
-            size_t paramSetCount = 0;
-            if (codec == oxr::protocol::VideoCodec::H264)
-            {
-                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
-            }
-            else
-            {
-                CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                    formatDesc, 0, nullptr, nullptr, &paramSetCount, nullptr);
-            }
-
-            for (size_t i = 0; i < paramSetCount; i++)
-            {
-                EmitParameterSetNalUnit(formatDesc, codec, i, timestampNs, callback);
-            }
-        }
-    }
-
-    CMBlockBufferRef dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
-    if (dataBuffer == nullptr)
-    {
-        return;
-    }
-
-    size_t totalLength = 0;
-    char* dataPointer = nullptr;
-    if (CMBlockBufferGetDataPointer(dataBuffer, 0, nullptr, &totalLength, &dataPointer) != noErr ||
-        dataPointer == nullptr || totalLength == 0)
-    {
-        return;
-    }
-
-    size_t offset = 0;
-    while (offset + 4 <= totalLength)
-    {
-        uint32_t naluLength = 0;
-        memcpy(&naluLength, dataPointer + offset, 4);
-        naluLength = CFSwapInt32BigToHost(naluLength);
-        offset += 4;
-
-        if (naluLength == 0 || offset + naluLength > totalLength)
-        {
-            break;
-        }
-
-        std::vector<uint8_t> nalUnit(4 + naluLength);
-        nalUnit[0] = 0x00;
-        nalUnit[1] = 0x00;
-        nalUnit[2] = 0x00;
-        nalUnit[3] = 0x01;
-        memcpy(nalUnit.data() + 4, dataPointer + offset, naluLength);
-
-        callback(nalUnit.data(), nalUnit.size(), isKeyframe, timestampNs);
-        offset += naluLength;
     }
 }
 
@@ -430,60 +221,7 @@ id<MTLSamplerState> CreateLinearClampSampler(id<MTLDevice> device)
     return sampler;
 }
 
-// VTSessionSetProperty failures are silent otherwise; a rejected property means
-// the encoder is running with defaults (e.g. no rate cap), so always log them.
-OSStatus SetSessionProperty(VTCompressionSessionRef session, CFStringRef key, CFTypeRef value)
-{
-    OSStatus status = VTSessionSetProperty(session, key, value);
-    if (status != noErr)
-    {
-        const char* keyName = [(__bridge NSString*)key UTF8String];
-        spdlog::warn("VideoEncoder: VTSessionSetProperty({}) failed: {}",
-                     keyName != nullptr ? keyName : "?", (int)status);
-    }
-    return status;
-}
-
 } // namespace
-
-static void CompressionOutputCallback(void* /*outputCallbackRefCon*/,
-                                       void* sourceFrameRefCon,
-                                       OSStatus status,
-                                       VTEncodeInfoFlags infoFlags,
-                                       CMSampleBufferRef sampleBuffer)
-{
-    auto* context = static_cast<EncodeFrameContext*>(sourceFrameRefCon);
-    if (context == nullptr)
-    {
-        return;
-    }
-
-    if (status != noErr || sampleBuffer == nullptr || (infoFlags & kVTEncodeInfo_FrameDropped))
-    {
-        FinalizeEncodeFrame(context, true);
-        return;
-    }
-
-    bool isKeyframe = IsKeyframeSample(sampleBuffer);
-    context->metrics.keyframe = isKeyframe;
-    try
-    {
-        EmitSampleNalUnits(sampleBuffer, isKeyframe, context->codec, context->nalCallback);
-    }
-    catch (const std::exception& error)
-    {
-        spdlog::warn("VideoEncoder: NAL callback threw: {}", error.what());
-        FinalizeEncodeFrame(context, true);
-        return;
-    }
-    catch (...)
-    {
-        spdlog::warn("VideoEncoder: NAL callback threw an unknown exception");
-        FinalizeEncodeFrame(context, true);
-        return;
-    }
-    FinalizeEncodeFrame(context, false);
-}
 
 VideoEncoder::VideoEncoder() = default;
 
@@ -698,161 +436,30 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].inUse = false;
     }
 
-    const CMVideoCodecType codecType = VideoToolboxCodecType(codec_);
+    // Session creation, the full LL-RC property set, and the output path live
+    // in the VideoToolbox encode engine behind the in-process transport seam.
+    const ConfigValues config = Config::Get().GetValues();
+    oxrsys::encoder::EncoderConfig engineConfig;
+    engineConfig.width = width_;
+    engineConfig.height = height_;
+    engineConfig.fps = fps_;
+    engineConfig.bitrateMbps = bitrateMbps_;
+    engineConfig.codec = codec_;
+    engineConfig.tenBit = tenBit_;
+    engineConfig.encoderPreset = config.encoderPreset;
+    engineConfig.keyframeIntervalSec = config.keyframeIntervalSec;
 
-    // Low-latency rate control halves encode latency (33 -> 10.6ms measured)
-    // and fixes the ~30% bitrate overshoot of the default RC. Historically its
-    // Rosetta all-zero-chroma bug (green image, VT's internal RGB->YCbCr of
-    // BGRA) forced an rgb_to_nv12 pre-convert; Apple fixed that in macOS 27
-    // and BGRA is fed directly (BT.709 match verified by vt-llrc-probe
-    // --matrix; the macOS<27 warning is logged at the top of Initialize).
-    NSDictionary* encoderSpec = @{
-        (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
-        (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
-        (NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl: @YES,
-    };
-
-    VTCompressionSessionRef compressionSession = nullptr;
-    OSStatus status = VTCompressionSessionCreate(
-        kCFAllocatorDefault,
-        width,
-        height,
-        codecType,
-        (__bridge CFDictionaryRef)encoderSpec,
-        nullptr,
-        kCFAllocatorDefault,
-        CompressionOutputCallback,
-        nullptr,
-        &compressionSession);
-    if (status != noErr)
+    auto transport = std::make_shared<oxrsys::encoder::InProcessEncoderTransport>();
+    if (!transport->Configure(engineConfig))
     {
-        // No fallback: a non-LL session has different latency and property
-        // behavior, and the LL create has never failed on supported hardware
-        // (evidence/vt-llrc-probe-rerun-*). Fail loudly instead of degrading.
-        spdlog::error("VideoEncoder: Failed to create low-latency compression session ({}); "
-                      "VideoToolbox low-latency rate control (macOS 13+) is required",
-                      (int)status);
         Shutdown();
         return false;
     }
-
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-
-    // Define one deterministic SDR color contract for every encoded stream. VideoToolbox embeds
-    // these values in H.264/H.265 metadata and uses the matching matrix for RGB-to-YCbCr conversion.
-    const OSStatus primariesStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_ColorPrimaries,
-        kCVImageBufferColorPrimaries_ITU_R_709_2);
-    const OSStatus transferStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_TransferFunction,
-        kCVImageBufferTransferFunction_ITU_R_709_2);
-    const OSStatus matrixStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_YCbCrMatrix,
-        kCVImageBufferYCbCrMatrix_ITU_R_709_2);
-    if (primariesStatus != noErr || transferStatus != noErr || matrixStatus != noErr)
-    {
-        spdlog::warn("VideoEncoder: failed to apply complete BT.709 color metadata (primaries={} transfer={} matrix={})",
-                     primariesStatus, transferStatus, matrixStatus);
-    }
-
-    const ConfigValues config = Config::Get().GetValues();
-    const std::string& preset = config.encoderPreset;
-    const OSStatus profileStatus = SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_ProfileLevel,
-        VideoToolboxProfileLevel(codec_, tenBit_ && codec_ == oxr::protocol::VideoCodec::H265));
-    if (codec_ == oxr::protocol::VideoCodec::H264)
-    {
-        // CABAC buys ~10% quality over the CAVLC default at the same bitrate;
-        // High profile already implies the decoder supports it.
-        SetSessionProperty(compressionSession,
-            kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC);
-    }
-    if (tenBit_ && codec_ == oxr::protocol::VideoCodec::H265)
-    {
-        if (profileStatus == noErr)
-        {
-            spdlog::info("VideoEncoder: Using HEVC Main10 (10-bit) profile");
-        }
-        else
-        {
-            spdlog::warn("VideoEncoder: HEVC Main10 profile unavailable ({}); falling back to encoder default",
-                         profileStatus);
-        }
-    }
-    if (preset == "speed")
-    {
-        SetSessionProperty(compressionSession,
-            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue);
-        spdlog::info("VideoEncoder: Using 'speed' preset (prioritize speed)");
-    }
-    else if (preset == "quality")
-    {
-        SetSessionProperty(compressionSession,
-            kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanFalse);
-        spdlog::info("VideoEncoder: Using 'quality' preset");
-    }
-    else
-    {
-        spdlog::info("VideoEncoder: Using 'balanced' preset");
-    }
-
-    // Rate control: AverageBitRate + an EXACT per-second DataRateLimits budget.
-    // Do NOT use kVTCompressionPropertyKey_ConstantBitRate here: the header
-    // documents it as incompatible with AverageBitRate/DataRateLimits, the
-    // LL-RC encoder rejects it (-12900), and classic RC silently ignores it
-    // (vt-llrc-probe --cbr, 2026-07-04; the "accepted then stalls" observation
-    // of 2026-07-03 traced to the frame-context use-after-free fixed
-    // alongside the NV12 encoder-input work, not CBR). AverageBitRate alone (with the old 1.5x limits
-    // headroom) overshot ~2x; the exact 1.0x budget below holds the measured
-    // output at/under target.
-    int targetBitrate = bitrateMbps * 1000000;
-    CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &targetBitrate);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_AverageBitRate, bitrateRef);
-    CFRelease(bitrateRef);
-
-    // Exact per-second byte budget; headroom above target lets VT overshoot.
-    double peakBytesPerSecond = (double)targetBitrate / 8.0;
-    NSArray* dataRateLimits = @[@(peakBytesPerSecond), @(1.0)];
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_DataRateLimits, (__bridge CFArrayRef)dataRateLimits);
-
-    uint32_t keyframeIntervalSec = config.keyframeIntervalSec;
-    int keyframeInterval = keyframeIntervalSec * std::max(fps, 1u);
-    CFNumberRef intervalRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &keyframeInterval);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_MaxKeyFrameInterval, intervalRef);
-    CFRelease(intervalRef);
-
-    double keyframeDuration = (double)keyframeIntervalSec;
-    CFNumberRef durationRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberFloat64Type, &keyframeDuration);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, durationRef);
-    CFRelease(durationRef);
-
-    int expectedFps = std::max(fps, 1u);
-    CFNumberRef fpsRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &expectedFps);
-    SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_ExpectedFrameRate, fpsRef);
-    CFRelease(fpsRef);
-
-    VTCompressionSessionPrepareToEncodeFrames(compressionSession);
-    videoToolbox_.session = compressionSession;
-
-    {
-        CFBooleanRef usingHw = nullptr;
-        const OSStatus hwStatus = VTSessionCopyProperty(compressionSession,
-            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder, kCFAllocatorDefault, &usingHw);
-        spdlog::info("VideoEncoder: hardware-accelerated encoder = {}",
-            hwStatus != noErr ? "unknown (query unsupported)" : (usingHw && CFBooleanGetValue(usingHw)) ? "yes" : "no");
-        if (usingHw) CFRelease(usingHw);
-    }
+    transport_ = std::move(transport);
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
-                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
+                  VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount,
+                  config.keyframeIntervalSec, config.encoderPreset);
     return true;
 }
 
@@ -860,25 +467,15 @@ void VideoEncoder::Shutdown()
 {
     shuttingDown_.store(true);
 
-    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
-    if (compressionSession != nullptr)
+    if (transport_ != nullptr)
     {
-        VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid);
-    }
-
-    // Drain in-flight frames BEFORE invalidating/releasing the session: late
-    // Metal completed handlers hold their own retains, but invalidating here
-    // would yank the session out from under any encode still in flight.
-    for (int i = 0; i < 200 && inFlightFrameCount_.load() > 0; i++)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
-    if (compressionSession != nullptr)
-    {
-        VTCompressionSessionInvalidate(compressionSession);
-        CFRelease(compressionSession);
-        videoToolbox_.session = nullptr;
+        // Flush + bounded (<=200ms) drain of in-flight frames BEFORE the
+        // session teardown: late Metal completed handlers hold their own
+        // session retains (via the pending-frame tokens), but destroying the
+        // session early would yank it out from under an encode in flight.
+        transport_->Drain();
+        transport_->Shutdown();
+        transport_.reset();
     }
 
     DestroySlots();
@@ -938,7 +535,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
                                    OnFrameEncodedCallback frameCallback)
 {
-    if (videoToolbox_.session == nullptr ||
+    if (transport_ == nullptr ||
         !frameSource.left.IsValid() ||
         (stereo && !frameSource.right.IsValid()))
     {
@@ -1273,33 +870,53 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         [blit endEncoding];
     }
 
-    auto* context = new EncodeFrameContext();
-    context->nalCallback = std::move(callback);
-    context->frameCallback = std::move(frameCallback);
-    // Hold a strong reference to the encoder for as long as the frame's
-    // context is alive. FinalizeEncodeFrame (which invokes this lambda and then
-    // deletes the context) can run from either the Metal completed handler
-    // below or, on the success path, the asynchronous VT output callback
-    // (CompressionOutputCallback) long after both owners have dropped their
-    // shared_ptr. Capturing self keeps ReleaseSlot()'s `this` valid through
-    // that whole window instead of dereferencing a freed encoder.
-    context->releaseSlot = [self = shared_from_this()](size_t releasedSlotIndex) {
-        self->ReleaseSlot(releasedSlotIndex);
-    };
-    context->frameSource = std::move(frameSource);
-    context->slotIndex = slotIndex;
-    context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
-    context->metrics.timestampNs = timestampNs;
-    context->metrics.keyframe = forceKeyframe;
-    context->codec = codec_;
-    context->encodeStart = Clock::now();
-    context->encodeSubmitFinished = context->encodeStart;
+    oxrsys::encoder::FrameCallbacks frameCallbacks;
+    if (callback)
+    {
+        // Fan the frame-level result back out as the legacy per-NAL callback:
+        // one invocation per Annex-B NAL unit, byte-identical to the old
+        // direct emission (start code included in each descriptor).
+        frameCallbacks.onEncodedFrame =
+            [nalCallback = std::move(callback)](const oxrsys::encoder::EncodedFrameResult& result) {
+                for (const oxrsys::encoder::NalUnitDescriptor& nal : result.nalUnits)
+                {
+                    nalCallback(result.data + nal.offset, nal.size, result.isIdr, result.timestampNs);
+                }
+            };
+    }
+    frameCallbacks.onFrameComplete = std::move(frameCallback);
+    // Hold a strong reference to the encoder for as long as the frame is in
+    // flight. The engine finalizes the frame (invoking this lambda last) from
+    // either the Metal completed handler below or, on the success path, the
+    // asynchronous VT output callback long after both owners have dropped
+    // their shared_ptr. Capturing self keeps ReleaseSlot()'s `this` valid
+    // through that whole window instead of dereferencing a freed encoder.
+    // frameSource rides along so the source images/sync objects stay alive
+    // until the frame context is destroyed.
+    frameCallbacks.releaseResources =
+        [self = shared_from_this(), slotIndex, frameSource = std::move(frameSource)]() {
+            (void)frameSource;
+            self->ReleaseSlot(slotIndex);
+        };
 
-    // Retain the CF objects across the async handler: blocks do not retain CF
-    // types, and a handler firing during/after Shutdown() must not touch a
-    // freed session or pixel buffer.
-    VTCompressionSessionRef compressionSession =
-        (VTCompressionSessionRef)CFRetain(videoToolbox_.session);
+    oxrsys::encoder::EncodedFrameMetrics seedMetrics;
+    seedMetrics.frameNumber = frameNumberCounter_.fetch_add(1);
+    seedMetrics.timestampNs = timestampNs;
+    seedMetrics.keyframe = forceKeyframe;
+
+    // The pending-frame token retains the compression session across the
+    // async handler (blocks do not retain CF types), so a handler firing
+    // during/after Shutdown() must go through the token, never a raw session.
+    std::shared_ptr<oxrsys::encoder::IPendingEncodeFrame> pendingFrame =
+        transport_->BeginFrame(std::move(frameCallbacks), seedMetrics);
+    if (pendingFrame == nullptr)
+    {
+        // Session vanished under us (shutdown race). The callbacks were
+        // consumed by BeginFrame, so finalize through the drop path without
+        // them; the old code would have crashed retaining a null session here.
+        return dropAcquiredSlot(nullptr);
+    }
+
     CVPixelBufferRetain(pixelBuffer);
     // Capture self so the handler's direct member accesses (shuttingDown_,
     // forceKeyframe_) stay valid even if this fires after both owners have
@@ -1314,59 +931,24 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                 // Frame never reached VT; re-arm the swallowed keyframe request.
                 self->forceKeyframe_.store(true);
             }
-            FinalizeEncodeFrame(context, true);
+            pendingFrame->Cancel();
             CVPixelBufferRelease(pixelBuffer);
-            CFRelease(compressionSession);
             return;
         }
 
-        context->metrics.gpuCopyMs = ToMilliseconds(Clock::now() - context->encodeStart);
-
-        CFMutableDictionaryRef frameProps = nullptr;
-        if (forceKeyframe)
+        // Submit() performs ALL frame-context writes before the VT encode
+        // call (the low-latency output callback can finalize the frame before
+        // Submit even returns) and finalizes the frame as dropped itself when
+        // the submission fails.
+        if (!pendingFrame->Submit(pixelBuffer, timestampNs, forceKeyframe))
         {
-            frameProps = CFDictionaryCreateMutable(kCFAllocatorDefault, 1,
-                &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-            CFDictionarySetValue(frameProps,
-                kVTEncodeFrameOptionKey_ForceKeyFrame, kCFBooleanTrue);
-        }
-
-        CMTime presentationTime = CMTimeMake(timestampNs, 1000000000);
-        // ALL context writes must happen BEFORE EncodeFrame: VT owns the
-        // refcon from that call on, and the low-latency encoder can run the
-        // output callback (which deletes the context) before EncodeFrame even
-        // returns. Writing afterwards is a use-after-free that corrupts the
-        // heap. encodeSubmitMs is therefore no longer measured (~0.05ms).
-        context->metrics.encodeSubmitMs = 0.0;
-        context->encodeSubmitFinished = Clock::now();
-        OSStatus status = VTCompressionSessionEncodeFrame(
-            compressionSession,
-            pixelBuffer,
-            presentationTime,
-            kCMTimeInvalid,
-            frameProps,
-            context,
-            nullptr);
-
-        if (frameProps != nullptr)
-        {
-            CFRelease(frameProps);
-        }
-
-        if (status != noErr)
-        {
-            // VT does not invoke the output callback when EncodeFrame itself
-            // fails, so the context is still ours to reclaim here.
-            spdlog::warn("VideoEncoder: VTCompressionSessionEncodeFrame failed: {}", status);
             if (forceKeyframe && !self->shuttingDown_.load())
             {
                 // Frame never reached VT; re-arm the swallowed keyframe request.
                 self->forceKeyframe_.store(true);
             }
-            FinalizeEncodeFrame(context, true);
         }
         CVPixelBufferRelease(pixelBuffer);
-        CFRelease(compressionSession);
     }];
 
     [cmdBuf commit];
@@ -1466,38 +1048,16 @@ void VideoEncoder::ForceKeyframe()
 
 void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
 {
-    if (videoToolbox_.session == nullptr || bitrateMbps == bitrateMbps_)
+    if (transport_ == nullptr || bitrateMbps == bitrateMbps_)
     {
         return;
     }
 
-    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
-
-    // No CBR path here: kVTCompressionPropertyKey_ConstantBitRate is banned —
-    // documented incompatible with the AverageBitRate/DataRateLimits pair we
-    // rely on (see the rate-control comment in Initialize()), so only that
-    // pair is ever updated.
-    int targetBitrate = bitrateMbps * 1000000;
-    CFNumberRef bitrateRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &targetBitrate);
-    OSStatus status = SetSessionProperty(compressionSession,
-        kVTCompressionPropertyKey_AverageBitRate, bitrateRef);
-    if (status == noErr)
+    // The engine updates the AverageBitRate/DataRateLimits pair (no CBR path;
+    // see the rate-control comment in VideoToolboxEncodeEngine::CreateSession)
+    // and owns the success/failure logging.
+    if (transport_->SetBitrate(bitrateMbps))
     {
-        // Keep the byte budget in lockstep with the average target.
-        double peakBytesPerSecond = (double)targetBitrate / 8.0;
-        NSArray* dataRateLimits = @[@(peakBytesPerSecond), @(1.0)];
-        SetSessionProperty(compressionSession,
-            kVTCompressionPropertyKey_DataRateLimits, (__bridge CFArrayRef)dataRateLimits);
-    }
-    CFRelease(bitrateRef);
-
-    if (status == noErr)
-    {
-        spdlog::info("VideoEncoder: Bitrate changed {} -> {} Mbps", bitrateMbps_, bitrateMbps);
         bitrateMbps_ = bitrateMbps;
-    }
-    else
-    {
-        spdlog::warn("VideoEncoder: Failed to set bitrate to {} Mbps: {}", bitrateMbps, status);
     }
 }
