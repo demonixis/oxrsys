@@ -146,7 +146,7 @@ struct NativeHelperEncoderTransport::Impl
 
     // ---------------------------------------------------------------- spawn
 
-    bool SpawnAndHandshake(const EncoderConfig& config)
+    bool SpawnAndHandshake()
     {
         const std::string helperPath = LocateHelperBinary();
         if (access(helperPath.c_str(), X_OK) != 0)
@@ -270,18 +270,9 @@ struct NativeHelperEncoderTransport::Impl
             TearDownProcess(true);
             return false;
         }
-        const uint32_t requiredCaps = ipc::kCodecCapHardware | ipc::kCodecCapLowLatency;
-        const uint32_t codecCaps = config.codec == oxr::protocol::VideoCodec::H264
-                                       ? childCaps.capsH264
-                                       : childCaps.capsH265;
-        if ((codecCaps & requiredCaps) != requiredCaps)
-        {
-            spdlog::error("NativeHelperEncoderTransport: helper lacks HW low-latency support for "
-                          "the requested codec (caps=0x{:x})",
-                          codecCaps);
-            TearDownProcess(true);
-            return false;
-        }
+        // Per-codec HW/low-latency caps are NOT checked here: the caller reads
+        // them via SupportsCodec() to pick the codec, and Configure() enforces
+        // them for the codec it was finally given.
         spdlog::info("NativeHelperEncoderTransport: helper pid {} up (arm64 native, macOS {}, "
                      "capsH264=0x{:x} capsH265=0x{:x})",
                      childCaps.helperPid, childCaps.macosMajor, childCaps.capsH264,
@@ -831,11 +822,49 @@ NativeHelperEncoderTransport::~NativeHelperEncoderTransport()
     Shutdown();
 }
 
+bool NativeHelperEncoderTransport::HelperBinaryAvailable()
+{
+    const std::string helperPath = LocateHelperBinary();
+    return access(helperPath.c_str(), X_OK) == 0;
+}
+
+bool NativeHelperEncoderTransport::StartHelper()
+{
+    auto& impl = *impl_;
+    if (impl.spawned)
+    {
+        return impl.alive.load(); // a died helper makes this transport inert
+    }
+    return impl.SpawnAndHandshake();
+}
+
+bool NativeHelperEncoderTransport::SupportsCodec(oxr::protocol::VideoCodec codec) const
+{
+    auto& impl = *impl_;
+    if (!impl.spawned)
+    {
+        return false;
+    }
+    const uint32_t requiredCaps = ipc::kCodecCapHardware | ipc::kCodecCapLowLatency;
+    const uint32_t codecCaps = codec == oxr::protocol::VideoCodec::H264 ? impl.childCaps.capsH264
+                                                                        : impl.childCaps.capsH265;
+    return (codecCaps & requiredCaps) == requiredCaps;
+}
+
 bool NativeHelperEncoderTransport::Configure(const EncoderConfig& config)
 {
     auto& impl = *impl_;
-    if (!impl.spawned && !impl.SpawnAndHandshake(config))
+    if (!impl.spawned && !impl.SpawnAndHandshake())
     {
+        return false;
+    }
+    if (!SupportsCodec(config.codec))
+    {
+        // The whole point of the helper is native hardware low-latency encode;
+        // callers gate the codec on SupportsCodec() before configuring.
+        spdlog::error("NativeHelperEncoderTransport: helper lacks HW low-latency support for the "
+                      "requested codec (capsH264=0x{:x} capsH265=0x{:x})",
+                      impl.childCaps.capsH264, impl.childCaps.capsH265);
         return false;
     }
 

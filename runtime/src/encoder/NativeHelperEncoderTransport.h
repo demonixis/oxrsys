@@ -54,6 +54,20 @@ public:
     /// False once the helper died (EOF) or was never successfully configured.
     bool IsHealthy() const;
 
+    /// True when the helper executable exists (and is executable) at its
+    /// resolved location: the OXRSYS_ENCODER_HELPER override or next to the
+    /// runtime dylib. Cheap enough to poll per encoder (re)build.
+    static bool HelperBinaryAvailable();
+
+    /// Spawn + handshake the helper if it is not already up. False when the
+    /// spawn, the handshake, or the native-arm64 requirement fails; a
+    /// transport whose helper died is single-use and stays failed.
+    bool StartHelper();
+
+    /// The helper advertised hardware low-latency support for `codec` in its
+    /// handshake caps. Only meaningful after StartHelper() succeeded.
+    bool SupportsCodec(oxr::protocol::VideoCodec codec) const;
+
     struct Impl;
 
 private:

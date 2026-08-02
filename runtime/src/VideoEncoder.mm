@@ -449,7 +449,10 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     engineConfig.encoderPreset = config.encoderPreset;
     engineConfig.keyframeIntervalSec = config.keyframeIntervalSec;
 
-    auto transport = std::make_shared<oxrsys::encoder::InProcessEncoderTransport>();
+    std::shared_ptr<oxrsys::encoder::IEncoderTransport> transport =
+        injectedTransport_ != nullptr
+            ? injectedTransport_
+            : std::make_shared<oxrsys::encoder::InProcessEncoderTransport>();
     if (!transport->Configure(engineConfig))
     {
         Shutdown();

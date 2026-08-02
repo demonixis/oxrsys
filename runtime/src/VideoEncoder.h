@@ -65,6 +65,14 @@ public:
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
+    // Inject the encode transport to drive (must be un-configured; Initialize()
+    // calls Configure() on it). Applies before Initialize(); when unset, Apple
+    // builds default to InProcessEncoderTransport. The injected transport is
+    // single-use — Shutdown() retires it with the encoder.
+    void SetEncoderTransport(std::shared_ptr<oxrsys::encoder::IEncoderTransport> transport)
+    {
+        injectedTransport_ = std::move(transport);
+    }
     static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
 
     // Encode one backend-native texture/image source.
@@ -141,6 +149,9 @@ private:
     FfmpegState ffmpeg_ = {};
     // Encode seam (Apple/VideoToolbox builds); null until Initialize succeeds.
     std::shared_ptr<oxrsys::encoder::IEncoderTransport> transport_;
+    // Optional caller-selected transport (SetEncoderTransport), consumed by
+    // Initialize(); null selects the in-process default.
+    std::shared_ptr<oxrsys::encoder::IEncoderTransport> injectedTransport_;
 
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
     uint32_t height_ = 0;
