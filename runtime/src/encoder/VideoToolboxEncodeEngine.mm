@@ -298,6 +298,11 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
         if (CMBlockBufferGetDataPointer(dataBuffer, 0, nullptr, &totalLength, &dataPointer) == noErr &&
             dataPointer != nullptr && totalLength != 0)
         {
+            // Avoid repeated growth: totalLength approximates the Annex-B
+            // output size (length prefixes swap for same-size-or-larger start
+            // codes), padded by one start code for the common case where they
+            // match exactly.
+            payload.reserve(payload.size() + totalLength + 4);
             size_t offset = 0;
             while (offset + (size_t)nalUnitHeaderLength <= totalLength)
             {

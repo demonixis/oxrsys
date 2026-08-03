@@ -15,12 +15,13 @@
  * Transport seam between the Metal compose stage (VideoEncoder) and the
  * hardware encode engine.
  *
- * Today the only implementation is InProcessEncoderTransport, which wraps
- * VideoToolboxEncodeEngine in the same process. The seam exists so a future
- * NativeHelperEncoderTransport can move the encode into a separate
- * native-arm64 helper process (IOSurface handoff) without touching the
- * compose or streaming-backend code. Everything in this header is
- * deliberately free of ALVR, Metal, and VideoToolbox dependencies.
+ * The seam exists so the compose and streaming-backend code stays
+ * transport-agnostic. Two implementations exist: InProcessEncoderTransport
+ * wraps VideoToolboxEncodeEngine in the same process (the Rosetta H.264
+ * fallback), and NativeHelperEncoderTransport moves the encode into a
+ * separate native-arm64 helper process (IOSurface handoff). Everything in
+ * this header is deliberately free of ALVR, Metal, and VideoToolbox
+ * dependencies.
  */
 namespace oxrsys::encoder
 {

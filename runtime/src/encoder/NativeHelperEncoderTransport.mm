@@ -43,6 +43,8 @@ namespace
 using Clock = std::chrono::steady_clock;
 
 constexpr size_t kSubmitQueueDepth = 3; ///< matches the 3-slot compose ring
+static_assert(kSubmitQueueDepth == ipc::kSlotCount,
+              "submit queue depth must match the IPC surface-slot count");
 constexpr uint32_t kHandshakeTimeoutMs = 5000;
 constexpr uint32_t kConfigureTimeoutMs = 5000;
 constexpr uint32_t kDrainBudgetMs = 200;
@@ -91,7 +93,6 @@ struct OutstandingFrame
 struct GenerationState
 {
     uint32_t generation = 0;
-    EncoderConfig config = {};
     std::map<uint32_t, uint32_t> surfaceSlots; ///< IOSurfaceID -> slot
     std::map<uint64_t, OutstandingFrame> outstanding; ///< frameId -> frame
 };
@@ -351,10 +352,12 @@ struct NativeHelperEncoderTransport::Impl
 
     void ReaderLoop()
     {
+        // Reused across iterations: ReadMessage() clears+resizes it per call,
+        // and no handler below retains a view into it past the iteration.
+        std::vector<uint8_t> payload;
         for (;;)
         {
             ipc::MessageHeader header;
-            std::vector<uint8_t> payload;
             const ipc::IoResult result = socket.ReadMessage(header, payload);
             if (result != ipc::IoResult::Ok)
             {
@@ -876,7 +879,7 @@ bool NativeHelperEncoderTransport::Configure(const EncoderConfig& config)
     configure.codec =
         config.codec == oxr::protocol::VideoCodec::H264 ? ipc::kCodecH264 : ipc::kCodecH265;
     configure.bitDepth = config.tenBit ? 10 : 8;
-    configure.pixelFormat = 'BGRA';
+    configure.pixelFormat = ipc::kPixelFormatBGRA;
     configure.fps = config.fps;
     configure.keyframeIntervalSec = config.keyframeIntervalSec;
     configure.initialBitrateBps = (uint64_t)config.bitrateMbps * 1000000;
@@ -907,7 +910,6 @@ bool NativeHelperEncoderTransport::Configure(const EncoderConfig& config)
 
     auto state = std::make_shared<GenerationState>();
     state->generation = generation;
-    state->config = config;
     {
         std::lock_guard<std::mutex> stateLock(impl.stateMutex);
         impl.generations[generation] = state;

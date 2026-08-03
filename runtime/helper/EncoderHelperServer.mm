@@ -24,6 +24,7 @@
 #include <thread>
 #include <vector>
 
+#include "../src/RuntimePlatform.h"
 #include "../src/encoder/EncoderIpcProtocol.h"
 #include "../src/encoder/EncoderIpcSocket.h"
 #include "../src/encoder/EncoderMachSurface.h"
@@ -50,17 +51,6 @@ uint64_t NowNs()
         mach_timebase_info(&timebase);
     }
     return mach_absolute_time() * timebase.numer / timebase.denom;
-}
-
-bool RunningTranslated()
-{
-    int translated = 0;
-    size_t size = sizeof(translated);
-    if (sysctlbyname("sysctl.proc_translated", &translated, &size, nullptr, 0) != 0)
-    {
-        return false;
-    }
-    return translated == 1;
 }
 
 uint32_t CurrentArch()
@@ -114,13 +104,6 @@ uint32_t ProbeCodecCaps(CMVideoCodecType codecType)
         caps = ipc::kCodecCapHardware;
     }
     return caps;
-}
-
-uint32_t MacOSMajor()
-{
-    const NSOperatingSystemVersion version =
-        NSProcessInfo.processInfo.operatingSystemVersion;
-    return (uint32_t)version.majorVersion;
 }
 
 uint32_t NalTypeOf(uint32_t codec, const uint8_t* nalStart, size_t size)
@@ -606,11 +589,11 @@ int EncoderHelperServer::Run(int socketFd, const std::string& bootstrapName)
             {
                 ipc::HelloReply reply;
                 reply.arch = CurrentArch();
-                reply.translated = RunningTranslated() ? 1 : 0;
+                reply.translated = oxrsys::runtime_platform::RunningUnderRosetta() ? 1 : 0;
                 reply.capsH264 = ProbeCodecCaps(kCMVideoCodecType_H264);
                 reply.capsH265 = ProbeCodecCaps(kCMVideoCodecType_HEVC);
-                reply.macosMajor = MacOSMajor();
-                reply.helperPid = (uint32_t)getpid();
+                reply.macosMajor = (uint32_t)oxrsys::runtime_platform::MacOSMajorVersion();
+                reply.helperPid = (uint32_t)oxrsys::runtime_platform::ProcessId();
                 std::vector<uint8_t> out;
                 reply.Serialize(out);
                 state.SendControl(ipc::MessageType::HelloReply, std::move(out));

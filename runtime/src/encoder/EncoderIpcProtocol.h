@@ -48,6 +48,9 @@ constexpr uint32_t kMaxPayloadSize = kMaxFramePayloadBytes + 64u * 1024u;
 /// Fixed slot count of the rotating IOSurface ring (mirrors the compose ring).
 constexpr uint32_t kSlotCount = 3;
 
+/// fourcc of the compose target, 'BGRA'.
+constexpr uint32_t kPixelFormatBGRA = 0x42475241;
+
 enum class MessageType : uint16_t
 {
     Hello = 1,             ///< parent -> child: version + parent pid
@@ -356,7 +359,7 @@ struct ConfigureGeneration
     uint32_t height = 0;
     uint32_t codec = kCodecH265;      ///< kCodec*
     uint32_t bitDepth = 8;            ///< 8 or 10 (HEVC Main10)
-    uint32_t pixelFormat = 0x42475241; ///< fourcc, 'BGRA'
+    uint32_t pixelFormat = kPixelFormatBGRA;
     uint32_t fps = 0;
     uint32_t keyframeIntervalSec = 0;
     uint64_t initialBitrateBps = 0;
@@ -501,6 +504,8 @@ struct FrameResult
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kFixedWireSize + nalUnits.size() * NalDescriptor::kWireSize +
+                    data.size());
         PayloadWriter w(out);
         w.U32(generation);
         w.U64(frameId);

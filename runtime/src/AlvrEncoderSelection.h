@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -29,6 +30,14 @@ enum class TransportDecision
     RetryLater,      ///< encoder_process = "native" but the helper cannot run right now
 };
 
+// At most one automatic helper respawn per this interval.
+constexpr auto kHelperRespawnBudget = std::chrono::seconds(30);
+
+// Mirrors encoder::ipc::kPixelFormatBGRA (EncoderIpcProtocol.h); kept local
+// because this header must stay ipc-free. AlvrStreamingBackend.cpp, which
+// includes both, static_asserts the two stay equal.
+constexpr uint32_t kPixelFormatBGRA = 0x42475241;
+
 /**
  * Transport decision for one EnsureEncoder pass.
  *
@@ -36,8 +45,7 @@ enum class TransportDecision
  * @param helperBinaryPresent  helper executable exists at its resolved location.
  * @param helperFailures       helper spawn/crash failures within the current connected
  *                             session (cleared on client disconnect).
- * @param respawnBudgetElapsed >=30s since the last helper spawn attempt — at most one
- *                             automatic respawn per 30s.
+ * @param respawnBudgetElapsed >=kHelperRespawnBudget since the last helper spawn attempt.
  * @param helperHealthy        a helper transport is currently up and driving a live
  *                             encoder; the respawn budget never applies to it.
  */
@@ -98,7 +106,7 @@ struct EncoderIdentity
     uint32_t fps = 0;
     oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
     uint32_t bitDepth = 8;             ///< 8, or 10 for HEVC Main10
-    uint32_t pixelFormat = 0x42475241; ///< fourcc of the compose target ('BGRA')
+    uint32_t pixelFormat = kPixelFormatBGRA; ///< fourcc of the compose target ('BGRA')
     EncoderTransportMode transport = EncoderTransportMode::InProcess;
 };
 

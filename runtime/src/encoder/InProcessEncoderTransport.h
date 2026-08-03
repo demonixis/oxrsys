@@ -8,9 +8,9 @@
 /**
  * In-process IEncoderTransport: a thin forwarding wrapper around
  * VideoToolboxEncodeEngine running in the caller's process. This is the
- * transport the demo pipeline uses today; a future NativeHelperEncoderTransport
- * will implement the same seam against an out-of-process native-arm64 encoder
- * helper (no IPC code exists yet — this class is deliberately trivial).
+ * Rosetta H.264 fallback transport; NativeHelperEncoderTransport implements
+ * the same seam against an out-of-process native-arm64 encoder helper
+ * (this class stays deliberately trivial).
  */
 namespace oxrsys::encoder
 {

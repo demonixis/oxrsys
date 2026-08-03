@@ -29,6 +29,15 @@ inline oxr::protocol::VideoCodec PreferredVideoCodec()
     return codec;
 }
 
+inline oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
+{
+    if (value == "h264")
+    {
+        return oxr::protocol::VideoCodec::H264;
+    }
+    return oxr::protocol::VideoCodec::H265;
+}
+
 // Codec for the embedded-ALVR streaming path. ALVR v20.14.1 clients decode
 // H.264 and HEVC unconditionally (VideoStreamingCapabilities only gates
 // AV1/10-bit/high-profile), so no client capability check applies here; the
@@ -44,16 +53,14 @@ inline oxr::protocol::VideoCodec SelectAlvrVideoCodec(const std::string& configu
         // The native-arm64 helper hardware-encodes both codecs regardless of
         // the parent's translation status; honor the configured codec and let
         // "auto" prefer HEVC.
-        return configuredCodec == "h264" ? oxr::protocol::VideoCodec::H264
-                                         : oxr::protocol::VideoCodec::H265;
+        return ParseConfiguredVideoCodec(configuredCodec);
     }
     if (underRosetta)
     {
         // In-process VideoToolbox under Rosetta exposes no HEVC hardware encode.
         return oxr::protocol::VideoCodec::H264;
     }
-    return configuredCodec == "h264" ? oxr::protocol::VideoCodec::H264
-                                     : oxr::protocol::VideoCodec::H265;
+    return ParseConfiguredVideoCodec(configuredCodec);
 }
 
 inline uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
@@ -90,15 +97,6 @@ inline bool ClientSupportsVideoCodec(const oxr::protocol::ClientConnect& clientC
         return codec == oxr::protocol::VideoCodec::H265;
     }
     return (clientConnect.supportedCodecs & VideoCodecCapabilityFlag(codec)) != 0;
-}
-
-inline oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
-{
-    if (value == "h264")
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
 }
 
 // Negotiate the stream codec: the configured/client-preferred codec when both

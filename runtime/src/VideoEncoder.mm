@@ -3,6 +3,7 @@
 #import "VideoEncoder.h"
 #import "Config.h"
 #import "RuntimePlatform.h"
+#import "encoder/EncoderIpcProtocol.h"
 #import "encoder/InProcessEncoderTransport.h"
 
 #import <CoreVideo/CoreVideo.h>
@@ -250,6 +251,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                                uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
                                oxr::protocol::VideoCodec codec)
 {
+    static_assert(SlotCount == oxrsys::encoder::ipc::kSlotCount,
+                  "compose ring depth must match the IPC surface-slot count");
+
     Shutdown();
 
     if (codec == oxr::protocol::VideoCodec::AV1)
@@ -468,6 +472,12 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
 void VideoEncoder::Shutdown()
 {
+    if (!IsInitialized())
+    {
+        shuttingDown_.store(true);
+        return;
+    }
+
     shuttingDown_.store(true);
 
     if (transport_ != nullptr)

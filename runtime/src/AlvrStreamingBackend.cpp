@@ -22,9 +22,13 @@
 #include "TrackingReceiver.h"
 #include "VideoEncoder.h"
 #include "alvr_server_core.h"
+#include "encoder/EncoderIpcProtocol.h"
 #include "encoder/NativeHelperEncoderTransport.h"
 
 namespace fs = std::filesystem;
+
+static_assert(oxrsys::alvr::kPixelFormatBGRA == oxrsys::encoder::ipc::kPixelFormatBGRA,
+              "the ALVR-side and IPC-side BGRA fourcc constants must stay in sync");
 
 AlvrStreamingBackend::AlvrStreamingBackend()
     : trackingReceiver_(std::make_unique<TrackingReceiver>())
@@ -353,7 +357,7 @@ bool AlvrStreamingBackend::EnsureEncoder()
     const auto now = std::chrono::steady_clock::now();
     const bool respawnBudgetElapsed =
         lastHelperSpawnAttempt_ == std::chrono::steady_clock::time_point{} ||
-        now - lastHelperSpawnAttempt_ >= std::chrono::seconds(30);
+        now - lastHelperSpawnAttempt_ >= oxrsys::alvr::kHelperRespawnBudget;
     const TransportDecision decision = oxrsys::alvr::DecideEncoderTransport(
         config.encoderProcess, helperPresent, helperFailures_.load(), respawnBudgetElapsed,
         helperHealthy && encoder_ != nullptr);
@@ -374,7 +378,8 @@ bool AlvrStreamingBackend::EnsureEncoder()
             else
             {
                 spdlog::error("OXRSys/ALVR: encoder_process=\"native\" — helper failed; retrying "
-                              "after the 30s respawn budget (no in-process fallback)");
+                              "after the {}s respawn budget (no in-process fallback)",
+                              oxrsys::alvr::kHelperRespawnBudget.count());
             }
             helperRetryLaterLogged_ = true;
         }

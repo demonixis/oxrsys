@@ -340,6 +340,7 @@ if(OXRSYS_BUILD_ENCODER_HELPER AND APPLE)
         src/encoder/VideoToolboxEncodeEngine.mm
         src/encoder/EncoderIpcSocket.cpp
         src/encoder/EncoderMachSurface.mm
+        src/RuntimePlatform.cpp
     )
     target_include_directories(oxrsys_encoder_helper PRIVATE
         src
@@ -358,6 +359,13 @@ if(OXRSYS_BUILD_ENCODER_HELPER AND APPLE)
     set_target_properties(oxrsys_encoder_helper PROPERTIES
         OUTPUT_NAME oxrsys-encoder-helper
     )
+else()
+    # A prior configuration of this same build tree (e.g. before this arch
+    # guard existed, or after CMAKE_OSX_ARCHITECTURES changed in-place) may
+    # have left a stale helper binary behind; ninja won't remove outputs for
+    # targets that drop out of the build graph. Sweep it on every configure
+    # so build-x64 never stages a leftover helper.
+    file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/oxrsys-encoder-helper")
 endif()
 
 # Copy default config file next to the dylib (if not already present)

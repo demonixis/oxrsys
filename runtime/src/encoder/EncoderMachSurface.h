@@ -97,7 +97,6 @@ public:
      */
     bool SendSurface(void* iosurface, const SurfaceTag& tag);
 
-    bool HasChild() const { return childPort_ != 0; }
     /// Drop the child send right only (keeps the check-in receive right for a
     /// future respawn).
     void ForgetChild();

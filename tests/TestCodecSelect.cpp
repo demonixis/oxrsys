@@ -97,6 +97,9 @@ TEST_CASE("ALVR codec select: native helper honors the configured codec", "[code
         CHECK(SelectAlvrVideoCodec("auto", /*helper=*/true, rosetta) == VideoCodec::H265);
         CHECK(SelectAlvrVideoCodec("h265", /*helper=*/true, rosetta) == VideoCodec::H265);
         CHECK(SelectAlvrVideoCodec("h264", /*helper=*/true, rosetta) == VideoCodec::H264);
+        // Garbage config strings fall back to H.265, same as any non-"h264" value.
+        CHECK(SelectAlvrVideoCodec("xyz", /*helper=*/true, rosetta) == VideoCodec::H265);
+        CHECK(SelectAlvrVideoCodec("", /*helper=*/true, rosetta) == VideoCodec::H265);
     }
 }
 
@@ -107,6 +110,9 @@ TEST_CASE("ALVR codec select: no helper keeps the Rosetta H.264 gate", "[codec-s
     CHECK(SelectAlvrVideoCodec("auto", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
     CHECK(SelectAlvrVideoCodec("h265", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
     CHECK(SelectAlvrVideoCodec("h264", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
+    // The Rosetta gate short-circuits before the configured string is read.
+    CHECK(SelectAlvrVideoCodec("xyz", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
+    CHECK(SelectAlvrVideoCodec("", /*helper=*/false, /*rosetta=*/true) == VideoCodec::H264);
 }
 
 TEST_CASE("ALVR codec select: no helper on a native runtime honors the config", "[codec-select]")
@@ -115,6 +121,9 @@ TEST_CASE("ALVR codec select: no helper on a native runtime honors the config", 
     CHECK(SelectAlvrVideoCodec("auto", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
     CHECK(SelectAlvrVideoCodec("h265", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
     CHECK(SelectAlvrVideoCodec("h264", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H264);
+    // Garbage config strings fall back to H.265, same as any non-"h264" value.
+    CHECK(SelectAlvrVideoCodec("xyz", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
+    CHECK(SelectAlvrVideoCodec("", /*helper=*/false, /*rosetta=*/false) == VideoCodec::H265);
 }
 
 TEST_CASE("Codec select: AV1-only client falls back to the runtime preference", "[codec-select]")

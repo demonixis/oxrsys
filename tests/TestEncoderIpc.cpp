@@ -399,6 +399,63 @@ TEST_CASE("Encoder IPC socket framing over a socketpair", "[encoder-ipc]")
         CHECK(reader.ReadMessage(parsedHeader, received) == ipc::IoResult::Invalid);
     }
 
+    SECTION("coalesced reads: two messages in one write() yield intact via sequential reads")
+    {
+        // Two complete, differently-sized messages land in a single write();
+        // ReadMessage must not consume past its own message even when more
+        // bytes are already sitting in the socket buffer.
+        ipc::Drain drain;
+        drain.generation = 9;
+        std::vector<uint8_t> drainPayload;
+        drain.Serialize(drainPayload);
+        ipc::MessageHeader drainHeader;
+        drainHeader.type = (uint16_t)ipc::MessageType::Drain;
+        drainHeader.payloadSize = (uint32_t)drainPayload.size();
+        drainHeader.sequence = 1;
+        std::vector<uint8_t> wire = SerializeHeader(drainHeader);
+        wire.insert(wire.end(), drainPayload.begin(), drainPayload.end());
+
+        ipc::FrameDropped dropped;
+        dropped.generation = 1;
+        dropped.frameId = 77;
+        dropped.reason = ipc::kDropQueueFull;
+        dropped.status = -12900;
+        std::vector<uint8_t> droppedPayload;
+        dropped.Serialize(droppedPayload);
+        ipc::MessageHeader droppedHeader;
+        droppedHeader.type = (uint16_t)ipc::MessageType::FrameDropped;
+        droppedHeader.payloadSize = (uint32_t)droppedPayload.size();
+        droppedHeader.sequence = 2;
+        std::vector<uint8_t> droppedWire = SerializeHeader(droppedHeader);
+        droppedWire.insert(droppedWire.end(), droppedPayload.begin(), droppedPayload.end());
+
+        REQUIRE(drainPayload.size() != droppedPayload.size());
+
+        wire.insert(wire.end(), droppedWire.begin(), droppedWire.end());
+        REQUIRE(::write(fds[1], wire.data(), wire.size()) == (ssize_t)wire.size());
+        ::close(fds[1]);
+
+        ipc::MessageHeader firstHeader;
+        std::vector<uint8_t> firstReceived;
+        REQUIRE(reader.ReadMessage(firstHeader, firstReceived) == ipc::IoResult::Ok);
+        CHECK(firstHeader.type == (uint16_t)ipc::MessageType::Drain);
+        CHECK(firstHeader.sequence == 1);
+        ipc::Drain parsedDrain;
+        REQUIRE(ipc::Drain::Deserialize(firstReceived.data(), firstReceived.size(), parsedDrain));
+        CHECK(parsedDrain.generation == 9);
+
+        ipc::MessageHeader secondHeader;
+        std::vector<uint8_t> secondReceived;
+        REQUIRE(reader.ReadMessage(secondHeader, secondReceived) == ipc::IoResult::Ok);
+        CHECK(secondHeader.type == (uint16_t)ipc::MessageType::FrameDropped);
+        CHECK(secondHeader.sequence == 2);
+        ipc::FrameDropped parsedDropped;
+        REQUIRE(ipc::FrameDropped::Deserialize(secondReceived.data(), secondReceived.size(),
+                                               parsedDropped));
+        CHECK(parsedDropped.frameId == 77);
+        CHECK(parsedDropped.status == -12900);
+    }
+
     // fds[0] is closed by `reader`; fds[1] by the writer socket or explicitly
     // in the section body.
 }
