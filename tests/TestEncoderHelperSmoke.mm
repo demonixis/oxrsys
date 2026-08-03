@@ -28,6 +28,8 @@
 
 #include "encoder/NativeHelperEncoderTransport.h"
 
+#include "EncoderTestSupport.h"
+
 namespace
 {
 
@@ -50,22 +52,6 @@ bool IsArm64MachO(const char* path)
     // Thin 64-bit Mach-O: magic + cputype. (The build never produces fat
     // helpers; a fat binary would skip, which is the safe direction.)
     return words[0] == MH_MAGIC_64 && (cpu_type_t)words[1] == CPU_TYPE_ARM64;
-}
-
-CVPixelBufferRef MakeSurfaceBackedBuffer()
-{
-    NSDictionary* attrs = @{
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
-        (NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
-    };
-    CVPixelBufferRef buffer = nullptr;
-    if (CVPixelBufferCreate(nullptr, kDim, kDim, kCVPixelFormatType_32BGRA,
-                            (__bridge CFDictionaryRef)attrs, &buffer) != kCVReturnSuccess)
-    {
-        return nullptr;
-    }
-    return buffer;
 }
 
 } // namespace
@@ -123,7 +109,7 @@ TEST_CASE("Encoder helper end-to-end smoke (spawn, handshake, 3 GPU frames)",
     CVPixelBufferRef buffers[3] = {};
     for (int i = 0; i < 3; i++)
     {
-        buffers[i] = MakeSurfaceBackedBuffer();
+        buffers[i] = MakeSurfaceBackedBuffer(kDim, /*metalCompatible=*/true);
         REQUIRE(buffers[i] != nullptr);
         REQUIRE(CVPixelBufferGetIOSurface(buffers[i]) != nullptr);
     }

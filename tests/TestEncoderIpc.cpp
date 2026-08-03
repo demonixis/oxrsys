@@ -5,7 +5,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -258,19 +261,54 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
     }
     SECTION("nal count over the cap is rejected")
     {
-        // Hand-build a payload declaring kMaxNalUnits+1 descriptors.
-        std::vector<uint8_t> crafted;
-        ipc::PayloadWriter writer(crafted);
-        writer.U32(1);          // generation
-        writer.U64(1);          // frameId
-        writer.I32(0);          // status
-        writer.U32(0);          // flags
-        writer.U64(0);          // encodeStartNs
-        writer.U64(0);          // callbackAtNs
-        writer.U32(ipc::kMaxNalUnits + 1);
-        writer.U32(0);          // dataSize
-        ipc::FrameResult parsed;
-        CHECK_FALSE(ipc::FrameResult::Deserialize(crafted.data(), crafted.size(), parsed));
+        // Shared, byte-for-byte payload construction parameterized only on
+        // descriptor count: every field, and every descriptor (a real,
+        // safely-inside-dataSize offset/length/type triple backed by real
+        // data bytes), is built identically for both variants below. That
+        // isolates the +1 case's rejection to the count-cap check alone —
+        // ruling out any other incidental malformation (missing descriptor
+        // bytes, a short data section, etc.) as the actual cause.
+        const auto BuildPayload = [](uint32_t nalCount)
+        {
+            const uint32_t dataSize = nalCount; // one data byte per descriptor
+            std::vector<uint8_t> crafted;
+            ipc::PayloadWriter writer(crafted);
+            writer.U32(1);  // generation
+            writer.U64(1);  // frameId
+            writer.I32(0);  // status
+            writer.U32(0);  // flags
+            writer.U64(0);  // encodeStartNs
+            writer.U64(0);  // callbackAtNs
+            writer.U32(nalCount);
+            writer.U32(dataSize);
+            for (uint32_t i = 0; i < nalCount; i++)
+            {
+                writer.U32(i); // offset
+                writer.U32(1); // length
+                writer.U32(0); // type
+            }
+            std::vector<uint8_t> data(dataSize, 0xAB);
+            writer.Bytes(data.data(), data.size());
+            return crafted;
+        };
+
+        // Positive control: EXACTLY at the cap must deserialize
+        // successfully, with every field/descriptor intact — proving the
+        // cap check is an off-by-one-correct boundary, not an overly eager
+        // rejection that happens to also catch kMaxNalUnits+1.
+        const std::vector<uint8_t> atCap = BuildPayload(ipc::kMaxNalUnits);
+        ipc::FrameResult parsedAtCap;
+        REQUIRE(ipc::FrameResult::Deserialize(atCap.data(), atCap.size(), parsedAtCap));
+        REQUIRE(parsedAtCap.nalUnits.size() == ipc::kMaxNalUnits);
+        CHECK(parsedAtCap.nalUnits.front().offset == 0);
+        CHECK(parsedAtCap.nalUnits.back().offset == ipc::kMaxNalUnits - 1);
+        CHECK(parsedAtCap.data.size() == ipc::kMaxNalUnits);
+
+        // Negative: identical shape, one descriptor further — only the
+        // count differs from the passing case above.
+        const std::vector<uint8_t> overCap = BuildPayload(ipc::kMaxNalUnits + 1);
+        ipc::FrameResult parsedOverCap;
+        CHECK_FALSE(ipc::FrameResult::Deserialize(overCap.data(), overCap.size(), parsedOverCap));
     }
 }
 
@@ -454,6 +492,155 @@ TEST_CASE("Encoder IPC socket framing over a socketpair", "[encoder-ipc]")
                                                parsedDropped));
         CHECK(parsedDropped.frameId == 77);
         CHECK(parsedDropped.status == -12900);
+    }
+
+    SECTION("oversized NAL count is legally framed but FrameResult::Deserialize rejects it")
+    {
+        // Hand-build a FrameResult payload carrying kMaxNalUnits+1
+        // *valid-looking* descriptors (each safely inside dataSize, so
+        // descriptor-arithmetic checks alone would pass them) with the whole
+        // message kept far under kMaxPayloadSize. That means ValidateHeader
+        // and ReadMessage must accept the framing as legal; only
+        // FrameResult::Deserialize's own count check may reject it.
+        const uint32_t nalCount = ipc::kMaxNalUnits + 1;
+        const uint32_t dataSize = nalCount; // one byte of payload per descriptor
+        std::vector<uint8_t> crafted;
+        ipc::PayloadWriter fieldWriter(crafted);
+        fieldWriter.U32(3);  // generation
+        fieldWriter.U64(99); // frameId
+        fieldWriter.I32(0);  // status
+        fieldWriter.U32(0);  // flags
+        fieldWriter.U64(0);  // encodeStartNs
+        fieldWriter.U64(0);  // callbackAtNs
+        fieldWriter.U32(nalCount);
+        fieldWriter.U32(dataSize);
+        for (uint32_t i = 0; i < nalCount; i++)
+        {
+            fieldWriter.U32(i); // offset
+            fieldWriter.U32(1); // length
+            fieldWriter.U32(0); // type
+        }
+        std::vector<uint8_t> data(dataSize, 0xAB);
+        fieldWriter.Bytes(data.data(), data.size());
+        REQUIRE(crafted.size() < ipc::kMaxPayloadSize);
+
+        ipc::EncoderIpcSocket writer(fds[1]);
+        REQUIRE(writer.WriteMessage(ipc::MessageType::FrameResult, 0, 11, crafted) ==
+                ipc::IoResult::Ok);
+
+        // The framing itself is legal: ReadMessage must accept it.
+        ipc::MessageHeader header;
+        std::vector<uint8_t> received;
+        REQUIRE(reader.ReadMessage(header, received) == ipc::IoResult::Ok);
+        CHECK(header.type == (uint16_t)ipc::MessageType::FrameResult);
+        REQUIRE(received == crafted);
+
+        // Only Deserialize's descriptor-count validation can catch this.
+        ipc::FrameResult parsed;
+        CHECK_FALSE(ipc::FrameResult::Deserialize(received.data(), received.size(), parsed));
+    }
+
+    SECTION("tiny SO_SNDBUF forces writev to resume across partial writes")
+    {
+        // Shrink the send buffer well below the payload size so
+        // WriteMessage's partial-write resume loop cannot complete in one
+        // call and must resume across partial writes while a concurrent
+        // reader drains the other end.
+        int sndbuf = 4096;
+        REQUIRE(setsockopt(fds[1], SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) == 0);
+
+        ipc::FrameResult result;
+        result.generation = 5;
+        result.frameId = 4242;
+        result.flags = ipc::kFrameResultFlagIsIdr;
+        result.encodeStartNs = 10;
+        result.callbackAtNs = 20;
+        const size_t kDataSize = 128 * 1024;
+        result.data.resize(kDataSize);
+        for (size_t i = 0; i < kDataSize; i++)
+        {
+            result.data[i] = (uint8_t)((i * 37 + 11) & 0xFF); // patterned, not zero-filled
+        }
+        result.nalUnits.push_back({0, (uint32_t)(kDataSize / 3), 7});
+        result.nalUnits.push_back({(uint32_t)(kDataSize / 3), (uint32_t)(kDataSize / 3), 1});
+        result.nalUnits.push_back(
+            {(uint32_t)(2 * kDataSize / 3), (uint32_t)(kDataSize - 2 * kDataSize / 3), 1});
+
+        std::vector<uint8_t> payload;
+        result.Serialize(payload);
+        // Sanity: the payload must genuinely exceed the shrunk send buffer,
+        // otherwise this test would not exercise the partial-write path.
+        REQUIRE(payload.size() > 64u * 1024u);
+
+        // Everything the reader thread touches lives in a heap-allocated,
+        // shared_ptr'd struct captured BY VALUE: if the reader hangs, the
+        // watchdog below detaches (rather than joins) the thread, and a
+        // detached thread must never keep writing into this SECTION's stack
+        // after the SECTION returns.
+        struct ReaderOutcome
+        {
+            std::mutex mutex;
+            std::condition_variable condition;
+            bool done = false;
+            ipc::IoResult result = ipc::IoResult::Error;
+            ipc::MessageHeader header{};
+            std::vector<uint8_t> received;
+        };
+        auto outcome = std::make_shared<ReaderOutcome>();
+        std::thread readerThread(
+            [&reader, outcome]
+            {
+                // ReadMessage drains the socket as bytes arrive.
+                ipc::MessageHeader header;
+                std::vector<uint8_t> received;
+                const ipc::IoResult r = reader.ReadMessage(header, received);
+                {
+                    std::lock_guard<std::mutex> lock(outcome->mutex);
+                    outcome->result = r;
+                    outcome->header = header;
+                    outcome->received = std::move(received);
+                    outcome->done = true;
+                }
+                outcome->condition.notify_one();
+            });
+
+        ipc::EncoderIpcSocket writer(fds[1]);
+        const ipc::IoResult writeResult =
+            writer.WriteMessage(ipc::MessageType::FrameResult, 0, 21, payload);
+        CHECK(writeResult == ipc::IoResult::Ok);
+
+        // Generous timeout guard: proves no deadlock rather than hanging the
+        // whole suite if the writev/ReadMessage pairing regresses. On
+        // timeout, detach rather than join — mirrors RunWithWatchdog's
+        // detach-on-timeout semantics (TestNativeHelperChaos.mm) so a
+        // genuinely hung reader can never hang this test process.
+        bool finishedInTime = false;
+        {
+            std::unique_lock<std::mutex> lock(outcome->mutex);
+            finishedInTime = outcome->condition.wait_for(lock, std::chrono::seconds(15),
+                                                          [&] { return outcome->done; });
+        }
+        if (finishedInTime)
+        {
+            readerThread.join();
+        }
+        else
+        {
+            readerThread.detach();
+        }
+        REQUIRE(finishedInTime);
+
+        CHECK(outcome->result == ipc::IoResult::Ok);
+        CHECK(outcome->header.type == (uint16_t)ipc::MessageType::FrameResult);
+        CHECK(outcome->header.sequence == 21);
+        REQUIRE(outcome->received == payload); // byte-exact reassembly
+
+        ipc::FrameResult parsed;
+        REQUIRE(
+            ipc::FrameResult::Deserialize(outcome->received.data(), outcome->received.size(), parsed));
+        CHECK(parsed.data == result.data); // pattern survived the partial writes intact
+        REQUIRE(parsed.nalUnits.size() == 3);
+        CHECK(parsed.nalUnits[2].type == 1);
     }
 
     // fds[0] is closed by `reader`; fds[1] by the writer socket or explicitly

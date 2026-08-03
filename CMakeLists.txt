@@ -197,10 +197,13 @@ if(APPLE)
     target_compile_definitions(oxrsys_runtime_tests PRIVATE
         XR_USE_GRAPHICS_API_METAL
     )
-    # Encoder IPC protocol/socket tests + the out-of-process helper smoke.
+    # Encoder IPC protocol/socket tests + the out-of-process helper smoke +
+    # the generation-chaos fixture (against a fake scripted helper peer, see
+    # oxrsys_encoder_helper_chaos_fake below).
     target_sources(oxrsys_runtime_tests PRIVATE
         tests/TestEncoderIpc.cpp
         tests/TestEncoderHelperSmoke.mm
+        tests/TestNativeHelperChaos.mm
         runtime/src/encoder/EncoderIpcSocket.cpp
         runtime/src/encoder/EncoderMachSurface.mm
         runtime/src/encoder/NativeHelperEncoderTransport.mm
@@ -289,6 +292,48 @@ if(TARGET oxrsys_encoder_helper)
         # Catch2 exits 4 when every selected test SKIPped (no Metal device or
         # a non-arm64 helper, e.g. the x86_64 tree) — report as skipped.
         SKIP_RETURN_CODE 4
+    )
+endif()
+
+# Scripted fake peer for the [helper-chaos] generation-chaos fixture
+# (TestNativeHelperChaos.mm): speaks the real wire protocol
+# (EncoderIpcProtocol.h/EncoderIpcSocket.h) and the real Mach surface
+# rendezvous (EncoderMachSurface.h) against the REAL
+# NativeHelperEncoderTransport, but never links VideoToolbox/Metal and never
+# touches pixel data — so, unlike oxrsys_encoder_helper above, it needs
+# neither hardware encode nor a native-arm64 build and is gated the same
+# simple way as the encoder-ipc tests (APPLE only, see TestEncoderIpc.cpp).
+if(APPLE)
+    add_executable(oxrsys_encoder_helper_chaos_fake
+        tests/FakeEncoderHelperMain.mm
+        runtime/src/encoder/EncoderIpcSocket.cpp
+        runtime/src/encoder/EncoderMachSurface.mm
+    )
+    target_include_directories(oxrsys_encoder_helper_chaos_fake PRIVATE
+        runtime/src
+    )
+    target_link_libraries(oxrsys_encoder_helper_chaos_fake PRIVATE
+        "-framework CoreFoundation"
+        "-framework IOSurface"
+    )
+    set_target_properties(oxrsys_encoder_helper_chaos_fake PROPERTIES
+        OUTPUT_NAME oxrsys-encoder-helper-chaos-fake
+    )
+    add_dependencies(oxrsys_runtime_tests oxrsys_encoder_helper_chaos_fake)
+    add_test(NAME oxrsys_native_helper_chaos
+        COMMAND oxrsys_runtime_tests "[helper-chaos]"
+    )
+    set_tests_properties(oxrsys_native_helper_chaos PROPERTIES
+        ENVIRONMENT
+            "${OXRSYS_ISOLATED_TEST_ENV};OXRSYS_ENCODER_HELPER=$<TARGET_FILE:oxrsys_encoder_helper_chaos_fake>"
+        # Matches oxrsys_encoder_helper_smoke's budget: two Catch2 leaf
+        # passes (SECTIONs) each with 10s waits can legitimately approach 60
+        # under load.
+        TIMEOUT 90
+        # SKIP_RETURN_CODE is deliberately absent here (unlike the smoke test
+        # above): this entry always supplies a working fake helper, so a
+        # non-zero exit is a real failure, not an environment skip — don't
+        # "fix" that in later cleanup.
     )
 endif()
 
