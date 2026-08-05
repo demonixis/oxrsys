@@ -46,6 +46,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed controller interaction-profile reporting so standard OpenXR apps (e.g. Unity with the Oculus Touch controller profile) receive controller input from Meta Quest / PICO headsets. `xrGetCurrentInteractionProfile` now returns the most-specific profile from the runtime's compatibility list that the application actually suggested bindings for (per the OpenXR spec), instead of a device-specific profile the app never bound — the latter made clients treat the controllers as absent even though input was already being routed. Falls back to `XR_NULL_PATH` when the app bound none.
 - Contained decode-error corruption on the Apple streaming clients: after a decode failure the decoder drops inter frames and re-requests a keyframe until an IRAP (H.265) or IDR (H.264) arrives, so packet loss shows a brief clean freeze instead of propagating green/blocky corruption.
 - Fixed a potential visionOS black screen when the server streams 8-bit H.265 while the client requests a 10-bit decode surface, by falling back to an 8-bit output surface when 10-bit session creation is rejected; the renderer already selects its color conversion from the buffer's actual pixel format.
 - Fixed SwiftUI Home USB ADB readiness oscillation by moving USB refresh/setup off the view update path, ignoring stale ADB results after source or device changes, preserving verified reverse ports across transient mapping-read failures, and running persisted USB startup reverse setup only once.

@@ -2548,18 +2548,26 @@ static void AccumulateBindingState(const InputManager& inputManager, const Sugge
 static std::string SelectCurrentInteractionProfileForInstance(
     const Instance* instance, const InputManager& inputManager, InputManager::Hand hand)
 {
-    for (const std::string& profilePath : inputManager.GetCurrentInteractionProfileCandidates(hand))
+    // Per the OpenXR spec, xrGetCurrentInteractionProfile must return a profile the application
+    // has actually suggested bindings for, or XR_NULL_PATH — never an arbitrary runtime-picked
+    // one. GetActiveInteractionProfiles gives the runtime's compatibility list most-specific
+    // first (e.g. Quest 2: meta/touch_controller_quest_2 → oculus/touch_controller →
+    // khr/simple_controller); return the first entry the app bound. Reporting an unbound
+    // device-specific profile (as before) makes clients like Unity — which bind the standard
+    // Oculus Touch profile — treat the controllers as absent even though OxrSyncActions is
+    // already routing their input through this same compatibility list.
+    for (const std::string& profilePath : inputManager.GetActiveInteractionProfiles(hand))
     {
-        if (!profilePath.empty() && IsKnownInteractionProfilePath(instance, profilePath))
+        if (profilePath.empty() || !IsKnownInteractionProfilePath(instance, profilePath))
+        {
+            continue;
+        }
+        XrPath path = XR_NULL_PATH;
+        Runtime::Get().StringToPath(profilePath.c_str(), &path);
+        if (gSuggestedBindings.find(static_cast<uint64_t>(path)) != gSuggestedBindings.end())
         {
             return profilePath;
         }
-    }
-
-    if (inputManager.IsControllerTrackingActive(hand) &&
-        IsKnownInteractionProfilePath(instance, "/interaction_profiles/oculus/touch_controller"))
-    {
-        return "/interaction_profiles/oculus/touch_controller";
     }
 
     return "";
