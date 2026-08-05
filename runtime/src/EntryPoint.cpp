@@ -68,6 +68,7 @@
 #endif
 #include <memory>
 #include <vector>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -122,6 +123,11 @@ struct SuggestedBinding
 };
 static std::unordered_map<uint64_t, std::vector<SuggestedBinding>> gSuggestedBindings;
 static bool gActionSetsAttached = false;
+// Last interaction profile we reported to the app per session, indexed [left, right]. Used to
+// detect when the current profile changes (e.g. streaming controllers become active mid-session)
+// so we can emit XrEventDataInteractionProfileChanged — without it the app queries
+// xrGetCurrentInteractionProfile once at startup and never learns the controllers appeared.
+static std::unordered_map<uint64_t, std::array<std::string, 2>> gReportedInteractionProfiles;
 static std::vector<uint64_t> gAttachedActionSetHandles;
 static std::vector<std::unique_ptr<DebugUtilsMessengerState>> gDebugUtilsMessengers;
 
@@ -259,6 +265,7 @@ static void CleanupRuntimeState()
     gActions.clear();
     gActionSets.clear();
     gSuggestedBindings.clear();
+    gReportedInteractionProfiles.clear();
     gActionSetsAttached = false;
     gAttachedActionSetHandles.clear();
     gDebugUtilsMessengers.clear();
@@ -1237,6 +1244,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrDestroySession(XrSession session)
     gHandTrackers.clear();
     gActionSetsAttached = false;
     gAttachedActionSetHandles.clear();
+    gReportedInteractionProfiles.clear();
     gSession.reset();
     return XR_SUCCESS;
 }
@@ -2699,6 +2707,31 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
             }
             action->ApplySyncState(subactionPath, aggregate, syncTime);
         }
+    }
+
+    // Detect a change in the current interaction profile (e.g. streaming controllers just became
+    // active) and notify the app so it re-queries xrGetCurrentInteractionProfile. Without this the
+    // app caches the startup value (XR_NULL_PATH before any client connects) and never binds the
+    // controllers that appear later.
+    std::array<std::string, 2> current = {
+        SelectCurrentInteractionProfileForInstance(
+            sess->GetInstance(), inputManager, InputManager::Hand::Left),
+        SelectCurrentInteractionProfileForInstance(
+            sess->GetInstance(), inputManager, InputManager::Hand::Right)};
+    std::array<std::string, 2>& reported =
+        gReportedInteractionProfiles[reinterpret_cast<uint64_t>(session)];
+    if (current != reported)
+    {
+        reported = current;
+        XrEventDataBuffer event{};
+        auto* profileChanged =
+            reinterpret_cast<XrEventDataInteractionProfileChanged*>(&event);
+        profileChanged->type = XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
+        profileChanged->next = nullptr;
+        profileChanged->session = session;
+        sess->GetInstance()->PushEvent(event);
+        spdlog::info("OXRSys: Interaction profile changed (left='{}' right='{}')",
+                      current[0], current[1]);
     }
 
     return XR_SUCCESS;
