@@ -55,6 +55,12 @@ Metal is the native Apple rendering path. Applications provide an `MTLDevice` th
 
 For dynamic Metal swapchains, `xrReleaseSwapchainImage` snapshots the released slot into a staging texture using the app-provided `MTLCommandQueue`. The snapshot signals a `MTLSharedEvent`, and the VideoToolbox encode blit waits on that event GPU-side before reading the staging texture. This prevents the streaming encoder from reading a swapchain slot after the app has released and reused it, while keeping `Session::EndFrame()` CPU-non-blocking. Staging slots are leased through `FrameSource`; if no slot is safe to reuse, the runtime skips that streaming frame instead of falling back to an unsafe live-slot read.
 
+### Native encoder helper (macOS)
+
+On macOS the embedded-ALVR streaming backend can move VideoToolbox encoding out of process behind the `EncoderTransport` seam. `streaming.encoder_process` selects the path: `"auto"`/`"native"` use `oxrsys-encoder-helper`, a thin native-arm64 executable; `"inproc"` keeps the in-process encoder (under Rosetta that path is H.264-only). The helper exists so an x86_64 host process (Wine/Rosetta) still gets native hardware low-latency HEVC.
+
+Mechanism: the parent `posix_spawn`s the helper once per encoder generation, after a `bootstrap_check_in` on a per-pid bootstrap name that the child resolves with a matching `bootstrap_look_up` (not the special-port route — `libxpc` latches the bootstrap port at `libSystem` init). Only the compose IOSurfaces cross the boundary, once per generation, as Mach send rights (wrapped once, BT.709 attachments re-applied on the helper side); frame submission and Annex-B NAL results travel over an inherited socketpair with a versioned little-endian protocol. The helper exits on socket EOF when the parent dies. Crash handling is budgeted: at most one automatic respawn per 30 s, and after two failures within one connected session `"auto"` pins to the in-process encoder until the next client reconnect (`"native"` fails loudly and never silently pins). When `"auto"` falls back because the helper binary is absent, the backend warns once per connected session and the session.json sync line states the reason.
+
 ### Vulkan
 
 Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. The runtime does not link directly against Vulkan. Instead, it resolves Vulkan functions through the application-provided loader path to avoid dual-loader and dual-MoltenVK issues.

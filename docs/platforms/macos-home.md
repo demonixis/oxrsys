@@ -188,6 +188,7 @@ The structured editor covers the current runtime keys:
 - `streaming.refresh_rate_hz`
 - `streaming.keyframe_interval_sec`
 - `streaming.video_codec`
+- `streaming.encoder_process` (`auto`/`native` need the staged arm64 helper next to the runtime dylib — see `docs/build.md`)
 - `streaming.encoder_preset`
 - `streaming.transport`
 - `streaming.foveated_encoding_preset`

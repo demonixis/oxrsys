@@ -116,6 +116,32 @@ ctest --test-dir build-win --output-on-failure
 The Windows backend exposes Vulkan, D3D11, and D3D12 in this milestone. OpenGL Win32/WGL is not
 advertised yet; Linux remains the only OpenGL runtime backend.
 
+### Native Encoder Helper (macOS)
+
+`OXRSYS_BUILD_ENCODER_HELPER` builds `oxrsys-encoder-helper`, the out-of-process native-arm64
+encode process used by the embedded-ALVR streaming path (see `docs/architecture.md`). The helper
+is **thin-arm64-only**:
+
+- The option defaults ON only when the configure targets exactly `arm64` (one architecture,
+  no arm64e, no universal lists). Enabling it on any other configure is a **configure-time
+  error** — a wrong-arch build would land in the same `runtime/` output directory that
+  packaging scripts use as the staging destination for the real arm64 helper and overwrite it.
+- Integrations that run the runtime as x86_64 (e.g. Wine/Rosetta) build the helper in its own
+  minimal arm64 tree and stage the binary next to the installed runtime dylib; the runtime
+  locates it beside its own dylib, or through the `OXRSYS_ENCODER_HELPER` env override.
+- When the helper target is not built (every non-arm64 configure), the configure step sweeps a
+  stale helper binary out of its output directory — but on Apple it spares a staged **arm64**
+  binary (word-boundary `lipo` match) so re-configuring an x86_64 tree does not un-stage the
+  native helper. In a thin-arm64 tree a leftover helper is always swept: there it is that
+  tree's own stale build output.
+
+```bash
+# Dedicated helper tree (what integrations should do):
+cmake -B build-helper -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DOXRSYS_BUILD_ENCODER_HELPER=ON
+cmake --build build-helper --target oxrsys_encoder_helper
+```
+
 ## Versioning
 
 Product versioning is centralized in `config/OXRSysVersion.xcconfig`.

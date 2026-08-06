@@ -50,7 +50,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 
 ## Status
 
-- macOS: Metal rendering, release-time Metal streaming snapshots, H.264/H.265 VideoToolbox streaming selection with negotiated H.265 Main10 support, core runtime flow, Vulkan/MoltenVK runtime plumbing, typed graphics/frame plumbing, and loader-backed runtime tests are in place. A CMake FFmpeg encoder option is available for Vulkan/codec pipeline validation.
+- macOS: Metal rendering, release-time Metal streaming snapshots, H.264/H.265 VideoToolbox streaming selection with negotiated H.265 Main10 support, core runtime flow, Vulkan/MoltenVK runtime plumbing, typed graphics/frame plumbing, and loader-backed runtime tests are in place. A native-arm64 out-of-process encoder helper (`streaming.encoder_process`) gives x86_64/Rosetta host processes hardware low-latency HEVC — see `docs/architecture.md` and `docs/build.md`. A CMake FFmpeg encoder option is available for Vulkan/codec pipeline validation.
 - Linux: Vulkan runtime streaming now uses FFmpeg H.264/H.265 encode with Vulkan image readback, and the first Linux OpenGL GLX backend exposes `XR_KHR_opengl_enable` with bounded PBO readback for desktop validation.
 - Windows: Vulkan and Direct3D 11/12 runtime backends are buildable with FFmpeg streaming readback; OpenGL Win32/WGL remains a follow-up backend.
 - `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.

@@ -28,6 +28,16 @@ exercises the loader-backed Metal path. Linux builds still run the runtime, conf
 status, and loader extension tests. Windows builds additionally run loader-backed D3D11/D3D12 WARP
 session and swapchain tests.
 
+## Configuration Isolation
+
+`ctest` runs every runtime test with an isolated `HOME` under the build tree (`build/test-env`),
+so tests that write runtime configuration touch only the sandbox. **Running a test binary
+directly does not get that isolation**: suites that exercise config writing (e.g. the runtime
+API tests) will overwrite the REAL user config at
+`~/Library/Application Support/OXRSys/oxrsys-runtime.toml`. Always run tests through `ctest`
+(`ctest --test-dir build -R <name>`); if you must invoke a binary directly, set `HOME` to a
+scratch directory first.
+
 ## Home Tests
 
 The macOS Home has a small Swift test runner for bundle inspection, launcher persistence
