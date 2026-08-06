@@ -316,20 +316,33 @@ include(${CMAKE_SOURCE_DIR}/cmake/AlvrServerCore.cmake)
 # Staging next to the installed runtime is the packaging scripts' job; the
 # transport falls back to the OXRSYS_ENCODER_HELPER env override in tests.
 if(APPLE)
-    # The helper only makes sense as a native arm64 binary; an x86_64 configure
-    # (e.g. the Wine/Rosetta runtime tree) would build a translated helper into
-    # the same runtime/ output dir and clobber a staged arm64 one. Default ON
-    # only when this tree targets arm64; still explicitly overridable.
+    # The helper only makes sense as a THIN native arm64 binary; any other
+    # configure (x86_64, arm64e, universal) would build a wrong-arch helper
+    # into the same runtime/ output dir and clobber a staged arm64 one.
+    # Exactly one architecture and exactly "arm64" — substring matching would
+    # wave through arm64e and "x86_64;arm64" universal configures.
     set(_oxrsys_helper_arch "${CMAKE_OSX_ARCHITECTURES}")
     if(NOT _oxrsys_helper_arch)
         set(_oxrsys_helper_arch "${CMAKE_SYSTEM_PROCESSOR}")
     endif()
-    if(_oxrsys_helper_arch MATCHES "arm64")
+    list(LENGTH _oxrsys_helper_arch _oxrsys_helper_arch_count)
+    if(_oxrsys_helper_arch_count EQUAL 1 AND _oxrsys_helper_arch STREQUAL "arm64")
+        set(_oxrsys_helper_thin_arm64 TRUE)
+    else()
+        set(_oxrsys_helper_thin_arm64 FALSE)
+    endif()
+    if(_oxrsys_helper_thin_arm64)
         option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" ON)
     else()
         option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" OFF)
     endif()
+    if(OXRSYS_BUILD_ENCODER_HELPER AND NOT _oxrsys_helper_thin_arm64)
+        message(FATAL_ERROR "the encoder helper is thin-arm64-only; build it in its own arm64 "
+                            "tree (wine-vr scripts/demo/build.sh) — any other configure would "
+                            "overwrite the staged native helper")
+    endif()
 else()
+    set(_oxrsys_helper_thin_arm64 FALSE)
     option(OXRSYS_BUILD_ENCODER_HELPER "Build the native out-of-process encoder helper" OFF)
 endif()
 
@@ -363,9 +376,32 @@ else()
     # A prior configuration of this same build tree (e.g. before this arch
     # guard existed, or after CMAKE_OSX_ARCHITECTURES changed in-place) may
     # have left a stale helper binary behind; ninja won't remove outputs for
-    # targets that drop out of the build graph. Sweep it on every configure
-    # so build-x64 never stages a leftover helper.
-    file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/oxrsys-encoder-helper")
+    # targets that drop out of the build graph. Sweep it on configure — but
+    # in a NON-arm64 APPLE tree (the wine-vr build-x64 case) the packaging
+    # scripts deliberately stage the native-arm64 helper into this runtime/
+    # dir, so there the sweep spares an arm64 binary and removes anything
+    # else (word-boundary match, consistent with doctor 9b / run.sh
+    # `grep -qw arm64`; an unreadable/non-Mach-O file fails lipo and is
+    # removed, preserving the old safety default). In a thin-arm64 tree a
+    # helper file here is this tree's own stale output — always removed.
+    set(_oxrsys_swept_helper "${CMAKE_CURRENT_BINARY_DIR}/oxrsys-encoder-helper")
+    if(APPLE AND NOT _oxrsys_helper_thin_arm64)
+        if(EXISTS "${_oxrsys_swept_helper}")
+            execute_process(
+                COMMAND lipo -archs "${_oxrsys_swept_helper}"
+                RESULT_VARIABLE _oxrsys_swept_helper_rc
+                OUTPUT_VARIABLE _oxrsys_swept_helper_archs
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            if(NOT _oxrsys_swept_helper_rc EQUAL 0 OR
+               NOT _oxrsys_swept_helper_archs MATCHES "(^|[ \t;])arm64($|[ \t;])")
+                file(REMOVE "${_oxrsys_swept_helper}")
+            endif()
+        endif()
+    else()
+        file(REMOVE "${_oxrsys_swept_helper}")
+    endif()
 endif()
 
 # Copy default config file next to the dylib (if not already present)
