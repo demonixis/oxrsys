@@ -82,11 +82,12 @@ void AlvrStreamingBackend::SyncSessionSettings()
     // at Start): sync it into session.json so server_core announces to the
     // client exactly what the encoder produces. A later mid-session crash-pin
     // to in-process H.264 can diverge from this until the next reconnect.
+    const bool underRosetta = oxrsys::runtime_platform::RunningUnderRosetta();
     const bool helperWouldRun =
         config.encoderProcess != "inproc" &&
         oxrsys::encoder::NativeHelperEncoderTransport::HelperBinaryAvailable();
-    const oxr::protocol::VideoCodec codec = oxrsys::SelectAlvrVideoCodec(
-        config.videoCodec, helperWouldRun, oxrsys::runtime_platform::RunningUnderRosetta());
+    const oxr::protocol::VideoCodec codec =
+        oxrsys::SelectAlvrVideoCodec(config.videoCodec, helperWouldRun, underRosetta);
     const std::string updated = oxrsys::alvr::ApplySessionSettings(json, bitrateMbps, codec);
 
     if (updated == json)
@@ -100,10 +101,26 @@ void AlvrStreamingBackend::SyncSessionSettings()
         return;
     }
     out << updated;
+    // State WHY the helper is out of the picture, not just the resulting codec
+    // — an explicit inproc config is deliberate and must not read as "absent".
+    const char* reason = "";
+    if (!helperWouldRun)
+    {
+        if (config.encoderProcess == "inproc")
+        {
+            reason = " — encoder_process=inproc";
+        }
+        else
+        {
+            reason = underRosetta ? " — helper absent; Rosetta forces H.264"
+                                  : " — helper absent";
+        }
+    }
     spdlog::info("OXRSys/ALVR: synced session.json from toml (ConstantMbps={}, "
-                 "preferred_codec={}, max_buffering_frames=1.5)",
+                 "preferred_codec={}, max_buffering_frames=1.5){}",
                  bitrateMbps,
-                 codec == oxr::protocol::VideoCodec::H264 ? "H264" : "Hevc");
+                 codec == oxr::protocol::VideoCodec::H264 ? "H264" : "Hevc",
+                 reason);
 }
 
 bool AlvrStreamingBackend::Start(uint32_t renderWidth, uint32_t renderHeight,
@@ -361,6 +378,18 @@ bool AlvrStreamingBackend::EnsureEncoder()
     const TransportDecision decision = oxrsys::alvr::DecideEncoderTransport(
         config.encoderProcess, helperPresent, helperFailures_.load(), respawnBudgetElapsed,
         helperHealthy && encoder_ != nullptr);
+
+    // "auto" quietly choosing in-process because the helper binary is absent is
+    // a quality downgrade the log must surface — once per connected session
+    // (cleared on disconnect). The transient inside-budget fallback stays
+    // silent here (helper death already logged) via the !helperPresent guard.
+    if (decision == TransportDecision::InProcess && config.encoderProcess == "auto" &&
+        !helperPresent && !helperAbsentDowngradeLogged_.exchange(true))
+    {
+        spdlog::warn("OXRSys/ALVR: encoder_process=\"auto\" but the helper binary is missing "
+                     "(expected next to the runtime dylib, or set OXRSYS_ENCODER_HELPER) — "
+                     "using the in-process encoder");
+    }
 
     if (decision == TransportDecision::RetryLater)
     {
@@ -894,6 +923,7 @@ void AlvrStreamingBackend::EventThread()
                 // scoped to one connected session.
                 helperFailures_.store(0);
                 helperPinLogged_.store(false);
+                helperAbsentDowngradeLogged_.store(false);
                 lastTrackingArrival = {};
                 trackingStaleWarned = false;
                 spdlog::info("OXRSys/ALVR: client disconnected");

@@ -199,6 +199,7 @@ private:
     std::chrono::steady_clock::time_point lastHelperSpawnAttempt_{}; // EncodeThread only
     bool helperRetryLaterLogged_ = false;         // EncodeThread only
     std::atomic<bool> helperPinLogged_{false};    // set EncodeThread, cleared EventThread
+    std::atomic<bool> helperAbsentDowngradeLogged_{false}; // set EncodeThread, cleared EventThread
 
     // ALVR device/input ids (pure path hashes, filled at Start).
     uint64_t headId_ = 0;
