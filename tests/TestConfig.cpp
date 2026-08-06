@@ -180,6 +180,86 @@ client_foveation_preset = "auto"
     CHECK(values.clientFoveationPreset == "auto");
 }
 
+TEST_CASE("Config parser strips trailing same-line comments", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+protocol = "alvr" # embedded ALVR core
+video_codec = "h264" # helper negotiates HEVC
+encoder_process = "native"  # "auto" would also work
+bitrate_mbps = 42 # note
+    # full-line comment with leading whitespace
+
+[general]
+runtime_enabled = true # trailing comment must not force this to false
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingProtocol == "alvr");
+    CHECK(values.videoCodec == "h264");
+    CHECK(values.encoderProcess == "native");
+    CHECK(values.bitrateMbps == 42);
+    // Pre-fix, ParseBool("true # ...") was false and assigned unconditionally.
+    CHECK(values.runtimeEnabled == true);
+}
+
+TEST_CASE("Config parser keeps '#' inside quoted values", "[config]")
+{
+    // No whitelisted value contains '#', so an in-quotes '#' is observable as
+    // "value stays intact, fails the whitelist, default kept" — and, crucially,
+    // the rest of the line and the following lines still parse.
+    std::istringstream input(R"TOML(
+[streaming]
+protocol = "al#vr"
+video_codec = "h264"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingProtocol == "oxrsys"); // default kept, not corrupted
+    CHECK(values.videoCodec == "h264");          // next line unaffected
+}
+
+TEST_CASE("Config parser accepts the legacy wine-vr setup.sh template verbatim", "[config]")
+{
+    // Deployment-shape regression: the exact toml body older wine-vr setup.sh
+    // wrote (trailing comments on the quoted keys). Deployed write-once configs
+    // with this shape must parse to the intended values.
+    std::istringstream input(R"TOML(# oxrsys runtime configuration (created by wine-vr demo.sh setup)
+[streaming]
+protocol = "alvr"     # embedded ALVR core; stock ALVR Quest client connects over WiFi
+bitrate_mbps = 42
+encoder_process = "auto"   # "auto" | "native" (arm64 helper, HW HEVC) | "inproc" (x86_64, H.264)
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingProtocol == "alvr");
+    CHECK(values.bitrateMbps == 42);
+    CHECK(values.encoderProcess == "auto");
+}
+
+TEST_CASE("Config parser accepts the current wine-vr setup.sh template verbatim", "[config]")
+{
+    // The post-fix template moves comments onto their own lines; pin that shape
+    // too so template drift in either repo shows up here.
+    std::istringstream input(R"TOML(# oxrsys runtime configuration (created by wine-vr demo.sh setup)
+[streaming]
+# embedded ALVR core; stock ALVR Quest client connects over WiFi
+protocol = "alvr"
+bitrate_mbps = 42
+# "auto" | "native" (arm64 helper, HW HEVC) | "inproc" (x86_64, H.264)
+encoder_process = "auto"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingProtocol == "alvr");
+    CHECK(values.bitrateMbps == 42);
+    CHECK(values.encoderProcess == "auto");
+}
+
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")
 {
     std::istringstream input(R"TOML(

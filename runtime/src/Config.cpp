@@ -254,6 +254,27 @@ static std::string Trim(const std::string& s)
     return s.substr(start, end - start + 1);
 }
 
+// Strip a same-line '#' comment. TOML-subset semantics matching the rest of
+// this parser: no escape handling exists anywhere, so '"' simply toggles
+// string context — a '#' inside a quoted value is kept, and everything from
+// the first unquoted '#' on is dropped.
+static std::string StripTomlComment(const std::string& s)
+{
+    bool inQuotes = false;
+    for (size_t i = 0; i < s.size(); ++i)
+    {
+        if (s[i] == '"')
+        {
+            inQuotes = !inQuotes;
+        }
+        else if (s[i] == '#' && !inQuotes)
+        {
+            return s.substr(0, i);
+        }
+    }
+    return s;
+}
+
 static bool ParseBool(const std::string& value)
 {
     std::string lower = value;
@@ -287,7 +308,7 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
     bool legacyAppAlphaBlendPassthrough = false;
     while (std::getline(input, line))
     {
-        line = Trim(line);
+        line = Trim(StripTomlComment(line));
 
         // Skip empty lines, comments, section headers
         if (line.empty() || line[0] == '#' || line[0] == '[')
@@ -748,10 +769,10 @@ void Config::SetupLogging()
     spdlog::info("OXRSys Runtime starting (config from {})", configFilePath);
     spdlog::info("  runtime_enabled={} file_logging={} quest_logcat={}",
                   values_.runtimeEnabled, values_.fileLogging, values_.questLogcat);
-    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s encoder_process={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
+    spdlog::info("  bitrate={}Mbps fov={}° refresh={}Hz res_scale={:.2f} dyn_min={:.2f} keyframe={}s codec={} encoder_process={} preset={} transport={} ffe={} client_ffr={} upscaling={} sharpen={:.2f} reprojection={} abr={} passthrough={} app_alpha_blend={} occlusion={} spatial={}/{}/{}/{} audio={}",
                   values_.bitrateMbps, values_.fovDegrees, values_.refreshRateHz,
                   values_.resolutionScale, values_.dynamicResolutionMinScale,
-                  values_.keyframeIntervalSec,
+                  values_.keyframeIntervalSec, values_.videoCodec,
                   values_.encoderProcess, values_.encoderPreset, values_.streamingTransport,
                   values_.foveatedEncodingPreset, values_.clientFoveationPreset,
                   values_.clientUpscaling, values_.clientSharpening, values_.clientReprojectionMode,

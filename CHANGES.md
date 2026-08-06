@@ -53,6 +53,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the TOML-subset config parser to strip same-line `#` comments outside quoted values. Previously a trailing comment corrupted the value: quoted string keys silently kept their defaults (e.g. `protocol` falling back to `oxrsys`) and bool keys were forced to `false`; numeric keys survived only by accident of `stoi` prefix parsing. The startup config dump now also logs the configured `video_codec` (previously only the hot-reload dump did).
 - Contained decode-error corruption on the Apple streaming clients: after a decode failure the decoder drops inter frames and re-requests a keyframe until an IRAP (H.265) or IDR (H.264) arrives, so packet loss shows a brief clean freeze instead of propagating green/blocky corruption.
 - Fixed a potential visionOS black screen when the server streams 8-bit H.265 while the client requests a 10-bit decode surface, by falling back to an 8-bit output surface when 10-bit session creation is rejected; the renderer already selects its color conversion from the buffer's actual pixel format.
 - Fixed SwiftUI Home USB ADB readiness oscillation by moving USB refresh/setup off the view update path, ignoring stale ADB results after source or device changes, preserving verified reverse ports across transient mapping-read failures, and running persisted USB startup reverse setup only once.
