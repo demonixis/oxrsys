@@ -40,18 +40,10 @@ namespace mach_surface = oxrsys::encoder::mach_surface;
 namespace
 {
 
-// Wall nanoseconds from the shared host counter. Gate B rule: raw mach ticks
-// are NOT comparable across the Rosetta boundary; only normalized ns cross
-// the wire.
-uint64_t NowNs()
-{
-    static mach_timebase_info_data_t timebase = {};
-    if (timebase.denom == 0)
-    {
-        mach_timebase_info(&timebase);
-    }
-    return mach_absolute_time() * timebase.numer / timebase.denom;
-}
+// Wall nanoseconds from the shared host counter (ipc::NowNs — Gate B rule: raw
+// mach ticks are NOT comparable across the Rosetta boundary; only normalized ns
+// cross the wire, so both sides share one definition in the protocol header).
+using ipc::NowNs;
 
 uint32_t CurrentArch()
 {

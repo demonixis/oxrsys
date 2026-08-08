@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <mach/mach_time.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -50,6 +52,23 @@ constexpr uint32_t kSlotCount = 3;
 
 /// fourcc of the compose target, 'BGRA'.
 constexpr uint32_t kPixelFormatBGRA = 0x42475241;
+
+/**
+ * The wire clock: normalized wall nanoseconds, per the timestamp rule above.
+ * Lives here rather than in either process because it IS the contract — the
+ * parent and the helper must derive their timestamps identically, and they run
+ * under different timebases (x86_64 Rosetta 1/1, native arm64 125/3). Only
+ * needs <mach/mach_time.h>, so the framework-free rule still holds.
+ */
+inline uint64_t NowNs()
+{
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t tb{};
+        mach_timebase_info(&tb);
+        return tb;
+    }();
+    return mach_absolute_time() * timebase.numer / timebase.denom;
+}
 
 enum class MessageType : uint16_t
 {

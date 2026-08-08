@@ -51,15 +51,8 @@ constexpr uint32_t kDrainBudgetMs = 200;
 constexpr uint32_t kShutdownAckTimeoutMs = 500;
 constexpr uint32_t kTermWaitMs = 500;
 
-uint64_t NowNs()
-{
-    static mach_timebase_info_data_t timebase = {};
-    if (timebase.denom == 0)
-    {
-        mach_timebase_info(&timebase);
-    }
-    return mach_absolute_time() * timebase.numer / timebase.denom;
-}
+// Wire clock shared with the helper — see ipc::NowNs in EncoderIpcProtocol.h.
+using ipc::NowNs;
 
 double ToMs(Clock::duration d)
 {
