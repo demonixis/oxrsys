@@ -260,6 +260,31 @@ encoder_process = "auto"
     CHECK(values.encoderProcess == "auto");
 }
 
+TEST_CASE("Config parser falls back to code defaults for omitted 1.3.0 streaming keys",
+          "[config]")
+{
+    // Write-once contract: deployed configs that predate the 1.3.0 [streaming]
+    // keys are never rewritten — they rely on the code defaults matching what a
+    // fresh template would produce. The template pins above use explicit
+    // values, so without this case a silently changed default would stay green
+    // while changing behavior on every pre-1.3.0 deployment.
+    std::istringstream input(R"TOML(
+[streaming]
+protocol = "alvr"
+bitrate_mbps = 42
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.encoderProcess == "auto");
+    CHECK(values.videoCodec == "h265");
+    CHECK(values.renderDevice == "quest3");
+    CHECK(values.encoder10Bit == false);
+    CHECK(values.clientSharpening == 0.0f);
+    CHECK(values.appAlphaBlendPassthrough == false);
+    CHECK(values.encoderPreset == "balanced");
+}
+
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")
 {
     std::istringstream input(R"TOML(
