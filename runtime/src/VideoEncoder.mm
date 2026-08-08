@@ -2,6 +2,7 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
+#import "encoder/ColorContract.h"
 #import "encoder/EncoderIpcProtocol.h"
 #import "encoder/InProcessEncoderTransport.h"
 
@@ -365,12 +366,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         // BGRA input: these tags declare the color space VT's internal
         // RGB->YCbCr conversion must target (BT.709 video-range), matching the
         // session properties and the client's decode contract.
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
-            kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
-            kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
-            kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+        oxrsys::encoder::ApplyBt709ColorAttachments(pixelBuffer);
 
         CVMetalTextureRef compositeTexture = nullptr;
         cvResult = CVMetalTextureCacheCreateTextureFromImage(

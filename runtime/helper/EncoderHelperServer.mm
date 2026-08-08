@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "../src/RuntimePlatform.h"
+#include "../src/encoder/ColorContract.h"
 #include "../src/encoder/EncoderIpcProtocol.h"
 #include "../src/encoder/EncoderIpcSocket.h"
 #include "../src/encoder/EncoderMachSurface.h"
@@ -325,15 +326,7 @@ void MachReceiveLoop(ServerState& state)
         }
         // Re-apply the BT.709 color contract on the wrapped buffer: attachments
         // do not travel with the IOSurface across the process boundary.
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
-                              kCVImageBufferColorPrimaries_ITU_R_709_2,
-                              kCVAttachmentMode_ShouldPropagate);
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
-                              kCVImageBufferTransferFunction_ITU_R_709_2,
-                              kCVAttachmentMode_ShouldPropagate);
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
-                              kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-                              kCVAttachmentMode_ShouldPropagate);
+        oxrsys::encoder::ApplyBt709ColorAttachments(pixelBuffer);
 
         auto slotBuffer = std::make_shared<SlotBuffer>();
         slotBuffer->surface = surface;      // ReceiveSurface's +1 CF ref moves here
