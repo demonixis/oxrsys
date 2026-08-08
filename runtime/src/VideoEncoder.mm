@@ -359,11 +359,12 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     // Compose target: all paths write BGRA here. The texture is a view of the
     // slot's CVPixelBuffer (IOSurface-backed), so composing IS producing the
-    // encoder input — no conversion or copy afterwards. shaderWrite covers the
-    // MPS mono-downscale path writing it directly.
+    // encoder input — no conversion or copy afterwards. Write-only: blit
+    // destinations need no usage bit, shaderWrite covers the MPS
+    // mono-downscale path, and nothing shader-reads it (the rgb_to_nv12
+    // kernel was its last reader).
     NSDictionary* compositeTexAttrs = @{
-        (NSString*)kCVMetalTextureUsage:
-            @(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite),
+        (NSString*)kCVMetalTextureUsage: @(MTLTextureUsageShaderWrite),
     };
 
     for (size_t i = 0; i < SlotCount; i++)
