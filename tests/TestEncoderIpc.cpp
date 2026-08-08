@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -256,6 +257,18 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
         CHECK(parsed.nalUnits[1].offset == 6);
         CHECK(parsed.nalUnits[1].length == 7);
         CHECK(parsed.data == result.data);
+    }
+    SECTION("view deserialize borrows the source buffer instead of copying")
+    {
+        ipc::FrameResultView view;
+        REQUIRE(ipc::FrameResultView::Deserialize(payload.data(), payload.size(), view));
+        CHECK(view.frameId == 42);
+        REQUIRE(view.nalUnits.size() == 2);
+        REQUIRE(view.dataSize == result.data.size());
+        // The payload pointer must alias the serialized buffer, not a copy.
+        CHECK(view.data >= payload.data());
+        CHECK(view.data + view.dataSize <= payload.data() + payload.size());
+        CHECK(std::equal(result.data.begin(), result.data.end(), view.data));
     }
     SECTION("descriptor past the payload end is rejected")
     {

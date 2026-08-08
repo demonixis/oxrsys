@@ -462,12 +462,13 @@ void HandleFrameSubmit(ServerState& state, const std::vector<uint8_t>& payload)
         {
             wire.nalUnits.push_back({(uint32_t)nal.offset, (uint32_t)nal.size});
         }
-        wire.data.assign(result.data, result.data + result.size);
 
         OutMessage message;
         message.type = ipc::MessageType::FrameResult;
         message.bounded = true;
-        wire.Serialize(message.payload);
+        // The engine's Annex-B bytes go straight into the outgoing message —
+        // this runs inside the VT output callback, so no owned copy first.
+        wire.SerializeWithPayload(message.payload, result.data, result.size);
         if (statePtr->writer.Enqueue(std::move(message)))
         {
             resultSent->store(true);

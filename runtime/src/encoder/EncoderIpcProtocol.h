@@ -544,7 +544,13 @@ struct NalDescriptor
     static constexpr size_t kWireSize = 8;
 };
 
-struct FrameResult
+/// Deserialized FrameResult whose payload bytes are a VIEW into the source
+/// buffer (`data` points into the bytes handed to Deserialize). For the
+/// per-frame read path: the parent's reader deserializes into a view, invokes
+/// the frame callbacks synchronously, and only then reuses the buffer — no
+/// per-frame copy of the encoded payload. Never retain a view past the
+/// lifetime of the buffer it was parsed from.
+struct FrameResultView
 {
     uint32_t generation = 0;
     uint64_t frameId = 0;
@@ -553,35 +559,12 @@ struct FrameResult
     uint64_t encodeStartNs = 0;  ///< helper wall ns at EncodeFrame submission
     uint64_t callbackAtNs = 0;   ///< helper wall ns inside the VT callback
     std::vector<NalDescriptor> nalUnits;
-    std::vector<uint8_t> data; ///< contiguous Annex-B payload
-
-    static constexpr size_t kFixedWireSize = 44; // + 12*nalCount + data
-    static constexpr MessageType kType = MessageType::FrameResult;
-
-    void Serialize(std::vector<uint8_t>& out) const
-    {
-        out.reserve(out.size() + kFixedWireSize + nalUnits.size() * NalDescriptor::kWireSize +
-                    data.size());
-        PayloadWriter w(out);
-        w.U32(generation);
-        w.U64(frameId);
-        w.I32(status);
-        w.U32(flags);
-        w.U64(encodeStartNs);
-        w.U64(callbackAtNs);
-        w.U32((uint32_t)nalUnits.size());
-        w.U32((uint32_t)data.size());
-        for (const NalDescriptor& nal : nalUnits)
-        {
-            w.U32(nal.offset);
-            w.U32(nal.length);
-        }
-        w.Bytes(data.data(), data.size());
-    }
+    const uint8_t* data = nullptr; ///< contiguous Annex-B payload (borrowed)
+    uint32_t dataSize = 0;
 
     /// Full descriptor-arithmetic validation: every descriptor must lie inside
     /// the payload with no overflow, counts/caps enforced.
-    static bool Deserialize(const uint8_t* payload, size_t size, FrameResult& out)
+    static bool Deserialize(const uint8_t* payload, size_t size, FrameResultView& out)
     {
         PayloadReader r(payload, size);
         out.generation = r.U32();
@@ -618,13 +601,78 @@ struct FrameResult
         {
             return false;
         }
-        const uint8_t* dataPtr = r.Peek(dataSize);
-        if (dataPtr == nullptr)
+        out.data = r.Peek(dataSize);
+        if (out.data == nullptr)
         {
             return false;
         }
-        out.data.assign(dataPtr, dataPtr + dataSize);
+        out.dataSize = dataSize;
         return r.FinishExact();
+    }
+};
+
+struct FrameResult
+{
+    uint32_t generation = 0;
+    uint64_t frameId = 0;
+    int32_t status = 0;
+    uint32_t flags = 0; ///< kFrameResultFlag*
+    uint64_t encodeStartNs = 0;  ///< helper wall ns at EncodeFrame submission
+    uint64_t callbackAtNs = 0;   ///< helper wall ns inside the VT callback
+    std::vector<NalDescriptor> nalUnits;
+    std::vector<uint8_t> data; ///< contiguous Annex-B payload
+
+    static constexpr size_t kFixedWireSize = 44; // + NalDescriptor::kWireSize*nalCount + data
+    static constexpr MessageType kType = MessageType::FrameResult;
+
+    void Serialize(std::vector<uint8_t>& out) const
+    {
+        SerializeWithPayload(out, data.data(), data.size());
+    }
+
+    /// Serialize with the Annex-B bytes taken from a borrowed span instead of
+    /// this->data. The helper's VT callback writes the engine's payload
+    /// straight into the outgoing message with this — no owned copy first.
+    void SerializeWithPayload(std::vector<uint8_t>& out, const uint8_t* payload,
+                              size_t payloadSize) const
+    {
+        out.reserve(out.size() + kFixedWireSize + nalUnits.size() * NalDescriptor::kWireSize +
+                    payloadSize);
+        PayloadWriter w(out);
+        w.U32(generation);
+        w.U64(frameId);
+        w.I32(status);
+        w.U32(flags);
+        w.U64(encodeStartNs);
+        w.U64(callbackAtNs);
+        w.U32((uint32_t)nalUnits.size());
+        w.U32((uint32_t)payloadSize);
+        for (const NalDescriptor& nal : nalUnits)
+        {
+            w.U32(nal.offset);
+            w.U32(nal.length);
+        }
+        w.Bytes(payload, payloadSize);
+    }
+
+    /// Owning deserialize (copies the payload); the validation lives in
+    /// FrameResultView::Deserialize so the two paths cannot drift.
+    static bool Deserialize(const uint8_t* payload, size_t size, FrameResult& out)
+    {
+        FrameResultView view;
+        if (!FrameResultView::Deserialize(payload, size, view))
+        {
+            return false;
+        }
+        out.generation = view.generation;
+        out.frameId = view.frameId;
+        out.status = view.status;
+        out.flags = view.flags;
+        out.encodeStartNs = view.encodeStartNs;
+        out.callbackAtNs = view.callbackAtNs;
+        out.nalUnits = std::move(view.nalUnits);
+        out.data.assign(view.data, view.data + view.dataSize);
+        return true;
     }
 };
 

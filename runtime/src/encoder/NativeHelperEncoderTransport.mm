@@ -464,8 +464,11 @@ struct NativeHelperEncoderTransport::Impl
 
     void OnFrameResult(const std::vector<uint8_t>& payload)
     {
-        ipc::FrameResult wire;
-        if (!ipc::FrameResult::Deserialize(payload.data(), payload.size(), wire))
+        // View, not copy: `wire.data` borrows the reader's payload buffer.
+        // Safe because the frame callbacks below run synchronously and the
+        // buffer is only reused after this handler returns.
+        ipc::FrameResultView wire;
+        if (!ipc::FrameResultView::Deserialize(payload.data(), payload.size(), wire))
         {
             spdlog::warn("NativeHelperEncoderTransport: invalid FrameResult dropped");
             return;
@@ -485,8 +488,8 @@ struct NativeHelperEncoderTransport::Impl
         if (frame->callbacks.onEncodedFrame)
         {
             EncodedFrameResult result;
-            result.data = wire.data.data();
-            result.size = wire.data.size();
+            result.data = wire.data;
+            result.size = wire.dataSize;
             result.isIdr = frame->metrics.keyframe;
             result.timestampNs = frame->metrics.timestampNs;
             result.nalUnits.reserve(wire.nalUnits.size());
