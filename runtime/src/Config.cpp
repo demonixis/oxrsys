@@ -620,6 +620,7 @@ bool Config::ReloadIfChangedLocked(bool force)
     }
 
     values_ = newValues;
+    revision_.fetch_add(1, std::memory_order_relaxed);
     configFilePath = resolvedPath;
     hasConfigFile_ = fileExists;
     hasKnownWriteTime_ = fileExists && hasWriteTime;

@@ -77,6 +77,11 @@ public:
     ConfigValues GetValues();
     void RefreshIfNeeded();
 
+    // Bumped every time a reload actually replaces the values. Lock-free, so
+    // per-frame callers can skip the mutex + full ConfigValues copy when
+    // nothing changed.
+    uint64_t Revision() const { return revision_.load(std::memory_order_relaxed); }
+
     // Resolved paths
     std::string appSupportDir;      // Platform config directory
     std::string dylibDir;           // Directory containing the runtime library
@@ -104,6 +109,7 @@ private:
 
     mutable std::mutex mutex_;
     ConfigValues values_;
+    std::atomic<uint64_t> revision_{1};
     std::filesystem::file_time_type lastConfigWriteTime_ = {};
     bool hasConfigFile_ = false;
     bool hasKnownWriteTime_ = false;

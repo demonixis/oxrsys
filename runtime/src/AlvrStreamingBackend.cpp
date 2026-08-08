@@ -368,6 +368,21 @@ bool AlvrStreamingBackend::EnsureEncoder()
         return false;
     }
 
+    // Healthy fast path: with a live encoder, an unchanged config revision, an
+    // unchanged stream shape, and no auto-upgrade watch (an unpinned
+    // in-process encoder under "auto" relies on the per-frame probe and
+    // respawn-budget check below to get back to the native helper), nothing
+    // that feeds the transport/codec decision can have changed — skip the
+    // config snapshot and the helper filesystem probe entirely.
+    const uint64_t configRevision = Config::Get().Revision();
+    if (encoder_ && encoder_->IsInitialized() && encoderIdentityValid_ &&
+        !encoderAutoUpgradeWatch_ && encoderConfigRevision_ == configRevision &&
+        encoderIdentity_.totalWidth == eyeWidth * 2 && encoderIdentity_.height == eyeHeight &&
+        encoderIdentity_.fps == targetRefreshRateHz_.load())
+    {
+        return true;
+    }
+
     const ConfigValues config = Config::Get().GetValues();
     const bool underRosetta = oxrsys::runtime_platform::RunningUnderRosetta();
     const bool helperPresent = NativeHelperEncoderTransport::HelperBinaryAvailable();
@@ -545,6 +560,10 @@ bool AlvrStreamingBackend::EnsureEncoder()
     nativeTransport_ = native;
     encoderIdentity_ = desired;
     encoderIdentityValid_ = true;
+    encoderConfigRevision_ = configRevision;
+    encoderAutoUpgradeWatch_ = mode == EncoderTransportMode::InProcess &&
+                               config.encoderProcess == "auto" &&
+                               decision != TransportDecision::InProcessPinned;
     spdlog::info("OXRSys/ALVR: encoder ready {}x{} @{}Hz {}Mbps ({}, {})", totalWidth, eyeHeight,
                  desired.fps, bitrateMbps, encoderUsesH264_ ? "H.264" : "HEVC",
                  mode == EncoderTransportMode::NativeHelper ? "native helper" : "in-process");

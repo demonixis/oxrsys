@@ -188,6 +188,11 @@ private:
     // forces a rebuild instead of inheriting the encoder.
     oxrsys::alvr::EncoderIdentity encoderIdentity_ = {};
     bool encoderIdentityValid_ = false; // EncodeThread only
+    uint64_t encoderConfigRevision_ = 0; // EncodeThread only: Config revision the encoder was built from
+    // EncodeThread only: true while an unpinned in-process encoder runs under
+    // encoder_process="auto" — those sessions rely on EnsureEncoder's per-frame
+    // helper probe / respawn-budget check to upgrade back to the native helper.
+    bool encoderAutoUpgradeWatch_ = false;
     // Cached helper handshake result for HEVC (EncodeThread only): keeps the
     // caps-driven H.264 downgrade stable across identity checks so it cannot
     // oscillate into a rebuild loop. Machine property, so caching is safe.
