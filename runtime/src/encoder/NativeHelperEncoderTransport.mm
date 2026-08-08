@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -86,7 +87,10 @@ struct GenerationState
 {
     uint32_t generation = 0;
     std::map<uint32_t, uint32_t> surfaceSlots; ///< IOSurfaceID -> slot
-    std::map<uint64_t, OutstandingFrame> outstanding; ///< frameId -> frame
+    /// frameId -> frame. Flat storage: the compose ring bounds live entries to
+    /// kSlotCount, so a linear scan beats a node allocation per frame on the
+    /// completion path, and the vector's capacity persists across frames.
+    std::vector<std::pair<uint64_t, OutstandingFrame>> outstanding;
 };
 
 struct QueuedMessage
@@ -424,13 +428,18 @@ struct NativeHelperEncoderTransport::Impl
             return std::nullopt;
         }
         auto& state = *generationIt->second;
-        auto frameIt = state.outstanding.find(frameId);
+        auto frameIt = std::find_if(state.outstanding.begin(), state.outstanding.end(),
+                                    [frameId](const auto& entry) { return entry.first == frameId; });
         if (frameIt == state.outstanding.end())
         {
             return std::nullopt;
         }
         OutstandingFrame frame = std::move(frameIt->second);
-        state.outstanding.erase(frameIt);
+        if (frameIt != std::prev(state.outstanding.end()))
+        {
+            *frameIt = std::move(state.outstanding.back());
+        }
+        state.outstanding.pop_back();
         if (state.outstanding.empty() && generationIt->second != current)
         {
             generations.erase(generationIt);
@@ -767,7 +776,7 @@ public:
         // deliver the result immediately after the writer sends it.
         {
             std::lock_guard<std::mutex> lock(impl.stateMutex);
-            generation_->outstanding.emplace(frameId, std::move(frame_));
+            generation_->outstanding.emplace_back(frameId, std::move(frame_));
         }
         if (!impl.EnqueueFrame(std::move(payload)))
         {
