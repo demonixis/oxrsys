@@ -39,8 +39,6 @@ uint64_t ProcessId();
 bool RunningUnderRosetta();
 
 // macOS marketing major version (e.g. 27 on macOS 27.x), 0 if unknown or not Apple.
-// VideoToolbox's internal RGB->YCbCr conversion under Rosetta emits all-zero
-// chroma before macOS 27, which matters now that the encoder feeds BGRA directly.
 int MacOSMajorVersion();
 
 } // namespace oxrsys::runtime_platform

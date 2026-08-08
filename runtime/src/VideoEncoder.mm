@@ -2,7 +2,6 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
-#import "RuntimePlatform.h"
 #import "encoder/EncoderIpcProtocol.h"
 #import "encoder/InProcessEncoderTransport.h"
 
@@ -31,9 +30,7 @@ struct MetalFoveationUniforms
 };
 
 // Encoder compute library: axis-aligned foveated encoding shader logic adapted
-// from ALVR's AADT compression shader (MIT licensed). The composed BGRA frame
-// goes to VideoToolbox as-is; VT performs the RGB->YCbCr conversion internally
-// (BT.709 video-range, declared via the session/buffer color attachments).
+// from ALVR's AADT compression shader (MIT licensed).
 constexpr const char* kFoveationMetalSource = R"METAL(
 #include <metal_stdlib>
 using namespace metal;
@@ -305,18 +302,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
     }
-    // The encoder is fed BGRA directly; VT converts to YCbCr internally. Under
-    // Rosetta that internal conversion emitted all-zero chroma (green video)
-    // before macOS 27 — the old rgb_to_nv12 pre-convert kernel existed for
-    // that. Correctness on 27+ is verified by wine-vr's vt-llrc-probe --matrix.
-    if (oxrsys::runtime_platform::RunningUnderRosetta() &&
-        oxrsys::runtime_platform::MacOSMajorVersion() < 27)
-    {
-        spdlog::warn("VideoEncoder: BGRA-direct encode under Rosetta requires macOS 27+ "
-                     "(VT zero-chroma bug on older builds) — expect green video on macOS {}",
-                     oxrsys::runtime_platform::MacOSMajorVersion());
-    }
-
     CVMetalTextureCacheRef cache = nullptr;
     CVReturn cvResult = CVMetalTextureCacheCreate(
         kCFAllocatorDefault, nullptr, device, nullptr, &cache);

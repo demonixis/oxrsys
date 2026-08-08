@@ -2,6 +2,8 @@
 
 #import "VideoToolboxEncodeEngine.h"
 
+#include "RuntimePlatform.h"
+
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -512,12 +514,23 @@ bool VideoToolboxEncodeEngine::CreateSession(const EncoderConfig& config)
 
     const CMVideoCodecType codecType = VideoToolboxCodecType(config_.codec);
 
+    // The composed BGRA frame is fed to VT as-is; VT converts to BT.709
+    // limited-range YCbCr internally (match verified by wine-vr's
+    // vt-llrc-probe --matrix). Under Rosetta that internal conversion emitted
+    // all-zero chroma (green video) before macOS 27. This check runs in
+    // whichever process owns the VT session — the native arm64 helper is not
+    // translated, so only an actually-affected encoder warns.
+    if (oxrsys::runtime_platform::RunningUnderRosetta() &&
+        oxrsys::runtime_platform::MacOSMajorVersion() < 27)
+    {
+        spdlog::warn("VideoEncoder: BGRA-direct encode under Rosetta requires macOS 27+ "
+                     "(VT zero-chroma bug on older builds) — expect green video "
+                     "(detected macOS major {}, 0 = unknown)",
+                     oxrsys::runtime_platform::MacOSMajorVersion());
+    }
+
     // Low-latency rate control halves encode latency (33 -> 10.6ms measured)
-    // and fixes the ~30% bitrate overshoot of the default RC. Historically its
-    // Rosetta all-zero-chroma bug (green image, VT's internal RGB->YCbCr of
-    // BGRA) forced an rgb_to_nv12 pre-convert; Apple fixed that in macOS 27
-    // and BGRA is fed directly (BT.709 match verified by vt-llrc-probe
-    // --matrix; the macOS<27 warning is logged by VideoEncoder::Initialize).
+    // and fixes the ~30% bitrate overshoot of the default RC.
     NSDictionary* encoderSpec = @{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
@@ -614,9 +627,7 @@ bool VideoToolboxEncodeEngine::CreateSession(const EncoderConfig& config)
     // Do NOT use kVTCompressionPropertyKey_ConstantBitRate here: the header
     // documents it as incompatible with AverageBitRate/DataRateLimits, the
     // LL-RC encoder rejects it (-12900), and classic RC silently ignores it
-    // (vt-llrc-probe --cbr, 2026-07-04; the "accepted then stalls" observation
-    // of 2026-07-03 traced to the frame-context use-after-free fixed
-    // alongside the NV12 encoder-input work, not CBR). AverageBitRate alone (with the old 1.5x limits
+    // (vt-llrc-probe --cbr). AverageBitRate alone (with the old 1.5x limits
     // headroom) overshot ~2x; the exact 1.0x budget below holds the measured
     // output at/under target.
     int targetBitrate = config_.bitrateMbps * 1000000;
