@@ -531,10 +531,13 @@ int EncoderHelperServer::Run(int socketFd, const std::string& bootstrapName)
         });
 
     int exitCode = 0;
+    // Reused across iterations: ReadMessage() clears+resizes it per call, and
+    // no handler below retains a view into it past the iteration (mirrors the
+    // parent transport's ReaderLoop).
+    std::vector<uint8_t> payload;
     for (;;)
     {
         ipc::MessageHeader header;
-        std::vector<uint8_t> payload;
         const ipc::IoResult ioResult = state.socket.ReadMessage(header, payload);
         if (ioResult == ipc::IoResult::Eof)
         {

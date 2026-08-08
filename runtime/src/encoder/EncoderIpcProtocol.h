@@ -353,6 +353,7 @@ struct Hello
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(parentPid);
         w.U32(reserved);
@@ -380,6 +381,7 @@ struct HelloReply
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(arch);
         w.U32(translated);
@@ -423,6 +425,7 @@ struct ConfigureGeneration
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
         w.U32(width);
@@ -472,6 +475,7 @@ struct ConfigureAck
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
         w.U32(status);
@@ -502,6 +506,7 @@ struct FrameSubmit
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
         w.U32(slot);
@@ -635,6 +640,7 @@ struct FrameDropped
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
         w.U64(frameId);
@@ -661,6 +667,7 @@ struct Drain
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
     }
@@ -681,6 +688,7 @@ struct DrainComplete
 
     void Serialize(std::vector<uint8_t>& out) const
     {
+        out.reserve(out.size() + kWireSize);
         PayloadWriter w(out);
         w.U32(generation);
     }
