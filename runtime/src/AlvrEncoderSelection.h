@@ -108,18 +108,11 @@ struct EncoderIdentity
     uint32_t bitDepth = 8;             ///< 8, or 10 for HEVC Main10
     uint32_t pixelFormat = kPixelFormatBGRA; ///< fourcc of the compose target ('BGRA')
     EncoderTransportMode transport = EncoderTransportMode::InProcess;
+
+    // Defaulted: a field added above is compared automatically. The hand-written
+    // form this replaced would have silently ignored it, reusing an encoder that
+    // should have been rebuilt.
+    bool operator==(const EncoderIdentity&) const = default;
 };
-
-inline bool operator==(const EncoderIdentity& a, const EncoderIdentity& b)
-{
-    return a.totalWidth == b.totalWidth && a.height == b.height && a.fps == b.fps &&
-           a.codec == b.codec && a.bitDepth == b.bitDepth && a.pixelFormat == b.pixelFormat &&
-           a.transport == b.transport;
-}
-
-inline bool operator!=(const EncoderIdentity& a, const EncoderIdentity& b)
-{
-    return !(a == b);
-}
 
 } // namespace oxrsys::alvr
