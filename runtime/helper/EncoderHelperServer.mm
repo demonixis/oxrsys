@@ -99,17 +99,6 @@ uint32_t ProbeCodecCaps(CMVideoCodecType codecType)
     return caps;
 }
 
-uint32_t NalTypeOf(uint32_t codec, const uint8_t* nalStart, size_t size)
-{
-    // nalStart points at the 4-byte Annex-B start code.
-    if (size < 5)
-    {
-        return 0;
-    }
-    const uint8_t byte = nalStart[4];
-    return codec == ipc::kCodecH264 ? (byte & 0x1F) : ((byte >> 1) & 0x3F);
-}
-
 struct OutMessage
 {
     ipc::MessageType type;
@@ -262,8 +251,6 @@ public:
     std::map<uint64_t, std::shared_ptr<SlotBuffer>> slots;
 
     uint32_t generation = 0;
-    bool configured = false;
-    uint32_t wireCodec = ipc::kCodecH265;
     uint64_t appliedBitrateBps = 0;
 
     std::thread machThread;
@@ -387,11 +374,10 @@ void HandleConfigure(ServerState& state, const std::vector<uint8_t>& payload)
                                                       : oxr::protocol::VideoCodec::H265;
     config.tenBit = configure.bitDepth == 10;
     config.keyframeIntervalSec = configure.keyframeIntervalSec;
+    config.encoderPreset = ipc::PresetFromWire(configure.preset);
 
     const bool created = state.engine.CreateSession(config);
     state.generation = configure.generation;
-    state.configured = created;
-    state.wireCodec = configure.codec;
     state.appliedBitrateBps = configure.initialBitrateBps;
 
     ack.generation = configure.generation;
@@ -411,7 +397,7 @@ void HandleFrameSubmit(ServerState& state, const std::vector<uint8_t>& payload)
     {
         return; // unparseable: no frame identity to answer for
     }
-    if (!state.configured || submit.generation != state.generation)
+    if (!state.engine.HasSession() || submit.generation != state.generation)
     {
         state.SendFrameDropped(submit.generation, submit.frameId, ipc::kDropBadGeneration, 0);
         return;
@@ -450,13 +436,12 @@ void HandleFrameSubmit(ServerState& state, const std::vector<uint8_t>& payload)
 
     const uint32_t frameGeneration = submit.generation;
     const uint64_t frameId = submit.frameId;
-    const uint32_t wireCodec = state.wireCodec;
     const uint64_t encodeStartNs = NowNs();
     auto resultSent = std::make_shared<std::atomic<bool>>(false);
     ServerState* statePtr = &state;
 
     FrameCallbacks callbacks;
-    callbacks.onEncodedFrame = [statePtr, frameGeneration, frameId, wireCodec, encodeStartNs,
+    callbacks.onEncodedFrame = [statePtr, frameGeneration, frameId, encodeStartNs,
                                 resultSent](const EncodedFrameResult& result)
     {
         ipc::FrameResult wire;
@@ -475,11 +460,7 @@ void HandleFrameSubmit(ServerState& state, const std::vector<uint8_t>& payload)
         wire.nalUnits.reserve(result.nalUnits.size());
         for (const NalUnitDescriptor& nal : result.nalUnits)
         {
-            ipc::NalDescriptor descriptor;
-            descriptor.offset = (uint32_t)nal.offset;
-            descriptor.length = (uint32_t)nal.size;
-            descriptor.type = NalTypeOf(wireCodec, result.data + nal.offset, nal.size);
-            wire.nalUnits.push_back(descriptor);
+            wire.nalUnits.push_back({(uint32_t)nal.offset, (uint32_t)nal.size});
         }
         wire.data.assign(result.data, result.data + result.size);
 

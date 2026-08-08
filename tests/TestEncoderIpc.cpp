@@ -60,7 +60,6 @@ std::vector<uint8_t> BuildFrameResultPayloadWithNalCount(uint32_t nalCount,
     {
         writer.U32(i); // offset
         writer.U32(1); // length
-        writer.U32(0); // type
     }
     std::vector<uint8_t> data(dataSize, 0xAB);
     writer.Bytes(data.data(), data.size());
@@ -238,8 +237,8 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
     result.encodeStartNs = 1000;
     result.callbackAtNs = 2000;
     result.data = {0, 0, 0, 1, 0x67, 0xAA, 0, 0, 0, 1, 0x65, 0xBB, 0xCC};
-    result.nalUnits.push_back({0, 6, 7});
-    result.nalUnits.push_back({6, 7, 5});
+    result.nalUnits.push_back({0, 6});
+    result.nalUnits.push_back({6, 7});
 
     std::vector<uint8_t> payload;
     result.Serialize(payload);
@@ -256,7 +255,6 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
         REQUIRE(parsed.nalUnits.size() == 2);
         CHECK(parsed.nalUnits[1].offset == 6);
         CHECK(parsed.nalUnits[1].length == 7);
-        CHECK(parsed.nalUnits[1].type == 5);
         CHECK(parsed.data == result.data);
     }
     SECTION("descriptor past the payload end is rejected")
@@ -547,10 +545,10 @@ TEST_CASE("Encoder IPC socket framing over a socketpair", "[encoder-ipc]")
         {
             result.data[i] = (uint8_t)((i * 37 + 11) & 0xFF); // patterned, not zero-filled
         }
-        result.nalUnits.push_back({0, (uint32_t)(kDataSize / 3), 7});
-        result.nalUnits.push_back({(uint32_t)(kDataSize / 3), (uint32_t)(kDataSize / 3), 1});
+        result.nalUnits.push_back({0, (uint32_t)(kDataSize / 3)});
+        result.nalUnits.push_back({(uint32_t)(kDataSize / 3), (uint32_t)(kDataSize / 3)});
         result.nalUnits.push_back(
-            {(uint32_t)(2 * kDataSize / 3), (uint32_t)(kDataSize - 2 * kDataSize / 3), 1});
+            {(uint32_t)(2 * kDataSize / 3), (uint32_t)(kDataSize - 2 * kDataSize / 3)});
 
         std::vector<uint8_t> payload;
         result.Serialize(payload);
@@ -626,7 +624,8 @@ TEST_CASE("Encoder IPC socket framing over a socketpair", "[encoder-ipc]")
             ipc::FrameResult::Deserialize(outcome->received.data(), outcome->received.size(), parsed));
         CHECK(parsed.data == result.data); // pattern survived the partial writes intact
         REQUIRE(parsed.nalUnits.size() == 3);
-        CHECK(parsed.nalUnits[2].type == 1);
+        CHECK(parsed.nalUnits[2].offset == (uint32_t)(2 * kDataSize / 3));
+        CHECK(parsed.nalUnits[2].length == (uint32_t)(kDataSize - 2 * kDataSize / 3));
     }
 
     // fds[0] is closed by `reader`; fds[1] by the writer socket or explicitly

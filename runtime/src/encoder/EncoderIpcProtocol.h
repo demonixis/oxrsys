@@ -110,6 +110,36 @@ constexpr uint32_t kCodecH264 = 1;
 // instead of assumed.
 constexpr uint32_t kColorBt709 = 1;
 
+// Encoder preset (ConfigureGeneration.preset), mirroring the config strings
+// the VideoToolbox engine understands. The mapping lives here so parent and
+// helper cannot diverge on it.
+constexpr uint32_t kPresetBalanced = 0;
+constexpr uint32_t kPresetSpeed = 1;
+constexpr uint32_t kPresetQuality = 2;
+
+inline uint32_t PresetToWire(const std::string& preset)
+{
+    if (preset == "speed")
+    {
+        return kPresetSpeed;
+    }
+    if (preset == "quality")
+    {
+        return kPresetQuality;
+    }
+    return kPresetBalanced;
+}
+
+inline const char* PresetFromWire(uint32_t preset)
+{
+    switch (preset)
+    {
+        case kPresetSpeed: return "speed";
+        case kPresetQuality: return "quality";
+        default: return "balanced";
+    }
+}
+
 // FrameSubmit.flags
 constexpr uint32_t kFrameFlagForceIdr = 1u << 0;
 // FrameResult.flags
@@ -386,8 +416,9 @@ struct ConfigureGeneration
     uint32_t transferFunction = kColorBt709;
     uint32_t ycbcrMatrix = kColorBt709;
     uint32_t slotCount = kSlotCount;
+    uint32_t preset = kPresetBalanced; ///< kPreset*
 
-    static constexpr size_t kWireSize = 56;
+    static constexpr size_t kWireSize = 60;
     static constexpr MessageType kType = MessageType::ConfigureGeneration;
 
     void Serialize(std::vector<uint8_t>& out) const
@@ -406,6 +437,7 @@ struct ConfigureGeneration
         w.U32(transferFunction);
         w.U32(ycbcrMatrix);
         w.U32(slotCount);
+        w.U32(preset);
     }
     static bool Deserialize(const uint8_t* data, size_t size, ConfigureGeneration& out)
     {
@@ -423,11 +455,12 @@ struct ConfigureGeneration
         out.transferFunction = r.U32();
         out.ycbcrMatrix = r.U32();
         out.slotCount = r.U32();
+        out.preset = r.U32();
         return r.FinishExact() && out.width != 0 && out.height != 0 &&
                out.slotCount != 0 && out.slotCount <= 16;
     }
 };
-static_assert(ConfigureGeneration::kWireSize == 12 * 4 + 8);
+static_assert(ConfigureGeneration::kWireSize == 13 * 4 + 8);
 
 struct ConfigureAck
 {
@@ -497,14 +530,13 @@ struct FrameSubmit
 };
 static_assert(FrameSubmit::kWireSize == 4 + 4 + 8 + 8 + 4 + 4 + 8 + 8 + 8);
 
-/// One Annex-B NAL unit inside FrameResult::data. 12 bytes on the wire.
+/// One Annex-B NAL unit inside FrameResult::data. 8 bytes on the wire.
 struct NalDescriptor
 {
     uint32_t offset = 0; ///< byte offset of the 00 00 00 01 start code
     uint32_t length = 0; ///< total bytes including the 4-byte start code
-    uint32_t type = 0;   ///< codec NAL type of the unit (informational)
 
-    static constexpr size_t kWireSize = 12;
+    static constexpr size_t kWireSize = 8;
 };
 
 struct FrameResult
@@ -538,7 +570,6 @@ struct FrameResult
         {
             w.U32(nal.offset);
             w.U32(nal.length);
-            w.U32(nal.type);
         }
         w.Bytes(data.data(), data.size());
     }
@@ -567,7 +598,6 @@ struct FrameResult
             NalDescriptor nal;
             nal.offset = r.U32();
             nal.length = r.U32();
-            nal.type = r.U32();
             if (!r.Ok())
             {
                 return false;

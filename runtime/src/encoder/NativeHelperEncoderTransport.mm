@@ -77,7 +77,6 @@ struct OutstandingFrame
     FrameCallbacks callbacks;
     EncodedFrameMetrics metrics;
     Clock::time_point begin;
-    Clock::time_point submitted;
 };
 
 // Per-generation state, retained until every submitted frame of the
@@ -94,7 +93,6 @@ struct QueuedMessage
 {
     ipc::MessageType type;
     std::vector<uint8_t> payload;
-    bool isFrame = false;
 };
 
 } // namespace
@@ -285,7 +283,7 @@ struct NativeHelperEncoderTransport::Impl
     {
         {
             std::lock_guard<std::mutex> lock(writeMutex);
-            controlQueue.push_back({type, std::move(payload), false});
+            controlQueue.push_back({type, std::move(payload)});
         }
         writeCondition.notify_one();
     }
@@ -298,7 +296,7 @@ struct NativeHelperEncoderTransport::Impl
             {
                 return false;
             }
-            frameQueue.push_back({ipc::MessageType::FrameSubmit, std::move(payload), true});
+            frameQueue.push_back({ipc::MessageType::FrameSubmit, std::move(payload)});
         }
         writeCondition.notify_one();
         return true;
@@ -749,7 +747,6 @@ public:
 
         const uint64_t frameId = impl.frameIdCounter.fetch_add(1);
         frame_.metrics.timestampNs = timestampNs;
-        frame_.submitted = Clock::now();
 
         ipc::FrameSubmit submit;
         submit.generation = generation_->generation;
@@ -877,6 +874,7 @@ bool NativeHelperEncoderTransport::Configure(const EncoderConfig& config)
     configure.keyframeIntervalSec = config.keyframeIntervalSec;
     configure.initialBitrateBps = (uint64_t)config.bitrateMbps * 1000000;
     configure.slotCount = ipc::kSlotCount;
+    configure.preset = ipc::PresetToWire(config.encoderPreset);
     std::vector<uint8_t> payload;
     configure.Serialize(payload);
 

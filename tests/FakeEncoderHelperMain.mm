@@ -110,7 +110,7 @@ ipc::FrameResult MakeCannedResult(const ipc::FrameSubmit& submit)
     wire.callbackAtNs = submit.composedAtNs + 1000000; // +1ms, arbitrary
     static const uint8_t kAnnexBIdr[] = {0, 0, 0, 1, 0x65, 0xAB, 0xCD};
     wire.data.assign(kAnnexBIdr, kAnnexBIdr + sizeof(kAnnexBIdr));
-    wire.nalUnits.push_back({0, (uint32_t)sizeof(kAnnexBIdr), 5});
+    wire.nalUnits.push_back({0, (uint32_t)sizeof(kAnnexBIdr)});
     return wire;
 }
 
