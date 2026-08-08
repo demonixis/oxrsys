@@ -312,30 +312,12 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     }
     videoToolbox_.textureCache = cache;
 
-    NSDictionary* poolConfig = @{
-        (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @(SlotCount),
-    };
-    NSDictionary* poolAttrs = @{
-        (NSString*)kCVPixelBufferWidthKey: @(width),
-        (NSString*)kCVPixelBufferHeightKey: @(height),
-        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+    // Each slot owns its buffer for the encoder's lifetime — the fixed set is
+    // allocated directly, no pool.
+    NSDictionary* bufferAttrs = @{
         (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
         (NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
-
-    CVPixelBufferPoolRef pool = nullptr;
-    cvResult = CVPixelBufferPoolCreate(
-        kCFAllocatorDefault,
-        (__bridge CFDictionaryRef)poolConfig,
-        (__bridge CFDictionaryRef)poolAttrs,
-        &pool);
-    if (cvResult != kCVReturnSuccess)
-    {
-        spdlog::error("VideoEncoder: Failed to create pixel buffer pool: {}", cvResult);
-        Shutdown();
-        return false;
-    }
-    videoToolbox_.pixelBufferPool = pool;
 
     MTLTextureDescriptor* tmpDesc = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -370,8 +352,9 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     for (size_t i = 0; i < SlotCount; i++)
     {
         CVPixelBufferRef pixelBuffer = nullptr;
-        cvResult = CVPixelBufferPoolCreatePixelBuffer(
-            kCFAllocatorDefault, (CVPixelBufferPoolRef)videoToolbox_.pixelBufferPool, &pixelBuffer);
+        cvResult = CVPixelBufferCreate(
+            kCFAllocatorDefault, width_, height_, kCVPixelFormatType_32BGRA,
+            (__bridge CFDictionaryRef)bufferAttrs, &pixelBuffer);
         if (cvResult != kCVReturnSuccess || pixelBuffer == nullptr)
         {
             spdlog::error("VideoEncoder: Failed to preallocate pixel buffer slot {}", i);
@@ -498,11 +481,6 @@ void VideoEncoder::Shutdown()
     {
         [(id<MTLCommandQueue>)videoToolbox_.commandQueue release];
         videoToolbox_.commandQueue = nullptr;
-    }
-    if (videoToolbox_.pixelBufferPool != nullptr)
-    {
-        CFRelease(videoToolbox_.pixelBufferPool);
-        videoToolbox_.pixelBufferPool = nullptr;
     }
     if (videoToolbox_.textureCache != nullptr)
     {

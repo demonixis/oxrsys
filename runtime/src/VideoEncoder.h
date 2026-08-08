@@ -127,7 +127,6 @@ private:
     // the encode engine behind transport_.
     struct VideoToolboxState
     {
-        void* pixelBufferPool = nullptr;  // CVPixelBufferPoolRef
         void* textureCache = nullptr;     // CVMetalTextureCacheRef
         void* metalDevice = nullptr;      // id<MTLDevice>
         void* commandQueue = nullptr;     // id<MTLCommandQueue>
