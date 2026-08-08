@@ -344,8 +344,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // slot's CVPixelBuffer (IOSurface-backed), so composing IS producing the
     // encoder input — no conversion or copy afterwards. Write-only: blit
     // destinations need no usage bit, shaderWrite covers the MPS
-    // mono-downscale path, and nothing shader-reads it (the rgb_to_nv12
-    // kernel was its last reader).
+    // mono-downscale path, and nothing shader-reads it (the removed
+    // pre-convert kernel was its last reader).
     NSDictionary* compositeTexAttrs = @{
         (NSString*)kCVMetalTextureUsage: @(MTLTextureUsageShaderWrite),
     };
@@ -418,9 +418,11 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     engineConfig.encoderPreset = config.encoderPreset;
     engineConfig.keyframeIntervalSec = config.keyframeIntervalSec;
 
+    // Consume the injected transport literally (it is documented single-use):
+    // after this, transport_ is its only owner inside the encoder.
     std::shared_ptr<oxrsys::encoder::IEncoderTransport> transport =
         injectedTransport_ != nullptr
-            ? injectedTransport_
+            ? std::exchange(injectedTransport_, nullptr)
             : std::make_shared<oxrsys::encoder::InProcessEncoderTransport>();
     if (!transport->Configure(engineConfig))
     {

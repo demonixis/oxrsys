@@ -4,12 +4,10 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <vector>
 
 #include "GraphicsTypes.h"
 #include "encoder/EncoderTransport.h"
