@@ -34,6 +34,39 @@ std::vector<uint8_t> SerializeHeader(const ipc::MessageHeader& header)
     return bytes;
 }
 
+// Byte-for-byte FrameResult payload construction parameterized only on
+// descriptor count: every field, and every descriptor (a real,
+// safely-inside-dataSize offset/length/type triple backed by real data
+// bytes), is built identically for every count. The count-cap tests below
+// rely on that identity to isolate a rejection to the cap check alone —
+// ruling out any other incidental malformation (missing descriptor bytes, a
+// short data section, etc.) as the actual cause.
+std::vector<uint8_t> BuildFrameResultPayloadWithNalCount(uint32_t nalCount,
+                                                         uint32_t generation = 1,
+                                                         uint64_t frameId = 1)
+{
+    const uint32_t dataSize = nalCount; // one data byte per descriptor
+    std::vector<uint8_t> crafted;
+    ipc::PayloadWriter writer(crafted);
+    writer.U32(generation);
+    writer.U64(frameId);
+    writer.I32(0); // status
+    writer.U32(0); // flags
+    writer.U64(0); // encodeStartNs
+    writer.U64(0); // callbackAtNs
+    writer.U32(nalCount);
+    writer.U32(dataSize);
+    for (uint32_t i = 0; i < nalCount; i++)
+    {
+        writer.U32(i); // offset
+        writer.U32(1); // length
+        writer.U32(0); // type
+    }
+    std::vector<uint8_t> data(dataSize, 0xAB);
+    writer.Bytes(data.data(), data.size());
+    return crafted;
+}
+
 } // namespace
 
 TEST_CASE("Encoder IPC header round-trips little-endian", "[encoder-ipc]")
@@ -261,42 +294,12 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
     }
     SECTION("nal count over the cap is rejected")
     {
-        // Shared, byte-for-byte payload construction parameterized only on
-        // descriptor count: every field, and every descriptor (a real,
-        // safely-inside-dataSize offset/length/type triple backed by real
-        // data bytes), is built identically for both variants below. That
-        // isolates the +1 case's rejection to the count-cap check alone —
-        // ruling out any other incidental malformation (missing descriptor
-        // bytes, a short data section, etc.) as the actual cause.
-        const auto BuildPayload = [](uint32_t nalCount)
-        {
-            const uint32_t dataSize = nalCount; // one data byte per descriptor
-            std::vector<uint8_t> crafted;
-            ipc::PayloadWriter writer(crafted);
-            writer.U32(1);  // generation
-            writer.U64(1);  // frameId
-            writer.I32(0);  // status
-            writer.U32(0);  // flags
-            writer.U64(0);  // encodeStartNs
-            writer.U64(0);  // callbackAtNs
-            writer.U32(nalCount);
-            writer.U32(dataSize);
-            for (uint32_t i = 0; i < nalCount; i++)
-            {
-                writer.U32(i); // offset
-                writer.U32(1); // length
-                writer.U32(0); // type
-            }
-            std::vector<uint8_t> data(dataSize, 0xAB);
-            writer.Bytes(data.data(), data.size());
-            return crafted;
-        };
-
         // Positive control: EXACTLY at the cap must deserialize
         // successfully, with every field/descriptor intact — proving the
         // cap check is an off-by-one-correct boundary, not an overly eager
         // rejection that happens to also catch kMaxNalUnits+1.
-        const std::vector<uint8_t> atCap = BuildPayload(ipc::kMaxNalUnits);
+        const std::vector<uint8_t> atCap =
+            BuildFrameResultPayloadWithNalCount(ipc::kMaxNalUnits);
         ipc::FrameResult parsedAtCap;
         REQUIRE(ipc::FrameResult::Deserialize(atCap.data(), atCap.size(), parsedAtCap));
         REQUIRE(parsedAtCap.nalUnits.size() == ipc::kMaxNalUnits);
@@ -306,7 +309,8 @@ TEST_CASE("Encoder IPC frame result validates descriptor arithmetic", "[encoder-
 
         // Negative: identical shape, one descriptor further — only the
         // count differs from the passing case above.
-        const std::vector<uint8_t> overCap = BuildPayload(ipc::kMaxNalUnits + 1);
+        const std::vector<uint8_t> overCap =
+            BuildFrameResultPayloadWithNalCount(ipc::kMaxNalUnits + 1);
         ipc::FrameResult parsedOverCap;
         CHECK_FALSE(ipc::FrameResult::Deserialize(overCap.data(), overCap.size(), parsedOverCap));
     }
@@ -496,32 +500,14 @@ TEST_CASE("Encoder IPC socket framing over a socketpair", "[encoder-ipc]")
 
     SECTION("oversized NAL count is legally framed but FrameResult::Deserialize rejects it")
     {
-        // Hand-build a FrameResult payload carrying kMaxNalUnits+1
-        // *valid-looking* descriptors (each safely inside dataSize, so
-        // descriptor-arithmetic checks alone would pass them) with the whole
-        // message kept far under kMaxPayloadSize. That means ValidateHeader
-        // and ReadMessage must accept the framing as legal; only
-        // FrameResult::Deserialize's own count check may reject it.
-        const uint32_t nalCount = ipc::kMaxNalUnits + 1;
-        const uint32_t dataSize = nalCount; // one byte of payload per descriptor
-        std::vector<uint8_t> crafted;
-        ipc::PayloadWriter fieldWriter(crafted);
-        fieldWriter.U32(3);  // generation
-        fieldWriter.U64(99); // frameId
-        fieldWriter.I32(0);  // status
-        fieldWriter.U32(0);  // flags
-        fieldWriter.U64(0);  // encodeStartNs
-        fieldWriter.U64(0);  // callbackAtNs
-        fieldWriter.U32(nalCount);
-        fieldWriter.U32(dataSize);
-        for (uint32_t i = 0; i < nalCount; i++)
-        {
-            fieldWriter.U32(i); // offset
-            fieldWriter.U32(1); // length
-            fieldWriter.U32(0); // type
-        }
-        std::vector<uint8_t> data(dataSize, 0xAB);
-        fieldWriter.Bytes(data.data(), data.size());
+        // Build a FrameResult payload carrying kMaxNalUnits+1 *valid-looking*
+        // descriptors (each safely inside dataSize, so descriptor-arithmetic
+        // checks alone would pass them) with the whole message kept far under
+        // kMaxPayloadSize. That means ValidateHeader and ReadMessage must
+        // accept the framing as legal; only FrameResult::Deserialize's own
+        // count check may reject it.
+        const std::vector<uint8_t> crafted =
+            BuildFrameResultPayloadWithNalCount(ipc::kMaxNalUnits + 1, 3, 99);
         REQUIRE(crafted.size() < ipc::kMaxPayloadSize);
 
         ipc::EncoderIpcSocket writer(fds[1]);
