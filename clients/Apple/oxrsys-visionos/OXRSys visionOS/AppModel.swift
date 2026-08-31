@@ -222,6 +222,11 @@ final class AppModel {
     var autoEnterImmersiveOnConnect = true
     var showHandsInImmersive = true
     var keepControlWindowVisibleInImmersive = false
+    /// Immersion style for the streamed view. `false` (default) uses `.mixed`, which composites
+    /// the opaque video over passthrough — visionOS imposes no room-scale walking limit in mixed
+    /// immersion, so you can walk your whole space. `true` uses `.full`, which looks the same but
+    /// is treated as a seated experience and breaks through to passthrough when you move around.
+    var useFullImmersion = false
     var shouldRestoreControlWindowOnImmersiveClose = false
     var connectionState: ConnectionState = .disconnected
     var discoveredServer: DiscoveredServer?

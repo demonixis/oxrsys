@@ -38,7 +38,15 @@ struct Vision_PlayerApp: App {
         ImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }
-        .immersionStyle(selection: .constant(.full), in: .full)
+        // .mixed by default: the renderer draws the video opaque, so it still looks fully
+        // immersive, but mixed immersion lets you walk the whole room (no safe-bubble
+        // breakthrough that .full forces). Toggling useFullImmersion transitions live.
+        .immersionStyle(
+            selection: Binding<any ImmersionStyle>(
+                get: { appModel.useFullImmersion ? .full : .mixed },
+                set: { appModel.useFullImmersion = $0 is FullImmersionStyle }
+            ),
+            in: .mixed, .full)
         .upperLimbVisibility(appModel.showHandsInImmersive ? .visible : .hidden)
     }
 }

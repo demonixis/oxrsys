@@ -37,6 +37,8 @@ struct ContentView: View {
             Toggle("Keep window in immersive", isOn: $appModel.keepControlWindowVisibleInImmersive)
                 .disabled(appModel.connectionState == .streaming)
 
+            Toggle("Full immersion (no room-scale walking)", isOn: $appModel.useFullImmersion)
+
             DisclosureGroup("Developer") {
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("Emulate controllers (hands + gamepad)", isOn: $appModel.emulateControllers)
