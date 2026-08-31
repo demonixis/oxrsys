@@ -320,6 +320,15 @@ struct TrackingPacket
     // Optional hand tracking payload per joint: x, y, z, radius
     float leftHandJoints[HAND_JOINT_COUNT][4];
     float rightHandJoints[HAND_JOINT_COUNT][4];
+
+    // Aim (pointer) pose — distinct from the grip pose above. OpenXR defines /input/grip/pose
+    // and /input/aim/pose with different orientations (~45-60° apart on Touch); games place the
+    // controller ray/model from the aim pose. Falls back to the grip pose when aim is unavailable.
+    // Appended at the end so the wire layout stays compatible with the Swift client's raw struct.
+    float leftControllerAimPos[3];
+    float leftControllerAimRot[4];
+    float rightControllerAimPos[3];
+    float rightControllerAimRot[4];
 };
 
 enum ButtonFlags : uint32_t

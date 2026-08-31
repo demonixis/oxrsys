@@ -254,6 +254,13 @@ void InputManager::UpdateFromStreaming()
                                        packet.leftControllerRot[0],
                                        packet.leftControllerRot[1],
                                        packet.leftControllerRot[2]);
+        leftControllerAimPos_ = glm::vec3(packet.leftControllerAimPos[0],
+                                          packet.leftControllerAimPos[1],
+                                          packet.leftControllerAimPos[2]);
+        leftControllerAimRot_ = glm::quat(packet.leftControllerAimRot[3],
+                                          packet.leftControllerAimRot[0],
+                                          packet.leftControllerAimRot[1],
+                                          packet.leftControllerAimRot[2]);
     }
     if (rightControllerActive)
     {
@@ -264,6 +271,13 @@ void InputManager::UpdateFromStreaming()
                                         packet.rightControllerRot[0],
                                         packet.rightControllerRot[1],
                                         packet.rightControllerRot[2]);
+        rightControllerAimPos_ = glm::vec3(packet.rightControllerAimPos[0],
+                                           packet.rightControllerAimPos[1],
+                                           packet.rightControllerAimPos[2]);
+        rightControllerAimRot_ = glm::quat(packet.rightControllerAimRot[3],
+                                           packet.rightControllerAimRot[0],
+                                           packet.rightControllerAimRot[1],
+                                           packet.rightControllerAimRot[2]);
     }
 
     // Apply button/trigger states
@@ -316,11 +330,18 @@ void InputManager::UpdateFromStreaming()
     {
         spdlog::info("InputManager: streaming pos=({:.3f}, {:.3f}, {:.3f}) "
                       "L=({:.3f},{:.3f},{:.3f}) R=({:.3f},{:.3f},{:.3f}) "
-                      "trig={:.2f}/{:.2f} btn=0x{:x} flags=0x{:x}",
+                      "trig={:.2f}/{:.2f} grip={:.2f}/{:.2f} btn=0x{:x} flags=0x{:x}",
                       headPosition_.x, headPosition_.y, headPosition_.z,
                       leftControllerPos_.x, leftControllerPos_.y, leftControllerPos_.z,
                       rightControllerPos_.x, rightControllerPos_.y, rightControllerPos_.z,
-                      leftTrigger_, rightTrigger_, buttonState_, packet.trackingFlags);
+                      leftTrigger_, rightTrigger_, leftGripValue_, rightGripValue_,
+                      buttonState_, packet.trackingFlags);
+        // Quaternion diagnostics: head vs left controller (received, as glm w,x,y,z).
+        spdlog::info("InputManager: quat head=(x{:.3f} y{:.3f} z{:.3f} w{:.3f}) "
+                      "Lctrl=(x{:.3f} y{:.3f} z{:.3f} w{:.3f})",
+                      headQuat_.x, headQuat_.y, headQuat_.z, headQuat_.w,
+                      leftControllerRot_.x, leftControllerRot_.y,
+                      leftControllerRot_.z, leftControllerRot_.w);
     }
 
     // Log Quest IPD/FOV on first packet for debugging
@@ -438,6 +459,29 @@ XrPosef InputManager::GetControllerPose(Hand hand) const
     const glm::vec3& pos = (hand == Hand::Left) ? leftControllerPos_ : rightControllerPos_;
 
     glm::quat rot = (hand == Hand::Left) ? leftControllerRot_ : rightControllerRot_;
+
+    XrPosef pose{};
+    pose.orientation.x = rot.x;
+    pose.orientation.y = rot.y;
+    pose.orientation.z = rot.z;
+    pose.orientation.w = rot.w;
+    pose.position.x = pos.x;
+    pose.position.y = pos.y;
+    pose.position.z = pos.z;
+    return pose;
+}
+
+XrPosef InputManager::GetControllerAimPose(Hand hand) const
+{
+    const glm::vec3& pos = (hand == Hand::Left) ? leftControllerAimPos_ : rightControllerAimPos_;
+    glm::quat rot = (hand == Hand::Left) ? leftControllerAimRot_ : rightControllerAimRot_;
+
+    // Clients that don't populate the aim pose leave it identity/zero; fall back to the grip pose
+    // so /input/aim/pose is never worse than before this field existed.
+    if (rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 0.0f)
+    {
+        return GetControllerPose(hand);
+    }
 
     XrPosef pose{};
     pose.orientation.x = rot.x;
@@ -637,6 +681,18 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     {
         return GetGrabValue(hand) > 0.5f;
     }
+    // The oculus/touch profile has no squeeze/click or trigger/click component — grip and trigger
+    // are analog-only (squeeze/value, trigger/value). Per the OpenXR spec, a boolean action bound
+    // to a float source must be thresholded by the runtime. Without this a boolean grip/trigger
+    // action bound to the value path always reads false (grip "never clicks").
+    if (componentPath == "squeeze/value")
+    {
+        return GetGrabValue(hand) > 0.5f;
+    }
+    if (componentPath == "trigger/value")
+    {
+        return GetTriggerValue(hand) > 0.5f;
+    }
     if (componentPath == "thumbstick/click")
     {
         uint32_t mask = (hand == Hand::Left)
@@ -833,7 +889,10 @@ XrPosef InputManager::GetPoseComponentForProfile(Hand hand, const std::string& c
         {
             return GetTrackedHandPose(hand, componentPath);
         }
-        return GetControllerPose(hand);
+        // grip and aim poses differ (~45-60° on Touch); return each from the client's distinct
+        // streamed pose so games placing content from aim/pose aren't tilted by the grip offset.
+        return (componentPath == "aim/pose") ? GetControllerAimPose(hand)
+                                             : GetControllerPose(hand);
     }
 
     if (componentPath == "pinch_ext/pose" || componentPath == "poke_ext/pose")

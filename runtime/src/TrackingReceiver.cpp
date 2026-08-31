@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -204,6 +205,14 @@ void TrackingReceiver::Stop()
     spdlog::info("TrackingReceiver: Stopped ({} packets received)", packetCount_.load());
 }
 
+// Minimum acceptable tracking packet: everything up to (but not including) the aim-pose fields,
+// which were appended later. Older clients — and the visionOS client until it's rebuilt — send
+// exactly this many bytes. We zero-init the packet so any fields the client didn't send (e.g. the
+// aim pose) stay zero, and the runtime falls back to the grip pose for aim/pose. This keeps the
+// protocol backward-compatible instead of dropping every shorter packet as "no tracking".
+static constexpr size_t kMinTrackingPacketSize =
+    offsetof(oxr::protocol::TrackingPacket, leftControllerAimPos);
+
 void TrackingReceiver::ReceiveThread()
 {
     uint8_t buffer[sizeof(oxr::protocol::TrackingPacket)];
@@ -213,26 +222,27 @@ void TrackingReceiver::ReceiveThread()
         oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
         int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
-        if (received < static_cast<int>(sizeof(oxr::protocol::TrackingPacket)))
+        if (received < static_cast<int>(kMinTrackingPacketSize))
         {
             continue;
         }
 
         oxr::protocol::TrackingPacket packet = {};
-        memcpy(&packet, buffer, sizeof(packet));
+        size_t copyBytes = std::min(static_cast<size_t>(received), sizeof(packet));
+        memcpy(&packet, buffer, copyBytes);
         StorePacket(packet, SteadyClockNowNs());
     }
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
 {
-    if (size < sizeof(oxr::protocol::TrackingPacket))
+    if (size < kMinTrackingPacketSize)
     {
         return;
     }
 
     oxr::protocol::TrackingPacket packet = {};
-    memcpy(&packet, data, sizeof(packet));
+    memcpy(&packet, data, std::min(size, sizeof(packet)));
     StorePacket(packet, SteadyClockNowNs());
 }
 
