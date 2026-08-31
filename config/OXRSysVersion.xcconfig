@@ -13,3 +13,5 @@ INFOPLIST_KEY_NSWorldSensingUsageDescription = OXRSys uses world sensing to plac
 INFOPLIST_KEY_NSHandsTrackingUsageDescription = OXRSys uses hand tracking to drive hand and emulated-controller input.
 INFOPLIST_KEY_NSAccessoryTrackingUsageDescription = OXRSys tracks paired spatial controllers (such as PlayStation VR2 Sense) so you can use them in streamed games.
 INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = OXRSys connects to Bluetooth spatial controllers.
+// GCSupportedGameControllers (SpatialGamepad) is array-valued so it can't live here; it is in the
+// visionOS target's base Info.plist (OXRSys visionOS/Info.plist), onto which these keys merge.

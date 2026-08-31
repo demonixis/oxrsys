@@ -48,6 +48,9 @@ struct ContentView: View {
         }
         .padding(20)
         .frame(width: 320)
+        .onAppear {
+            VisionTrackingManager.logLaunchDiagnostics()
+        }
         .task {
             await synchronizePresentationState()
         }

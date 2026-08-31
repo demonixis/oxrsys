@@ -95,6 +95,33 @@ final class VisionTrackingManager: @unchecked Sendable {
 
     var onTrackingUpdate: (@Sendable (VisionTrackingSnapshot) -> Void)?
 
+    /// One-time launch probe, logged via NSLog (unified log, so it can be streamed off the device
+    /// without an Xcode debug session) to show the spatial-controller failure stage directly:
+    /// whether accessory tracking is supported at all, and whether GameController surfaces the
+    /// Sense controllers as spatial. Runs at app launch — no streaming/immersive flow required.
+    nonisolated(unsafe) private static var launchDiagnosticsStarted = false
+    static func logLaunchDiagnostics() {
+        guard !launchDiagnosticsStarted else { return }
+        launchDiagnosticsStarted = true
+        func dump(_ tag: String) {
+            let all = GCController.controllers()
+            NSLog("[SpatialDiag] \(tag): GCController.controllers()=\(all.count)")
+            for c in all {
+                var spatial = false
+                if #available(visionOS 26.0, *) { spatial = c.productCategory == GCProductCategorySpatialController }
+                NSLog("[SpatialDiag]   '\(c.vendorName ?? "?")' category='\(c.productCategory)' spatial=\(spatial)")
+            }
+        }
+        if #available(visionOS 26.0, *) {
+            NSLog("[SpatialDiag] AccessoryTrackingProvider.isSupported=\(AccessoryTrackingProvider.isSupported)")
+        } else {
+            NSLog("[SpatialDiag] visionOS < 26: accessory tracking unavailable")
+        }
+        dump("launch")
+        NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { _ in dump("didConnect") }
+        NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { _ in dump("didDisconnect") }
+    }
+
     /// Enable hand-gesture controller emulation (pinch/curl → buttons/trigger/grip, wrist → pose).
     func setGestureEmulationEnabled(_ enabled: Bool) {
         queue.async { [self] in gestureEmulationEnabled = enabled }
