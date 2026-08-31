@@ -70,6 +70,13 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var running = false
     private var accessoryTrackingProvider: Any?
     private var accessoryAnchorLogCounter = 0
+    // Accessory anchors from the provider's async update stream, kept fresh per hand ([0]=left,
+    // [1]=right). AccessoryTrackingProvider.latestAnchors does NOT update with the controller — it
+    // returns the anchor captured at connect — so (unlike hand tracking) the live pose must come
+    // from consuming anchorUpdates and predicting the stored anchor to the frame time.
+    private let accessoryAnchorLock = NSLock()
+    private var storedAccessoryAnchors: [AccessoryAnchor?] = [nil, nil]
+    private var accessoryConsumeTask: Task<Void, Never>?
     private var lastHeadOrientation: simd_quatf?
 
     // Previous sample for head-velocity measurement (all access on `queue`), plus a light EMA so
@@ -180,7 +187,12 @@ final class VisionTrackingManager: @unchecked Sendable {
         runTask?.cancel()
         runTask = nil
         session.stop()
+        accessoryConsumeTask?.cancel()
+        accessoryConsumeTask = nil
         accessoryTrackingProvider = nil
+        accessoryAnchorLock.lock()
+        storedAccessoryAnchors = [nil, nil]
+        accessoryAnchorLock.unlock()
         lastHeadOrientation = nil
         lastSamplePosition = nil
         lastSampleOrientation = nil
@@ -195,6 +207,12 @@ final class VisionTrackingManager: @unchecked Sendable {
             let providers = try await makeProviders()
             try await session.run(providers)
             print("[VisionTracking] Started")
+            if #available(visionOS 26.0, *),
+               let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
+                accessoryConsumeTask = Task { [weak self] in
+                    await self?.consumeAccessoryAnchors(accessoryProvider)
+                }
+            }
         } catch {
             print("[VisionTracking] Failed to start: \(error)")
         }
@@ -264,6 +282,26 @@ final class VisionTrackingManager: @unchecked Sendable {
         guard !accessories.isEmpty else { return nil }
         print("[VisionTracking] Tracking \(accessories.count) accessory controllers")
         return AccessoryTrackingProvider(accessories: accessories)
+    }
+
+    /// Keep a fresh anchor per hand from the provider's async update stream. Required because
+    /// `latestAnchors` does not update for accessories — without this the controller pose freezes
+    /// at the connect pose. sampleTracking predicts these stored anchors to the frame time.
+    @available(visionOS 26.0, *)
+    private func consumeAccessoryAnchors(_ provider: AccessoryTrackingProvider) async {
+        for await update in provider.anchorUpdates {
+            let anchor = update.anchor
+            guard let chirality = controllerHandedness(for: anchor) else { continue }
+            let hand: Int
+            switch chirality {
+            case .left: hand = 0
+            case .right: hand = 1
+            default: continue
+            }
+            accessoryAnchorLock.lock()
+            storedAccessoryAnchors[hand] = (update.event == .removed) ? nil : anchor
+            accessoryAnchorLock.unlock()
+        }
     }
 
     private func sampleTracking() {
@@ -346,31 +384,28 @@ final class VisionTrackingManager: @unchecked Sendable {
             snapshot.rightHand = makeHandState(from: rightHandAnchor)
         }
 
-        if #available(visionOS 26.0, *) {
-            if let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
-                let anchors = accessoryProvider.latestAnchors
-                accessoryAnchorLogCounter += 1
-                if accessoryAnchorLogCounter % 180 == 1 {  // ~ every 2 s, so the console shows life
-                    let chir = anchors.map { controllerHandedness(for: $0).map { "\($0)" } ?? "nil" }
-                    print("[VisionTracking] accessory anchors: \(anchors.count) chiralities: \(chir)")
-                }
-                for anchor in anchors {
-                    guard let handedness = controllerHandedness(for: anchor) else { continue }
-                    // latestAnchors' transform does not move with the controller; predictAnchor
-                    // returns the live pose at `timestamp` from the provider's tracking state
-                    // (the same instant the head pose is queried for), so the controllers track.
-                    let tracked = accessoryProvider.predictAnchor(for: anchor, at: timestamp) ?? anchor
-                    switch handedness {
-                    case .left:
-                        snapshot.leftController = makeControllerState(from: tracked, isLeftHand: true)
-                    case .right:
-                        snapshot.rightController = makeControllerState(from: tracked, isLeftHand: false)
-                    case .unspecified:
-                        break
-                    @unknown default:
-                        break
-                    }
-                }
+        if #available(visionOS 26.0, *),
+           let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
+            accessoryAnchorLock.lock()
+            let stored = storedAccessoryAnchors
+            accessoryAnchorLock.unlock()
+
+            // Predict each fresh anchor to the frame's timestamp (the instant the head pose is
+            // queried for) so the controllers track live rather than freezing at the connect pose.
+            if let leftAnchor = stored[0] {
+                let tracked = accessoryProvider.predictAnchor(for: leftAnchor, at: timestamp) ?? leftAnchor
+                snapshot.leftController = makeControllerState(from: tracked, isLeftHand: true)
+            }
+            if let rightAnchor = stored[1] {
+                let tracked = accessoryProvider.predictAnchor(for: rightAnchor, at: timestamp) ?? rightAnchor
+                snapshot.rightController = makeControllerState(from: tracked, isLeftHand: false)
+            }
+
+            accessoryAnchorLogCounter += 1
+            if accessoryAnchorLogCounter % 180 == 1 {  // ~2 s; a CHANGING Lpos means it is tracking
+                let lp = snapshot.leftController?.position
+                print("[VisionTracking] accessory: stored L=\(stored[0] != nil) R=\(stored[1] != nil) "
+                      + "Lpos=\(lp.map { String(format: "(%.2f, %.2f, %.2f)", $0.x, $0.y, $0.z) } ?? "nil")")
             }
         }
 
