@@ -356,11 +356,15 @@ final class VisionTrackingManager: @unchecked Sendable {
                 }
                 for anchor in anchors {
                     guard let handedness = controllerHandedness(for: anchor) else { continue }
+                    // latestAnchors' transform does not move with the controller; predictAnchor
+                    // returns the live pose at `timestamp` from the provider's tracking state
+                    // (the same instant the head pose is queried for), so the controllers track.
+                    let tracked = accessoryProvider.predictAnchor(for: anchor, at: timestamp) ?? anchor
                     switch handedness {
                     case .left:
-                        snapshot.leftController = makeControllerState(from: anchor, isLeftHand: true)
+                        snapshot.leftController = makeControllerState(from: tracked, isLeftHand: true)
                     case .right:
-                        snapshot.rightController = makeControllerState(from: anchor, isLeftHand: false)
+                        snapshot.rightController = makeControllerState(from: tracked, isLeftHand: false)
                     case .unspecified:
                         break
                     @unknown default:
