@@ -213,7 +213,11 @@ final class VisionTrackingManager: @unchecked Sendable {
 
     @available(visionOS 26.0, *)
     private func makeAccessoryTrackingProvider() async -> AccessoryTrackingProvider? {
-        let controllers = GCController.controllers()
+        // Only spatial controllers (e.g. PSVR2 Sense) can be tracked as accessories; a regular
+        // gamepad (Xbox) is not one, and Accessory(device:) would just throw for it.
+        let controllers = GCController.controllers().filter {
+            $0.productCategory == GCProductCategorySpatialController
+        }
         guard !controllers.isEmpty else { return nil }
 
         var accessories: [Accessory] = []
@@ -316,12 +320,11 @@ final class VisionTrackingManager: @unchecked Sendable {
            let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
             for anchor in accessoryProvider.latestAnchors {
                 guard let handedness = controllerHandedness(for: anchor) else { continue }
-                let controllerState = makeControllerState(from: anchor)
                 switch handedness {
                 case .left:
-                    snapshot.leftController = controllerState
+                    snapshot.leftController = makeControllerState(from: anchor, isLeftHand: true)
                 case .right:
-                    snapshot.rightController = controllerState
+                    snapshot.rightController = makeControllerState(from: anchor, isLeftHand: false)
                 case .unspecified:
                     break
                 @unknown default:
@@ -526,35 +529,28 @@ final class VisionTrackingManager: @unchecked Sendable {
     }
 
     @available(visionOS 26.0, *)
-    private func makeControllerState(from anchor: AccessoryAnchor) -> VisionControllerState {
-        let position = anchor.originFromAnchorTransform.translation
-        let orientation = simd_quatf(anchor.originFromAnchorTransform.rotationMatrix)
+    private func makeControllerState(from anchor: AccessoryAnchor, isLeftHand: Bool) -> VisionControllerState {
+        let transform = anchor.originFromAnchorTransform
+        let position = transform.translation
+        // Apply the target profile's grip-convention correction (identity until tuned on-device).
+        let orientation = simd_normalize(
+            simd_quatf(transform.rotationMatrix)
+            * SpatialControllerSupport.gripCorrection(isLeftHand: isLeftHand))
 
-        var buttonState: UInt32 = 0
-        var trigger: Float = 0
-        var grip: Float = 0
-        var thumbstick = SIMD2<Float>(repeating: 0)
-
+        // PSVR2 Sense buttons/trigger/grip/thumbstick, mapped to Meta Touch (Quest 2) per hand.
+        var input = SpatialControllerSupport.Input()
         if case let .device(device) = anchor.accessory.source,
-           let controller = device as? GCController,
-           let gamepad = controller.extendedGamepad {
-            if gamepad.buttonA.isPressed { buttonState |= ButtonFlags.a }
-            if gamepad.buttonB.isPressed { buttonState |= ButtonFlags.b }
-            if gamepad.buttonX.isPressed { buttonState |= ButtonFlags.x }
-            if gamepad.buttonY.isPressed { buttonState |= ButtonFlags.y }
-            if gamepad.buttonMenu.isPressed { buttonState |= ButtonFlags.menu }
-            trigger = gamepad.rightTrigger.value
-            grip = max(gamepad.leftTrigger.value, gamepad.leftShoulder.value)
-            thumbstick = SIMD2<Float>(gamepad.leftThumbstick.xAxis.value, gamepad.leftThumbstick.yAxis.value)
+           let controller = device as? GCController {
+            input = SpatialControllerSupport.input(from: controller, isLeftHand: isLeftHand)
         }
 
         return VisionControllerState(
             position: position,
             orientation: orientation,
-            buttonState: buttonState,
-            trigger: trigger,
-            grip: grip,
-            thumbstick: thumbstick
+            buttonState: input.buttons,
+            trigger: input.trigger,
+            grip: input.grip,
+            thumbstick: input.thumbstick
         )
     }
 }
