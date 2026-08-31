@@ -2593,15 +2593,13 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     foveationEdgeRatioY_ = std::max(server.foveationEdgeRatioY, 1.0f);
     const bool clientFoveationOverride =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_FOVEATION) != 0;
-    if (clientFoveationOverride)
-    {
-        ApplyClientFoveationPreset(server.clientFoveationPreset);
-    }
-    else
-    {
-        clientFoveationPreset_ = protocol::ClientFoveationPreset::Off;
-        ShutdownFoveation();
-    }
+    // This runs on the discovery thread. The FB foveation functions touch swapchains_/session_,
+    // which are owned by the render thread — calling them here races the render thread's session
+    // teardown on reconnect and crashes (SIGSEGV in ShutdownFoveation). Defer to RunFrame().
+    const protocol::ClientFoveationPreset requestedFoveationPreset =
+        clientFoveationOverride ? server.clientFoveationPreset
+                                : protocol::ClientFoveationPreset::Off;
+    pendingFoveationPreset_.store(static_cast<int>(requestedFoveationPreset));
 
     if (server.refreshRateHz > 0)
     {
@@ -3577,6 +3575,16 @@ void XrApp::RunFrame()
 
     RetryUsbAdbTransportIfNeeded();
     ApplyCompletedStreamConfigUpdate();
+
+    // Apply any foveation preset requested by the server (deferred here from the discovery thread,
+    // where touching swapchains_/session_ would race this thread's session lifecycle).
+    const int pendingFoveation = pendingFoveationPreset_.exchange(-1);
+    if (pendingFoveation >= 0 && pendingFoveation != appliedFoveationPreset_)
+    {
+        ApplyClientFoveationPreset(
+            static_cast<protocol::ClientFoveationPreset>(pendingFoveation));
+        appliedFoveationPreset_ = pendingFoveation;
+    }
 
     if (connectionState_.load() == ConnectionState::Connected &&
         !hasVideoTexture_ &&
@@ -5104,6 +5112,19 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
             }
             if (controllerActive || aimActive)
             {
+                // Send the aim (pointer) pose separately from grip so the server can report
+                // /input/aim/pose correctly. Prefer the real aim pose; fall back to grip.
+                const XrPosef& aimSrc = aimActive ? aimLoc.pose : loc.pose;
+                float* apos = (hand == 0) ? packet.leftControllerAimPos : packet.rightControllerAimPos;
+                float* arot = (hand == 0) ? packet.leftControllerAimRot : packet.rightControllerAimRot;
+                apos[0] = aimSrc.position.x;
+                apos[1] = aimSrc.position.y;
+                apos[2] = aimSrc.position.z;
+                arot[0] = aimSrc.orientation.x;
+                arot[1] = aimSrc.orientation.y;
+                arot[2] = aimSrc.orientation.z;
+                arot[3] = aimSrc.orientation.w;
+
                 shellControllers_[hand].active = true;
                 shellControllers_[hand].aimActive = aimActive;
                 shellControllers_[hand].gripPose = controllerActive ? loc.pose : aimLoc.pose;
@@ -5134,6 +5155,21 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
     readFloatAction(gripAction_, handPaths_[1], &packet.rightGrip);
     shellControllers_[0].triggerValue = packet.leftTrigger;
     shellControllers_[1].triggerValue = packet.rightTrigger;
+
+    // Diagnostics: what we actually put on the wire for the left hand — grip-pose quat vs
+    // head/view quat (both in appSpace_) and the grip/trigger values. Compare against the
+    // runtime's "quat head=... Lctrl=..." log to isolate the 90° controller tilt and grip flow.
+    static uint32_t sendDiagCounter = 0;
+    if (++sendDiagCounter % 270 == 1)
+    {
+        LOGI("SendDiag L: ctrlRot=(x%.3f y%.3f z%.3f w%.3f) headRot=(x%.3f y%.3f z%.3f w%.3f) "
+             "grip=%.2f trig=%.2f",
+             packet.leftControllerRot[0], packet.leftControllerRot[1],
+             packet.leftControllerRot[2], packet.leftControllerRot[3],
+             packet.headOrientation[0], packet.headOrientation[1],
+             packet.headOrientation[2], packet.headOrientation[3],
+             packet.leftGrip, packet.leftTrigger);
+    }
 
     // Thumbsticks
     readVector2Action(thumbstickAction_, handPaths_[0],
@@ -5255,6 +5291,7 @@ void XrApp::HandleSessionStateChange(XrSessionState newState)
         SetShellPassthroughActive(false);
         ShutdownHandTracking();
         ShutdownFoveation();
+        appliedFoveationPreset_ = -1;  // fresh session must re-apply foveation
         xrEndSession(session_);
         sessionRunning_ = false;
         LOGI("Session STOPPING -> ended");

@@ -297,6 +297,17 @@ private:
     uint32_t clientRefreshRateHz_ = 90;
     protocol::ClientFoveationPreset clientFoveationPreset_ =
         protocol::ClientFoveationPreset::Off;
+    // Foveation preset requested by the server, applied on the render thread in RunFrame().
+    // The FB foveation functions touch swapchains_/session_ and MUST NOT run on the discovery
+    // thread — doing so races the render thread's session teardown on reconnect and crashes
+    // (SIGSEGV in ShutdownFoveation). -1 means nothing pending.
+    std::atomic<int> pendingFoveationPreset_{-1};
+    // The foveation preset currently applied to the live swapchains (-1 = none applied yet).
+    // Re-applying the same preset tears down a live foveation profile and rebuilds it every
+    // reconnect; the Meta driver faults destroying a profile still bound to valid swapchains, so
+    // we skip the churn unless the preset actually changed. Reset to -1 when the session stops so
+    // a fresh session re-applies. Touched only on the render thread.
+    int appliedFoveationPreset_ = -1;
     protocol::ClientReprojectionMode clientReprojectionMode_ =
         protocol::ClientReprojectionMode::Pose;
     bool serverFoveatedEncodingEnabled_ = false;
