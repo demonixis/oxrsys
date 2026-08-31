@@ -346,6 +346,14 @@ public struct TrackingPacket: Sendable {
     public var leftHandJoints: HandJointData = HandJointData()
     public var rightHandJoints: HandJointData = HandJointData()
 
+    // Aim (pointer) pose — must stay byte-for-byte in sync with the C++ Protocol.h struct
+    // (the packet is sent as a raw struct copy). Distinct from the grip pose; defaults to
+    // identity for clients that don't yet populate it.
+    public var leftControllerAimPos: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
+    public var rightControllerAimPos: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
+
     public init() {}
 }
 
