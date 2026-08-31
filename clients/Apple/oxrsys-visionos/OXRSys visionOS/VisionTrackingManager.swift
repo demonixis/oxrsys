@@ -69,6 +69,12 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var sampleTimer: DispatchSourceTimer?
     private var running = false
     private var accessoryTrackingProvider: Any?
+    // The spatial controllers the accessory provider was last built from. The provider set is fixed
+    // when `session.run` is called, so a controller paired *after* the session started is invisible
+    // until we rebuild the provider and re-run the session. Polled cheaply each sample.
+    private var trackedSpatialControllerIDs: Set<ObjectIdentifier> = []
+    private var rebuildingAccessories = false
+    private var accessoryAnchorLogCounter = 0
     private var lastHeadOrientation: simd_quatf?
 
     // Previous sample for head-velocity measurement (all access on `queue`), plus a light EMA so
@@ -218,6 +224,9 @@ final class VisionTrackingManager: @unchecked Sendable {
         let controllers = GCController.controllers().filter {
             $0.productCategory == GCProductCategorySpatialController
         }
+        print("[VisionTracking] spatial controllers detected: \(controllers.count) "
+              + "\(controllers.map { $0.vendorName ?? "?" })")
+        trackedSpatialControllerIDs = Set(controllers.map { ObjectIdentifier($0) })
         guard !controllers.isEmpty else { return nil }
 
         var accessories: [Accessory] = []
@@ -234,6 +243,42 @@ final class VisionTrackingManager: @unchecked Sendable {
         guard !accessories.isEmpty else { return nil }
         print("[VisionTracking] Tracking \(accessories.count) accessory controllers")
         return AccessoryTrackingProvider(accessories: accessories)
+    }
+
+    /// Rebuild the accessory provider and re-run the session when the set of paired spatial
+    /// controllers changes, so a controller powered on or paired *after* the immersive session
+    /// started still gets tracked (the provider set is otherwise fixed at `session.run`). Cheap:
+    /// an identity-set compare of a list that is almost always empty or two long.
+    @available(visionOS 26.0, *)
+    private func refreshSpatialControllersIfNeeded() {
+        guard running, !rebuildingAccessories else { return }
+        let ids = Set(GCController.controllers()
+            .filter { $0.productCategory == GCProductCategorySpatialController }
+            .map { ObjectIdentifier($0) })
+        guard ids != trackedSpatialControllerIDs else { return }
+        trackedSpatialControllerIDs = ids
+        rebuildingAccessories = true
+        print("[VisionTracking] spatial controller set changed (\(ids.count)); rebuilding provider")
+        Task { [weak self] in await self?.rebuildAccessoryProvider() }
+    }
+
+    @available(visionOS 26.0, *)
+    private func rebuildAccessoryProvider() async {
+        defer { rebuildingAccessories = false }
+        guard running else { return }
+        let provider = await makeAccessoryTrackingProvider()
+        guard running else { return }
+        var providers: [any DataProvider] = [worldTracking]
+        if HandTrackingProvider.isSupported { providers.append(handTracking) }
+        if let provider { providers.append(provider) }
+        do {
+            // ARKit allows re-running with an updated provider list without stopping first.
+            try await session.run(providers)
+            accessoryTrackingProvider = provider
+            print("[VisionTracking] session re-run; accessory provider \(provider == nil ? "cleared" : "active")")
+        } catch {
+            print("[VisionTracking] session re-run failed: \(error)")
+        }
     }
 
     private func sampleTracking() {
@@ -316,19 +361,29 @@ final class VisionTrackingManager: @unchecked Sendable {
             snapshot.rightHand = makeHandState(from: rightHandAnchor)
         }
 
-        if #available(visionOS 26.0, *),
-           let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
-            for anchor in accessoryProvider.latestAnchors {
-                guard let handedness = controllerHandedness(for: anchor) else { continue }
-                switch handedness {
-                case .left:
-                    snapshot.leftController = makeControllerState(from: anchor, isLeftHand: true)
-                case .right:
-                    snapshot.rightController = makeControllerState(from: anchor, isLeftHand: false)
-                case .unspecified:
-                    break
-                @unknown default:
-                    break
+        if #available(visionOS 26.0, *) {
+            // Pick up controllers paired after the session started (see trackedSpatialControllerIDs).
+            refreshSpatialControllersIfNeeded()
+
+            if let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
+                let anchors = accessoryProvider.latestAnchors
+                accessoryAnchorLogCounter += 1
+                if accessoryAnchorLogCounter % 180 == 1 {  // ~ every 2 s, so the console shows life
+                    let chir = anchors.map { controllerHandedness(for: $0).map { "\($0)" } ?? "nil" }
+                    print("[VisionTracking] accessory anchors: \(anchors.count) chiralities: \(chir)")
+                }
+                for anchor in anchors {
+                    guard let handedness = controllerHandedness(for: anchor) else { continue }
+                    switch handedness {
+                    case .left:
+                        snapshot.leftController = makeControllerState(from: anchor, isLeftHand: true)
+                    case .right:
+                        snapshot.rightController = makeControllerState(from: anchor, isLeftHand: false)
+                    case .unspecified:
+                        break
+                    @unknown default:
+                        break
+                    }
                 }
             }
         }

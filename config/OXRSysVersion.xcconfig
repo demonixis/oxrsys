@@ -4,3 +4,12 @@ OXRSYS_VERSION = 1.3.0
 OXRSYS_BUILD = 1
 MARKETING_VERSION = $(OXRSYS_VERSION)
 CURRENT_PROJECT_VERSION = $(OXRSYS_BUILD)
+
+// visionOS usage descriptions for the ARKit providers and spatial controllers. These flow into
+// the generated Info.plist (GENERATE_INFOPLIST_FILE) from this base xcconfig. Accessory tracking
+// in particular REQUIRES NSAccessoryTrackingUsageDescription — without it the platform refuses to
+// track paired spatial controllers (PSVR2 Sense), which reads as "controllers never appear".
+INFOPLIST_KEY_NSWorldSensingUsageDescription = OXRSys uses world sensing to place the streamed view and track controllers in your space.
+INFOPLIST_KEY_NSHandsTrackingUsageDescription = OXRSys uses hand tracking to drive hand and emulated-controller input.
+INFOPLIST_KEY_NSAccessoryTrackingUsageDescription = OXRSys tracks paired spatial controllers (such as PlayStation VR2 Sense) so you can use them in streamed games.
+INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = OXRSys connects to Bluetooth spatial controllers.
