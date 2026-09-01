@@ -382,6 +382,15 @@ final class AppModel {
                     leftController.thumbstick.x,
                     leftController.thumbstick.y
                 )
+                // Send the pointer pose only when the controller publishes a distinct aim
+                // location; leaving it unset makes the runtime fall back to the grip pose.
+                if let aimPos = leftController.aimPosition,
+                   let aimRot = leftController.aimOrientation {
+                    packet.leftControllerAimPos = (aimPos.x, aimPos.y, aimPos.z)
+                    packet.leftControllerAimRot = (
+                        aimRot.imag.x, aimRot.imag.y, aimRot.imag.z, aimRot.real
+                    )
+                }
             }
 
             if let rightController = snapshot.rightController {
@@ -404,6 +413,15 @@ final class AppModel {
                     rightController.thumbstick.x,
                     rightController.thumbstick.y
                 )
+                // Send the pointer pose only when the controller publishes a distinct aim
+                // location; leaving it unset makes the runtime fall back to the grip pose.
+                if let aimPos = rightController.aimPosition,
+                   let aimRot = rightController.aimOrientation {
+                    packet.rightControllerAimPos = (aimPos.x, aimPos.y, aimPos.z)
+                    packet.rightControllerAimRot = (
+                        aimRot.imag.x, aimRot.imag.y, aimRot.imag.z, aimRot.real
+                    )
+                }
             }
 
             trackingSender.send(packet)

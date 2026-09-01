@@ -38,6 +38,10 @@ struct VisionControllerState: Sendable {
     let trigger: Float
     let grip: Float
     let thumbstick: SIMD2<Float>
+    /// Pointer ("aim") pose, when the accessory publishes a distinct aim location. nil leaves the
+    /// packet's aim fields unset so the runtime falls back to the grip pose.
+    var aimPosition: SIMD3<Float>? = nil
+    var aimOrientation: simd_quatf? = nil
 }
 
 struct VisionTrackingSnapshot: Sendable {
@@ -625,6 +629,17 @@ final class VisionTrackingManager: @unchecked Sendable {
         return anchor.originFromAnchorTransform
     }
 
+    /// The controller's LIVE aim (pointer) pose, when the accessory publishes one. Resolved through
+    /// `coordinateSpace(for:)` like the grip pose so it tracks instead of freezing. Returns nil when
+    /// the accessory has no distinct aim location, which leaves the packet's aim fields unset so the
+    /// runtime keeps using the grip pose.
+    @available(visionOS 26.0, *)
+    private func accessoryAimTransform(_ anchor: AccessoryAnchor) -> simd_float4x4? {
+        guard anchor.accessory.locations.contains(.aim) else { return nil }
+        return anchor.coordinateSpace(for: .aim, correction: .rendered)
+            .ancestorFromSpaceTransformFloat().matrix
+    }
+
     private func makeControllerState(from anchor: AccessoryAnchor, isLeftHand: Bool) -> VisionControllerState {
         let transform = accessoryTransform(anchor)
         let position = transform.translation
@@ -640,7 +655,7 @@ final class VisionTrackingManager: @unchecked Sendable {
             input = SpatialControllerSupport.input(from: controller, isLeftHand: isLeftHand)
         }
 
-        return VisionControllerState(
+        var state = VisionControllerState(
             position: position,
             orientation: orientation,
             buttonState: input.buttons,
@@ -648,6 +663,11 @@ final class VisionTrackingManager: @unchecked Sendable {
             grip: input.grip,
             thumbstick: input.thumbstick
         )
+        if let aim = accessoryAimTransform(anchor) {
+            state.aimPosition = aim.translation
+            state.aimOrientation = simd_normalize(simd_quatf(aim.rotationMatrix))
+        }
+        return state
     }
 }
 
