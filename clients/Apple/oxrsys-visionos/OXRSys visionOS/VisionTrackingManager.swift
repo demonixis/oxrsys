@@ -6,6 +6,7 @@ import GameController
 import OXRSysStreaming
 import QuartzCore
 import simd
+import Spatial
 
 /// Orientation correction for emulated (hand-derived) controller poses. The hand frame points
 /// +Z toward the fingertips, opposite the OpenXR grip pose's forward (−Z), so an uncorrected
@@ -391,20 +392,23 @@ final class VisionTrackingManager: @unchecked Sendable {
             accessoryAnchorLock.unlock()
 
             // Predict each fresh anchor to the frame's timestamp (the instant the head pose is
-            // queried for) so the controllers track live rather than freezing at the connect pose.
+            // queried for). The pose itself is read live via accessoryTransform().
+            var leftPredicted = false
             if let leftAnchor = stored[0] {
-                let tracked = accessoryProvider.predictAnchor(for: leftAnchor, at: timestamp) ?? leftAnchor
-                snapshot.leftController = makeControllerState(from: tracked, isLeftHand: true)
+                let predicted = accessoryProvider.predictAnchor(for: leftAnchor, at: timestamp)
+                leftPredicted = predicted != nil
+                snapshot.leftController = makeControllerState(from: predicted ?? leftAnchor, isLeftHand: true)
             }
             if let rightAnchor = stored[1] {
-                let tracked = accessoryProvider.predictAnchor(for: rightAnchor, at: timestamp) ?? rightAnchor
-                snapshot.rightController = makeControllerState(from: tracked, isLeftHand: false)
+                let predicted = accessoryProvider.predictAnchor(for: rightAnchor, at: timestamp)
+                snapshot.rightController = makeControllerState(from: predicted ?? rightAnchor, isLeftHand: false)
             }
 
             accessoryAnchorLogCounter += 1
             if accessoryAnchorLogCounter % 180 == 1 {  // ~2 s; a CHANGING Lpos means it is tracking
                 let lp = snapshot.leftController?.position
-                print("[VisionTracking] accessory: stored L=\(stored[0] != nil) R=\(stored[1] != nil) "
+                let state = stored[0].map { "\($0.trackingState) isTracked=\($0.isTracked)" } ?? "no-anchor"
+                print("[VisionTracking] accessory L: \(state) predicted=\(leftPredicted) "
                       + "Lpos=\(lp.map { String(format: "(%.2f, %.2f, %.2f)", $0.x, $0.y, $0.z) } ?? "nil")")
             }
         }
@@ -605,8 +609,24 @@ final class VisionTrackingManager: @unchecked Sendable {
     }
 
     @available(visionOS 26.0, *)
+    /// The controller's LIVE pose.
+    ///
+    /// `AccessoryAnchor` is a value snapshot: `originFromAnchorTransform` is frozen at the instant
+    /// the anchor was produced, so re-reading it every frame yields a pose that snaps once and then
+    /// never moves. `coordinateSpace(for:)` resolves against the provider's live tracking state at
+    /// call time, which is what actually follows the controller. Prefer `.grip` (where the hand
+    /// holds it — the frame an OpenXR grip pose wants); fall back to the snapshot for an accessory
+    /// that publishes no grip location.
+    private func accessoryTransform(_ anchor: AccessoryAnchor) -> simd_float4x4 {
+        if anchor.accessory.locations.contains(.grip) {
+            return anchor.coordinateSpace(for: .grip, correction: .rendered)
+                .ancestorFromSpaceTransformFloat().matrix
+        }
+        return anchor.originFromAnchorTransform
+    }
+
     private func makeControllerState(from anchor: AccessoryAnchor, isLeftHand: Bool) -> VisionControllerState {
-        let transform = anchor.originFromAnchorTransform
+        let transform = accessoryTransform(anchor)
         let position = transform.translation
         // Apply the target profile's grip-convention correction (identity until tuned on-device).
         let orientation = simd_normalize(
