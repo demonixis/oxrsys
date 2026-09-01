@@ -52,6 +52,11 @@ struct ContentView: View {
             VisionTrackingManager.logLaunchDiagnostics()
         }
         .task {
+            // Start looking for a server immediately, like the Android client, so a launch with
+            // the runtime already streaming connects and enters the view without any tapping.
+            if appModel.connectionState == .disconnected && appModel.discoveredServer == nil {
+                appModel.startDiscovery()
+            }
             await synchronizePresentationState()
         }
         .onChange(of: appModel.connectionState) { _, _ in

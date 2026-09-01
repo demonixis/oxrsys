@@ -232,7 +232,7 @@ final class AppModel {
     var shouldRestoreControlWindowOnImmersiveClose = false
     var connectionState: ConnectionState = .disconnected
     var discoveredServer: DiscoveredServer?
-    var statusText = "Tap Search to find the runtime"
+    var statusText = "Searching for the runtime..."
     var directServerHost = UserDefaults.standard.string(
         forKey: AppModel.directServerHostPreferenceKey
     ) ?? ""
@@ -266,6 +266,11 @@ final class AppModel {
     private nonisolated let postFXState = PostFXState()
 
     private var statsTimer: Timer?
+    /// When the stream started, so the watchdog can distinguish "video never arrived" from
+    /// "video stopped". 0 while disconnected.
+    private var connectedAtNs: Int64 = 0
+    /// Cleared on a user-initiated disconnect so we do not immediately rediscover and reconnect.
+    private var shouldAutoReconnect = true
     private var lastStatsTimeNs: Int64 = 0
     private var lastDeliveredFrames: UInt32 = 0
     private let keyframeErrorThreshold = 3
@@ -448,6 +453,7 @@ final class AppModel {
 
     func startDiscovery() {
         guard connectionState == .disconnected else { return }
+        shouldAutoReconnect = true
         usesDirectServerAddress = false
         connectionState = .discovering
         discoveredServer = nil
@@ -458,13 +464,10 @@ final class AppModel {
                 guard let self, self.connectionState == .discovering else { return }
                 self.discoveredServer = server
                 self.discovery.stop()
-                if self.autoEnterImmersiveOnConnect {
-                    self.statusText = "Found \(server.name), connecting..."
-                    self.connect()
-                } else {
-                    self.connectionState = .disconnected
-                    self.statusText = "Found \(server.name)"
-                }
+                // Connect as soon as a server appears, like the Android client. Whether we then
+                // enter the immersive space is a separate choice (autoEnterImmersiveOnConnect).
+                self.statusText = "Found \(server.name), connecting..."
+                self.connect()
             }
         }
     }
@@ -593,6 +596,7 @@ final class AppModel {
         updateTrackingState()
 
         connectionState = .streaming
+        connectedAtNs = VideoReceiver.monotonicNs()
         wantsImmersiveSpace = autoEnterImmersiveOnConnect
         statusText = "Streaming from \(server.name) via \(serverAddress)"
     }
@@ -606,7 +610,11 @@ final class AppModel {
         wantsImmersiveSpace = true
     }
 
-    func disconnect() {
+    func disconnect(userInitiated: Bool = true) {
+        if userInitiated {
+            shouldAutoReconnect = false
+        }
+        connectedAtNs = 0
         stopTracking()
         stopStatsTimer()
         videoReceiver.stop()
@@ -700,7 +708,12 @@ final class AppModel {
     }
 
     private func updateTrackingState() {
-        let shouldTrack = connectionState == .streaming && immersiveSpaceState == .open
+        // Start as soon as the stream is up rather than waiting for the immersive space to open.
+        // Running the ARKit session is asynchronous (it has to clear authorization first), so
+        // gating it on the space being open meant the renderer's first frames queried a provider
+        // that was not running yet: no device anchor, "this drawable won't be presented", and a
+        // frozen image until the user reconnected. Warming it at connect closes that window.
+        let shouldTrack = connectionState == .streaming
         if shouldTrack {
             trackingManager.start()
         } else {
@@ -730,7 +743,42 @@ final class AppModel {
         statsTimer = nil
     }
 
+    /// Mirrors the Android client's watchdogs: if video never arrives after connecting, or stops
+    /// arriving mid-session (the server app quit, the runtime stopped, the link dropped), drop the
+    /// connection and go back to discovery instead of sitting on a frozen frame.
+    private func checkStreamHealth() {
+        guard connectionState == .streaming else { return }
+        let now = VideoReceiver.monotonicNs()
+
+        if videoReceiver.framesDelivered == 0 {
+            if connectedAtNs != 0, now - connectedAtNs > 5_000_000_000 {
+                handleConnectionLost(reason: "No video from the server")
+            }
+            return
+        }
+
+        let lastFrameNs = videoReceiver.lastFrameDeliveryTimeNs
+        if lastFrameNs != 0, now - lastFrameNs > 2_000_000_000 {
+            handleConnectionLost(reason: "Server stopped streaming")
+        }
+    }
+
+    /// Tear the session down and start looking for a server again. Distinct from a user-initiated
+    /// disconnect, which stays disconnected.
+    private func handleConnectionLost(reason: String) {
+        guard connectionState == .streaming else { return }
+        print("[Connection] lost: \(reason)")
+        disconnect(userInitiated: false)
+        statusText = "\(reason) — searching..."
+        if shouldAutoReconnect {
+            startDiscovery()
+        }
+    }
+
     private func refreshStats() {
+        checkStreamHealth()
+        guard connectionState == .streaming else { return }
+
         stats.packetsReceived = videoReceiver.packetsReceived
         stats.framesDelivered = videoReceiver.framesDelivered
         stats.framesDropped = videoReceiver.framesDropped
