@@ -70,6 +70,10 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var handTracking = HandTrackingProvider()
     private let queue = DispatchQueue(label: "oxr.visionos.tracking", qos: .userInteractive)
 
+    // Bumped on every teardown. An in-flight `runSession` captures the generation it started
+    // under and re-checks it after each await, so a session start that was superseded by a
+    // reconnect can never run its stale provider array against the new session.
+    private var sessionGeneration: UInt64 = 0
     private var runTask: Task<Void, Never>?
     private var sampleTimer: DispatchSourceTimer?
     private var running = false
@@ -149,8 +153,9 @@ final class VisionTrackingManager: @unchecked Sendable {
             guard !running else { return }
             running = true
 
-            runTask = Task {
-                await runSession()
+            let generation = sessionGeneration
+            runTask = Task { [weak self] in
+                await self?.runSession(generation: generation)
             }
 
             let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
@@ -187,6 +192,7 @@ final class VisionTrackingManager: @unchecked Sendable {
     /// Stop the running session and cancel work. Must be called on `queue`.
     private func tearDownLocked() {
         running = false
+        sessionGeneration &+= 1
         sampleTimer?.cancel()
         sampleTimer = nil
         runTask?.cancel()
@@ -208,15 +214,31 @@ final class VisionTrackingManager: @unchecked Sendable {
         gestureEmulator.reset()
     }
 
-    private func runSession() async {
+    private func runSession(generation: UInt64) async {
         do {
-            let providers = try await makeProviders()
+            guard let (session, providers) = try await makeProviders(generation: generation) else {
+                print("[VisionTracking] Discarding superseded session start")
+                return
+            }
             try await session.run(providers)
+            guard isCurrent(generation) else {
+                print("[VisionTracking] Discarding superseded session start")
+                return
+            }
             print("[VisionTracking] Started")
-            if #available(visionOS 26.0, *),
-               let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
-                accessoryConsumeTask = Task { [weak self] in
-                    await self?.consumeAccessoryAnchors(accessoryProvider)
+            if #available(visionOS 26.0, *) {
+                let accessoryProvider = queue.sync { () -> AccessoryTrackingProvider? in
+                    guard sessionGeneration == generation else { return nil }
+                    return accessoryTrackingProvider as? AccessoryTrackingProvider
+                }
+                if let accessoryProvider {
+                    let task: Task<Void, Never> = Task { [weak self] in
+                        await self?.consumeAccessoryAnchors(accessoryProvider)
+                    }
+                    queue.sync {
+                        guard sessionGeneration == generation else { return task.cancel() }
+                        accessoryConsumeTask = task
+                    }
                 }
             }
         } catch {
@@ -224,7 +246,25 @@ final class VisionTrackingManager: @unchecked Sendable {
         }
     }
 
-    private func makeProviders() async throws -> [any DataProvider] {
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        queue.sync { sessionGeneration == generation }
+    }
+
+    /// Builds the provider set for one session start. Returns nil once a teardown has superseded
+    /// this start: requesting authorization and constructing `Accessory(device:)` both suspend for
+    /// long enough that a disconnect/reconnect can recreate the session and providers underneath
+    /// us, and running the stale array against the new session leaves a dead provider inside a
+    /// live one — which showed up as hand tracking reporting "provider is not running" for a whole
+    /// session while world and accessory tracking worked.
+    private func makeProviders(generation: UInt64) async throws
+        -> (session: ARKitSession, providers: [any DataProvider])?
+    {
+        let snapshot = queue.sync { () -> (ARKitSession, WorldTrackingProvider, HandTrackingProvider)? in
+            guard sessionGeneration == generation else { return nil }
+            return (session, worldTracking, handTracking)
+        }
+        guard let (session, worldTracking, handTracking) = snapshot else { return nil }
+
         let authorizationTypes = Set(
             WorldTrackingProvider.requiredAuthorizations +
             (HandTrackingProvider.isSupported ? HandTrackingProvider.requiredAuthorizations : []) +
@@ -237,6 +277,7 @@ final class VisionTrackingManager: @unchecked Sendable {
                 print("[VisionTracking] Authorization \(type): \(status)")
             }
         }
+        guard isCurrent(generation) else { return nil }
 
         var providers: [any DataProvider] = [worldTracking]
 
@@ -247,13 +288,15 @@ final class VisionTrackingManager: @unchecked Sendable {
         if #available(visionOS 26.0, *),
            AccessoryTrackingProvider.isSupported,
            let accessoryProvider = await makeAccessoryTrackingProvider() {
-            accessoryTrackingProvider = accessoryProvider
+            guard isCurrent(generation) else { return nil }
+            queue.sync { accessoryTrackingProvider = accessoryProvider }
             providers.append(accessoryProvider)
         } else {
-            accessoryTrackingProvider = nil
+            guard isCurrent(generation) else { return nil }
+            queue.sync { accessoryTrackingProvider = nil }
         }
 
-        return providers
+        return (session, providers)
     }
 
     private func accessoryAuthorizationTypes() -> [ARKitSession.AuthorizationType] {
