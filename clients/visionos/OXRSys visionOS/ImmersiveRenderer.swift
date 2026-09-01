@@ -128,6 +128,17 @@ actor ImmersiveRenderer {
                 continue
             }
 
+            // Nothing is streaming: the connection dropped and the ARKit providers were stopped,
+            // but the immersive space is still open. Every frame here would query a stopped
+            // provider, get no device anchor and present a drawable the compositor discards —
+            // which is how the client ended up spinning the GPU at full rate against a dead
+            // session, logging "this drawable won't be presented" indefinitely. Idle until a
+            // stream comes back (or the space is dismissed and the layer is invalidated).
+            guard appModel.isPresentingStream() else {
+                try? await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+
             autoreleasepool {
                 renderFrame()
             }
@@ -154,9 +165,18 @@ actor ImmersiveRenderer {
         let drawables = frame.queryDrawables()
         guard !drawables.isEmpty else { return }
 
+        // A drawable presented without a device anchor is thrown away by the compositor, so
+        // rendering one is pure waste. This happens for the first frames after connecting, while
+        // the ARKit session is still coming up — skip them instead of encoding work that can
+        // never be shown.
+        let presentationTime = drawables[0].frameTiming.presentationTime.timeInterval
+        guard let deviceAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime) else {
+            return
+        }
+
         frame.startSubmission()
         for drawable in drawables {
-            render(drawable: drawable, commandBuffer: commandBuffer)
+            render(drawable: drawable, deviceAnchor: deviceAnchor, commandBuffer: commandBuffer)
         }
 
         committedFrameIndex += 1
@@ -165,9 +185,11 @@ actor ImmersiveRenderer {
         frame.endSubmission()
     }
 
-    private func render(drawable: LayerRenderer.Drawable, commandBuffer: MTLCommandBuffer) {
+    private func render(drawable: LayerRenderer.Drawable,
+                        deviceAnchor: DeviceAnchor,
+                        commandBuffer: MTLCommandBuffer) {
         let presentationTime = drawable.frameTiming.presentationTime.timeInterval
-        let currentAnchor = worldTracking.queryDeviceAnchor(atTimestamp: presentationTime)
+        let currentAnchor: DeviceAnchor? = deviceAnchor
         drawable.deviceAnchor = currentAnchor
 
         publishEyeProjection(drawable)

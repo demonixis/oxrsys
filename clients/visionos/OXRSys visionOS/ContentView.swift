@@ -164,12 +164,11 @@ struct ContentView: View {
     }
 
     private func disconnectAndDismissImmersive() async {
+        // Close the space before tearing the session down, and go through the same serialized
+        // path as every other transition — dismissing here independently could overlap with a
+        // sync already in flight.
         appModel.wantsImmersiveSpace = false
-        if appModel.immersiveSpaceState != .closed {
-            appModel.immersiveSpaceState = .inTransition
-            await dismissImmersiveSpace()
-            appModel.immersiveSpaceDidClose()
-        }
+        await synchronizePresentationState()
         appModel.disconnect()
     }
 
@@ -178,6 +177,25 @@ struct ContentView: View {
     /// auto re-entering. The control window is intentionally left open: `.full` immersion hides
     /// it while immersed, and keeping it alive makes it reappear automatically on exit.
     private func synchronizePresentationState() async {
+        // Serialized: a single AppModel change can notify both observers below, and running two
+        // of these concurrently means two overlapping openImmersiveSpace/dismissImmersiveSpace
+        // calls. That is how a lost connection could leave the app immersed forever with a render
+        // loop spinning against a stopped ARKit session. If state changes while a sync is in
+        // flight, run once more afterwards so nothing is missed.
+        if appModel.isSynchronizingPresentation {
+            appModel.presentationSyncPending = true
+            return
+        }
+        appModel.isSynchronizingPresentation = true
+        defer { appModel.isSynchronizingPresentation = false }
+
+        repeat {
+            appModel.presentationSyncPending = false
+            await applyPresentationState()
+        } while appModel.presentationSyncPending
+    }
+
+    private func applyPresentationState() async {
         let shouldBeImmersed = appModel.connectionState == .streaming && appModel.wantsImmersiveSpace
 
         if shouldBeImmersed {
