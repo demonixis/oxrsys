@@ -3,20 +3,13 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
-
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12) || \
-                        defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
-#include "D3DGraphicsContext.h"
-#endif
 
 enum class GraphicsApi
 {
     Metal,
     Vulkan,
-    OpenGL,
-    D3D11,
-    D3D12,
 };
 
 struct VulkanGraphicsContext
@@ -29,26 +22,12 @@ struct VulkanGraphicsContext
     uint32_t queueIndex = 0;
 };
 
-struct OpenGLGraphicsContext
-{
-    void* display = nullptr;
-    void* drawable = nullptr;
-    void* context = nullptr;
-    uint64_t visualId = 0;
-};
-
 struct GraphicsContext
 {
     GraphicsApi api = GraphicsApi::Metal;
     void* metalDevice = nullptr;
     void* metalCommandQueue = nullptr;
     VulkanGraphicsContext vulkan = {};
-    OpenGLGraphicsContext openGL = {};
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12) || \
-                        defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
-    D3D11GraphicsContext d3d11 = {};
-    D3D12GraphicsContext d3d12 = {};
-#endif
 
     static GraphicsContext Metal(void* device, void* commandQueue = nullptr)
     {
@@ -69,43 +48,40 @@ struct GraphicsContext
         return context;
     }
 
-    static GraphicsContext OpenGL(const OpenGLGraphicsContext& openGLContext)
-    {
-        GraphicsContext context = {};
-        context.api = GraphicsApi::OpenGL;
-        context.openGL = openGLContext;
-        return context;
-    }
+};
 
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12) || \
-                        defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
-    static GraphicsContext D3D11(const D3D11GraphicsContext& d3d11Context)
-    {
-        GraphicsContext context = {};
-        context.api = GraphicsApi::D3D11;
-        context.d3d11 = d3d11Context;
-        return context;
-    }
-
-    static GraphicsContext D3D12(const D3D12GraphicsContext& d3d12Context)
-    {
-        GraphicsContext context = {};
-        context.api = GraphicsApi::D3D12;
-        context.d3d12 = d3d12Context;
-        return context;
-    }
-#endif
+enum class FrameSyncKind
+{
+    None,
+    MetalSharedEvent,
+    HostFence,
 };
 
 struct FrameSyncToken
 {
-    GraphicsApi api = GraphicsApi::Metal;
+    FrameSyncKind kind = FrameSyncKind::None;
     std::shared_ptr<void> waitObject = {};
     uint64_t waitValue = 0;
+    std::function<bool(uint64_t)> waitForReady = {};
 
     bool IsValid() const
     {
-        return waitObject != nullptr && waitValue != 0;
+        switch (kind)
+        {
+            case FrameSyncKind::MetalSharedEvent:
+                return waitObject != nullptr && waitValue != 0;
+            case FrameSyncKind::HostFence:
+                return static_cast<bool>(waitForReady);
+            case FrameSyncKind::None:
+            default:
+                return false;
+        }
+    }
+
+    bool WaitForHostReady(uint64_t timeoutNs) const
+    {
+        return kind != FrameSyncKind::HostFence ||
+               (waitForReady && waitForReady(timeoutNs));
     }
 };
 

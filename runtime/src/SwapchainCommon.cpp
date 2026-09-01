@@ -5,6 +5,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <exception>
+
 Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCreateInfo* createInfo)
     : device_(graphicsContext.metalDevice),
       metalCommandQueue_(graphicsContext.metalCommandQueue),
@@ -22,28 +24,6 @@ Swapchain::Swapchain(const GraphicsContext& graphicsContext, const XrSwapchainCr
         InitVulkan(graphicsContext.metalDevice, graphicsContext.vulkan, createInfo);
         return;
     }
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsContext.api == GraphicsApi::OpenGL)
-    {
-        InitOpenGL(graphicsContext.openGL, createInfo);
-        return;
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsContext.api == GraphicsApi::D3D11)
-    {
-        InitD3D11(graphicsContext.d3d11, createInfo);
-        return;
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsContext.api == GraphicsApi::D3D12)
-    {
-        InitD3D12(graphicsContext.d3d12, createInfo);
-        return;
-    }
-#endif
-
     if (createInfo != nullptr)
     {
         width_ = createInfo->width;
@@ -70,38 +50,46 @@ void Swapchain::InitMetalStaging(void* /*metalDevice*/)
 
 Swapchain::~Swapchain()
 {
+    if (PrepareForDestroy() != XR_SUCCESS)
+    {
+        // Public destruction never erases the owning unique_ptr on this path.
+        // Reaching it here means process teardown or an initialization failure;
+        // keep the diagnostic explicit because destroying an app-owned Vulkan
+        // device concurrently would violate the graphics-binding contract.
+        std::terminate();
+    }
+    Runtime::Get().RemoveHandle(handle_);
+}
+
+XrResult Swapchain::PrepareForDestroy()
+{
+    std::lock_guard<std::mutex> teardownLock(teardownMutex_);
+    if (resourcesDestroyed_)
+    {
+        return XR_SUCCESS;
+    }
+
 #ifdef XR_USE_GRAPHICS_API_METAL
     if (graphicsApi_ == GraphicsApi::Metal)
     {
         DestroyMetalResources();
+        resourcesDestroyed_ = true;
+        return XR_SUCCESS;
     }
 #endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (graphicsApi_ == GraphicsApi::Vulkan)
     {
-        DestroyVulkanResources();
+        if (!DestroyVulkanResources())
+        {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
+        resourcesDestroyed_ = true;
+        return XR_SUCCESS;
     }
 #endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsApi_ == GraphicsApi::OpenGL)
-    {
-        DestroyOpenGLResources();
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        DestroyD3D11Resources();
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        DestroyD3D12Resources();
-    }
-#endif
-
-    Runtime::Get().RemoveHandle(handle_);
+    resourcesDestroyed_ = true;
+    return XR_SUCCESS;
 }
 
 XrResult Swapchain::EnumerateImages(uint32_t imageCapacityInput, uint32_t* imageCountOutput,
@@ -138,25 +126,6 @@ XrResult Swapchain::EnumerateImages(uint32_t imageCapacityInput, uint32_t* image
         return EnumerateVulkanImages(imageCapacityInput, images);
     }
 #endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsApi_ == GraphicsApi::OpenGL)
-    {
-        return EnumerateOpenGLImages(imageCapacityInput, images);
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        return EnumerateD3D11Images(imageCapacityInput, images);
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        return EnumerateD3D12Images(imageCapacityInput, images);
-    }
-#endif
-
     return XR_ERROR_VALIDATION_FAILURE;
 }
 
@@ -252,49 +221,25 @@ XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
         acquiredImageOrder_.pop_front();
     }
 
+    // A static image can only be released once. Capture it even before a
+    // client connects, otherwise a later connection could never stream it.
+    // Dynamic swapchains avoid all snapshot work while demand is false.
+    const bool snapshotRequested = imageCount_ == 1 ||
+        (streamingSnapshotDemand_ != nullptr &&
+         streamingSnapshotDemand_->load(std::memory_order_acquire));
+
 #ifdef XR_USE_GRAPHICS_API_METAL
     if (graphicsApi_ == GraphicsApi::Metal)
     {
-        SnapshotMetalReleasedImage();
+        SnapshotMetalReleasedImage(snapshotRequested);
     }
 #endif
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     if (graphicsApi_ == GraphicsApi::Vulkan)
     {
-        lastVulkanSnapshots_.assign(arraySize_, {});
-        for (uint32_t arrayIndex = 0; arrayIndex < arraySize_; ++arrayIndex)
-        {
-            lastVulkanSnapshots_[arrayIndex] = SnapshotVulkanFrameImageSource(arrayIndex);
-        }
+        SnapshotVulkanReleasedImage(snapshotRequested);
     }
 #endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsApi_ == GraphicsApi::OpenGL)
-    {
-        SnapshotOpenGLReleasedImage(releaseIndex);
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        lastD3D11Snapshots_.assign(arraySize_, {});
-        for (uint32_t arrayIndex = 0; arrayIndex < arraySize_; ++arrayIndex)
-        {
-            lastD3D11Snapshots_[arrayIndex] = SnapshotD3D11FrameImageSource(arrayIndex);
-        }
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        lastD3D12Snapshots_.assign(arraySize_, {});
-        for (uint32_t arrayIndex = 0; arrayIndex < arraySize_; ++arrayIndex)
-        {
-            lastD3D12Snapshots_[arrayIndex] = SnapshotD3D12FrameImageSource(arrayIndex);
-        }
-    }
-#endif
-
     return XR_SUCCESS;
 }
 
@@ -324,36 +269,6 @@ void* Swapchain::GetLastReleasedTexture() const
         }
         return reinterpret_cast<void*>(vkImages_[lastReleasedIndex_]);
     }
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsApi_ == GraphicsApi::OpenGL)
-    {
-        if (glTextures_.empty())
-        {
-            return nullptr;
-        }
-        return reinterpret_cast<void*>(static_cast<uintptr_t>(glTextures_[lastReleasedIndex_]));
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        if (d3d11Textures_.empty())
-        {
-            return nullptr;
-        }
-        return d3d11Textures_[lastReleasedIndex_];
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        if (d3d12Resources_.empty())
-        {
-            return nullptr;
-        }
-        return d3d12Resources_[lastReleasedIndex_];
-    }
-#endif
     return nullptr;
 }
 
@@ -396,32 +311,6 @@ FrameImageSource Swapchain::GetLastReleasedFrameImageSource(uint32_t arrayIndex)
             return {};
         }
         return lastVulkanSnapshots_[arrayIndex];
-    }
-#endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    if (graphicsApi_ == GraphicsApi::OpenGL)
-    {
-        return SnapshotOpenGLFrameImageSource(arrayIndex);
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    if (graphicsApi_ == GraphicsApi::D3D11)
-    {
-        if (arrayIndex >= lastD3D11Snapshots_.size())
-        {
-            return {};
-        }
-        return lastD3D11Snapshots_[arrayIndex];
-    }
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    if (graphicsApi_ == GraphicsApi::D3D12)
-    {
-        if (arrayIndex >= lastD3D12Snapshots_.size())
-        {
-            return {};
-        }
-        return lastD3D12Snapshots_[arrayIndex];
     }
 #endif
     return {};

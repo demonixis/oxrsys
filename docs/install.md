@@ -1,143 +1,87 @@
 # Install
 
-## Scope
+## Host Requirements
 
-This document lists the host tools and SDKs required to build and test the project on macOS, Linux, and Windows, plus the Android tooling needed for the Android VR client.
+OXRSys builds on macOS only. Both Apple Silicon and Intel Macs are supported.
 
-## Host Tools
+The supported deployment minimums are:
 
-Install the base macOS toolchain:
+- macOS 14 or later for the runtime, OXRSys Home, and the macOS simulator
+- iOS 17 or later for the simulator/Cardboard viewer
+- visionOS 26 or later for the Vision Pro app
 
-```bash
-xcode-select --install
-brew install cmake ninja gradle openjdk@17
-```
+The shared `OXRSysStreaming` package retains a visionOS 1 minimum for reuse, but that does not lower
+the Vision Pro app's visionOS 26 requirement. Building the newest client SDKs may require a newer
+macOS development host than these deployment minimums.
 
-The macOS SwiftUI Home app does not require Android Studio, the Android SDK, or a Homebrew `adb`
-install for normal Quest USB setup: it can claim the headset USB ADB interface directly, complete
-ADB authentication, and configure reverse mappings itself. External `adb` remains optional for
-diagnostics, logcat, manual server startup, and fallback workflows. Install `adb-enhanced` or
-Android Platform Tools only when you need those command-line tools. If `adb` is installed outside
-the automatic search paths, both Home apps can store a custom ADB executable path from the Quest USB
-ADB panel. The SwiftUI Home and Qt Home preferences are intentionally separate; clear the custom
-path to return to automatic native/server/Homebrew/PATH detection.
+Install:
 
-Qt frontends need Qt 6 Core, Widgets, and Network. On macOS, the build helper checks Homebrew,
-MacPorts, `QTDIR`, `Qt6_DIR`, and Qt Online Installer layouts under `~/Qt/<version>/<kit>`, such as
-`~/Qt/6.10.2/macos`.
+- Xcode with the macOS, iOS, and visionOS SDKs needed by the clients you build
+- the Xcode command-line tools
+- CMake and Ninja
+- Vulkan headers
+- the Xcode Metal Toolchain for Metal shader compilation and CTS
+- Git and a C++20 compiler
 
-macOS runtime builds use VideoToolbox by default. Install FFmpeg development libraries on macOS
-only if you want to configure the runtime with `-DOXRSYS_VIDEO_ENCODER=FFMPEG` or build the Qt video
-preview path against a Homebrew/MacPorts FFmpeg.
-
-For the Swift/Xcode applications and Swift package Metal shaders, install the full Xcode app, not only the Command Line Tools. Finish first-launch setup after installing or updating Xcode:
+With Homebrew:
 
 ```bash
-sudo xcodebuild -license accept
-sudo xcodebuild -runFirstLaunch
+brew install cmake ninja vulkan-headers
 xcodebuild -downloadComponent MetalToolchain
 ```
 
-If simulator builds report that `CoreSimulator` is older than the selected SDK, update Xcode and the simulator runtime components so their versions match.
+The runtime does not link a Vulkan loader. Install the LunarG macOS Vulkan SDK or another MoltenVK
+distribution only when building or running Vulkan applications against OXRSys.
 
-Linux runtime and Qt frontend builds need equivalent distro packages for:
+## Apple Client SDKs
 
-- CMake, Ninja, and a C++20 compiler
-- Vulkan headers
-- OpenGL, GLX, and X11 development files
-- FFmpeg development libraries: `libavcodec`, `libavutil`, `libswscale`
-- pkg-config
-- Qt 6 Core, Widgets, and Network
-- adb / Android Platform Tools for starting an ADB server, logcat, and USB fallback setup
+The Swift packages require Swift 5.10 or later. Install the matching Xcode simulator runtimes for:
 
-On Fedora with RPM Fusion FFmpeg packages installed, use the matching RPM Fusion
-development package:
+- macOS Home and simulator
+- iOS Simulator and physical iPhone Cardboard/ARKit validation
+- visionOS Simulator and physical Vision Pro validation
+
+Physical-device builds require an Apple Development team and normal Xcode provisioning. CI builds
+generic devices with `CODE_SIGNING_ALLOWED=NO`; this proves compilation, not installation.
+
+## Android Client Tooling
+
+Quest and Pico builds require:
+
+- Java 17
+- Android SDK platform 35
+- Android build tools
+- Android NDK 28.2.13676358 (the CI baseline)
+- CMake `3.22.1+` from the Android SDK
+
+Create `clients/android-vr/local.properties` when Gradle cannot discover the SDK:
+
+```properties
+sdk.dir=/absolute/path/to/Android/sdk
+```
+
+The Android client targets `arm64-v8a` and API 29 or later so Quest 1 remains supported. Keep these
+requirements aligned with `clients/android-vr/app/build.gradle.kts`.
+
+An Android SDK installation is not required for normal USB use of an already-installed headset
+client. OXRSys Home can speak the native ADB host protocol, use an existing server on
+`127.0.0.1:5037`, or fall back to a configured `adb` executable.
+
+## Runtime Build
+
+After installing dependencies:
 
 ```bash
-sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config \
-  vulkan-headers vulkan-loader-devel mesa-libGL-devel libX11-devel \
-  qt6-qtbase-devel android-tools \
-  ffmpeg-devel
+cmake --preset default
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-On Fedora systems that only use Fedora's free FFmpeg package set, use
-`ffmpeg-free-devel` instead of `ffmpeg-devel`.
-
-Windows runtime builds need:
-
-- CMake, Ninja, and a C++20 compiler such as MSVC
-- Windows SDK headers/libraries for Direct3D 11, Direct3D 12, and DXGI
-- Vulkan headers
-- FFmpeg development headers and libraries for `libavcodec`, `libavutil`, and `libswscale`
-
-Set `FFMPEG_ROOT` or pass `-DFFMPEG_ROOT=<prefix>` when FFmpeg is not in a standard prefix. Windows
-OpenGL/WGL is not required until that backend is added.
-
-## Android SDK And NDK
-
-Install Android command-line tools, then install the required packages with `sdkmanager`.
-
-Recommended packages:
-
-- Android SDK Platform `34`
-- Android Build-Tools `34.0.0`
-- Android NDK `26.3.11579264`
-- CMake `3.22.1`
-- Platform-Tools
-
-Example:
-
-```bash
-sdkmanager --install \
-  "platform-tools" \
-  "platforms;android-34" \
-  "build-tools;34.0.0" \
-  "ndk;26.3.11579264" \
-  "cmake;3.22.1"
-```
-
-Then set `clients/Android/android-vr/local.properties`:
-
-```text
-sdk.dir=/Users/<you>/Library/Android/sdk
-```
-
-## Android Version Note
-
-The current Gradle configuration in the repository uses `compileSdk = 35`, `targetSdk = 32`, and `minSdk = 29`. If `compileSdk` stays at `35`, you may also need:
-
-```bash
-sdkmanager --install "platforms;android-35"
-```
-
-Keep this document aligned with `clients/Android/android-vr/app/build.gradle.kts`.
-
-## Vulkan SDK And MoltenVK
-
-For Metal-only work, the macOS runtime builds without a full Vulkan SDK. For Vulkan interop work and Vulkan applications running through MoltenVK, install the macOS Vulkan SDK from LunarG.
-
-What you need from it:
-
-- Vulkan headers
-- MoltenVK
-- Vulkan tools useful for validation and debugging
-
-If you only need headers for local compilation, a lighter option is:
-
-```bash
-brew install vulkan-headers
-```
-
-## OpenXR Samples And Clients
-
-Optional but useful:
-
-- OpenXR SDK examples such as `hello_xr`
-- Unity for editor-side runtime selection testing
-- Godot if you validate the Vulkan app path regularly
+The generated loader manifest is `build/runtime/oxrsys-runtime.json`.
 
 ## Next Steps
 
-- Build overview: [build.md](build.md)
-- Quest client workflow: [quest.md](platforms/quest.md)
-- Testing and CTS: [testing-and-conformance.md](testing-and-conformance.md)
+- [Build](build.md) for every target and architecture
+- [macOS Home](platforms/macos-home.md) for launch, registration, and USB setup
+- [Quest and Pico](platforms/quest.md) for Android installation
+- [Testing and Conformance](testing-and-conformance.md) before submitting a change

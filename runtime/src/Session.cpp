@@ -6,6 +6,7 @@
 #include "Instance.h"
 #include "Runtime.h"
 #include "Swapchain.h"
+#include "SwapchainCreateValidation.h"
 #include "Space.h"
 #include "InputManager.h"
 #include "StreamingServer.h"
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <numeric>
 #include <thread>
 #include <utility>
@@ -24,7 +26,6 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 
-#if !defined(_WIN32)
 // CLOCK_MONOTONIC in nanoseconds — the clock XR_KHR_convert_timespec_time
 // converts against.
 int64_t MonotonicNowNs()
@@ -33,7 +34,6 @@ int64_t MonotonicNowNs()
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
-#endif
 
 struct SessionMetricSummary
 {
@@ -115,9 +115,7 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
-#if !defined(_WIN32)
     monoStartNs_ = MonotonicNowNs();
-#endif
     lastFrameTime_ = startTime_;
 
     Runtime::Get().RegisterHandle(handle_, this);
@@ -135,9 +133,7 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
-#if !defined(_WIN32)
     monoStartNs_ = MonotonicNowNs();
-#endif
     lastFrameTime_ = startTime_;
 
     Runtime::Get().RegisterHandle(handle_, this);
@@ -155,22 +151,18 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
         case GraphicsApi::Vulkan:
             apiName = "Vulkan";
             break;
-        case GraphicsApi::OpenGL:
-            apiName = "OpenGL";
-            break;
-        case GraphicsApi::D3D11:
-            apiName = "D3D11";
-            break;
-        case GraphicsApi::D3D12:
-            apiName = "D3D12";
-            break;
     }
     spdlog::info("OXRSys: {} session created", apiName);
 }
 
 Session::~Session()
 {
-    Shutdown();
+    if (Shutdown() != XR_SUCCESS)
+    {
+        // xrDestroySession retains the Session on a bounded drain timeout.
+        // Freeing it here would invalidate callbacks and app-device resources.
+        std::terminate();
+    }
     instance_->RemoveEventsForSession(reinterpret_cast<XrSession>(handle_));
     instance_->SetSession(nullptr);
     Runtime::Get().RemoveHandle(handle_);
@@ -185,7 +177,6 @@ XrTime Session::GetCurrentTime() const
             .count());
 }
 
-#if !defined(_WIN32)
 XrTime Session::TimespecToXrTime(const struct timespec& ts) const
 {
     const int64_t monoNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
@@ -200,7 +191,6 @@ void Session::XrTimeToTimespec(XrTime time, struct timespec& ts) const
     ts.tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
     ts.tv_nsec = static_cast<long>(monoNs % 1000000000LL);
 }
-#endif
 
 void Session::TransitionState(XrSessionState newState)
 {
@@ -266,9 +256,13 @@ XrResult Session::EndSession()
     running_ = false;
 
     // Stop streaming so it can be restarted on next BeginSession
+    streamingSnapshotDemand_->store(false, std::memory_order_release);
     if (streamingServer_)
     {
-        streamingServer_->Stop();
+        if (!streamingServer_->Stop())
+        {
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
         streamingServer_.reset();
         streamingStarted_ = false;
         inputManager_->SetTrackingReceiver(nullptr);
@@ -300,8 +294,10 @@ XrResult Session::RequestExitSession()
     return XR_SUCCESS;
 }
 
-void Session::Shutdown()
+XrResult Session::Shutdown()
 {
+    std::lock_guard<std::mutex> shutdownLock(shutdownMutex_);
+    teardownStarted_.store(true, std::memory_order_release);
     running_ = false;
     exitRequested_ = true;
     state_ = XR_SESSION_STATE_IDLE;
@@ -317,15 +313,31 @@ void Session::Shutdown()
         inputManager_->SetTrackingReceiver(nullptr);
     }
 
+    streamingSnapshotDemand_->store(false, std::memory_order_release);
     if (streamingServer_)
     {
-        streamingServer_->Stop();
+        if (!streamingServer_->Stop())
+        {
+            // Keep the server, encoder, swapchains and public session handle
+            // alive. xrDestroySession/Instance can retry after callbacks exit.
+            return XR_ERROR_RUNTIME_FAILURE;
+        }
         streamingServer_.reset();
         streamingStarted_ = false;
     }
 
+    std::lock_guard<std::mutex> swapchainsLock(swapchainsMutex_);
+    for (const auto& swapchain : swapchains_)
+    {
+        const XrResult result = swapchain->PrepareForDestroy();
+        if (result != XR_SUCCESS)
+        {
+            return result;
+        }
+    }
     spaces_.clear();
     swapchains_.clear();
+    return XR_SUCCESS;
 }
 
 void Session::BeginDebugUtilsLabelRegion(const XrDebugUtilsLabelEXT& labelInfo)
@@ -411,6 +423,10 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
             return XR_ERROR_SESSION_NOT_RUNNING;
         }
     }
+
+    streamingSnapshotDemand_->store(
+        streamingServer_ != nullptr && streamingServer_->IsClientConnected(),
+        std::memory_order_release);
 
     uint32_t targetRefreshHz = 90;
     if (streamingServer_)
@@ -630,6 +646,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
 
 bool Session::OwnsSwapchain(const Swapchain* swapchain) const
 {
+    std::lock_guard<std::mutex> lock(swapchainsMutex_);
     return std::any_of(swapchains_.begin(), swapchains_.end(),
                        [swapchain](const std::unique_ptr<Swapchain>& candidate)
                        {
@@ -879,6 +896,20 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
         return XR_ERROR_FEATURE_UNSUPPORTED;
     }
 
+    if (teardownStarted_.load(std::memory_order_acquire))
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return XR_ERROR_SESSION_LOST;
+    }
+
+    const XrResult supportResult =
+        oxrsys::swapchain::ValidateCreateInfo(graphicsContext_.api, *createInfo);
+    if (supportResult != XR_SUCCESS)
+    {
+        *swapchain = XR_NULL_HANDLE;
+        return supportResult;
+    }
+
     *swapchain = XR_NULL_HANDLE;
     auto sc = std::make_unique<Swapchain>(graphicsContext_, createInfo);
     XrResult initializationResult = sc->InitializationResult();
@@ -886,17 +917,32 @@ XrResult Session::CreateSwapchain(const XrSwapchainCreateInfo* createInfo, XrSwa
     {
         return initializationResult;
     }
+    sc->SetStreamingSnapshotDemand(streamingSnapshotDemand_);
     *swapchain = reinterpret_cast<XrSwapchain>(sc->GetHandle());
-    swapchains_.push_back(std::move(sc));
+    {
+        std::lock_guard<std::mutex> lock(swapchainsMutex_);
+        if (teardownStarted_.load(std::memory_order_acquire))
+        {
+            *swapchain = XR_NULL_HANDLE;
+            return XR_ERROR_SESSION_LOST;
+        }
+        swapchains_.push_back(std::move(sc));
+    }
     return XR_SUCCESS;
 }
 
 XrResult Session::DestroySwapchain(Swapchain* swapchain)
 {
+    std::lock_guard<std::mutex> lock(swapchainsMutex_);
     for (auto it = swapchains_.begin(); it != swapchains_.end(); ++it)
     {
         if (it->get() == swapchain)
         {
+            const XrResult result = (*it)->PrepareForDestroy();
+            if (result != XR_SUCCESS)
+            {
+                return result;
+            }
             swapchains_.erase(it);
             return XR_SUCCESS;
         }
@@ -999,8 +1045,12 @@ void Session::CheckStreamingConnection()
 {
     if (!streamingServer_)
     {
+        streamingSnapshotDemand_->store(false, std::memory_order_release);
         return;
     }
+
+    streamingSnapshotDemand_->store(
+        streamingServer_->IsClientConnected(), std::memory_order_release);
 
     // When a client connects, wire up the tracking receiver
     if (streamingServer_->IsClientConnected() && !inputManager_->IsStreaming())

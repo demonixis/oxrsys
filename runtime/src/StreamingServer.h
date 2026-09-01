@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -56,7 +57,9 @@ public:
 
     // Start broadcasting and listening for clients
     bool Start(uint32_t renderWidth, uint32_t renderHeight, uint32_t refreshRateHz);
-    void Stop();
+    // Idempotent and retryable. False means an encoder callback still owns a
+    // FrameSource; the server and encoder stay alive until a later retry.
+    bool Stop(std::chrono::nanoseconds timeout = std::chrono::milliseconds(500));
 
     // Queue a rendered frame for asynchronous latest-frame-only encoding.
     // The source owns backend graphics resources until the frame is encoded,

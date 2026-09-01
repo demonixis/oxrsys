@@ -21,7 +21,11 @@ The WiFi transport uses UDP with dedicated ports:
 - Audio: `9947` (reserved for headset speaker audio; not advertised until an audio stream is active)
 - Spatial: `9948` (reserved reliable channel for anchors, scene capture, meshes, and larger async spatial results)
 
-Discovery announces the server and its stream settings. Video carries encoded frame fragments. Tracking carries headset and controller state back to the runtime. Control carries latency reports, stream reconfiguration, keyframe requests, and haptics. Spatial is a reliable side channel for future spatial entity and scene data.
+Discovery announces the server and its stream settings. The control port also accepts the optional
+direct-discovery request described below. Video carries encoded frame fragments. Tracking carries
+headset and controller state back to the runtime. Control carries latency reports, stream
+reconfiguration, keyframe requests, and haptics. Spatial is a reliable side channel for future
+spatial entity and scene data.
 
 The Quest USB path uses ADB reverse TCP on localhost ports:
 
@@ -46,7 +50,15 @@ TCP payloads are framed with `TcpRecordHeader`, which contains the record magic,
 
 ## Discovery
 
-The runtime broadcasts `ServerAnnounce` messages. Clients answer with `ClientConnect`.
+The runtime broadcasts `ServerAnnounce` messages on UDP `9943`. Clients answer with
+`ClientConnect` on UDP `9946`; existing broadcast-only clients keep this behavior unchanged.
+
+Clients that already know an IPv4 address or hostname can send the one-byte
+`DiscoveryRequest` message (`MessageType` `0x04`) to UDP `9946` from an ephemeral source port. While
+WiFi is enabled and the runtime is in its broadcasting state, the runtime replies to that source
+address and port with the same complete `ServerAnnounce` used by broadcast discovery. The request
+does not select a codec, mutate connection state, or replace `ClientConnect`. Clients must bound
+their retry count and receive timeout; no response means that direct discovery failed.
 
 The handshake exposes:
 
@@ -235,7 +247,8 @@ attached. Microphone input is out of scope for this speaker-only path.
 
 The expected lifecycle is:
 
-1. The runtime announces itself over UDP, or a USB TCP client connects to control port `9946` and receives `ServerAnnounce`.
+1. The runtime announces itself over UDP, responds to an optional unicast `DiscoveryRequest`, or a
+   USB TCP client connects to control port `9946` and receives `ServerAnnounce`.
 2. A client connects and advertises capabilities.
 3. The runtime starts video, tracking, and optional spatial-channel exchange.
 4. The client sends latency feedback, stream config acknowledgements, and keyframe requests while streaming is active.

@@ -26,8 +26,6 @@ install_manifest.txt
 !cmake/GenerateStrings.cmake
 !cmake/RunOpenXRCTS.cmake
 !cmake/SyncCompileCommands.cmake
-!clients/Qt/cmake/
-!clients/Qt/cmake/DetectQt6.cmake
 
 # --- IDE & Editors ---
 # VSCode
@@ -37,19 +35,11 @@ install_manifest.txt
 !.vscode/extensions.json
 *.code-workspace
 
-# Visual Studio
-.vs/
-*.user
-*.suo
-*.sdf
-*.opensdf
-*.ipch
-*.sln
-*.vcxproj
-*.vcxproj.filters
-
 # CLion
 .idea/
+
+# Editor backup files
+*~
 
 # Xcode — track project files, ignore user-specific state
 xcuserdata/
@@ -62,16 +52,8 @@ xcuserdata/
 /*.xcworkspace
 
 # --- C++ Compilation Artifacts ---
-*.exe
-*.dll
-*.so
 *.dylib
 *.a
-*.lib
-*.pdb
-*.ilk
-*.exp
-*.obj
 *.o
 *.gch
 *.pch
@@ -83,18 +65,10 @@ xcuserdata/
 *.spv
 
 # --- OS Specific ---
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
 # macOS
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Linux
-*~
 
 # --- Android ---
 local.properties
@@ -112,10 +86,7 @@ docs/api
 # --- Python ---
 __pycache__
 .cache
-clients/common/OpenXRStreaming/.build
-clients/common/OpenXRSimulator/.build
-clients/Android/android-vr/.gradle
-clients/Android/android-vr/app/.cxx
-clients/oxrsys-android/.gradle
-clients/Apple/common/OXRSysSimulator/.build
-clients/Apple/common/OXRSysStreaming/.build
+clients/android-vr/.gradle
+clients/android-vr/app/.cxx
+clients/shared/OXRSysSimulator/.build
+clients/shared/OXRSysStreaming/.build

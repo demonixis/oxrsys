@@ -8,6 +8,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SCRIPT_NAME="$(basename "$0")"
 
 CONFIGURATION="Debug"
+ARCHITECTURES=""
+CMAKE_ARCHITECTURES=""
+XCODE_ARCHITECTURES=""
+EXPECTED_ARCHITECTURES=()
 DEFAULT_PACKAGE_BUILD_ROOT="${REPO_ROOT}/build/macos-package"
 CMAKE_BUILD_DIR="${DEFAULT_PACKAGE_BUILD_ROOT}/cmake"
 HOME_DERIVED_DATA="${DEFAULT_PACKAGE_BUILD_ROOT}/xcode/OXRSysHome"
@@ -30,6 +34,8 @@ Builds the macOS runtime and OXRSys Home, then assembles one local package direc
 
 Options:
   --configuration NAME    Xcode and CMake configuration. Default: Debug
+  --architectures VALUE   native, arm64, x86_64, or universal.
+                          Default: native for Debug, universal for Release.
   --cmake-build-dir DIR   CMake build directory. Default: build/macos-package/cmake
   --home-derived-data DIR DerivedData path for the Home build. Default: build/macos-package/xcode/OXRSysHome
   --output-dir DIR        Assembled package directory. Default: build/OXRSys-macOS
@@ -40,7 +46,8 @@ Options:
 
 Examples:
   ${SCRIPT_NAME}
-  ${SCRIPT_NAME} --configuration Release --output-dir build/OXRSys-macOS-Release
+  ${SCRIPT_NAME} --configuration Release --architectures universal \
+    --output-dir build/OXRSys-macOS-Release
 EOF
 }
 
@@ -68,11 +75,10 @@ require_tool() {
 
 absolute_path() {
     local path="$1"
-    if [[ "${path}" == /* ]]; then
-        print -r -- "${path}"
-    else
-        print -r -- "$(pwd)/${path}"
+    if [[ "${path}" != /* ]]; then
+        path="$(pwd)/${path}"
     fi
+    print -r -- "${path:A}"
 }
 
 run() {
@@ -88,6 +94,11 @@ parse_args() {
             --configuration)
                 [[ $# -ge 2 ]] || fail "--configuration requires a value"
                 CONFIGURATION="$2"
+                shift 2
+                ;;
+            --architectures)
+                [[ $# -ge 2 ]] || fail "--architectures requires a value"
+                ARCHITECTURES="$2"
                 shift 2
                 ;;
             --cmake-build-dir)
@@ -158,26 +169,106 @@ validate_configuration() {
     esac
 }
 
+configure_architectures() {
+    if [[ -z "${ARCHITECTURES}" ]]; then
+        if [[ "${CONFIGURATION}" == "Release" ]]; then
+            ARCHITECTURES="universal"
+        else
+            ARCHITECTURES="native"
+        fi
+    fi
+
+    case "${ARCHITECTURES}" in
+        native)
+            local native_arch
+            native_arch="$(/usr/bin/uname -m)"
+            case "${native_arch}" in
+                arm64|x86_64)
+                    ;;
+                *)
+                    fail "Unsupported native macOS architecture: ${native_arch}"
+                    ;;
+            esac
+            CMAKE_ARCHITECTURES="${native_arch}"
+            XCODE_ARCHITECTURES="${native_arch}"
+            EXPECTED_ARCHITECTURES=("${native_arch}")
+            ;;
+        arm64)
+            CMAKE_ARCHITECTURES="arm64"
+            XCODE_ARCHITECTURES="arm64"
+            EXPECTED_ARCHITECTURES=(arm64)
+            ;;
+        x86_64)
+            CMAKE_ARCHITECTURES="x86_64"
+            XCODE_ARCHITECTURES="x86_64"
+            EXPECTED_ARCHITECTURES=(x86_64)
+            ;;
+        universal)
+            CMAKE_ARCHITECTURES="arm64;x86_64"
+            XCODE_ARCHITECTURES="arm64 x86_64"
+            EXPECTED_ARCHITECTURES=(arm64 x86_64)
+            ;;
+        *)
+            fail "--architectures must be native, arm64, x86_64, or universal"
+            ;;
+    esac
+}
+
 build_runtime() {
-    run cmake -B "${CMAKE_BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE="${CONFIGURATION}"
+    run cmake \
+        -S "${REPO_ROOT}" \
+        -B "${CMAKE_BUILD_DIR}" \
+        -G Ninja \
+        -DCMAKE_BUILD_TYPE="${CONFIGURATION}" \
+        -DCMAKE_OSX_ARCHITECTURES="${CMAKE_ARCHITECTURES}"
     run cmake --build "${CMAKE_BUILD_DIR}" --target oxrsys_runtime
 }
 
 build_home() {
     run /usr/bin/xcodebuild \
-        -project "${REPO_ROOT}/clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
+        -project "${REPO_ROOT}/clients/home/OXRSys Home.xcodeproj" \
         -scheme "OXRSys Home" \
         -configuration "${CONFIGURATION}" \
         -destination "platform=macOS" \
         -derivedDataPath "${HOME_DERIVED_DATA}" \
+        ARCHS="${XCODE_ARCHITECTURES}" \
+        ONLY_ACTIVE_ARCH=NO \
         CODE_SIGNING_ALLOWED=NO \
         build
+}
+
+validate_binary_architectures() {
+    local binary_path="$1"
+    local label="$2"
+    local actual_architectures
+    actual_architectures="$(/usr/bin/lipo -archs "${binary_path}")" \
+        || fail "Could not inspect ${label}: ${binary_path}"
+
+    local expected_arch
+    for expected_arch in "${EXPECTED_ARCHITECTURES[@]}"; do
+        if [[ " ${actual_architectures} " != *" ${expected_arch} "* ]]; then
+            fail "${label} is missing ${expected_arch}; found: ${actual_architectures}"
+        fi
+    done
+}
+
+home_executable_path() {
+    local executable_name
+    executable_name="$(/usr/libexec/PlistBuddy \
+        -c 'Print :CFBundleExecutable' \
+        "$(home_app_path)/Contents/Info.plist")" \
+        || fail "Could not read CFBundleExecutable from $(home_app_path)"
+    print -r -- "$(home_app_path)/Contents/MacOS/${executable_name}"
 }
 
 validate_build_outputs() {
     [[ -f "$(runtime_dylib_path)" ]] || fail "Runtime dylib not found: $(runtime_dylib_path)"
     [[ -f "$(runtime_manifest_path)" ]] || fail "Runtime manifest not found: $(runtime_manifest_path)"
     [[ -d "$(home_app_path)" ]] || fail "Home app not found: $(home_app_path)"
+    [[ -f "$(home_executable_path)" ]] || fail "Home executable not found: $(home_executable_path)"
+
+    validate_binary_architectures "$(runtime_dylib_path)" "Runtime dylib"
+    validate_binary_architectures "$(home_executable_path)" "Home executable"
 }
 
 clean_output_dir() {
@@ -238,8 +329,11 @@ main() {
     require_tool cmake
     require_tool /usr/bin/ditto
     require_tool /usr/bin/plutil
+    require_tool /usr/bin/lipo
+    require_tool /usr/libexec/PlistBuddy
     require_tool /usr/bin/xcodebuild
     validate_configuration
+    configure_architectures
 
     if [[ "${BUILD_RUNTIME}" -eq 1 ]]; then
         build_runtime

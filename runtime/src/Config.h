@@ -51,8 +51,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults =
 void RenderBaseEyeResolution(uint32_t& width, uint32_t& height);
 
 /**
- * Runtime configuration loaded from the platform config directory
- * (macOS: ~/Library/Application Support/OXRSys, Linux: XDG_CONFIG_HOME/oxrsys)
+ * Runtime configuration loaded from
+ * ~/Library/Application Support/OXRSys on macOS
  * with a fallback to the library-local config file.
  *
  * Singleton initialized once on first access. Configures spdlog sinks

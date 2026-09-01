@@ -40,10 +40,6 @@ CMakeLists.txt text
 # Scripts (Force LF for shell scripts)
 *.sh text eol=lf
 
-# Windows Scripts (Force CRLF)
-*.bat text eol=crlf
-*.cmd text eol=crlf
-
 # --- Assets (Binary) ---
 # Images
 *.png  binary

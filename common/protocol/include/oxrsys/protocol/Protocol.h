@@ -98,6 +98,7 @@ enum class MessageType : uint8_t
     ServerAnnounce = 0x01,
     ClientConnect = 0x02,
     ServerDisconnect = 0x03,
+    DiscoveryRequest = 0x04,
 };
 
 enum ServerFeatureFlags : uint32_t

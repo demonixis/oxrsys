@@ -2,86 +2,106 @@
 
 [![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 
-## Project
+OXRSys is an open-source OpenXR runtime built specifically for macOS. It supports native Apple
+Silicon and Intel hosts, Metal and Vulkan through MoltenVK, and low-latency H.264/H.265 streaming
+through VideoToolbox.
 
-OXRSys Runtime is an unofficial OpenXR runtime that started on macOS and is being moved toward a measured cross-platform shape. The repository includes the shared runtime, Apple frontends, Qt frontends, and an Android VR streaming client for Quest/Pico-class headsets.
+The runtime streams to Meta Quest, Pico, Vision Pro, and the shared macOS/iOS simulator. The iOS
+variant provides a Cardboard-style stereo view with ARKit tracking. OXRSys Home is a native SwiftUI
+app for runtime registration, compatible-app launching, configuration, telemetry, and USB setup.
 
-OXRSys is independent software. It is not affiliated with, endorsed by, sponsored by, or approved by The Khronos Group, Meta, Apple, LunarG, or the owners of the platforms, SDKs, runtimes, and trademarks referenced by this project.
+OXRSys is independent software. It is not affiliated with, endorsed by, sponsored by, or approved
+by The Khronos Group, Meta, Apple, LunarG, or the owners of the platforms, SDKs, runtimes, and
+trademarks referenced by this project.
 
-### Android VR Client
+## Highlights
 
-The Android VR client can be used over WiFi or USB. The USB path is the best way to experiment with the runtime because it gives the lowest latency. The macOS SwiftUI Home app can configure USB reverse directly through the headset USB ADB interface, so Android Studio and the Android SDK are not required for normal USB setup; a running local ADB server or external `adb` executable remains a fallback.
-For Quest sideload validation, `assembleRelease` is the stable debug-signed APK; `assembleOptimizedRelease` is reserved for diagnosing optimized Android regressions.
+- macOS runtime for `arm64` and `x86_64`, with universal release packaging
+- `XR_KHR_metal_enable` and Vulkan/MoltenVK graphics paths
+- VideoToolbox H.264, H.265, and negotiated HEVC Main10 streaming
+- WiFi UDP and reconnecting USB ADB reverse TCP transport
+- SDK-free native ADB setup in OXRSys Home, with local ADB server and external `adb` fallbacks
+- Quest controller, hand tracking, reprojection, passthrough, foveation, and ABR paths
+- native visionOS immersive viewer with automatic and direct-IP discovery, hand tracking, and
+  accessory-controller tracking
+- shared Swift streaming and simulator packages for macOS, iOS, and visionOS clients
+- loader-backed runtime tests and a pinned OpenXR-CTS qualification lane
 
-### Home Apps
+The current support and qualification levels are tracked in the
+[support matrix](docs/support-matrix.md). Build success, packaging, application launch, live
+streaming, and physical-device qualification are reported as separate gates.
 
-OXRSys Home exists as a native Apple app and a Qt app. The Apple app owns the macOS direct-distribution workflow. The Qt app is Linux-first and also keeps its launcher, transport readiness, Settings-based Internal/Custom ADB selection, and simulator window code portable for macOS and Windows.
-The macOS package helper builds the runtime and Home app into one local folder; the distribution helper signs that package and can submit the archive for notarization.
+## Repository Layout
 
-## Disclaimer
+```text
+runtime/                 macOS OpenXR runtime
+clients/
+  home/                  SwiftUI macOS Home app
+  simulator/             macOS/iOS simulator and Cardboard viewer
+  visionos/              visionOS immersive viewer
+  android-vr/            Quest/Pico OpenXR client
+  shared/                shared Swift streaming and simulator packages
+common/protocol/         shared C++ wire protocol
+scripts/                 packaging, notarization, registration, and Unity helpers
+tests/                   runtime and protocol tests
+docs/                    detailed project documentation
+```
 
-**Current Status**: This project is in early development and is not yet production-ready.
+Open `clients/OXRSys Clients.xcworkspace` when working on more than one Apple client.
 
-### Technical Limitations
+## Quick Start
 
-- macOS Support: Due to non-standard OpenXR implementation on macOS, specific workarounds are required. OXRSys Home can launch configured apps with `XR_RUNTIME_JSON`; command-line launches remain useful for debugging. Unity projects should use the `net.demonixis.oxrsys-unity` Package Manager package under `scripts/unity/`.
-- Meta Quest Integration: The headset client now shows a local status shell with reset and passthrough/3D controls while waiting for video.
+Requirements are macOS, Xcode, CMake, Ninja, C++20 tooling, Vulkan headers, and the Xcode Metal
+Toolchain. Android client builds additionally require Java 17 and the Android SDK/NDK.
 
-### Stability & Contributions
+```bash
+cmake --preset default
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
 
-Expect frequent crashes and bugs. Contributions are welcome through bug reports, feature requests, and pull requests.
+Build the native Home app:
 
-### AI Disclosure
+```bash
+xcodebuild -project "clients/home/OXRSys Home.xcodeproj" \
+  -scheme "OXRSys Home" \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
 
-This project uses AI-generated code and documentation. We appreciate professional cooperation regarding this approach.
+Build a universal local package:
 
-## Dependencies
+```bash
+./scripts/macos_build_package.sh \
+  --configuration Release \
+  --architectures universal
+```
 
-- macOS 13 or later for Apple frontends and the Metal runtime path
-- Linux with Vulkan, OpenGL/GLX/X11 development files, FFmpeg development libraries, pkg-config, and Qt 6 for the Linux runtime and Qt frontends
-- Windows with the Windows SDK, Vulkan headers, FFmpeg development libraries, and Direct3D 11/12 development libraries for the Windows runtime path
-- C++20
-- CMake with FetchContent
-- Ninja
-- OpenXR SDK headers and loader
-- Xcode Metal Toolchain for Apple builds and CTS Metal (`xcodebuild -downloadComponent MetalToolchain`)
-- Vulkan headers for interop paths
-- Android SDK, Android NDK, and Java 17 for the Android client
-
-## Status
-
-- macOS: Metal rendering, release-time Metal streaming snapshots, H.264/H.265 VideoToolbox streaming selection with negotiated H.265 Main10 support, core runtime flow, Vulkan/MoltenVK runtime plumbing, typed graphics/frame plumbing, and loader-backed runtime tests are in place. A CMake FFmpeg encoder option is available for Vulkan/codec pipeline validation.
-- Linux: Vulkan runtime streaming now uses FFmpeg H.264/H.265 encode with Vulkan image readback, and the first Linux OpenGL GLX backend exposes `XR_KHR_opengl_enable` with bounded PBO readback for desktop validation.
-- Windows: Vulkan and Direct3D 11/12 runtime backends are buildable with FFmpeg streaming readback; OpenGL Win32/WGL remains a follow-up backend.
-- `XR_EXT_conformance_automation`, `XR_EXT_hand_tracking`, `XR_EXT_hand_interaction`, and `XR_EXT_debug_utils` are implemented.
-- The Android VR client feeds real Quest/PICO hand joints into the runtime, gates controller poses and actions with explicit active flags, keeps hand-interaction bindings available alongside active controllers with controller-first priority, supports WiFi UDP and reconnecting USB ADB reverse TCP streaming, decodes negotiated H.264/H.265 streams while preferring H.265, keeps a reserved optional spatial channel for anchors/scene data, shows a local status shell with controller lasers plus hand laser/pinch controls before video arrives, matches per-frame render poses for smoother headset reprojection, reprojects short decode/network gaps with a configurable Quest client mode, reports active refresh before streaming, supports optional server-announced `XR_FB_foveation` overrides for the headset viewer, supports negotiated Quest passthrough during MR streaming with app alpha-blend kept behind an explicit config opt-in, supports USB TCP dynamic encoded-resolution reconfiguration in ABR full mode, supports the Quest shader path for foveated-encoding decompression and edge-aware upscaling, recovers when an initial video stream never arrives, reports frame age/reprojection/passthrough readiness/effective bitrate/foveated-status telemetry for runtime status, and keeps decoder output draining off the XR frame loop.
-- The visionOS viewer uses a compact floating control window for server search and explicit connection, decodes negotiated H.264/H.265 streams while preferring H.265, supports optional automatic immersive entry, defaults to hidden-window immersive mode with return-to-menu re-entry/disconnect controls, offers optional keep-window-visible behavior and visible-hands upper-limb control, and sends head pose, hand joints, and first-pass tracked accessory controller data back to the runtime when available.
-- OXRSys Home is now a direct-distribution launcher and runtime selector for compatible apps such as Godot and Unity, with a first-launch registration prompt, main-window runtime activity summary, autosaved streaming settings up to the shared 200 Mbps runtime cap, refresh/codec/encoder/foveated-encoding/ABR/dynamic-resolution/passthrough/spatial controls, a separate Headset Client section for client foveation, reprojection, upscaling, and reserved audio, bounded Quest logcat capture setup, runtime log reveal actions, transport readiness controls, one-step USB reverse setup, Settings-based Internal/Custom ADB selection, native ADB-server protocol support with external `adb` fallback, per-app custom ADB path selection, and optional Developer simulator workflows. Qt Home keeps the same shared streaming controls and keeps slow WiFi/ADB readiness work off the UI thread. The Apple and Qt simulators own simulator FOV locally and send eye-FOV tracking metadata; the shared Apple receiver and the Qt Home simulator use decoded H.264/H.265 video as the interaction surface when available, and keep tracking-only fallback visible when it is not.
-- As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed, 36 skipped, 0 failed.
+See [Install](docs/install.md), [Build](docs/build.md), and
+[Testing and Conformance](docs/testing-and-conformance.md) before submitting a change.
 
 ## Documentation
 
-- [Install](docs/install.md)
-- [Changes](CHANGES.md)
-- [Build and versioning](docs/build.md)
 - [Architecture](docs/architecture.md)
 - [Protocol](docs/protocol.md)
 - [Simulator](docs/simulator.md)
-- [Quest](docs/platforms/quest.md)
 - [macOS Home](docs/platforms/macos-home.md)
-- [Qt Home](docs/platforms/qt-home.md)
+- [Quest and Pico](docs/platforms/quest.md)
 - [iOS Viewer](docs/platforms/ios-viewer.md)
-- [Vision OS](docs/platforms/visionos.md)
-- [Testing And Conformance](docs/testing-and-conformance.md)
-- [Licensing](docs/licensing.md)
+- [visionOS](docs/platforms/visionos.md)
 - [Scripts](scripts/README.md)
+- [Changes](CHANGES.md)
+- [Licensing](docs/licensing.md)
 
 ## Contributing
 
-Contributions from humans and LLM-assisted workflows are welcome. Keep changes small, tested, and documented: if behavior, architecture, build steps, or platform support changes, update the relevant files in `docs/` and `AGENTS.md` in the same patch.
-
-Before considering a change ready, run the build and tests for the affected platform. If you touch the Android client, also run the Android build. If you touch runtime API or conformance-sensitive behavior, run the CTS lane when practical.
+Contributions and LLM-assisted workflows are welcome. Keep changes focused, preserve the
+latency-sensitive and non-blocking contracts in `AGENTS.md`, update tests and the owning
+documentation, and run every affected build lane before declaring success.
 
 ## License
 
-The project is licensed under [MPL-2.0](LICENSE). Third-party SDKs, tools, platform runtimes, and OpenXR/Khronos components keep their own licenses and terms; see [Licensing](docs/licensing.md).
+Project-owned source is licensed under [MPL-2.0](LICENSE). Third-party components retain their
+upstream licenses and terms; see [Licensing](docs/licensing.md).

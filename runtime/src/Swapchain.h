@@ -6,13 +6,37 @@
 #include "GraphicsTypes.h"
 #ifdef XR_USE_GRAPHICS_API_VULKAN
 #include <vulkan/vulkan.h>
+#if defined(__APPLE__)
+#include <vulkan/vulkan_metal.h>
 #endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-#include <GL/gl.h>
+
+struct VulkanDeviceFunctions
+{
+    PFN_vkCreateImage createImage = nullptr;
+    PFN_vkDestroyImage destroyImage = nullptr;
+    PFN_vkGetImageMemoryRequirements getImageMemoryRequirements = nullptr;
+    PFN_vkAllocateMemory allocateMemory = nullptr;
+    PFN_vkFreeMemory freeMemory = nullptr;
+    PFN_vkBindImageMemory bindImageMemory = nullptr;
+#if defined(__APPLE__)
+    PFN_vkExportMetalObjectsEXT exportMetalObjects = nullptr;
 #endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12) || \
-                        defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
-#include "D3DGraphicsContext.h"
+    PFN_vkCreateCommandPool createCommandPool = nullptr;
+    PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
+    PFN_vkResetCommandPool resetCommandPool = nullptr;
+    PFN_vkAllocateCommandBuffers allocateCommandBuffers = nullptr;
+    PFN_vkBeginCommandBuffer beginCommandBuffer = nullptr;
+    PFN_vkEndCommandBuffer endCommandBuffer = nullptr;
+    PFN_vkCmdPipelineBarrier cmdPipelineBarrier = nullptr;
+    PFN_vkCmdCopyImage cmdCopyImage = nullptr;
+    PFN_vkQueueSubmit queueSubmit = nullptr;
+    PFN_vkCreateFence createFence = nullptr;
+    PFN_vkDestroyFence destroyFence = nullptr;
+    PFN_vkGetFenceStatus getFenceStatus = nullptr;
+    PFN_vkResetFences resetFences = nullptr;
+    PFN_vkWaitForFences waitForFences = nullptr;
+    PFN_vkGetDeviceQueue getDeviceQueue = nullptr;
+};
 #endif
 #include <vector>
 #include <cstdint>
@@ -20,16 +44,14 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+
+#include "SnapshotLeasePool.h"
 
 struct SwapchainStagingSlotState
 {
     std::atomic_bool inUse{false};
-};
-
-struct SwapchainSnapshotPoolState
-{
-    std::atomic_uint32_t inUse{0};
 };
 
 class Swapchain
@@ -55,6 +77,9 @@ public:
     XrResult WaitImage(const XrSwapchainImageWaitInfo* waitInfo);
     XrResult ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo);
     XrResult InitializationResult() const { return initializationResult_; }
+    // Retryable pre-destruction barrier. Failure keeps the OpenXR handle and
+    // every backend resource alive for a later xrDestroy* retry.
+    XrResult PrepareForDestroy();
 
     uint32_t GetWidth() const
     {
@@ -95,71 +120,45 @@ public:
 
     bool HasReleasedImage() const;
 
+    // Release-time snapshots are only useful while a headset encoder is ready.
+    // The shared flag avoids coupling swapchains to StreamingServer lifetime.
+    void SetStreamingSnapshotDemand(const std::shared_ptr<std::atomic_bool>& demand)
+    {
+        streamingSnapshotDemand_ = demand;
+    }
+
     static constexpr uint32_t SwapchainImageCount = 3;
 
 #ifdef XR_USE_GRAPHICS_API_VULKAN
-    struct VulkanFrameSource
+    struct VulkanSnapshotSlot
     {
-        std::shared_ptr<void> lifetime = {};
-        VulkanGraphicsContext context = {};
-        VkFormat format = VK_FORMAT_UNDEFINED;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-        size_t stagingSize = 0;
+        VkImage snapshotImage = VK_NULL_HANDLE;
+        VkDeviceMemory snapshotMemory = VK_NULL_HANDLE;
+        void* metalTexture = nullptr;
         VkCommandPool commandPool = VK_NULL_HANDLE;
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         bool fenceSubmitted = false;
+    };
+
+    struct VulkanSnapshotPool
+    {
+        explicit VulkanSnapshotPool(size_t slotCount)
+            : leases(slotCount), slots(slotCount)
+        {
+        }
+
+        SnapshotLeasePool leases;
+        std::vector<VulkanSnapshotSlot> slots;
+        VulkanGraphicsContext context = {};
         PFN_vkDestroyCommandPool destroyCommandPool = nullptr;
-        PFN_vkDestroyBuffer destroyBuffer = nullptr;
+        PFN_vkDestroyImage destroyImage = nullptr;
         PFN_vkFreeMemory freeMemory = nullptr;
         PFN_vkDestroyFence destroyFence = nullptr;
         PFN_vkWaitForFences waitForFences = nullptr;
-        PFN_vkMapMemory mapMemory = nullptr;
-        PFN_vkUnmapMemory unmapMemory = nullptr;
-        PFN_vkInvalidateMappedMemoryRanges invalidateMappedMemoryRanges = nullptr;
-    };
-#endif
-
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    struct OpenGLFrameSource
-    {
-        std::vector<uint8_t> pixels;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        GLenum format = GL_RGBA;
-    };
-#endif
-
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(OXRSYS_USE_D3D12) || \
-                        defined(XR_USE_GRAPHICS_API_D3D11) || defined(XR_USE_GRAPHICS_API_D3D12))
-    struct D3D11FrameSource
-    {
-        std::shared_ptr<void> lifetime = {};
-        ID3D11DeviceContext* immediateContext = nullptr;
-        ID3D11Texture2D* stagingTexture = nullptr;
-        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-        uint32_t width = 0;
-        uint32_t height = 0;
-    };
-
-    struct D3D12FrameSource
-    {
-        std::shared_ptr<void> lifetime = {};
-        ID3D12Resource* sourceTexture = nullptr;
-        ID3D12Resource* readbackBuffer = nullptr;
-        ID3D12Fence* fence = nullptr;
-        HANDLE fenceEvent = nullptr;
-        uint64_t fenceValue = 0;
-        bool fenceSubmitted = false;
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
-        UINT64 totalBytes = 0;
-        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        ID3D12CommandAllocator* commandAllocator = nullptr;
-        ID3D12GraphicsCommandList* commandList = nullptr;
+        // Once stopping is visible, no new encoder-side Vulkan wait may start.
+        // Existing waits retain a lease and are covered by the bounded drain.
+        std::atomic_bool stopping{false};
     };
 #endif
 
@@ -174,22 +173,12 @@ private:
     void InitMetal(void* metalDevice, const XrSwapchainCreateInfo* createInfo);
     void InitVulkan(void* metalDevice, const VulkanGraphicsContext& vulkanContext,
                      const XrSwapchainCreateInfo* createInfo);
-    void InitOpenGL(const OpenGLGraphicsContext& openGLContext,
-                    const XrSwapchainCreateInfo* createInfo);
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    void InitD3D11(const D3D11GraphicsContext& d3d11Context,
-                   const XrSwapchainCreateInfo* createInfo);
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    void InitD3D12(const D3D12GraphicsContext& d3d12Context,
-                   const XrSwapchainCreateInfo* createInfo);
-#endif
     void InitMetalStaging(void* metalDevice);
 #ifdef XR_USE_GRAPHICS_API_METAL
     XrResult EnumerateMetalImages(uint32_t imageCapacityInput,
                                   XrSwapchainImageBaseHeader* images) const;
     void DestroyMetalResources();
-    void SnapshotMetalReleasedImage();
+    void SnapshotMetalReleasedImage(bool requested);
     void* GetLastReleasedMetalTextureSlice(uint32_t arrayIndex) const;
     FrameImageSource SnapshotMetalFrameImageSource(uint32_t arrayIndex) const;
     static void ReleaseMetalTextureSlice(void* textureSlice);
@@ -197,33 +186,12 @@ private:
 #ifdef XR_USE_GRAPHICS_API_VULKAN
     XrResult EnumerateVulkanImages(uint32_t imageCapacityInput,
                                    XrSwapchainImageBaseHeader* images) const;
-    void DestroyVulkanResources();
-    FrameImageSource SnapshotVulkanFrameImageSource(uint32_t arrayIndex) const;
-    static void ReleaseVulkanFrameSource(VulkanFrameSource* source);
+    bool DestroyVulkanResources();
+    void SnapshotVulkanReleasedImage(bool requested);
+    bool InitVulkanSnapshotPool();
+    bool DrainVulkanSnapshotPool(std::chrono::nanoseconds timeout);
+    void DestroyVulkanSnapshotPoolResources();
 #endif
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    XrResult EnumerateOpenGLImages(uint32_t imageCapacityInput,
-                                   XrSwapchainImageBaseHeader* images) const;
-    void DestroyOpenGLResources();
-    void SnapshotOpenGLReleasedImage(uint32_t releasedIndex);
-    void ResolveReadyOpenGLSnapshots();
-    FrameImageSource SnapshotOpenGLFrameImageSource(uint32_t arrayIndex) const;
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    XrResult EnumerateD3D11Images(uint32_t imageCapacityInput,
-                                  XrSwapchainImageBaseHeader* images) const;
-    void DestroyD3D11Resources();
-    FrameImageSource SnapshotD3D11FrameImageSource(uint32_t arrayIndex) const;
-    static void ReleaseD3D11FrameSource(D3D11FrameSource* source);
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    XrResult EnumerateD3D12Images(uint32_t imageCapacityInput,
-                                  XrSwapchainImageBaseHeader* images) const;
-    void DestroyD3D12Resources();
-    FrameImageSource SnapshotD3D12FrameImageSource(uint32_t arrayIndex) const;
-    static void ReleaseD3D12FrameSource(D3D12FrameSource* source);
-#endif
-
     uint64_t handle_ = 0;
     XrResult initializationResult_ = XR_SUCCESS;
     GraphicsApi graphicsApi_ = GraphicsApi::Metal;
@@ -250,47 +218,18 @@ private:
     uint64_t lastSnapshotValue_ = 0;
     bool hasSnapshot_ = false;
     std::shared_ptr<void> lastSnapshotLease_ = {};
-    std::shared_ptr<SwapchainSnapshotPoolState> backendSnapshotPool_ =
-        std::make_shared<SwapchainSnapshotPoolState>();
+    std::shared_ptr<std::atomic_bool> streamingSnapshotDemand_ = {};
 
     // Vulkan resources (only used when graphicsApi_ == Vulkan)
     void* vkDevice_ = nullptr;
     VulkanGraphicsContext vulkanContext_ = {};
+    std::shared_ptr<const VulkanDeviceFunctions> vulkanDeviceFunctions_ = {};
     std::vector<uint64_t> vkImages_;   // VkImage handles
     std::vector<uint64_t> vkMemories_; // VkDeviceMemory handles
     std::vector<FrameImageSource> lastVulkanSnapshots_;
-
-    // OpenGL resources (only used when graphicsApi_ == OpenGL)
-    OpenGLGraphicsContext openGLContext_ = {};
-#ifdef XR_USE_GRAPHICS_API_OPENGL
-    struct OpenGLReadbackSlot
-    {
-        GLuint pbo = 0;
-        GLsync fence = nullptr;
-        size_t size = 0;
-        uint32_t arrayIndex = 0;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        GLenum format = GL_RGBA;
-        bool pending = false;
-    };
-
-    std::vector<GLuint> glTextures_;
-    std::vector<OpenGLReadbackSlot> glReadbackSlots_;
-    std::vector<uint32_t> glReadbackNextSlotByLayer_;
-    std::vector<std::shared_ptr<OpenGLFrameSource>> lastOpenGLSnapshots_;
-#endif
-
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-    D3D11GraphicsContext d3d11Context_ = {};
-    std::vector<void*> d3d11Textures_;
-    std::vector<FrameImageSource> lastD3D11Snapshots_;
-#endif
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-    D3D12GraphicsContext d3d12Context_ = {};
-    std::vector<void*> d3d12Resources_;
-    std::vector<FrameImageSource> lastD3D12Snapshots_;
-#endif
+    std::shared_ptr<VulkanSnapshotPool> vulkanSnapshotPool_ = {};
+    bool resourcesDestroyed_ = false;
+    std::mutex teardownMutex_;
 
     uint32_t nextAcquireIndex_ = 0;
     uint32_t lastReleasedIndex_ = 0;

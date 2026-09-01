@@ -2,7 +2,8 @@
 
 ## Purpose
 
-This page documents the current iOS workflow inside the unified viewer target: a lightweight remote stereo viewer rather than a full standalone OpenXR headset target.
+This page documents the iOS 17+ workflow inside the unified viewer target: a lightweight remote
+stereo viewer rather than a full standalone OpenXR headset target.
 
 ## Intended Role
 
@@ -20,17 +21,30 @@ The iOS path is still a lightweight remote-viewing workflow for experimentation 
 - Display and interaction expectations are closer to a lightweight viewer than to a full headset runtime.
 - `StereoView` currently uses side-by-side presentation with adjustable IPD offset, not a full lens-distortion stack.
 
+## Privacy and Physical-Device Discovery Gate
+
+The generated iOS app metadata explains camera access for ARKit tracking and local-network access
+for runtime discovery. OXRSys listens for its server announcement with IPv4 UDP broadcast rather
+than Bonjour, so `NSBonjourServices` is not required.
+
+Apple's [multicast entitlement documentation](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.networking.multicast)
+requires the restricted `com.apple.developer.networking.multicast` entitlement for apps that send
+or receive IP broadcast on iOS. Do not add that entitlement with an unprovisioned value: the
+signing team must first obtain the capability from Apple and include it in the app's provisioning
+profile. The generic-device build only validates compilation. Physical discovery remains gated on a
+properly provisioned build, Local Network permission, and an on-device UDP broadcast discovery test.
+
 ## Design Priorities
 
 - simple install and launch flow
 - low-friction experimentation
 - clear separation from headset-class features
 - realistic scope for a future prototype
-- shared implementation in `clients/Apple/common/OXRSysSimulator/` to avoid duplicate client stacks
+- shared implementation in `clients/shared/OXRSysSimulator/` to avoid duplicate client stacks
 
 ## Current Workflow
 
-- Build the unified target in `clients/Apple/oxrsys-simulator/`
+- Build the unified target in `clients/simulator/`
 - Connect to the runtime from the app landing page
 - Open the settings sheet and switch to `StereoView`
 - Use the stats overlay and IPD controls as needed
@@ -39,13 +53,15 @@ The iOS path is still a lightweight remote-viewing workflow for experimentation 
 ## Build
 
 ```bash
-xcodebuild -project "clients/Apple/oxrsys-simulator/OXRSys Simulator.xcodeproj" \
+xcodebuild -project "clients/simulator/OXRSys Simulator.xcodeproj" \
   -scheme "OXRSys Simulator" \
   -configuration Debug \
   -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO \
   build
 ```
 
 ## Status
 
-`Prototype in-tree`. The iOS stereo viewer is now part of the unified viewer target, but it remains an experimentation path rather than a headset-class product.
+`Supported client variant`. CI compiles the simulator and generic-device destinations. Cardboard
+projection and ARKit tracking remain physical-iPhone release gates.

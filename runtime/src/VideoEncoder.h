@@ -6,18 +6,21 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <condition_variable>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "GraphicsTypes.h"
+#include "BoundedDrain.h"
 #include <oxrsys/protocol/Protocol.h>
 
 /**
  * Low-latency video encoder facade.
  *
- * Apple builds use VideoToolbox with Metal textures by default. Linux builds
- * use FFmpeg and keep backend-specific graphics readback state behind
- * GraphicsContext. macOS can opt into FFmpeg for codec/pipeline testing.
+ * macOS builds use VideoToolbox with Metal textures. Backend-specific graphics
+ * snapshot state stays behind GraphicsContext.
  */
 class VideoEncoder
 {
@@ -49,6 +52,31 @@ public:
         float edgeRatioY = 1.0f;
     };
 
+    struct BackendCapabilities
+    {
+        std::string backendName;
+        bool hardwareEncoder = false;
+        bool supportsH264 = false;
+        bool supportsH265 = false;
+        bool supportsTenBitH265 = false;
+        bool supportsFoveatedEncoding = false;
+        std::string unsupportedReason;
+
+        bool SupportsCodec(oxr::protocol::VideoCodec codec) const
+        {
+            switch (codec)
+            {
+                case oxr::protocol::VideoCodec::H264:
+                    return supportsH264;
+                case oxr::protocol::VideoCodec::H265:
+                    return supportsH265;
+                case oxr::protocol::VideoCodec::AV1:
+                default:
+                    return false;
+            }
+        }
+    };
+
     // Callback for each encoded NAL unit
     using OnNalUnitCallback = std::function<void(const uint8_t* data, size_t size,
                                                   bool isKeyframe, int64_t timestampNs)>;
@@ -64,11 +92,16 @@ public:
     bool Initialize(uint32_t width, uint32_t height, uint32_t fps,
                     uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
                     oxr::protocol::VideoCodec codec);
-    void Shutdown();
+    // Stops new submissions and waits only up to timeout for Metal and
+    // VideoToolbox callbacks. A timeout keeps all backing resources alive and
+    // is safe to retry; true means every callback released its FrameSource.
+    bool Shutdown(std::chrono::nanoseconds timeout = std::chrono::milliseconds(500));
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
     static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
+    static BackendCapabilities QueryBackendCapabilities(const GraphicsContext* graphicsContext = nullptr);
+    static bool SupportsCodec(oxr::protocol::VideoCodec codec);
 
     // Encode one backend-native texture/image source.
     // The callback is invoked for each NAL unit produced
@@ -88,10 +121,7 @@ public:
     uint32_t GetBitrateMbps() const { return bitrateMbps_; }
     oxr::protocol::VideoCodec GetCodec() const { return codec_; }
 
-    bool IsInitialized() const
-    {
-        return videoToolbox_.session != nullptr || ffmpeg_.codecContext != nullptr;
-    }
+    bool IsInitialized() const { return initialized_.load(std::memory_order_acquire); }
 
     // Stats
     uint32_t GetEncodedFrameCount() const { return frameCount_; }
@@ -126,22 +156,14 @@ private:
         void* metalDevice = nullptr;      // id<MTLDevice>
         void* commandQueue = nullptr;     // id<MTLCommandQueue>
         void* scaler = nullptr;           // MPSImageBilinearScale*
+        void* copyPipeline = nullptr;      // id<MTLComputePipelineState>
+        void* copySampler = nullptr;       // id<MTLSamplerState>
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
     };
 
-    struct FfmpegState
-    {
-        void* codecContext = nullptr; // AVCodecContext*
-        void* frame = nullptr;        // AVFrame*
-        void* packet = nullptr;       // AVPacket*
-        void* readbackState = nullptr;
-    };
-
     GraphicsContext graphicsContext_ = {};
     VideoToolboxState videoToolbox_ = {};
-    FfmpegState ffmpeg_ = {};
-
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
     uint32_t height_ = 0;
     uint32_t eyeWidth_ = 0;   // Single eye width (width_/2 for stereo)
@@ -150,6 +172,7 @@ private:
     oxr::protocol::VideoCodec codec_ = oxr::protocol::VideoCodec::H265;
     FoveationSettings foveationSettings_ = {};
     bool tenBit_ = false;
+    std::atomic_bool initialized_{false};
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
@@ -158,6 +181,17 @@ private:
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};
     std::mutex slotMutex_;
+    BoundedDrain callbackDrain_;
+    // Serializes VTCompressionSessionEncodeFrame against session invalidation.
+    // The OpenXR teardown thread never performs the potentially blocking VT
+    // drain itself; the shutdown worker owns that operation.
+    std::mutex videoToolboxSessionMutex_;
+    std::mutex shutdownMutex_;
+    std::condition_variable shutdownCondition_;
+    std::thread shutdownThread_;
+    bool sessionShutdownStarted_ = false;
+    bool sessionShutdownComplete_ = true;
+    bool resourcesDestroyed_ = true;
     static constexpr size_t SlotCount = 3;
     std::array<BufferSlot, SlotCount> slots_{};
 };

@@ -1,99 +1,60 @@
-# Vision Pro — Latency & Jitter
+# Vision Pro Latency And Reprojection
 
-**Branch:** `develop-avp` (latency track)
+## Current Pipeline
 
-Goal of this track: minimize motion-to-photon latency and kill reprojection
-jitter for the streamed visionOS client. Visual correctness (black screen, eye
-projection, BT.709 color, Main10) is already handled; this track is about
-*timing and stability*.
+The visionOS client uses the shared decoder at
+`clients/shared/OXRSysStreaming/Sources/OXRSysStreaming/VideoDecoder.swift` and presents through a
+native CompositorServices renderer.
 
-Work is staged. This document currently covers **item 1 — the decode pipeline**
-(implemented) and lists the remaining items as a roadmap. Background research and
-provenance: `docs/research/visionos-client-improvements.md` §2 on the
-`optimization/vision-pro-latency` branch.
+The latency-first decode contract is:
 
----
+- set `kVTDecompressionPropertyKey_RealTime`
+- enable, but never require, hardware-accelerated decode
+- never combine real-time decode with `MaximizePowerEfficiency`
+- scan Annex B start codes in place rather than copying the complete frame first
+- after a decode failure, discard dependent frames and request a keyframe until a valid IDR/IRAP
+  arrives
+- retain the H.265 ten-bit-to-eight-bit output fallback when session creation rejects ten-bit output
 
-## 1. Low-latency decode pipeline — IMPLEMENTED
+The renderer uses two in-flight buffers. Increasing that count can add a compositor frame of
+latency and requires an isolated measurement before adoption.
 
-File: `clients/Apple/common/OXRSysStreaming/Sources/OXRSysStreaming/VideoDecoder.swift`
+## Pose Matching And Timewarp
 
-Three changes, all in the decode hot path, all low-risk:
+Every displayed frame is matched to the render pose carried with that encoded frame. The client
+reprojects it from the server render pose into the latest ARKit head pose at presentation time.
+Current timewarp includes rotation, translation against the bounded shared reprojection plane, and
+the per-eye IPD lever-arm correction.
 
-### 1a. Real-time decode hint
-`kVTDecompressionPropertyKey_RealTime = true` is set on every decompression
-session right after creation. This tells VideoToolbox that latency matters more
-than throughput, so it does not batch or hold frames.
+The client reports:
 
-- **Must never** be combined with `kVTDecompressionPropertyKey_MaximizePowerEfficiency`
-  — combining the two is undefined behavior. We do not set the power key anywhere;
-  keep it that way.
+- locally measured head linear and angular velocity
+- decoder, renderer pickup, in-flight, and compositor latency
+- displayed-frame age and matched render-pose data
 
-### 1b. Hardware-decoder preference
-The decoder specification now passes
-`kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder = true`, so a
-real-time stream is never paced by a software decoder.
+These values feed bounded server prediction. Missing or implausible pose data must fail closed rather
+than applying an unbounded warp.
 
-- We use **Enable**, not **Require**. Hardware HEVC/H.264 decode is always present
-  on Apple silicon (all Apple Vision Pro, modern Macs), so this is effectively
-  always honored — but `Enable` still permits a fallback rather than failing
-  session creation outright on any configuration that lacks it. This composes
-  safely with the existing 10-bit→8-bit output-format fallback loop.
+## Color, Foveation, And Sharpening
 
-### 1c. In-place NAL splitting (drops a per-frame whole-buffer copy)
-`splitNalUnits` previously did `[UInt8](data)` — a full heap copy of every frame —
-then sliced that array into per-NAL `Data`. It now scans Annex-B start codes
-directly over the frame's bytes via `withUnsafeBytes`, and copies each NAL out
-exactly once into an owned, 0-based `Data`.
+Latency changes must preserve visual contracts:
 
-- Owned + 0-based is deliberate: callers index `nal[0]` for the NAL type, and
-  parameter sets (VPS/SPS/PPS) are *retained* across frames — both would be unsafe
-  with a storage-sharing slice or a raw pointer into the transient receive buffer.
-- Net effect: removes one full-frame copy and the per-byte bounds checking on the
-  decode path per frame. Not literally zero-copy (the NAL payload is still copied
-  once, which is required), but it removes the dominant redundant copy §2.2 flagged.
+- BT.709 SDR limited-range conversion with exact 8-bit and 10-bit ranges
+- the closed-form visionOS foveated inverse as the exact inverse of the server AADT transform
+- display-space contrast-adaptive sharpening controlled by the server announcement
+- matching per-eye FOV and IPD from the active visionOS drawable/ARKit state
 
-### Verification (do on device)
-- Console: `[VideoDecoder/H.265] Decoder session created - WxH (10-bit|8-bit)`.
-- Confirm hardware decode is actually in use by reading
-  `kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder` off the
-  session (diagnostic; not wired up yet — add if HW usage is ever in doubt).
-- Measure decode→display latency against the pre-change baseline (LatencyReporter /
-  JitterDiag). The RealTime hint should shave queued-frame latency; the NAL change
-  should reduce per-frame CPU at high bitrate/refresh.
+Re-run fp32 round-trip tests whenever the foveation math changes.
 
----
+## Physical Verification
 
-## Deferred — needs an isolated experiment (do NOT bundle with the above)
+Simulator compilation does not qualify this path. On a physical Vision Pro:
 
-- **Drop `_EnableAsynchronousDecompression`.** For an all-P (no B-frame) stream,
-  synchronous one-in/one-out decode can lower and de-jitter latency — but async can
-  help throughput and dropping it risks frame starvation. §2.1 says *measure first*.
-  Left ON for now. Requires confirming the server encodes zero B-frames.
-- **maxBuffersInFlight 3 → 2** (`ImmersiveRenderer`): lower latency, possible frame
-  starvation. Isolated A/B.
-- **Fixed 1.5 m compositor depth**: may improve translation handling but distorts
-  content at other depths. Isolated.
-- **Adaptive jitter buffer**: smooths unstable Wi-Fi at the cost of intentional
-  added latency. Isolated.
+1. Stream the same controlled scene before and after the change.
+2. Confirm hardware decode status when diagnosing decoder regressions.
+3. Record server pipeline, decode, compositor, displayed-frame-age, and prediction telemetry.
+4. Replay slow and fast yaw, pitch, vertical translation, lateral translation, and reconnect.
+5. Verify no black-level, eye-projection, Main10, foveation, or sharpening regression.
 
----
-
-## Roadmap — remaining items (later)
-
-Recommended order, per the review of `optimization/vision-pro-latency`:
-
-- [x] 1. Low-latency VideoToolbox decode, HW-decoder preference, in-place NAL split
-- [ ] 2. Decoder corruption recovery: after packet loss, discard dependent frames
-      until an IDR/IRAP (HEVC NAL types 16–23) arrives (see §2.3 keyframe-by-NAL-type)
-- [ ] 3. Live ARKit provider lookup + last-valid-anchor fallback during reconnects
-- [ ] 4. Locally measured linear/angular head velocity for better server pose prediction
-- [ ] 5. Measured decode-to-photon latency for auto-calibrated prediction
-- [ ] 6. visionOS foveated-stream decoding
-- [ ] 7. Unified resolution presets + corrected foveation layouts (touches Quest/ABR)
-- [ ] 8. Optional contrast-adaptive sharpening
-- [ ] 9. Controller emulation via hand gestures / hands + gamepad (separate from latency)
-
-Do **not** merge `optimization/vision-pro-latency` wholesale — it predates the
-current codec generalization and couples protocol, runtime, UI, and rendering
-experiments. Port items individually, as done for item 1.
+Use controlled A-B-A measurements for latency changes. Do not present source-level optimizations or
+FPS alone as proof of lower motion-to-photon latency.

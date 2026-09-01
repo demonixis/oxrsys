@@ -6,28 +6,38 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
+  architecture validation for the runtime and OXRSys Home.
+- Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit
+  tracking integration, alongside the visionOS and Android client builds.
+- Added direct IPv4/hostname discovery to the visionOS client. It sends a bounded one-byte unicast
+  request on the control port and connects only after the runtime returns a complete
+  `ServerAnnounce`, providing a fallback when broadcast discovery cannot use Apple's restricted
+  multicast entitlement.
 - Added a visionOS "Emulate controllers" toggle so controller-only PCVR games are playable without physical spatial controllers: hand-tracking gestures synthesize VR controllers (index pinch → trigger, middle/ring pinch → face buttons, three-finger curl → grip, wrist → 6DOF pose), and when an Xbox-style gamepad is connected the hand pose plus gamepad buttons/sticks/triggers emulate Meta Touch controllers (compatibility mode takes priority). Emulated controllers are corrected to the Meta/Touch orientation and flow through the existing tracking path.
-- Added headset contrast-adaptive sharpening: a `client_sharpening` (0.0-1.0) server setting is carried to the client in the announce, and the visionOS client applies a near-free luma-only contrast-adaptive sharpen in source (video) space — four extra luma taps in the same pass, no second render pass and no added latency — with matching SwiftUI Home and Qt Home sliders.
+- Added headset contrast-adaptive sharpening: a `client_sharpening` (0.0-1.0) server setting is carried to the client in the announce, and the visionOS client applies a near-free luma-only contrast-adaptive sharpen in source (video) space — four extra luma taps in the same pass, no second render pass and no added latency — with a matching SwiftUI Home slider.
 - Added foveated-stream decode to the visionOS client: it now advertises `CLIENT_CAPABILITY_FOVEATED_ENCODING` and inverse-warps the server's AADT layout in the fragment shader using a closed-form inverse of the server warp (exact to fp32, replacing per-pixel bisection), so `foveated_encoding_preset` takes effect on Vision Pro (previously the client did not advertise support, so the server sent non-foveated video).
-- Added per-device render-resolution presets: `render_device = "quest2" | "quest3" | "avp"` selects the per-eye render resolution the runtime advertises to the app (1440x1584 / 1512x1680 / 3024x3360), with matching SwiftUI Home and Qt Home controls. The default (`quest3`) matches the previous fixed 1512x1680; use the existing `resolution_scale` to trim how much of it is encoded and streamed.
-- Added negotiated 10-bit H.265 streaming: the visionOS client advertises HEVC Main10 decode support, the runtime requests Main10 only when `streaming.encoder_10bit = true`, the selected codec is H.265, and the connected client supports it, and SwiftUI Home and Qt Home expose the setting. H.264 and legacy clients remain on the 8-bit path.
+- Added per-device render-resolution presets: `render_device = "quest2" | "quest3" | "avp"` selects the per-eye render resolution the runtime advertises to the app (1440x1584 / 1512x1680 / 3024x3360), with matching SwiftUI Home controls. The default (`quest3`) matches the previous fixed 1512x1680; use the existing `resolution_scale` to trim how much of it is encoded and streamed.
+- Added negotiated 10-bit H.265 streaming: the visionOS client advertises HEVC Main10 decode support, the runtime requests Main10 only when `streaming.encoder_10bit = true`, the selected codec is H.265, and the connected client supports it, and SwiftUI Home exposes the setting. H.264 and legacy clients remain on the 8-bit path.
 - Improved the visionOS control window with explicit discovery and connection states, optional automatic immersive entry, immersive re-entry and disconnect actions, configurable window visibility while immersed, and visible-hands control.
-- Added runtime video codec selection with `streaming.video_codec = "h265"`, `"h264"`, or `"auto"`, plus matching SwiftUI Home and Qt Home controls.
+- Added runtime video codec selection with `streaming.video_codec = "h265"`, `"h264"`, or `"auto"`, plus matching SwiftUI Home controls.
 - Added conservative codec capability negotiation through `ClientConnect.supportedCodecs`, keeping legacy clients H.265-only while allowing H.264-capable clients to opt in.
 - Added H.264 decode support to the Android VR client and shared Apple streaming path, with Android, Apple simulator, and visionOS clients advertising H.264/H.265 while keeping H.265 preferred.
 - Added a codec-aware VideoToolbox decoder for Apple clients, including H.264 SPS/PPS and H.265 VPS/SPS/PPS parameter-set handling.
-- Added an `OXRSYS_VIDEO_ENCODER` CMake option so macOS can use the default VideoToolbox path or an explicit FFmpeg encoder build for codec/pipeline validation.
-- Added a first Linux OpenGL GLX backend through `XR_KHR_opengl_enable`, including OpenGL swapchain image enumeration and bounded FBO/PBO readback into the shared FFmpeg encode path.
-- Added Windows Direct3D 11 and Direct3D 12 runtime backends through `XR_KHR_D3D11_enable` and `XR_KHR_D3D12_enable`, including DXGI swapchain images, bounded readback snapshots, FFmpeg conversion, and loader-backed WARP tests.
-- Added loader-backed tests for host graphics extension exposure, including Vulkan everywhere, OpenGL only on Linux builds, and D3D11/D3D12 only on Windows builds.
-- Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`) for reliable USB TCP, dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved optional spatial TCP channel on `9948`, and matching SwiftUI/Qt Home controls and status display.
+- Added protocol v1.2 stream reconfiguration (`StreamConfigUpdate/Ack`) for reliable USB TCP, dynamic encoded-resolution profiles for `abr_mode = "full"`, global passthrough config with app-driven OpenXR alpha blend/source-alpha detection, headset passthrough support/readiness status, occlusion/spatial config gates, a reserved optional spatial TCP channel on `9948`, and matching SwiftUI Home controls and status display.
 - Added runtime status fields for configured bitrate versus effective client-capped bitrate, and for requested/active foveated encoding state so Home can show when a preset is inactive because of `resolution_scale` or client support.
 - Added a native USB ADB backend to SwiftUI Home so Quest USB reverse setup can run without Android Studio, the Android SDK, Homebrew, or an `adb` executable.
-- Added Settings-based Internal/Custom ADB selection to SwiftUI Home and Qt Home, including editable custom executable paths and auto-detected external `adb` prefills.
-- Added world-space rotational reprojection to the visionOS viewer, reprojecting each streamed frame from its runtime render pose into the live head pose every vsync so the view stays locked to the world while turning.
+- Added Settings-based Internal/Custom ADB selection to SwiftUI Home, including editable custom executable paths and auto-detected external `adb` prefills.
+- Added bounded world-space reprojection to the visionOS viewer, applying exact rotation and
+  translation from each frame's runtime render pose to the live head pose against the shared 2 m
+  reprojection plane.
 
 ### Changed
 
+- Focused the host runtime exclusively on macOS with Metal, Vulkan/MoltenVK, and VideoToolbox, while
+  retaining Quest/Pico, visionOS, and macOS/iOS streaming clients.
+- Flattened client sources into `clients/{home,simulator,visionos,android-vr,shared}` and made the
+  SwiftUI Home app the single desktop frontend.
 - The visionOS client now measures real decode-to-photon latency (renderer pickup wait + in-flight queue + compositor present) per displayed frame and reports it in place of the previous one-refresh compositor guess, so the runtime's pose-prediction horizon covers the actual client display path; the displayed-frame-age field is now populated too.
 - The visionOS client now reports measured head linear/angular velocity (differenced from consecutive ARKit samples with light smoothing) in the tracking packet, activating the runtime's preferred client-velocity path for bounded pose prediction instead of its noisier finite differencing of received UDP poses — frames arrive rendered closer to the actual head position.
 - Extended visionOS reprojection from rotation-only to a full 6-DOF planar timewarp: the echoed render-pose position (previously discarded) is now kept, and the fragment shader compensates head translation against the shared 2 m reprojection plane for the entire render-to-display latency — up/down/sway no longer lags the full round-trip. Includes the per-eye rotation-induced offset (IPD lever arm) and a clamped delta so a bad pose match cannot distort the warp.
@@ -37,12 +47,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Reduced visionOS decode latency by preferring the VideoToolbox hardware decoder and enabling real-time decode, and by splitting received NAL units in place instead of copying each whole frame into an array on the decode path.
 - Corrected visionOS streamed-video color conversion by defining a BT.709 SDR encoder contract and expanding VideoToolbox limited-range YCbCr with exact 8-bit and 10-bit code ranges before RGB conversion, restoring proper black levels and color balance without changing stream bandwidth.
 
-- Split non-Apple swapchain implementation by backend so Vulkan, Linux OpenGL, D3D11, and D3D12 resources live in separate files behind explicit platform/API guards.
-- Promoted Linux Vulkan/FFmpeg runtime support from scaffolding to Vulkan swapchains, release-time staging readback, H.264/H.265 encode, and backend readback metadata shared by the existing FFmpeg encoder path.
-- Updated Qt simulator video preview with H.264/H.265 decode selection.
-- Updated the Quest/PICO shell to keep passthrough active only when global passthrough is enabled and the headset reports `XR_FB_passthrough` support, while keeping app alpha-blend passthrough behind the explicit `app_alpha_blend_passthrough` opt-in instead of the normal passthrough toggle.
-- Updated SwiftUI Home and Qt Home setup flows with first-launch runtime registration guidance, automatic USB reverse configuration when USB is selected, packaged-runtime manifest preference, and native ADB host-server protocol support before falling back to an external `adb` executable.
-- Updated documentation for video codec selection, Linux Vulkan/OpenGL streaming, protocol v1.2, passthrough/MR, native ADB setup, and visionOS reprojection.
+- Updated the Quest/PICO shell to keep passthrough active only when global passthrough is enabled and the headset reports `XR_FB_passthrough` support, while keeping app alpha-blend passthrough behind the explicit `app_alpha_blend_passthrough` opt-in instead of the normal passthrough toggle. Protocol alpha/source-alpha frames can reveal the passthrough underlay; black-key alpha is limited to an explicit compatibility fallback.
+- Updated SwiftUI Home setup flows with first-launch runtime registration guidance, automatic USB reverse configuration when USB is selected, packaged-runtime manifest preference, and native ADB host-server protocol support before falling back to an external `adb` executable.
+- Updated documentation for the macOS-only runtime, dual host architectures, protocol v1.2,
+  passthrough/MR, native ADB setup, simulator, and visionOS reprojection.
 
 ### Fixed
 
@@ -61,9 +69,18 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed visionOS eye projection by sending the device's real per-eye FOV and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
 - Fixed Vision Pro head-rotation jitter at the source by tagging each streamed frame with the exact head pose captured at `xrLocateViews`, and by dropping out-of-order or duplicate UDP tracking packets before finite-difference prediction.
 
+### Removed
+
+- Removed the non-macOS host runtime backends, their build options and tests, and the portable
+  desktop frontend. Released history below remains unchanged.
+
 ### Known Limits
 
-- Vulkan, OpenGL, and D3D desktop streaming still need regular manual validation on real Linux/Windows hardware and with MoltenVK apps; Windows OpenGL/WGL remains separate follow-up work.
+- Host runtime support is limited to macOS. Physical Intel Mac, Quest/Pico, Vision Pro, and iPhone
+  qualification remains a release gate even when automated builds are green.
+- Vulkan automation is limited to building the path, loader/dispatch checks, and the generic
+  bounded `HostFence` wait contract. Real MoltenVK image export, fence completion, and streaming
+  from a Vulkan OpenXR application remain manual release gates.
 
 ## 1.2.0 - 2026-06-19
 

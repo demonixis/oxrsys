@@ -2,120 +2,85 @@
 
 ## Purpose
 
-The simulator is the local debug path inside the unified viewer app. It lets you validate runtime behavior, frame submission, input plumbing, and rendering without a headset.
+The OXRSys simulator is the software streaming client used for desktop development and for the iOS
+Cardboard-style viewer. It exercises discovery, video decode, frame presentation, tracking return,
+FOV metadata, keyframe recovery, and runtime telemetry without duplicating the client stack.
 
-## App Layout
+The macOS variant requires macOS 14 or later. The iOS simulator/Cardboard variant requires iOS 17
+or later.
 
-The reusable SwiftUI simulator implementation lives in
-`clients/Apple/common/OXRSysSimulator/` and exposes `OXRSysSimulatorView`. The standalone Apple app in
-`clients/Apple/oxrsys-simulator/` is a thin wrapper around that shared view.
+## Layout
 
-The Qt simulator shared code lives in `clients/Qt/oxrsys-simulator-shared` and is reused by:
+- `clients/shared/OXRSysSimulator/`: shared SwiftUI simulator model, views, and tracking integration
+- `clients/shared/OXRSysStreaming/`: discovery, transport, protocol, VideoToolbox decode, and renderer
+- `clients/simulator/`: standalone macOS/iOS app target
+- `clients/home/`: embeds the same simulator package in the optional Developer workflow
 
-- `clients/Qt/oxrsys-simulator`: standalone simulator shell
-- `clients/Qt/oxrsys-home`: Developer tab launcher for a dedicated simulator window
+The standalone app and Home integration must remain behaviorally aligned because they use the same
+package rather than separate implementations.
 
-The Apple viewer exposes two viewing modes:
+## macOS Simulator
 
-- `Simulator`: mono preview with simulation controls
-- `StereoView`: stereo side-by-side presentation for headset-style viewing on iOS
+The macOS variant uses a SwiftUI interface with platform-scoped Metal and input adapters. It can
+discover or connect to OXRSys, present the decoded stereo stream, and send mouse-driven synthetic
+head tracking. The simulator owns its vertical FOV and sends per-eye FOV metadata in tracking
+packets.
 
-On macOS, the app is primarily used in `Simulator` mode. On iOS, the same target can switch between `Simulator` and `StereoView` from the in-app settings sheet. The macOS Home can also open `OXRSysSimulatorView` from its Developer tab when Developer Mode is enabled.
+Build it with:
 
-The Qt simulator is a single `Simulator` mode. It can run as the standalone
-`oxrsys-simulator` app or from the Qt Home Developer tab, which opens or reuses a
-dedicated `1280x720` simulator window.
+```bash
+xcodebuild -project "clients/simulator/OXRSys Simulator.xcodeproj" \
+  -scheme "OXRSys Simulator" \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
+```
 
-## How Simulator Mode Works
+## iOS Cardboard Variant
 
-The viewer connects to the runtime as a streaming client, using the same UDP protocol as the iOS and visionOS players.
+The iOS target uses the same streaming and presentation path with a Cardboard-style side-by-side
+view. ARKit supplies device tracking on supported hardware. iOS-only tracking sources live under the
+package's `Platform/iOS` source boundary.
 
-`Simulator` mode:
+Compile the simulator and generic-device variants with:
 
-- Discovers the runtime via UDP broadcast (port 9943)
-- Receives encoded video frames and decodes them locally
-- Captures keyboard and mouse input and sends simulated tracking data to the runtime
-- Displays a single-eye preview across the full screen
+```bash
+xcodebuild -project "clients/simulator/OXRSys Simulator.xcodeproj" \
+  -scheme "OXRSys Simulator" -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build
 
-The Qt simulator uses the same UDP discovery, video, control, and tracking ports. With FFmpeg
-development libraries available at build time, the Qt widget advertises H.265 and H.264 support and
-decodes the selected stream into its preview surface. That surface is also the interaction target
-for click, drag, scroll, keyboard focus, and mouse capture. If no decoded frame is available yet, it
-shows a synthetic pose preview with a `Waiting for video` status. If FFmpeg was not enabled, it
-shows `Video preview unavailable: FFmpeg support was not enabled` and keeps synthetic tracking
-available.
+xcodebuild -project "clients/simulator/OXRSys Simulator.xcodeproj" \
+  -scheme "OXRSys Simulator" -configuration Debug \
+  -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO build
+```
 
-The Qt video path uses an internal UDP frame assembler with duplicate-packet filtering, partial-frame
-timeouts, existing XOR FEC recovery, dropped-frame counters, and keyframe requests after repeated
-loss or decode failures. After a successful decode, the Qt client sends the existing latency report
-with receive-to-submit, decode, compositor `0`, and total client latency fields.
+The iOS Simulator cannot qualify physical ARKit motion or Cardboard comfort. Use a signed build on a
+physical iPhone for projection, orientation, touch, reconnect, thermal, and tracking validation.
 
-The settings sheet also lets you:
+## Modes And Controls
 
-- switch between `Simulator` and `StereoView` where supported
-- toggle streaming stats
-- tune the simulator vertical FOV sent through `TrackingPacket.eyeFov`
-- tune the stereo IPD offset
-- request a keyframe
-- reset device pose in `StereoView` on iOS
+- `Simulator` presents the received stereo surface with synthetic or ARKit tracking.
+- `StereoView` is the phone-oriented side-by-side/Cardboard presentation.
+- Discovery and explicit connection use the shared streaming package.
+- Reset returns the synthetic or ARKit tracking origin to the client-defined neutral pose.
+- Vertical FOV belongs to the client and is sent to the runtime; it is not a server render setting.
 
-`Simulator` mode is useful for:
+Keep decoded-frame presentation matched to render-pose metadata. Recovery requests should prefer a
+clean freeze and keyframe request over presenting corrupted frames.
 
-- quick local checks
-- API debugging
-- render loop validation
-- input system iteration
+## Verification
 
-It is not a replacement for real headset validation.
+For simulator changes, separately report:
 
-## macOS TestFlight Packaging
+- Swift package build/test
+- macOS arm64 build
+- macOS x86_64 build
+- iOS Simulator compile
+- generic iOS device compile
+- live macOS stream and input behavior
+- physical iPhone Cardboard and ARKit behavior
 
-The macOS app target is App Store-ready for upload with a generated `LSApplicationCategoryType` of
-`public.app-category.developer-tools` and a sandbox entitlement file. The sandbox keeps UDP client
-and server network entitlements enabled because discovery, video receive, tracking, and control all
-use the streaming protocol.
-
-## Apple Simulator Controls
-
-| Input | Action |
-| --- | --- |
-| Right mouse button | Capture or release relative mouse look |
-| Mouse move while captured | Head look |
-| Mouse wheel | Move forward or backward |
-| `Z Q S D` or `W A S D` | Move head |
-| `Left Shift` + `W A S D` | Move left controller |
-| `Right Shift` + `W A S D` | Move right controller |
-| `Q / E` | Roll head |
-| Arrow keys | Alternate head look |
-| `F / G` | Left or right grip |
-| `Escape` | Menu button |
-| `T` | Toggle controller mode or hand tracking mode |
-
-The Apple simulator settings sheet exposes `Vertical FOV` in `Simulator` mode.
-The simulator derives the horizontal FOV from the runtime render aspect when a
-server has been discovered, then sends both angles in each tracking packet.
-
-## Qt Simulator Controls
-
-| Input | Action |
-| --- | --- |
-| Right mouse button in the preview | Capture or release mouse look |
-| Mouse move while captured, or left-drag | Head look |
-| Mouse wheel | Move forward or backward |
-| `Z Q S D` or `W A S D` | Move head |
-| `Left Shift` + movement | Move left controller |
-| `Right Shift` + movement | Move right controller |
-| Arrow keys | Alternate head look |
-| `R / E` | Roll head |
-| `F / G` | Left or right grip |
-| `Escape` | Release mouse capture |
-
-The Qt simulator window exposes `Vertical FOV` next to the runtime/tracking
-panels. It uses the same `TrackingPacket.eyeFov` path as the Apple simulator.
-
-## Limitations
-
-- Pose quality does not match real headset tracking.
-- Simulator timing does not replace real streaming latency measurements.
-- Optical characteristics, compositor behavior, and headset-specific runtime behavior still require device validation.
-- `StereoView` is a side-by-side viewer mode, not a full optical distortion pipeline.
+The compile lanes do not replace the last two interactive checks.

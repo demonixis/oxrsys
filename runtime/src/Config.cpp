@@ -15,14 +15,11 @@
 #include <filesystem>
 #include <thread>
 
-#if !defined(_WIN32)
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#endif
 
-#if !defined(_WIN32)
 namespace
 {
 
@@ -188,7 +185,6 @@ bool RunAdbLogcatClear(const std::string& adbPath, std::chrono::milliseconds tim
 }
 
 } // namespace
-#endif
 
 Config& Config::Get()
 {
@@ -744,10 +740,6 @@ void Config::SetupLogging()
 
 void Config::StartLogcatCapture()
 {
-#if defined(_WIN32)
-    spdlog::warn("Quest logcat capture is disabled on Windows in this runtime build");
-    return;
-#else
     if (logcatRunning_.load() || logcatPipe_ != nullptr || logcatPid_ > 0)
     {
         return;
@@ -853,27 +845,18 @@ void Config::StartLogcatCapture()
     });
 
     spdlog::info("Quest logcat capture started via {} → {}", adbPath, questLogFilePath);
-#endif
 }
 
 void Config::StopLogcatCapture()
 {
     logcatRunning_.store(false);
 
-#if defined(_WIN32)
-    if (logcatPipe_ != nullptr)
-    {
-        fclose(logcatPipe_);
-        logcatPipe_ = nullptr;
-    }
-#else
     if (logcatPid_ > 0)
     {
         kill(static_cast<pid_t>(logcatPid_), SIGTERM);
         WaitForLogcatProcessExit(logcatPid_);
         logcatPid_ = -1;
     }
-#endif
 
     if (logcatThread_.joinable())
     {

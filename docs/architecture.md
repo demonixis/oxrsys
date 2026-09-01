@@ -2,113 +2,110 @@
 
 ## Overview
 
-OXRSys Runtime is a cross-platform OpenXR runtime in progress. macOS is the mature path, Linux has Vulkan + FFmpeg streaming and a first OpenGL GLX backend, and Windows has Vulkan plus Direct3D 11/12 runtime backends. Shared platform, config, status, codec, and socket helpers are kept portable so platform-specific backends can be added without spreading OS calls through the runtime. The runtime is discovered by the OpenXR loader through the generated `oxrsys-runtime.json` manifest.
+OXRSys is a macOS OpenXR runtime with remote display clients. The runtime accepts OpenXR
+applications through the generated loader manifest, renders through application-owned Metal or
+Vulkan resources, snapshots released swapchain images, encodes them with VideoToolbox, and streams
+them to a headset or simulator. Tracking, input, status, and control data return to the runtime.
+
+The host runtime builds natively for Apple Silicon and Intel. Android, iOS, and visionOS are client
+targets, not additional runtime hosts.
 
 ## Repository Layout
 
-- `runtime/`: runtime library, graphics integration, input, configuration, streaming server, tracking receiver, and video encoder.
-- `common/protocol/include/oxrsys/protocol/`: canonical C++ protocol and FEC wire layout.
-- `clients/Android/android-vr/`: Quest/Pico-oriented Android VR client for decode, display, and tracking return.
-- `clients/Apple/`: Xcode workspace, native SwiftUI Home app, unified Apple simulator/viewer, visionOS viewer, and shared Swift packages.
-- `clients/Qt/`: Qt Home app, Qt simulator app, and reusable Qt simulator widget.
-- `tests/`: unit-style and loader-backed runtime tests.
-- `cmake/`: CMake helpers, including the OpenXR-CTS lane.
-- `docs/`: focused project documentation.
+- `runtime/`: OpenXR entry points, instance/session/action state, graphics integration, streaming,
+  VideoToolbox encoding, configuration, and status.
+- `common/protocol/`: wire-layout definitions shared with native clients.
+- `clients/home/`: SwiftUI macOS launcher, runtime selector, configuration, ADB, and diagnostics.
+- `clients/simulator/`: standalone macOS/iOS simulator and Cardboard viewer.
+- `clients/visionos/`: immersive Vision Pro client.
+- `clients/android-vr/`: Quest/Pico OpenXR client.
+- `clients/shared/`: Swift streaming and simulator packages shared by Apple clients.
 
-## Runtime Modes
+Use `clients/OXRSys Clients.xcworkspace` for coordinated Apple-client development.
 
-The runtime operates in two modes:
+## Runtime And Frame Flow
 
-- `Simulator`: local keyboard and mouse input, local debug rendering, no headset required.
-- `Streaming`: a headset client connects, sends tracking, and receives encoded frames.
+1. The macOS OpenXR loader resolves `oxrsys-runtime.json` and loads the runtime dylib.
+2. The application creates a Metal or Vulkan session and swapchains.
+3. The runtime receives tracking from the active client and supplies predicted views/actions.
+4. The application renders and releases its swapchain images.
+5. The runtime snapshots the released color layers into a bounded backend-owned slot.
+6. `xrEndFrame` enqueues the newest available snapshot without waiting for encode or transport.
+7. VideoToolbox encodes H.264 or H.265, and the bounded sender dispatches the newest frame.
+8. The client decodes and presents the frame matched to its render-pose metadata.
 
-The simulator is useful for API validation and local debugging. Streaming is the path used for Quest-class headsets and future remote clients.
-
-## Frame And Input Flow
-
-At a high level:
-
-1. The application drives the normal OpenXR frame loop.
-2. The runtime maintains instance, session, space, action, swapchain, and hand-tracker state.
-3. Input comes either from the simulator path or from the tracking receiver.
-4. `xrEndFrame` validates and publishes the submitted composition data.
-5. The local renderer presents to the debug window, and the streaming path can encode the latest frame for the client.
-
-`Session::EndFrame()` must remain non-blocking. The streaming path uses `StreamingFrameQueue`, a latest-frame-only queue that replaces any not-yet-encoded frame and immediately releases the replaced `FrameSource` resources. `FrameSource` owns backend-native image references and per-image sync tokens so async encoders can safely outlive the OpenXR frame submission.
-
-## Runtime Boundaries
-
-The runtime keeps these internal boundaries explicit:
-
-- `RuntimePlatform`: config/state roots, module directory detection, and process ids.
-- `RuntimeSockets`: UDP/TCP socket creation, options, timeout, close, and best-effort send/receive wrappers.
-- `GraphicsContext`: typed Metal, Vulkan, OpenGL, D3D11, and D3D12 session context passed from OpenXR graphics bindings into sessions, swapchains, streaming, and encoders.
-- `SwapchainCommon`: shared OpenXR swapchain state, acquire/wait/release ordering, and backend dispatch; graphics API files own only resource creation, image enumeration, destruction, and release-time snapshots.
-- `FrameSource`: the pair of backend-native frame resources owned by the latest-frame queue until the encoder consumes or replaces them.
-- `VulkanDispatch`: Vulkan function dispatch resolved from app-provided or already-loaded process entry points without linking the runtime to the Vulkan loader.
+Encoder and socket backpressure never runs inside `Session::EndFrame()` or a VideoToolbox callback.
+When a bounded slot or queue is full, OXRSys drops stale streaming work instead of accumulating
+latency.
 
 ## Graphics Integration
 
 ### Metal
 
-Metal is the native Apple rendering path. Applications provide an `MTLDevice` through `XR_KHR_metal_enable`, and swapchain textures are backed by native Metal resources.
+`XR_KHR_metal_enable` sessions retain the application-provided Metal device and command queue.
+Released images are copied into bounded private staging textures on that queue. GPU-side shared
+events synchronize the encoder worker. A slot that cannot be reused safely causes a streaming-frame
+drop; the encoder never reads a live application swapchain image after release.
 
-For dynamic Metal swapchains, `xrReleaseSwapchainImage` snapshots the released slot into a staging texture using the app-provided `MTLCommandQueue`. The snapshot signals a `MTLSharedEvent`, and the VideoToolbox encode blit waits on that event GPU-side before reading the staging texture. This prevents the streaming encoder from reading a swapchain slot after the app has released and reused it, while keeping `Session::EndFrame()` CPU-non-blocking. Staging slots are leased through `FrameSource`; if no slot is safe to reuse, the runtime skips that streaming frame instead of falling back to an unsafe live-slot read.
+### Vulkan Through MoltenVK
 
-### Vulkan
+The runtime supports `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. It stores application-owned
+instance, device, physical-device, queue, family, and dispatch state. Released color images are
+copied into bounded exportable Vulkan snapshot images and exposed as Metal textures for the
+VideoToolbox path. Fence waits occur on the encoder worker, never in `Session::EndFrame()`.
 
-Vulkan support is exposed through `XR_KHR_vulkan_enable` and `XR_KHR_vulkan_enable2`. The runtime does not link directly against Vulkan. Instead, it resolves Vulkan functions through the application-provided loader path to avoid dual-loader and dual-MoltenVK issues.
+OXRSys deliberately does not link or load a Vulkan loader. Vulkan v2 uses the application's
+`pfnGetInstanceProcAddr`; Vulkan v1 may reuse that dispatch or find an already-loaded
+`vkGetInstanceProcAddr` with `dlsym(RTLD_DEFAULT, ...)`. Vulkan headers are a build dependency, while
+MoltenVK and the Vulkan loader belong to the application/toolchain environment.
 
-The v2 path stores the app's `pfnGetInstanceProcAddr`. The v1 path first reuses that dispatch if available, then looks for `vkGetInstanceProcAddr` only in already-loaded process modules: `dlsym(RTLD_DEFAULT, ...)` on POSIX and `GetModuleHandleW(L"vulkan-1.dll")` plus `GetProcAddress` on Windows. It intentionally does not load a Vulkan loader itself.
+The macOS runtime does not advertise an OpenGL or Direct3D graphics binding.
 
-Vulkan swapchains allocate runtime-owned `VkImage` objects with transfer-source usage for color formats. When a color image is released, the runtime submits an image-to-buffer copy into a host-visible staging buffer and stores one `FrameImageSource` per array layer. The FFmpeg encoder waits on that source fence outside `Session::EndFrame()`, maps the staging buffer, converts RGBA/BGRA through `swscale`, and encodes H.264 or H.265. If readback resources or snapshot leases are unavailable, the streaming frame is dropped instead of blocking frame submission.
+## Video And Protocol
 
-On macOS, Vulkan is intended for MoltenVK applications and validation builds with `-DOXRSYS_VIDEO_ENCODER=FFMPEG`; the native Metal + VideoToolbox path remains the default Apple streaming path. `VK_EXT_metal_objects` interop remains optional and is not required for the Vulkan FFmpeg readback path.
+VideoToolbox is the host encoder. Codec selection combines configured preference, encoder
+capability, and client advertisement. H.265 remains preferred; H.264 requires explicit client
+support. HEVC Main10 additionally requires the server setting and the client ten-bit capability.
 
-### OpenGL
+Apple streams use BT.709 SDR limited-range YCbCr. Foveated encoding runs as a Metal compute pass
+before the VideoToolbox pixel-buffer copy and is enabled only for clients that advertise the exact
+inverse transform.
 
-OpenGL support is Linux-first through `XR_KHR_opengl_enable` and `XrGraphicsBindingOpenGLXlibKHR`. The runtime creates `XrSwapchainImageOpenGLKHR` textures for common color and depth internal formats, snapshots released color layers through an FBO into per-layer PBO readback slots, and resolves only fences that are already signaled. Ready PBO data is copied into `FrameImageSource` CPU snapshots for the same FFmpeg RGBA/BGRA to YUV path used by Vulkan.
-
-macOS does not advertise OpenGL because `XR_KHR_opengl_enable` has no standard CGL binding. Windows OpenGL/WGL is intentionally left for a later backend milestone.
-
-### Direct3D
-
-Direct3D support is Windows-only through `XR_KHR_D3D11_enable` and `XR_KHR_D3D12_enable`. The runtime accepts app-owned D3D11 devices and D3D12 device/queue bindings, creates runtime-owned DXGI swapchain textures/resources, and exposes them through `XrSwapchainImageD3D11KHR` or `XrSwapchainImageD3D12KHR`.
-
-D3D11 snapshots copy the released array layer into a staging texture. D3D12 snapshots enqueue a copy into a readback buffer and signal a fence. The FFmpeg encoder waits/maps outside `Session::EndFrame()`, converts DXGI RGBA/BGRA readback data through the same `swscale` path as Vulkan/OpenGL, and encodes H.264 or H.265.
+The C++ and Swift protocol layouts must remain byte-compatible. See [Protocol](protocol.md) for
+ports, messages, feature flags, and compatibility rules.
 
 ## Input And Actions
 
-The input system is profile-aware. The runtime currently supports:
+Tracking packets update head, controller, hand-joint, velocity, eye-FOV, and client status data.
+Controller poses are accepted only when the corresponding active flag is set. The action system is
+profile-aware and keeps hand interaction available alongside controller-first bindings.
 
-- `KHR simple_controller`
-- `oculus/touch_controller`
-- Meta Quest Touch and Touch Plus controller profiles
-- PICO Neo3 and PICO 4 controller profiles
-- `ext/hand_interaction_ext`
+Reference spaces currently include `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+`xrLocateSpacesKHR` aliases the OpenXR 1.1 `xrLocateSpaces` entry point.
 
-The runtime also supports:
+## Configuration And Status
 
-- `XR_EXT_hand_tracking`
-- `XR_EXT_conformance_automation`
-- `XR_EXT_debug_utils`
-- `xrLocateSpacesKHR` as an alias for OpenXR 1.1 `xrLocateSpaces`
+The runtime reads:
 
-Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+```text
+~/Library/Application Support/OXRSys/oxrsys-runtime.toml
+```
 
-## Configuration
+It publishes current activity under the same Application Support directory in
+`runtime_status.json`. OXRSys Home edits the configuration, launches applications with the selected
+`XR_RUNTIME_JSON`, and manages the user loader registration at
+`~/.config/openxr/1/active_runtime.json`.
 
-Runtime configuration is loaded from:
+Initialization-bound settings require restarting the OpenXR application. Dynamic streaming values
+are reloaded only where the runtime explicitly supports safe live changes.
 
-- macOS: `~/Library/Application Support/OXRSys/oxrsys-runtime.toml`
-- Linux: `${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml`
-- Windows: `%APPDATA%/OXRSys/oxrsys-runtime.toml`
-- fallback: `build/runtime/oxrsys-runtime.toml`
+## Client Boundaries
 
-Runtime status and logs are written to the platform state directory. On Linux this is `${XDG_STATE_HOME:-~/.local/state}/oxrsys`; on Windows it currently shares `%APPDATA%/OXRSys`.
-
-For terminal-launched applications, use `XR_RUNTIME_JSON`. On macOS, `scripts/oxrsys_runtime_default.sh` can register `build/runtime/oxrsys-runtime.json` as the user default runtime and restore `XR_RUNTIME_JSON` through a LaunchAgent.
-
-The native Home app in `clients/Apple/oxrsys-home/` manages the macOS workflow. The Qt Home app in `clients/Qt/oxrsys-home/` owns Linux runtime registration and can manually launch apps with the user-selected `XR_RUNTIME_JSON` on other desktop platforms.
-
-The runtime reloads config changes opportunistically when the file timestamp changes. `runtime_enabled` is enforced on subsequent `xrCreateInstance` calls, dynamic streaming values such as keyframe cadence update without a full process restart, while initialization-time resources such as the file logger sink still require a restart. `streaming.video_codec` selects `h265`, `h264`, or `auto`; H.265 remains the default and the runtime only selects H.264 when the connected client advertises support. Headset and simulator clients own their eye FOV and send it through tracking metadata; the runtime config only keeps an internal fallback for clients that omit it.
+- Quest/Pico clients own headset OpenXR, GLES composition, MediaCodec decode, WiFi/USB transport,
+  controller/hand tracking, passthrough, and client reprojection.
+- The visionOS client owns CompositorServices presentation, VideoToolbox decode, ARKit head/hands,
+  tracked accessory controllers, and immersive lifecycle.
+- The simulator package owns synthetic tracking on macOS and ARKit tracking plus Cardboard stereo
+  presentation on iOS.
+- Home owns desktop workflows and native ADB setup. All user-facing desktop screens are SwiftUI;
+  AppKit is isolated to platform adapters.

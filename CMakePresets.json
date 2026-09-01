@@ -54,20 +54,6 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64"
       }
-    },
-    {
-      "name": "linux-native",
-      "displayName": "Linux native Debug",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/linux-native",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
-      }
     }
   ]
 }

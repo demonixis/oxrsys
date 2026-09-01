@@ -7,118 +7,204 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Superseded pushes to the same ref don't need their runs finished.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  macos:
-    name: macOS (VideoToolbox)
-    runs-on: macos-latest
+  runtime:
+    name: Runtime (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            preset: macos-arm64
+            arch: arm64
+          - runner: macos-26-intel
+            preset: macos-x64
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install ninja vulkan-headers vulkan-loader
-      - name: Cache third-party sources
-        uses: actions/cache@v4
-        with:
-          path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build build
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-  linux:
-    name: Linux (FFmpeg)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
+      - name: Enforce macOS-only source layout
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build pkg-config \
-            libvulkan-dev \
-            libavcodec-dev libavutil-dev libswscale-dev \
-            libgl1-mesa-dev libx11-dev libxrandr-dev
-      - name: Cache third-party sources
-        uses: actions/cache@v4
-        with:
-          path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build build
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-      - name: Test time-sensitive scheduling with CAP_SYS_NICE
-        # ctest above exercises the unprivileged EPERM path; this rerun of the
-        # single scheduling test with the capability granted exercises the
-        # privileged SCHED_FIFO path. Skipped on branches that predate the
-        # scheduling helper.
-        run: |
-          if ./build/oxrsys_runtime_tests --list-tests | grep -q SetCurrentThreadTimeSensitive; then
-            sudo setcap cap_sys_nice+ep build/oxrsys_runtime_tests
-            ./build/oxrsys_runtime_tests "SetCurrentThreadTimeSensitive raises the calling thread's priority"
-          else
-            echo "scheduling test not present on this branch; skipping"
+          removed_paths=(
+            clients/Apple
+            clients/Android
+            clients/Qt
+            clients/android-vr/gradlew.bat
+            runtime/src/SwapchainOpenGL.cpp
+            runtime/src/SwapchainD3D11.cpp
+            runtime/src/SwapchainD3D12.cpp
+            runtime/src/D3DGraphicsContext.h
+            runtime/src/MediaFoundationVideoEncoder.cpp
+            runtime/src/VaapiVideoEncoder.cpp
+            runtime/src/StubVideoEncoder.cpp
+            runtime/src/VideoFramePreparation.cpp
+            runtime/src/VideoFramePreparation.h
+            runtime/src/VideoBitstream.cpp
+            runtime/src/VideoBitstream.h
+            tests/TestWindowsD3D.cpp
+            tests/TestNativeVideoEncoderSmoke.cpp
+            tests/TestVideoFramePreparation.cpp
+            tests/TestVideoBitstream.cpp
+          )
+          for removed_path in "${removed_paths[@]}"; do
+            if [[ ( -e "${removed_path}" || -L "${removed_path}" ) && \
+                -n "$(git ls-files -- "${removed_path}")" ]]; then
+              echo "Removed platform surface is still present: ${removed_path}" >&2
+              exit 1
+            fi
+          done
+          mkdir -p build
+          if cmake -S . -B build/removed-option-check \
+              -DOXRSYS_VIDEO_ENCODER=VIDEOTOOLBOX >build/removed-option-check.log 2>&1; then
+            echo 'Removed CMake options must fail configuration.' >&2
+            exit 1
           fi
-
-  windows:
-    name: Windows (FFmpeg)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@c25f41106918cde0bf347e6f201277392b3a9e9d # v1.2.1
-        with:
-          vulkan-query-version: 1.3.283.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader
-          vulkan-use-cache: true
-      - name: Cache FFmpeg dev libraries
-        id: cache-ffmpeg
-        uses: actions/cache@v4
-        with:
-          path: ffmpeg-extract
-          key: ffmpeg-win64-gpl-shared-v1
-      - name: Download FFmpeg dev libraries
-        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          curl.exe -L -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip
-          7z x ffmpeg.zip -offmpeg-extract
-      - name: Locate FFmpeg
-        shell: pwsh
-        run: |
-          $root = (Get-ChildItem ffmpeg-extract | Select-Object -First 1).FullName
-          "FFMPEG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          if ! rg -q 'OXRSYS_VIDEO_ENCODER was removed' build/removed-option-check.log; then
+            cat build/removed-option-check.log
+            exit 1
+          fi
+      - name: Install build dependencies
+        run: brew install ninja vulkan-headers
       - name: Cache third-party sources
         uses: actions/cache@v4
         with:
-          path: build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          path: build/${{ matrix.preset }}/_deps
+          key: deps-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', 'runtime/CMakeLists.txt', 'cmake/**') }}
       - name: Configure
-        run: cmake -S . -B build -DFFMPEG_ROOT="$env:FFMPEG_ROOT"
-        shell: pwsh
+        run: cmake --preset ${{ matrix.preset }}
       - name: Build
-        run: cmake --build build --config Debug --parallel 4
-      - name: Register runtime for the OpenXR loader
-        # The runners execute elevated, and the loader deliberately ignores
-        # XR_RUNTIME_JSON in elevated contexts - register the runtime the way a
-        # real install does. Resolve the manifest rather than hardcoding the
-        # generator-dependent layout, and fail here if the build didn't
-        # produce one.
-        shell: pwsh
-        run: |
-          $manifest = Get-ChildItem build -Recurse -Filter oxrsys-runtime.json | Select-Object -First 1
-          if (-not $manifest) { throw 'no oxrsys-runtime.json in the build tree' }
-          reg add 'HKLM\SOFTWARE\Khronos\OpenXR\1' /v ActiveRuntime /t REG_SZ /d $manifest.FullName /f
+        run: cmake --build build/${{ matrix.preset }}
       - name: Test
-        shell: pwsh
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure
+      - name: Build and test Home
+        run: >-
+          xcodebuild
+          -project "clients/home/OXRSys Home.xcodeproj"
+          -scheme "OXRSys Home"
+          -configuration Debug
+          -destination 'platform=macOS'
+          -derivedDataPath "build/xcode/home-${{ matrix.arch }}"
+          ARCHS=${{ matrix.arch }}
+          ONLY_ACTIVE_ARCH=NO
+          CODE_SIGNING_ALLOWED=NO
+          test
+      - name: Build simulator for macOS
+        run: >-
+          xcodebuild
+          -project "clients/simulator/OXRSys Simulator.xcodeproj"
+          -scheme "OXRSys Simulator"
+          -configuration Debug
+          -destination 'platform=macOS'
+          -derivedDataPath "build/xcode/simulator-${{ matrix.arch }}"
+          ARCHS=${{ matrix.arch }}
+          ONLY_ACTIVE_ARCH=NO
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+  apple-clients:
+    name: Apple clients
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce platform UI boundaries
         run: |
-          Copy-Item "$env:FFMPEG_ROOT\bin\*.dll" build\Debug
-          ctest --test-dir build -C Debug --output-on-failure
+          if rg -n '^import AppKit' clients --glob '*.swift' | rg -v '/Platform/macOS/'; then
+            echo 'AppKit imports must stay under Platform/macOS.' >&2
+            exit 1
+          fi
+          if rg -n '^import UIKit' clients --glob '*.swift' | rg -v '/Platform/iOS/'; then
+            echo 'UIKit imports must stay under Platform/iOS.' >&2
+            exit 1
+          fi
+      - name: Test shared streaming package
+        run: swift test --package-path clients/shared/OXRSysStreaming
+      - name: Build shared simulator package
+        run: swift build --package-path clients/shared/OXRSysSimulator
+      - name: Build simulator for iOS Simulator
+        run: >-
+          xcodebuild
+          -project "clients/simulator/OXRSys Simulator.xcodeproj"
+          -scheme "OXRSys Simulator"
+          -configuration Debug
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath build/xcode/simulator-ios
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Build simulator for iOS device
+        run: >-
+          xcodebuild
+          -project "clients/simulator/OXRSys Simulator.xcodeproj"
+          -scheme "OXRSys Simulator"
+          -configuration Debug
+          -destination 'generic/platform=iOS'
+          -derivedDataPath build/xcode/simulator-ios-device
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Build visionOS viewer
+        run: >-
+          xcodebuild
+          -project "clients/visionos/OXRSys visionOS.xcodeproj"
+          -scheme "OXRSys visionOS"
+          -configuration Debug
+          -destination 'generic/platform=visionOS Simulator'
+          -derivedDataPath build/xcode/visionos
+          CODE_SIGNING_ALLOWED=NO
+          build
+      - name: Build visionOS viewer for device
+        run: >-
+          xcodebuild
+          -project "clients/visionos/OXRSys visionOS.xcodeproj"
+          -scheme "OXRSys visionOS"
+          -configuration Debug
+          -destination 'generic/platform=visionOS'
+          -derivedDataPath build/xcode/visionos-device
+          CODE_SIGNING_ALLOWED=NO
+          build
+
+  android-client:
+    name: Android VR client
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: clients/android-vr/**/*.gradle*
+      - uses: android-actions/setup-android@v3
+      - name: Install Android build components
+        run: >-
+          sdkmanager
+          'platforms;android-35'
+          'build-tools;35.0.0'
+          'cmake;3.22.1'
+          'ndk;28.2.13676358'
+      - name: Build stable APKs
+        working-directory: clients/android-vr
+        run: ./gradlew assembleDebug assembleRelease
+
+  package:
+    name: Universal macOS package
+    runs-on: macos-26
+    needs: [runtime, apple-clients]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: brew install ninja vulkan-headers
+      - name: Build universal package
+        run: >-
+          ./scripts/macos_build_package.sh
+          --configuration Release
+          --architectures universal
+          --output-dir build/OXRSys-macOS-Release
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OXRSys-macOS-universal
+          path: build/OXRSys-macOS-Release
+          if-no-files-found: error

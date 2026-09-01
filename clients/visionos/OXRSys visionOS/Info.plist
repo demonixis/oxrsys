@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>OXRSys connects to the OpenXR runtime on your Mac for immersive streaming.</string>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationPreferredDefaultSceneSessionRole</key>
+		<string>UIWindowSceneSessionRoleApplication</string>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UISceneSessionRoleImmersiveSpaceApplication</key>
+			<array>
+				<dict>
+					<key>UISceneInitialImmersionStyle</key>
+					<string>UIImmersionStyleFull</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+	<!-- REQUIRED for PSVR2 Sense controllers to be offered to the app as spatial (6DoF,
+	     ARKit-trackable) accessories. Without a SpatialGamepad profile the system hands them
+	     over as a single combined MFi gamepad (productCategory "MFi", not SpatialController) and
+	     accessory tracking never sees them. Array-valued, so it cannot be an INFOPLIST_KEY_. -->
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>SpatialGamepad</string>
+		</dict>
+		<dict>
+			<key>ProfileName</key>
+			<string>ExtendedGamepad</string>
+		</dict>
+	</array>
+</dict>
+</plist>

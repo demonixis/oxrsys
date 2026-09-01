@@ -2,6 +2,7 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
+#import "VideoTextureFormat.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -16,7 +17,6 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
-#include <thread>
 #include <utility>
 
 namespace
@@ -34,6 +34,7 @@ struct EncodeFrameContext
     VideoEncoder::OnNalUnitCallback nalCallback;
     VideoEncoder::OnFrameEncodedCallback frameCallback;
     std::function<void(size_t)> releaseSlot;
+    BoundedDrain* callbackDrain = nullptr;
     FrameSource frameSource;
     VideoEncoder::FrameMetrics metrics;
     oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
@@ -42,13 +43,91 @@ struct EncodeFrameContext
     Clock::time_point encodeSubmitFinished;
 };
 
+class ScopedDrainLease
+{
+public:
+    explicit ScopedDrainLease(BoundedDrain& drain)
+        : drain_(drain.TryAcquire() ? &drain : nullptr)
+    {
+    }
+
+    ~ScopedDrainLease()
+    {
+        if (drain_ != nullptr)
+        {
+            drain_->Release();
+        }
+    }
+
+    explicit operator bool() const { return drain_ != nullptr; }
+    void TransferToCallback() { drain_ = nullptr; }
+
+private:
+    BoundedDrain* drain_ = nullptr;
+};
+
 struct MetalFoveationUniforms
 {
     vector_float2 centerSize;
     vector_float2 centerShift;
     vector_float2 edgeRatio;
     vector_float2 eyeSizeRatio;
+    vector_uint2 sourceSrgb;
 };
+
+struct MetalVideoCopyUniforms
+{
+    vector_uint2 destinationOrigin;
+    vector_uint2 destinationSize;
+    uint32_t sourceSrgb;
+    uint32_t padding[3];
+};
+
+constexpr const char* kVideoCopyMetalSource = R"METAL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VideoCopyUniforms
+{
+    uint2 destinationOrigin;
+    uint2 destinationSize;
+    uint sourceSrgb;
+    uint padding0;
+    uint padding1;
+    uint padding2;
+};
+
+static float3 linear_to_srgb(float3 value)
+{
+    value = clamp(value, float3(0.0), float3(1.0));
+    float3 linearSegment = value * 12.92;
+    float3 powerSegment = 1.055 * pow(value, float3(1.0 / 2.4)) - 0.055;
+    return select(powerSegment, linearSegment, value <= float3(0.0031308));
+}
+
+kernel void video_copy_kernel(texture2d<float, access::sample> sourceTexture [[texture(0)]],
+                              texture2d<float, access::write> outputTexture [[texture(1)]],
+                              sampler linearSampler [[sampler(0)]],
+                              constant VideoCopyUniforms& params [[buffer(0)]],
+                              uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= params.destinationSize.x || gid.y >= params.destinationSize.y)
+    {
+        return;
+    }
+
+    float2 uv = (float2(gid) + float2(0.5)) / float2(params.destinationSize);
+    float4 color = sourceTexture.sample(linearSampler, uv);
+    if (params.sourceSrgb != 0)
+    {
+        // Sampling an sRGB texture decodes it to linear. Re-encode before
+        // writing the unorm VideoToolbox surface so the source code values and
+        // the runtime's BT.709 transfer contract are preserved.
+        color.rgb = linear_to_srgb(color.rgb);
+    }
+    outputTexture.write(color, params.destinationOrigin + gid);
+}
+)METAL";
 
 // Axis-aligned foveated encoding shader logic adapted from ALVR's AADT
 // compression shader (MIT licensed).
@@ -62,7 +141,16 @@ struct FoveationUniforms
     float2 centerShift;
     float2 edgeRatio;
     float2 eyeSizeRatio;
+    uint2 sourceSrgb;
 };
+
+static float3 linear_to_srgb(float3 value)
+{
+    value = clamp(value, float3(0.0), float3(1.0));
+    float3 linearSegment = value * 12.92;
+    float3 powerSegment = 1.055 * pow(value, float3(1.0 / 2.4)) - 0.055;
+    return select(powerSegment, linearSegment, value <= float3(0.0031308));
+}
 
 static float compress_axis(float eyeUv, float centerSize, float centerShift, float edgeRatio)
 {
@@ -118,6 +206,10 @@ kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[text
     float4 color = rightEye
         ? rightTexture.sample(linearSampler, compressedUv)
         : leftTexture.sample(linearSampler, compressedUv);
+    if (params.sourceSrgb[rightEye ? 1 : 0] != 0)
+    {
+        color.rgb = linear_to_srgb(color.rgb);
+    }
     outputTexture.write(color, gid);
 }
 )METAL";
@@ -153,6 +245,20 @@ void FinalizeEncodeFrame(EncodeFrameContext* context, bool frameDropped)
     if (context->releaseSlot)
     {
         context->releaseSlot(context->slotIndex);
+    }
+
+    // Drop every callback capture and FrameSource lease before publishing the
+    // drain decrement. A successful Shutdown therefore means no context can
+    // still own the encoder or an exported swapchain texture.
+    context->frameSource = {};
+    context->nalCallback = {};
+    context->frameCallback = {};
+    context->releaseSlot = {};
+    BoundedDrain* callbackDrain = context->callbackDrain;
+    context->callbackDrain = nullptr;
+    if (callbackDrain != nullptr)
+    {
+        callbackDrain->Release();
     }
 
     delete context;
@@ -326,7 +432,7 @@ void EmitSampleNalUnits(CMSampleBufferRef sampleBuffer, bool isKeyframe,
 void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImageSource& source)
 {
     if (commandBuffer == nil ||
-        source.sync.api != GraphicsApi::Metal ||
+        source.sync.kind != FrameSyncKind::MetalSharedEvent ||
         !source.sync.IsValid())
     {
         return;
@@ -337,6 +443,11 @@ void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImag
     {
         [commandBuffer encodeWaitForEvent:event value:source.sync.waitValue];
     }
+}
+
+bool WaitForHostFrameImage(const FrameImageSource& source, uint64_t timeoutNs)
+{
+    return source.sync.WaitForHostReady(timeoutNs);
 }
 
 bool IsFiniteRatio(float value)
@@ -377,6 +488,39 @@ bool TextureAllowsUsage(id<MTLTexture> texture, MTLTextureUsage requiredUsage)
     const MTLTextureUsage declaredUsage = texture.usage;
     return declaredUsage == MTLTextureUsageUnknown ||
            (declaredUsage & requiredUsage) == requiredUsage;
+}
+
+id<MTLComputePipelineState> CreateVideoCopyPipeline(id<MTLDevice> device)
+{
+    NSError* error = nil;
+    NSString* source = [NSString stringWithUTF8String:kVideoCopyMetalSource];
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    if (library == nil)
+    {
+        spdlog::error("VideoEncoder: Failed to compile texture conversion shader: {}",
+                      error != nil ? error.localizedDescription.UTF8String : "unknown error");
+        return nil;
+    }
+
+    id<MTLFunction> kernelFunction = [library newFunctionWithName:@"video_copy_kernel"];
+    if (kernelFunction == nil)
+    {
+        spdlog::error("VideoEncoder: Failed to load texture conversion entry point");
+        [library release];
+        return nil;
+    }
+
+    error = nil;
+    id<MTLComputePipelineState> pipeline =
+        [device newComputePipelineStateWithFunction:kernelFunction error:&error];
+    if (pipeline == nil)
+    {
+        spdlog::error("VideoEncoder: Failed to create texture conversion pipeline: {}",
+                      error != nil ? error.localizedDescription.UTF8String : "unknown error");
+    }
+    [kernelFunction release];
+    [library release];
+    return pipeline;
 }
 
 id<MTLComputePipelineState> CreateFoveationPipeline(id<MTLDevice> device)
@@ -425,6 +569,62 @@ id<MTLSamplerState> CreateLinearClampSampler(id<MTLDevice> device)
     return sampler;
 }
 
+bool EncodeVideoTextureCopy(id<MTLCommandBuffer> commandBuffer,
+                            id<MTLComputePipelineState> pipeline,
+                            id<MTLSamplerState> sampler,
+                            id<MTLTexture> source,
+                            id<MTLTexture> destination,
+                            MTLOrigin destinationOrigin,
+                            MTLSize destinationSize,
+                            bool sourceSrgb)
+{
+    if (commandBuffer == nil || pipeline == nil || sampler == nil ||
+        source == nil || destination == nil ||
+        destinationSize.width == 0 || destinationSize.height == 0 ||
+        destinationOrigin.x + destinationSize.width > destination.width ||
+        destinationOrigin.y + destinationSize.height > destination.height ||
+        !TextureAllowsUsage(source, MTLTextureUsageShaderRead) ||
+        !TextureAllowsUsage(destination, MTLTextureUsageShaderWrite))
+    {
+        return false;
+    }
+
+    MetalVideoCopyUniforms uniforms = {};
+    uniforms.destinationOrigin = {
+        static_cast<uint32_t>(destinationOrigin.x),
+        static_cast<uint32_t>(destinationOrigin.y),
+    };
+    uniforms.destinationSize = {
+        static_cast<uint32_t>(destinationSize.width),
+        static_cast<uint32_t>(destinationSize.height),
+    };
+    uniforms.sourceSrgb = sourceSrgb ? 1u : 0u;
+
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    if (encoder == nil)
+    {
+        return false;
+    }
+    [encoder setComputePipelineState:pipeline];
+    [encoder setTexture:source atIndex:0];
+    [encoder setTexture:destination atIndex:1];
+    [encoder setSamplerState:sampler atIndex:0];
+    [encoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+
+    const NSUInteger threadsX =
+        std::max<NSUInteger>(1, std::min<NSUInteger>(pipeline.threadExecutionWidth, 16));
+    const NSUInteger threadsY = std::max<NSUInteger>(
+        1, std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup / threadsX, 16));
+    const MTLSize threadsPerGroup = MTLSizeMake(threadsX, threadsY, 1);
+    const MTLSize threadgroups = MTLSizeMake(
+        (destinationSize.width + threadsX - 1) / threadsX,
+        (destinationSize.height + threadsY - 1) / threadsY,
+        1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    [encoder endEncoding];
+    return true;
+}
+
 } // namespace
 
 static void CompressionOutputCallback(void* /*outputCallbackRefCon*/,
@@ -470,7 +670,13 @@ VideoEncoder::VideoEncoder() = default;
 
 VideoEncoder::~VideoEncoder()
 {
-    Shutdown();
+    if (!Shutdown())
+    {
+        // A timed-out public shutdown retains this object for retry. Reaching
+        // the destructor would otherwise free memory still captured by Metal
+        // or VideoToolbox callbacks, which is never a recoverable state.
+        std::terminate();
+    }
 }
 
 bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsContext)
@@ -489,11 +695,44 @@ bool VideoEncoder::SupportsFoveatedEncoding(const GraphicsContext& graphicsConte
     return supported;
 }
 
+VideoEncoder::BackendCapabilities VideoEncoder::QueryBackendCapabilities(
+    const GraphicsContext* graphicsContext)
+{
+    BackendCapabilities capabilities = {};
+    capabilities.backendName = "VideoToolbox";
+    capabilities.hardwareEncoder = true;
+    capabilities.supportsH264 = true;
+    capabilities.supportsH265 = true;
+    capabilities.supportsTenBitH265 = true;
+    capabilities.supportsFoveatedEncoding =
+        graphicsContext != nullptr && SupportsFoveatedEncoding(*graphicsContext);
+    return capabilities;
+}
+
+bool VideoEncoder::SupportsCodec(oxr::protocol::VideoCodec codec)
+{
+    return QueryBackendCapabilities(nullptr).SupportsCodec(codec);
+}
+
 bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                                uint32_t bitrateMbps, const GraphicsContext& graphicsContext,
                                oxr::protocol::VideoCodec codec)
 {
-    Shutdown();
+    if (!Shutdown())
+    {
+        spdlog::error("VideoEncoder: Previous encoder generation did not drain");
+        return false;
+    }
+    if (!callbackDrain_.Reset())
+    {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        sessionShutdownStarted_ = false;
+        sessionShutdownComplete_ = true;
+        resourcesDestroyed_ = false;
+    }
 
     if (codec == oxr::protocol::VideoCodec::AV1)
     {
@@ -525,6 +764,15 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     videoToolbox_.commandQueue = (void*)[device newCommandQueue];
     videoToolbox_.scaler = (void*)[[MPSImageBilinearScale alloc] initWithDevice:device];
+    videoToolbox_.copyPipeline = (void*)CreateVideoCopyPipeline(device);
+    videoToolbox_.copySampler = (void*)CreateLinearClampSampler(device);
+    if (videoToolbox_.commandQueue == nullptr || videoToolbox_.scaler == nullptr ||
+        videoToolbox_.copyPipeline == nullptr || videoToolbox_.copySampler == nullptr)
+    {
+        spdlog::error("VideoEncoder: Required Metal copy resources are unavailable");
+        Shutdown();
+        return false;
+    }
     if (foveationSettings_.enabled)
     {
         videoToolbox_.foveationPipeline = (void*)CreateFoveationPipeline(device);
@@ -758,29 +1006,91 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     CFRelease(delayRef);
 
     VTCompressionSessionPrepareToEncodeFrames(compressionSession);
-    videoToolbox_.session = compressionSession;
+    {
+        std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
+        videoToolbox_.session = compressionSession;
+    }
+    initialized_ = true;
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
                   VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
 }
 
-void VideoEncoder::Shutdown()
+bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
 {
+    const auto deadline = Clock::now() + timeout;
     shuttingDown_.store(true);
+    initialized_.store(false, std::memory_order_release);
+    // Close admission before starting the VT drain. Existing EncodeInternal
+    // calls retain a lease until they either return or transfer it to their
+    // Metal/VideoToolbox callback context.
+    callbackDrain_.Stop();
 
-    if (videoToolbox_.session != nullptr)
     {
-        VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
-        VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid);
-        VTCompressionSessionInvalidate(compressionSession);
-        CFRelease(compressionSession);
-        videoToolbox_.session = nullptr;
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        if (!sessionShutdownStarted_)
+        {
+            sessionShutdownStarted_ = true;
+            sessionShutdownComplete_ = false;
+            shutdownThread_ = std::thread([this] {
+                // CompleteFrames can block in VideoToolbox. Keep it off the
+                // OpenXR teardown thread and expose only a bounded retryable
+                // wait to xrDestroySwapchain/xrDestroySession. Taking the
+                // session lock first also lets an EncodeFrame call that
+                // already entered finish before invalidation.
+                VTCompressionSessionRef compressionSession = nullptr;
+                {
+                    std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
+                    compressionSession =
+                        (VTCompressionSessionRef)videoToolbox_.session;
+                    videoToolbox_.session = nullptr;
+                }
+                if (compressionSession != nullptr)
+                {
+                    VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid);
+                    VTCompressionSessionInvalidate(compressionSession);
+                    CFRelease(compressionSession);
+                }
+                {
+                    std::lock_guard<std::mutex> completionLock(shutdownMutex_);
+                    sessionShutdownComplete_ = true;
+                }
+                shutdownCondition_.notify_all();
+            });
+        }
     }
 
-    for (int i = 0; i < 200 && inFlightFrameCount_.load() > 0; i++)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::unique_lock<std::mutex> lock(shutdownMutex_);
+        if (!shutdownCondition_.wait_until(lock, deadline, [this] {
+                return sessionShutdownComplete_;
+            }))
+        {
+            spdlog::warn("VideoEncoder: VideoToolbox session drain timed out");
+            return false;
+        }
+    }
+    if (shutdownThread_.joinable())
+    {
+        shutdownThread_.join();
+    }
+
+    const auto now = Clock::now();
+    if (now >= deadline ||
+        !callbackDrain_.StopAndWait(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now)))
+    {
+        spdlog::warn("VideoEncoder: asynchronous callback drain timed out");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        if (resourcesDestroyed_)
+        {
+            return true;
+        }
     }
 
     DestroySlots();
@@ -789,6 +1099,16 @@ void VideoEncoder::Shutdown()
     {
         [(MPSImageBilinearScale*)videoToolbox_.scaler release];
         videoToolbox_.scaler = nullptr;
+    }
+    if (videoToolbox_.copyPipeline != nullptr)
+    {
+        [(id<MTLComputePipelineState>)videoToolbox_.copyPipeline release];
+        videoToolbox_.copyPipeline = nullptr;
+    }
+    if (videoToolbox_.copySampler != nullptr)
+    {
+        [(id<MTLSamplerState>)videoToolbox_.copySampler release];
+        videoToolbox_.copySampler = nullptr;
     }
     if (videoToolbox_.foveationPipeline != nullptr)
     {
@@ -816,8 +1136,14 @@ void VideoEncoder::Shutdown()
         videoToolbox_.textureCache = nullptr;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        resourcesDestroyed_ = true;
+    }
+
     spdlog::info("VideoEncoder: Shut down (submitted={} dropped={})",
                   frameCount_, droppedFrameCount_.load());
+    return true;
 }
 
 bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,
@@ -840,14 +1166,47 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
                                    OnFrameEncodedCallback frameCallback)
 {
-    if (videoToolbox_.session == nullptr ||
-        !frameSource.left.IsValid() ||
+    if (!frameSource.left.IsValid() ||
         (stereo && !frameSource.right.IsValid()))
     {
         return false;
     }
     if (shuttingDown_.load())
     {
+        return false;
+    }
+    ScopedDrainLease drainLease(callbackDrain_);
+    if (!drainLease || shuttingDown_.load())
+    {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
+        if (videoToolbox_.session == nullptr)
+        {
+            return false;
+        }
+    }
+
+
+    // Vulkan/MoltenVK snapshots are submitted from xrReleaseSwapchainImage on
+    // the application's queue. Wait for those copies only on this encoder
+    // worker, never from Session::EndFrame(). A stalled GPU drops the streaming
+    // frame instead of accumulating latency.
+    const uint64_t framePeriodNs = 1'000'000'000ull / std::max(fps_, 1u);
+    const uint64_t snapshotWaitNs = std::min<uint64_t>(framePeriodNs, 16'666'667ull);
+    if (!WaitForHostFrameImage(frameSource.left, snapshotWaitNs) ||
+        (stereo && !WaitForHostFrameImage(frameSource.right, snapshotWaitNs)))
+    {
+        droppedFrameCount_.fetch_add(1);
+        if (frameCallback)
+        {
+            FrameMetrics metrics = {};
+            metrics.frameNumber = frameNumberCounter_.fetch_add(1);
+            metrics.timestampNs = timestampNs;
+            metrics.frameDropped = true;
+            frameCallback(metrics);
+        }
         return false;
     }
 
@@ -982,6 +1341,17 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         }
     }
 
+    const auto leftCopyMode = oxrsys::video::SelectTextureCopyMode(
+        static_cast<uint64_t>(leftTex.pixelFormat));
+    const auto rightCopyMode = stereo
+        ? oxrsys::video::SelectTextureCopyMode(static_cast<uint64_t>(rightTex.pixelFormat))
+        : oxrsys::video::TextureCopyMode::DirectBgra;
+    if (leftCopyMode == oxrsys::video::TextureCopyMode::Unsupported ||
+        rightCopyMode == oxrsys::video::TextureCopyMode::Unsupported)
+    {
+        return dropAcquiredSlot("unsupported Metal source texture format");
+    }
+
     bool forceKeyframe = forceKeyframe_.exchange(false);
     const bool useFoveatedEncoding = stereo &&
         foveationSettings_.enabled &&
@@ -992,16 +1362,20 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         ? (leftTex.width != (NSUInteger)eyeWidth_ || leftTex.height != (NSUInteger)height_ ||
            rightTex.width != (NSUInteger)eyeWidth_ || rightTex.height != (NSUInteger)height_)
         : (leftTex.width != (NSUInteger)width_ || leftTex.height != (NSUInteger)height_);
+    const bool needsExplicitConversion =
+        leftCopyMode == oxrsys::video::TextureCopyMode::ComputeConversion ||
+        rightCopyMode == oxrsys::video::TextureCopyMode::ComputeConversion;
 
     if (frameCount_ == 0)
     {
-        spdlog::info("VideoEncoder: submit {} frame srcL={}x{} srcR={}x{} dst={}x{} downscale={}",
+        spdlog::info("VideoEncoder: submit {} frame srcL={}x{} srcR={}x{} dst={}x{} downscale={} conversion={}",
                       stereo ? "stereo" : "mono",
                       (uint32_t)leftTex.width, (uint32_t)leftTex.height,
                       stereo ? (uint32_t)rightTex.width : 0,
                       stereo ? (uint32_t)rightTex.height : 0,
                       (uint32_t)dstTexture.width, (uint32_t)dstTexture.height,
-                      useFoveatedEncoding ? true : needsDownscale);
+                      useFoveatedEncoding ? true : needsDownscale,
+                      needsExplicitConversion);
         if (useFoveatedEncoding)
         {
             spdlog::info("VideoEncoder: foveated path targetEye={}x{} encoded={}x{} ratio={:.4f}x{:.4f} via compute scratch texture",
@@ -1040,6 +1414,10 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         uniforms.centerShift = {foveationSettings_.centerShiftX, foveationSettings_.centerShiftY};
         uniforms.edgeRatio = {foveationSettings_.edgeRatioX, foveationSettings_.edgeRatioY};
         uniforms.eyeSizeRatio = {foveationSettings_.eyeWidthRatio, foveationSettings_.eyeHeightRatio};
+        uniforms.sourceSrgb = {
+            oxrsys::video::IsSrgbTextureFormat(static_cast<uint64_t>(leftTex.pixelFormat)) ? 1u : 0u,
+            oxrsys::video::IsSrgbTextureFormat(static_cast<uint64_t>(rightTex.pixelFormat)) ? 1u : 0u,
+        };
 
         id<MTLComputeCommandEncoder> computeEncoder = [cmdBuf computeCommandEncoder];
         if (computeEncoder == nil)
@@ -1083,6 +1461,29 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
+    }
+    else if (needsExplicitConversion)
+    {
+        id<MTLComputePipelineState> pipeline =
+            (id<MTLComputePipelineState>)videoToolbox_.copyPipeline;
+        id<MTLSamplerState> sampler =
+            (id<MTLSamplerState>)videoToolbox_.copySampler;
+        const bool leftCopied = EncodeVideoTextureCopy(
+            cmdBuf, pipeline, sampler, leftTex, dstTexture,
+            MTLOriginMake(0, 0, 0),
+            MTLSizeMake(stereo ? eyeWidth_ : width_, height_, 1),
+            oxrsys::video::IsSrgbTextureFormat(
+                static_cast<uint64_t>(leftTex.pixelFormat)));
+        const bool rightCopied = !stereo || EncodeVideoTextureCopy(
+            cmdBuf, pipeline, sampler, rightTex, dstTexture,
+            MTLOriginMake(eyeWidth_, 0, 0),
+            MTLSizeMake(eyeWidth_, height_, 1),
+            oxrsys::video::IsSrgbTextureFormat(
+                static_cast<uint64_t>(rightTex.pixelFormat)));
+        if (!leftCopied || !rightCopied)
+        {
+            return dropAcquiredSlot("failed explicit Metal texture conversion");
+        }
     }
     else if (stereo && needsDownscale)
     {
@@ -1169,6 +1570,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     context->releaseSlot = [this](size_t releasedSlotIndex) {
         ReleaseSlot(releasedSlotIndex);
     };
+    context->callbackDrain = &callbackDrain_;
     context->frameSource = std::move(frameSource);
     context->slotIndex = slotIndex;
     context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
@@ -1178,7 +1580,6 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     context->encodeStart = Clock::now();
     context->encodeSubmitFinished = context->encodeStart;
 
-    VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
     [cmdBuf addCompletedHandler:^(id<MTLCommandBuffer> commandBuffer)
     {
         if (commandBuffer.status != MTLCommandBufferStatusCompleted || this->shuttingDown_.load())
@@ -1200,14 +1601,32 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         CMTime presentationTime = CMTimeMake(timestampNs, 1000000000);
         auto submitStart = Clock::now();
-        OSStatus status = VTCompressionSessionEncodeFrame(
-            compressionSession,
-            pixelBuffer,
-            presentationTime,
-            kCMTimeInvalid,
-            frameProps,
-            context,
-            nullptr);
+        OSStatus status = noErr;
+        {
+            // Shutdown detaches and invalidates the VT session under the same
+            // lock. Recheck after locking so a Metal completion racing teardown
+            // cannot submit through a released VTCompressionSessionRef.
+            std::lock_guard<std::mutex> sessionLock(this->videoToolboxSessionMutex_);
+            VTCompressionSessionRef compressionSession =
+                (VTCompressionSessionRef)this->videoToolbox_.session;
+            if (this->shuttingDown_.load() || compressionSession == nullptr)
+            {
+                if (frameProps != nullptr)
+                {
+                    CFRelease(frameProps);
+                }
+                FinalizeEncodeFrame(context, true);
+                return;
+            }
+            status = VTCompressionSessionEncodeFrame(
+                compressionSession,
+                pixelBuffer,
+                presentationTime,
+                kCMTimeInvalid,
+                frameProps,
+                context,
+                nullptr);
+        }
         context->metrics.encodeSubmitMs = ToMilliseconds(Clock::now() - submitStart);
         context->encodeSubmitFinished = Clock::now();
 
@@ -1223,6 +1642,7 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         }
     }];
 
+    drainLease.TransferToCallback();
     [cmdBuf commit];
 
     frameCount_++;

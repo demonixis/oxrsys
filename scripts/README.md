@@ -1,99 +1,85 @@
 # Scripts
 
-## macOS Build Package
+## macOS Package Builder
 
-`scripts/macos_build_package.sh` builds the macOS runtime and `OXRSys Home.app`, then assembles a
-single local package folder at `build/OXRSys-macOS/` by default. The folder contains the Home app
-and a `runtime/` directory with `liboxrsys-runtime.dylib`, `oxrsys-runtime.json`, and
-`oxrsys-runtime.toml`. The manifest copy inside the package is rewritten to load the packaged dylib
-with a relative path.
+`macos_build_package.sh` builds the macOS runtime and SwiftUI Home app, verifies their architecture
+slices, and assembles a relocatable directory at `build/OXRSys-macOS/` by default:
 
-Run it from the repository root:
+```text
+OXRSys Home.app
+runtime/liboxrsys-runtime.dylib
+runtime/oxrsys-runtime.json
+runtime/oxrsys-runtime.toml
+```
+
+The package manifest is rewritten to use `./liboxrsys-runtime.dylib`.
 
 ```bash
 ./scripts/macos_build_package.sh
+./scripts/macos_build_package.sh \
+  --configuration Release \
+  --architectures universal \
+  --output-dir build/OXRSys-macOS-Release
 ```
 
-The default configuration is `Debug`; use `--configuration Release` for a release package, or
-`--output-dir` to choose a different package folder.
+`--architectures` accepts `native`, `arm64`, `x86_64`, or `universal`. Debug defaults to `native`;
+Release defaults to `universal`. The same architecture selection is passed to CMake and Xcode, and
+the runtime dylib plus Home executable are verified with `lipo` before packaging.
 
-## macOS Signing And Notarization
+Use `--skip-runtime-build` or `--skip-home-build` only when the reused output was built for the same
+requested architectures. The verification still rejects missing slices.
 
-`scripts/macos_sign_notarize.sh` signs the built macOS runtime dylib and `OXRSys Home.app`, then
-creates one distribution archive under `build/dist/` by default. The archive contains the Home app
-and a `runtime/` directory with `liboxrsys-runtime.dylib`, `oxrsys-runtime.json`, and
-`oxrsys-runtime.toml`. The manifest copy inside the archive is rewritten to load the packaged dylib
-with a relative path.
+## Signing And Notarization
 
-Pass `--notarize` with `--apple-id`, `--password`, and preferably `--team-id` to submit the same
-archive through `xcrun notarytool`. After acceptance, the script staples the ticket to
-`OXRSys Home.app` and rebuilds the archive so the distributed zip contains the stapled app. Run
-`scripts/macos_sign_notarize.sh --help` for the full option list and command examples.
+`macos_sign_notarize.sh` signs the runtime and Home app, creates a combined zip, optionally submits
+it through `xcrun notarytool`, staples the accepted Home ticket, and rebuilds the archive.
 
-## Unity
+Build and sign a universal Release:
 
-`scripts/unity/` is a Unity Package Manager package named `net.demonixis.oxrsys-unity` for
-projects that target OXRSys. Prefer installing it through Unity Package Manager instead of copying
-files into `Assets/Editor`.
+```bash
+./scripts/macos_sign_notarize.sh \
+  --build-runtime \
+  --build-home \
+  --architectures universal \
+  --identity "Developer ID Application: Example Team (ABCDE12345)"
+```
 
-- `OXRSysRuntimeAutoSelector.cs` forces the OpenXR runtime JSON for the current Unity editor process.
-- `OXRSysMacOpenXRLoaderPostprocessor.cs` fixes macOS Player exports by copying Unity's
-  OpenXR loader to the bundle path that `UnityOpenXR.dylib` loads at runtime.
+Add notarization:
 
-### Runtime Selector
+```bash
+./scripts/macos_sign_notarize.sh \
+  --build-runtime \
+  --build-home \
+  --architectures universal \
+  --identity "Developer ID Application: Example Team (ABCDE12345)" \
+  --notarize \
+  --team-id ABCDE12345 \
+  --apple-id developer@example.com \
+  --password "xxxx-xxxx-xxxx-xxxx"
+```
 
-- sets `XR_RUNTIME_JSON`
-- sets `XR_SELECTED_RUNTIME_JSON`
-- sets `OTHER_XR_RUNTIME_JSON`
-- remembers the selected path in `EditorPrefs`
-- uses `XR_RUNTIME_JSON` as the initial runtime path when it is already set
+Never store the signing identity credentials or app-specific password in tracked files. Run either
+script with `--help` for path overrides and the full option list.
 
-### macOS Player Loader Postprocessor
+## Runtime Registration
 
-Unity's OpenXR package may include the macOS loader in an architecture subdirectory such as
-`Contents/PlugIns/ARM64/libopenxr_loader.dylib`, while the runtime plugin loads
-`Contents/PlugIns/openxr_loader.dylib`. When that top-level file is missing, a macOS Player can
-work in the editor but fail in the exported app with `Failed to load openxr runtime loader.`
+`oxrsys_runtime_default.sh` updates the current user's macOS OpenXR loader registration. OXRSys Home
+is preferred for interactive selection and compatible-app launching because it can show current
+runtime status and registration guidance.
 
-`OXRSysMacOpenXRLoaderPostprocessor.cs` runs after macOS builds, copies
-`Packages/com.unity.xr.openxr/RuntimeLoaders/osx/libopenxr_loader.dylib` to
-`Contents/PlugIns/openxr_loader.dylib`, and ad-hoc signs the app again because adding a file after
-Unity signs the bundle invalidates the seal.
+## Unity Package
 
-### Installation
+`unity/` is the `net.demonixis.oxrsys-unity` Unity Package Manager package.
 
-Add the package from Unity Package Manager with this Git URL:
+- `OXRSysRuntimeAutoSelector.cs` selects the runtime for the current Unity editor process.
+- `OXRSysMacOpenXRLoaderPostprocessor.cs` copies Unity's loader to the path expected by exported
+  macOS Players and re-signs the modified bundle ad hoc.
+
+Install through Unity Package Manager with:
 
 ```text
 https://github.com/demonixis/OpenXR-OSX.git?path=/scripts/unity
 ```
 
-For local development from this checkout, use Package Manager's "Add package from disk..." flow and
-select `scripts/unity/package.json`.
-
+For local development, choose “Add package from disk…” and select `scripts/unity/package.json`.
 See [`unity/README.md`](unity/README.md) for manifest examples and release pinning.
-
-### How To Use It
-
-1. Add `net.demonixis.oxrsys-unity` to the Unity project.
-2. Build the runtime so `build/runtime/oxrsys-runtime.json` exists.
-3. Open the Unity editor.
-4. Use one of the menu entries under `Tools/OpenXR`:
-   - `Use OXRSys Runtime`
-   - `Choose Custom Runtime Json...`
-   - `Clear Forced Runtime`
-   - `Log Active Runtime`
-5. For macOS Player exports, keep the package installed before building the `.app`.
-
-`Use OXRSys Runtime` applies `XR_RUNTIME_JSON` when it points to an existing manifest. If it is not set, the helper asks you to choose the generated `oxrsys-runtime.json`.
-
-### When To Use It
-
-Use the runtime selector when you want the Unity editor to target the local runtime JSON without
-relying on a shell environment or the user-wide runtime registration helper.
-
-Use the macOS loader postprocessor for exported Unity Players that use `com.unity.xr.openxr`.
-The postprocessor does not select an OpenXR runtime by itself; launch the app with
-`XR_RUNTIME_JSON`, OXRSys Home, or the user-wide runtime registration helper.
-
-For system-wide registration outside Unity, use `scripts/oxrsys_runtime_default.sh` instead.

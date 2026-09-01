@@ -2,7 +2,7 @@
 
 ## Scope
 
-The native macOS Home app lives in `clients/Apple/oxrsys-home/` and provides three default tabs:
+The native macOS 14+ Home app lives in `clients/home/` and provides three default tabs:
 
 - `Apps`: scans for compatible apps, manages manually added apps, launches them with
   `XR_RUNTIME_JSON`, and captures stdout/stderr logs.
@@ -25,9 +25,11 @@ launch scripts, `~/.config/openxr/1/active_runtime.json`, `~/Library/LaunchAgent
 ## Build
 
 ```bash
-xcodebuild -project "clients/Apple/oxrsys-home/OXRSys Home.xcodeproj" \
+xcodebuild -project "clients/home/OXRSys Home.xcodeproj" \
   -scheme "OXRSys Home" \
   -configuration Debug \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
   build
 ```
 
@@ -42,16 +44,19 @@ simulator without launching a separate app bundle.
 Use `scripts/macos_build_package.sh` from the repository root to build the runtime and Home app,
 then copy them into `build/OXRSys-macOS/`. That folder keeps `OXRSys Home.app` next to a complete
 `runtime/` directory containing the runtime dylib, manifest, and TOML config.
+Debug packages default to the native host architecture. Release packages default to universal
+`arm64` plus `x86_64`, and the helper validates both Home and runtime slices before assembly.
 
 ## Direct Distribution Package
 
 Use `scripts/macos_sign_notarize.sh` from the repository root for Developer ID signing and optional
-notarization. It can sign the app and runtime from `build/OXRSys-macOS/`, then creates one zip
-archive containing the app and `runtime/` directory. With `--notarize`, it submits that archive to
-Apple using the provided Apple Developer account email and app-specific password, staples the Home
-app after acceptance, and rebuilds the zip so the app in the archive carries the stapled ticket.
+notarization. It can build a universal runtime and Home app itself, or accept explicit paths to
+existing outputs, then creates one zip containing the app and `runtime/` directory. With
+`--notarize`, it submits that archive to Apple using the provided Apple Developer account email and
+app-specific password, staples the Home app after acceptance, and rebuilds the zip so the app in the
+archive carries the stapled ticket.
 
-The full command examples live in [build.md](../build.md#macos-release-signing-and-notarization).
+The full command examples live in [build.md](../build.md#signing-and-notarization).
 
 ## Apps Launcher
 
@@ -208,7 +213,7 @@ The structured editor covers the current runtime keys:
 
 The bitrate control accepts the shared runtime range, `1` to `200` Mbps.
 `configured_bitrate_mbps` reports the Home/server value, while `max_bitrate_mbps`
-reports the effective ceiling after a headset client cap. Apple and Qt simulator
+reports the effective ceiling after a headset client cap. The Apple simulator
 clients do not add their own bitrate ceiling, so those values should match when
 the simulators connect.
 

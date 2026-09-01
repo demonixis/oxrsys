@@ -9,6 +9,7 @@
 #include "StreamingTransportPolicy.h"
 #include "Swapchain.h"
 #include "TrackingReceiver.h"
+#include "VideoCodecSelection.h"
 #include "VideoEncoder.h"
 #include <oxrsys/protocol/Foveation.h>
 #include <oxrsys/protocol/FecCodec.h>
@@ -20,6 +21,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <exception>
 #include <limits>
 #include <bit>
 #include <numeric>
@@ -27,10 +29,8 @@
 #include <thread>
 #include <utility>
 
-#if !defined(_WIN32)
 #include <ifaddrs.h>
 #include <net/if.h>
-#endif
 
 namespace
 {
@@ -170,82 +170,6 @@ const char* VideoCodecName(oxr::protocol::VideoCodec codec)
     }
 }
 
-uint32_t VideoCodecCapabilityFlag(oxr::protocol::VideoCodec codec)
-{
-    switch (codec)
-    {
-        case oxr::protocol::VideoCodec::H264:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
-        case oxr::protocol::VideoCodec::AV1:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_AV1;
-        case oxr::protocol::VideoCodec::H265:
-        default:
-            return oxr::protocol::CLIENT_CODEC_CAPABILITY_H265;
-    }
-}
-
-bool RuntimeSupportsVideoCodec(oxr::protocol::VideoCodec codec)
-{
-    return codec == oxr::protocol::VideoCodec::H265 ||
-           codec == oxr::protocol::VideoCodec::H264;
-}
-
-bool ClientSupportsVideoCodec(const oxr::protocol::ClientConnect& clientConnect,
-                              oxr::protocol::VideoCodec codec)
-{
-    if (clientConnect.supportedCodecs == 0)
-    {
-        return codec == oxr::protocol::VideoCodec::H265;
-    }
-    return (clientConnect.supportedCodecs & VideoCodecCapabilityFlag(codec)) != 0;
-}
-
-oxr::protocol::VideoCodec ParseConfiguredVideoCodec(const std::string& value)
-{
-    if (value == "h264")
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
-
-oxr::protocol::VideoCodec SelectVideoCodec(const ConfigValues& config,
-                                           const oxr::protocol::ClientConnect& clientConnect)
-{
-    if (config.videoCodec == "auto")
-    {
-        const auto preferred = static_cast<oxr::protocol::VideoCodec>(clientConnect.preferredCodec);
-        if (RuntimeSupportsVideoCodec(preferred) && ClientSupportsVideoCodec(clientConnect, preferred))
-        {
-            return preferred;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-        {
-            return oxr::protocol::VideoCodec::H265;
-        }
-        if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-        {
-            return oxr::protocol::VideoCodec::H264;
-        }
-        return oxr::protocol::VideoCodec::H265;
-    }
-
-    const oxr::protocol::VideoCodec requested = ParseConfiguredVideoCodec(config.videoCodec);
-    if (RuntimeSupportsVideoCodec(requested) && ClientSupportsVideoCodec(clientConnect, requested))
-    {
-        return requested;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H265))
-    {
-        return oxr::protocol::VideoCodec::H265;
-    }
-    if (ClientSupportsVideoCodec(clientConnect, oxr::protocol::VideoCodec::H264))
-    {
-        return oxr::protocol::VideoCodec::H264;
-    }
-    return oxr::protocol::VideoCodec::H265;
-}
-
 bool IsGraphicsContextValid(const GraphicsContext& context);
 
 struct StreamLayout
@@ -353,20 +277,6 @@ bool IsGraphicsContextValid(const GraphicsContext& context)
             return context.metalDevice != nullptr;
         case GraphicsApi::Vulkan:
             return context.vulkan.device != nullptr;
-        case GraphicsApi::OpenGL:
-            return context.openGL.context != nullptr;
-        case GraphicsApi::D3D11:
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D11) || defined(XR_USE_GRAPHICS_API_D3D11))
-            return context.d3d11.device != nullptr && context.d3d11.immediateContext != nullptr;
-#else
-            return false;
-#endif
-        case GraphicsApi::D3D12:
-#if defined(_WIN32) && (defined(OXRSYS_USE_D3D12) || defined(XR_USE_GRAPHICS_API_D3D12))
-            return context.d3d12.device != nullptr && context.d3d12.queue != nullptr;
-#else
-            return false;
-#endif
     }
     return false;
 }
@@ -608,7 +518,12 @@ StreamingServer::StreamingServer()
 
 StreamingServer::~StreamingServer()
 {
-    Stop();
+    if (!Stop())
+    {
+        // Stop() failure is retryable only while the owner retains this server.
+        // Destruction would invalidate callback captures and is therefore fatal.
+        std::terminate();
+    }
 }
 
 std::shared_ptr<StreamingServer::CallbackAccess> StreamingServer::GetCallbackAccess()
@@ -833,7 +748,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     return true;
 }
 
-void StreamingServer::Stop()
+bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
 {
     std::lock_guard<std::mutex> stopLock(stopMutex_);
 
@@ -894,10 +809,16 @@ void StreamingServer::Stop()
 
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
+        if (encoder_ != nullptr && !encoder_->Shutdown(timeout))
+        {
+            spdlog::warn("StreamingServer: encoder drain incomplete; Stop can be retried");
+            return false;
+        }
         encoder_.reset();
     }
 
     spdlog::info("StreamingServer: Stopped");
+    return true;
 }
 
 void StreamingServer::BroadcastThread()
@@ -1044,7 +965,24 @@ void StreamingServer::ControlThread()
         }
 
         uint8_t type = buffer[0];
-        if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
+        if (type == static_cast<uint8_t>(oxr::protocol::MessageType::DiscoveryRequest) &&
+            received == static_cast<int>(sizeof(uint8_t)))
+        {
+            // Direct discovery is the unicast fallback for Apple clients that cannot receive the
+            // UDP broadcast beacon. Keep it append-only and side-effect-free: the normal
+            // ClientConnect handshake still selects codecs, capabilities, and stream state.
+            if (wifiEnabled_ && state_.load() == State::Broadcasting)
+            {
+                const oxr::protocol::ServerAnnounce announce = BuildServerAnnounce(false);
+                oxrsys::runtime_socket::SendTo(controlSocket_,
+                                               &announce,
+                                               sizeof(announce),
+                                               0,
+                                               reinterpret_cast<const sockaddr*>(&clientAddr),
+                                               addrLen);
+            }
+        }
+        else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
             received >= static_cast<int>(oxr::protocol::CLIENT_CONNECT_BASE_SIZE))
         {
             if (wifiEnabled_)
@@ -1757,86 +1695,142 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     bool encoderReady = false;
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
-        encoder_ = std::make_shared<VideoEncoder>();
-        if (IsGraphicsContextValid(graphicsContext_))
+        bool encoderReplacementDeferred = false;
+        if (encoder_ != nullptr)
         {
-            RenewCallbackAccess();
-            const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
-            if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+            InvalidateCallbackAccess();
+            if (!encoder_->Shutdown())
             {
-                spdlog::warn("StreamingServer: client '{}' does not support configured video_codec='{}'; using {}",
-                             clientName,
-                             config.videoCodec,
-                             VideoCodecName(selectedCodec));
-            }
-            activeVideoCodec_.store(selectedCodec);
-            uint32_t bitrateMbps =
-                (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
-                ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
-                : config.bitrateMbps;
-            configMaxBitrateMbps_.store(bitrateMbps);
-            currentBitrateMbps_.store(bitrateMbps);
-            lastKeyframeRequestCountForAbr_ = 0;
-            lastVideoSendDroppedFrameCountForAbr_ = 0;
-            lastEncoderDroppedFrameCountForAbr_ = 0;
-            requestKeyframeTotalForAbr_.store(0);
-            videoSendDroppedFramesTotalForAbr_.store(0);
-            encoderDroppedFramesTotalForAbr_.store(0);
-            abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
-                                 bitrateMbps,
-                                 bitrateMbps,
-                                 config.resolutionScale,
-                                 config.dynamicResolutionMinScale);
-            {
-                std::lock_guard<std::mutex> abrLock(abrStateMutex_);
-                abrModeName_ = oxrsys::streaming_abr::ToString(
-                    oxrsys::streaming_abr::ParseMode(config.abrMode));
-                abrStateName_ = "stable";
-                abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
-            }
-            const StreamLayoutState layoutState = GetStreamLayoutState();
-            const oxr::protocol::FoveationPreset foveationPreset =
-                layoutState.foveatedEncodingActive
-                    ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                    : oxr::protocol::FoveationPreset::Off;
-            const oxr::protocol::FoveationLayout layout =
-                oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                        layoutState.foveatedTargetEyeHeight,
-                                                        foveationPreset);
-            const bool clientSupportsFoveatedEncoding =
-                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
-            clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-            const bool useFoveatedEncoding =
-                layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
-            clientFoveatedEncodingActive_.store(useFoveatedEncoding);
-            encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
-                useFoveatedEncoding, layout));
-            const bool useTenBit = config.encoder10Bit &&
-                selectedCodec == oxr::protocol::VideoCodec::H265 &&
-                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
-            tenBitEncodingActive_.store(useTenBit);
-            encoder_->SetTenBitEncoding(useTenBit);
-            if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
-            {
-                spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
-                             clientName);
-            }
-            if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
-                                     bitrateMbps, graphicsContext_, selectedCodec))
-            {
-                encoder_->ForceKeyframe();
-                frameIndex_ = 0;
-                encoderReady = true;
-                spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz codec={}",
-                              clientName, clientIp_, clientPort_, negotiatedRefresh, VideoCodecName(selectedCodec));
-                RuntimeStatus::SetStreaming("wifi", clientName);
+                encoderReplacementDeferred = true;
+                spdlog::warn(
+                    "StreamingServer: previous encoder is still draining; rejecting WiFi reconnect");
             }
             else
             {
-                spdlog::error("StreamingServer: Failed to initialize VideoEncoder");
                 encoder_.reset();
+            }
+        }
+        if (!encoderReplacementDeferred && encoder_ == nullptr)
+        {
+            encoder_ = std::make_shared<VideoEncoder>();
+        }
+        else if (encoderReplacementDeferred)
+        {
+            // Leave encoderReady false. The common failure path below resumes
+            // discovery; a later connection retries the bounded drain.
+            spdlog::warn("StreamingServer: WiFi encoder replacement deferred");
+        }
+        if (encoderReplacementDeferred)
+        {
+            // Retain the previous generation for the next bounded retry.
+        }
+        else if (IsGraphicsContextValid(graphicsContext_))
+        {
+            RenewCallbackAccess();
+            const ConfigValues config = Config::Get().GetValues();
+            const VideoEncoder::BackendCapabilities backendCapabilities =
+                VideoEncoder::QueryBackendCapabilities(&graphicsContext_);
+            const std::vector<oxr::protocol::VideoCodec> codecCandidates =
+                oxrsys::video_codec_selection::BuildCodecCandidates(
+                    config.videoCodec, clientConnect, backendCapabilities);
+            if (codecCandidates.empty())
+            {
+                spdlog::error("StreamingServer: client '{}' has no compatible video codec for {} ({})",
+                              clientName,
+                              backendCapabilities.backendName,
+                              backendCapabilities.unsupportedReason.empty()
+                                  ? "no matching client/backend codec"
+                                  : backendCapabilities.unsupportedReason);
+                encoder_.reset();
+            }
+            else
+            {
+                uint32_t bitrateMbps =
+                    (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
+                    ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
+                    : config.bitrateMbps;
+                configMaxBitrateMbps_.store(bitrateMbps);
+                currentBitrateMbps_.store(bitrateMbps);
+                lastKeyframeRequestCountForAbr_ = 0;
+                lastVideoSendDroppedFrameCountForAbr_ = 0;
+                lastEncoderDroppedFrameCountForAbr_ = 0;
+                requestKeyframeTotalForAbr_.store(0);
+                videoSendDroppedFramesTotalForAbr_.store(0);
+                encoderDroppedFramesTotalForAbr_.store(0);
+                abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
+                                     bitrateMbps,
+                                     bitrateMbps,
+                                     config.resolutionScale,
+                                     config.dynamicResolutionMinScale);
+                {
+                    std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+                    abrModeName_ = oxrsys::streaming_abr::ToString(
+                        oxrsys::streaming_abr::ParseMode(config.abrMode));
+                    abrStateName_ = "stable";
+                    abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
+                }
+                const StreamLayoutState layoutState = GetStreamLayoutState();
+                const oxr::protocol::FoveationPreset foveationPreset =
+                    layoutState.foveatedEncodingActive
+                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
+                        : oxr::protocol::FoveationPreset::Off;
+                const oxr::protocol::FoveationLayout layout =
+                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                                                            layoutState.foveatedTargetEyeHeight,
+                                                            foveationPreset);
+                const bool clientSupportsFoveatedEncoding =
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
+                clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                const bool useFoveatedEncoding =
+                    layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
+                clientFoveatedEncodingActive_.store(useFoveatedEncoding);
+                encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
+                    useFoveatedEncoding, layout));
+                if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
+                {
+                    spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
+                                 clientName);
+                }
+                for (const oxr::protocol::VideoCodec selectedCodec : codecCandidates)
+                {
+                    const bool useTenBit = backendCapabilities.supportsTenBitH265 &&
+                        config.encoder10Bit &&
+                        selectedCodec == oxr::protocol::VideoCodec::H265 &&
+                        HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
+                    tenBitEncodingActive_.store(useTenBit);
+                    encoder_->SetTenBitEncoding(useTenBit);
+                    if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
+                                             bitrateMbps, graphicsContext_, selectedCodec))
+                    {
+                        if (config.videoCodec != "auto" &&
+                            selectedCodec != oxrsys::video_codec_selection::ParseConfiguredVideoCodec(config.videoCodec))
+                        {
+                            spdlog::warn("StreamingServer: configured video_codec='{}' failed or is unavailable for client '{}' on {}; using {}",
+                                         config.videoCodec,
+                                         clientName,
+                                         backendCapabilities.backendName,
+                                         VideoCodecName(selectedCodec));
+                        }
+                        activeVideoCodec_.store(selectedCodec);
+                        encoder_->ForceKeyframe();
+                        frameIndex_ = 0;
+                        encoderReady = true;
+                        spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz codec={} backend={}",
+                                      clientName, clientIp_, clientPort_, negotiatedRefresh,
+                                      VideoCodecName(selectedCodec), backendCapabilities.backendName);
+                        RuntimeStatus::SetStreaming("wifi", clientName);
+                        break;
+                    }
+                    spdlog::warn("StreamingServer: {} failed to initialize {}; trying fallback codec if available",
+                                 backendCapabilities.backendName,
+                                 VideoCodecName(selectedCodec));
+                }
+                if (!encoderReady)
+                {
+                    tenBitEncodingActive_.store(false);
+                    spdlog::error("StreamingServer: Failed to initialize VideoEncoder for any compatible WiFi codec");
+                    encoder_.reset();
+                }
             }
         }
         else
@@ -1923,86 +1917,140 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     bool encoderReady = false;
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
-        encoder_ = std::make_shared<VideoEncoder>();
-        if (IsGraphicsContextValid(graphicsContext_))
+        bool encoderReplacementDeferred = false;
+        if (encoder_ != nullptr)
         {
-            RenewCallbackAccess();
-            const ConfigValues config = Config::Get().GetValues();
-            const oxr::protocol::VideoCodec selectedCodec = SelectVideoCodec(config, clientConnect);
-            if (config.videoCodec != "auto" &&
-                selectedCodec != ParseConfiguredVideoCodec(config.videoCodec))
+            InvalidateCallbackAccess();
+            if (!encoder_->Shutdown())
             {
-                spdlog::warn("StreamingServer: USB client '{}' does not support configured video_codec='{}'; using {}",
-                             clientName,
-                             config.videoCodec,
-                             VideoCodecName(selectedCodec));
-            }
-            activeVideoCodec_.store(selectedCodec);
-            uint32_t bitrateMbps =
-                (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
-                ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
-                : config.bitrateMbps;
-            configMaxBitrateMbps_.store(bitrateMbps);
-            currentBitrateMbps_.store(bitrateMbps);
-            lastKeyframeRequestCountForAbr_ = 0;
-            lastVideoSendDroppedFrameCountForAbr_ = 0;
-            lastEncoderDroppedFrameCountForAbr_ = 0;
-            requestKeyframeTotalForAbr_.store(0);
-            videoSendDroppedFramesTotalForAbr_.store(0);
-            encoderDroppedFramesTotalForAbr_.store(0);
-            abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
-                                 bitrateMbps,
-                                 bitrateMbps,
-                                 config.resolutionScale,
-                                 config.dynamicResolutionMinScale);
-            {
-                std::lock_guard<std::mutex> abrLock(abrStateMutex_);
-                abrModeName_ = oxrsys::streaming_abr::ToString(
-                    oxrsys::streaming_abr::ParseMode(config.abrMode));
-                abrStateName_ = "stable";
-                abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
-            }
-            const StreamLayoutState layoutState = GetStreamLayoutState();
-            const oxr::protocol::FoveationPreset foveationPreset =
-                layoutState.foveatedEncodingActive
-                    ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                    : oxr::protocol::FoveationPreset::Off;
-            const oxr::protocol::FoveationLayout layout =
-                oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                        layoutState.foveatedTargetEyeHeight,
-                                                        foveationPreset);
-            const bool clientSupportsFoveatedEncoding =
-                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
-            clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-            const bool useFoveatedEncoding =
-                layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
-            clientFoveatedEncodingActive_.store(useFoveatedEncoding);
-            encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
-                useFoveatedEncoding, layout));
-            const bool useTenBit = config.encoder10Bit &&
-                selectedCodec == oxr::protocol::VideoCodec::H265 &&
-                HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
-            tenBitEncodingActive_.store(useTenBit);
-            encoder_->SetTenBitEncoding(useTenBit);
-            if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
-            {
-                spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
-                             clientName);
-            }
-            if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
-                                     bitrateMbps, graphicsContext_, selectedCodec))
-            {
-                encoder_->ForceKeyframe();
-                frameIndex_ = 0;
-                encoderReady = true;
-                spdlog::info("StreamingServer: Client connected via usb_adb: {} refresh={}Hz codec={}",
-                              clientName, negotiatedRefresh, VideoCodecName(selectedCodec));
-                RuntimeStatus::SetStreaming("usb_adb", clientName);
+                encoderReplacementDeferred = true;
+                spdlog::warn(
+                    "StreamingServer: previous encoder is still draining; rejecting USB reconnect");
             }
             else
             {
-                spdlog::error("StreamingServer: Failed to initialize VideoEncoder for USB ADB");
                 encoder_.reset();
+            }
+        }
+        if (!encoderReplacementDeferred && encoder_ == nullptr)
+        {
+            encoder_ = std::make_shared<VideoEncoder>();
+        }
+        else if (encoderReplacementDeferred)
+        {
+            spdlog::warn("StreamingServer: USB encoder replacement deferred");
+        }
+        if (encoderReplacementDeferred)
+        {
+            // Retain the previous generation for the next bounded retry.
+        }
+        else if (IsGraphicsContextValid(graphicsContext_))
+        {
+            RenewCallbackAccess();
+            const ConfigValues config = Config::Get().GetValues();
+            const VideoEncoder::BackendCapabilities backendCapabilities =
+                VideoEncoder::QueryBackendCapabilities(&graphicsContext_);
+            const std::vector<oxr::protocol::VideoCodec> codecCandidates =
+                oxrsys::video_codec_selection::BuildCodecCandidates(
+                    config.videoCodec, clientConnect, backendCapabilities);
+            if (codecCandidates.empty())
+            {
+                spdlog::error("StreamingServer: USB client '{}' has no compatible video codec for {} ({})",
+                              clientName,
+                              backendCapabilities.backendName,
+                              backendCapabilities.unsupportedReason.empty()
+                                  ? "no matching client/backend codec"
+                                  : backendCapabilities.unsupportedReason);
+                encoder_.reset();
+            }
+            else
+            {
+                uint32_t bitrateMbps =
+                    (clientConnect.maxBitrateMbps != oxr::protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG)
+                    ? std::min(config.bitrateMbps, clientConnect.maxBitrateMbps)
+                    : config.bitrateMbps;
+                configMaxBitrateMbps_.store(bitrateMbps);
+                currentBitrateMbps_.store(bitrateMbps);
+                lastKeyframeRequestCountForAbr_ = 0;
+                lastVideoSendDroppedFrameCountForAbr_ = 0;
+                lastEncoderDroppedFrameCountForAbr_ = 0;
+                requestKeyframeTotalForAbr_.store(0);
+                videoSendDroppedFramesTotalForAbr_.store(0);
+                encoderDroppedFramesTotalForAbr_.store(0);
+                abrController_.Reset(oxrsys::streaming_abr::ParseMode(config.abrMode),
+                                     bitrateMbps,
+                                     bitrateMbps,
+                                     config.resolutionScale,
+                                     config.dynamicResolutionMinScale);
+                {
+                    std::lock_guard<std::mutex> abrLock(abrStateMutex_);
+                    abrModeName_ = oxrsys::streaming_abr::ToString(
+                        oxrsys::streaming_abr::ParseMode(config.abrMode));
+                    abrStateName_ = "stable";
+                    abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
+                }
+                const StreamLayoutState layoutState = GetStreamLayoutState();
+                const oxr::protocol::FoveationPreset foveationPreset =
+                    layoutState.foveatedEncodingActive
+                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
+                        : oxr::protocol::FoveationPreset::Off;
+                const oxr::protocol::FoveationLayout layout =
+                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                                                            layoutState.foveatedTargetEyeHeight,
+                                                            foveationPreset);
+                const bool clientSupportsFoveatedEncoding =
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
+                clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                const bool useFoveatedEncoding =
+                    layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
+                clientFoveatedEncodingActive_.store(useFoveatedEncoding);
+                encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
+                    useFoveatedEncoding, layout));
+                if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
+                {
+                    spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
+                                 clientName);
+                }
+                for (const oxr::protocol::VideoCodec selectedCodec : codecCandidates)
+                {
+                    const bool useTenBit = backendCapabilities.supportsTenBitH265 &&
+                        config.encoder10Bit &&
+                        selectedCodec == oxr::protocol::VideoCodec::H265 &&
+                        HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
+                    tenBitEncodingActive_.store(useTenBit);
+                    encoder_->SetTenBitEncoding(useTenBit);
+                    if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
+                                             bitrateMbps, graphicsContext_, selectedCodec))
+                    {
+                        if (config.videoCodec != "auto" &&
+                            selectedCodec != oxrsys::video_codec_selection::ParseConfiguredVideoCodec(config.videoCodec))
+                        {
+                            spdlog::warn("StreamingServer: configured video_codec='{}' failed or is unavailable for USB client '{}' on {}; using {}",
+                                         config.videoCodec,
+                                         clientName,
+                                         backendCapabilities.backendName,
+                                         VideoCodecName(selectedCodec));
+                        }
+                        activeVideoCodec_.store(selectedCodec);
+                        encoder_->ForceKeyframe();
+                        frameIndex_ = 0;
+                        encoderReady = true;
+                        spdlog::info("StreamingServer: Client connected via usb_adb: {} refresh={}Hz codec={} backend={}",
+                                      clientName, negotiatedRefresh,
+                                      VideoCodecName(selectedCodec), backendCapabilities.backendName);
+                        RuntimeStatus::SetStreaming("usb_adb", clientName);
+                        break;
+                    }
+                    spdlog::warn("StreamingServer: {} failed to initialize {}; trying fallback codec if available",
+                                 backendCapabilities.backendName,
+                                 VideoCodecName(selectedCodec));
+                }
+                if (!encoderReady)
+                {
+                    tenBitEncodingActive_.store(false);
+                    spdlog::error("StreamingServer: Failed to initialize VideoEncoder for any compatible USB ADB codec");
+                    encoder_.reset();
+                }
             }
         }
         else
@@ -2080,7 +2128,21 @@ void StreamingServer::HandleClientDisconnect()
 
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
-        encoder_.reset();
+        if (encoder_ != nullptr)
+        {
+            if (encoder_->Shutdown())
+            {
+                encoder_.reset();
+            }
+            else
+            {
+                // Retain ownership. The next reconnect or Stop() retries after
+                // outstanding Metal/VideoToolbox callbacks release their frame
+                // sources; allowing shared_ptr destruction on a callback thread
+                // would be unsafe.
+                spdlog::warn("StreamingServer: disconnected encoder drain deferred");
+            }
+        }
     }
 
     targetRefreshRateHz_.store(refreshRateHz_);
@@ -2462,10 +2524,36 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
     ClearVideoSendQueue();
     newEncoder->ForceKeyframe();
 
+    bool previousEncoderDrained = true;
     {
         std::lock_guard<std::mutex> lock(encoderMutex_);
-        RenewCallbackAccess();
-        encoder_ = std::move(newEncoder);
+        // Do not let the last old-generation shared_ptr disappear from a VT
+        // callback. First revoke server access, then perform the bounded drain
+        // while encoder_ retains ownership. Only a fully drained generation can
+        // be replaced; on timeout HandleClientDisconnect keeps it for retry.
+        InvalidateCallbackAccess();
+        if (encoder_ != nullptr && !encoder_->Shutdown())
+        {
+            previousEncoderDrained = false;
+        }
+        else
+        {
+            encoder_.reset();
+            RenewCallbackAccess();
+            encoder_ = std::move(newEncoder);
+        }
+    }
+    if (!previousEncoderDrained)
+    {
+        {
+            std::lock_guard<std::mutex> lock(streamConfigMutex_);
+            ResetPendingStreamConfigLocked();
+        }
+        spdlog::warn(
+            "StreamingServer: stream config seq={} deferred because the previous encoder is still draining",
+            update.sequence);
+        HandleClientDisconnect();
+        return;
     }
 
     {
@@ -3245,53 +3333,6 @@ std::string StreamingServer::GetClientName() const
 
 std::string StreamingServer::GetLocalIpAddress() const
 {
-#if defined(_WIN32)
-    if (!oxrsys::runtime_socket::EnsureInitialized())
-    {
-        return "0.0.0.0";
-    }
-
-    char hostName[256] = {};
-    if (gethostname(hostName, sizeof(hostName)) != 0)
-    {
-        return "0.0.0.0";
-    }
-
-    addrinfo hints = {};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-
-    addrinfo* addresses = nullptr;
-    if (getaddrinfo(hostName, nullptr, &hints, &addresses) != 0)
-    {
-        return "0.0.0.0";
-    }
-
-    std::string result = "0.0.0.0";
-    for (addrinfo* current = addresses; current != nullptr; current = current->ai_next)
-    {
-        if (current->ai_addr == nullptr || current->ai_addr->sa_family != AF_INET)
-        {
-            continue;
-        }
-        auto* addr = reinterpret_cast<sockaddr_in*>(current->ai_addr);
-        const uint32_t hostAddress = ntohl(addr->sin_addr.s_addr);
-        if ((hostAddress >> 24) == 127)
-        {
-            continue;
-        }
-
-        char ipStr[INET_ADDRSTRLEN] = {};
-        if (inet_ntop(AF_INET, &addr->sin_addr, ipStr, sizeof(ipStr)) != nullptr)
-        {
-            result = ipStr;
-            break;
-        }
-    }
-
-    freeaddrinfo(addresses);
-    return result;
-#else
     struct ifaddrs* ifas = nullptr;
     if (getifaddrs(&ifas) != 0)
     {
@@ -3328,5 +3369,4 @@ std::string StreamingServer::GetLocalIpAddress() const
 
     freeifaddrs(ifas);
     return result;
-#endif
 }

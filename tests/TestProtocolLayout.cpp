@@ -37,6 +37,7 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(STREAMING_MAX_BITRATE_MBPS == 200);
     STATIC_REQUIRE(CLIENT_MAX_BITRATE_USE_SERVER_CONFIG == 0);
     STATIC_REQUIRE(SPATIAL_PORT == 9948);
+    STATIC_REQUIRE(static_cast<uint8_t>(MessageType::DiscoveryRequest) == 0x04);
 
     STATIC_REQUIRE(sizeof(LatencyReport) == 40);
     STATIC_REQUIRE(sizeof(RequestKeyframe) == 12);

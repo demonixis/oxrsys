@@ -3,8 +3,7 @@
 # OXRSys Runtime Configuration
 # Preferred location:
 #   macOS: ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
-#   Linux: ${XDG_CONFIG_HOME:-~/.config}/oxrsys/oxrsys-runtime.toml
-# Fallback location: next to liboxrsys-runtime.dylib / liboxrsys-runtime.so
+# Fallback location: next to liboxrsys-runtime.dylib
 
 [general]
 # Enable or disable this runtime without unregistering the manifest.
@@ -40,7 +39,7 @@ keyframe_interval_sec = 2
 
 # Video codec: "h265", "h264", or "auto".
 # H.265 remains the default for headset compatibility; H.264 is useful for
-# FFmpeg/Qt simulator validation and clients that advertise H.264 support.
+# clients that advertise H.264 support. VideoToolbox provides both codecs.
 video_codec = "h265"
 
 # Encoder speed preset: "quality", "balanced", "speed"
@@ -105,7 +104,6 @@ persistence = false
 [logging]
 # Write server logs to the platform state directory.
 #   macOS: ~/Library/Application Support/OXRSys/oxrsys-runtime.log
-#   Linux: ${XDG_STATE_HOME:-~/.local/state}/oxrsys/oxrsys-runtime.log
 file_logging = true
 
 # Capture Quest/headset logcat to the platform state directory.

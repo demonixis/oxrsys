@@ -37,6 +37,25 @@ FrameSource TestFrameSource(uintptr_t left, uintptr_t right, std::vector<uintptr
 
 } // namespace
 
+TEST_CASE("Host frame synchronization is explicit and bounded", "[streaming][sync]")
+{
+    FrameSyncToken token = {};
+    CHECK_FALSE(token.IsValid());
+    CHECK(token.WaitForHostReady(1));
+
+    uint64_t observedTimeout = 0;
+    token.kind = FrameSyncKind::HostFence;
+    token.waitForReady = [&](uint64_t timeoutNs) {
+        observedTimeout = timeoutNs;
+        return timeoutNs == 16'666'667;
+    };
+
+    CHECK(token.IsValid());
+    CHECK(token.WaitForHostReady(16'666'667));
+    CHECK(observedTimeout == 16'666'667);
+    CHECK_FALSE(token.WaitForHostReady(1));
+}
+
 TEST_CASE("StreamingFrameQueue replaces the pending frame and releases it", "[streaming]")
 {
     uint32_t releasedFrameIndex = 0;

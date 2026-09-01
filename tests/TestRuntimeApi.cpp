@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -2840,4 +2841,126 @@ TEST_CASE("Unsupported swapchain mip counts report feature unsupported", "[runti
     CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
           XR_ERROR_FEATURE_UNSUPPORTED);
     CHECK(swapchain == XR_NULL_HANDLE);
+}
+
+TEST_CASE("Swapchain creation rejects unsupported flags and incompatible usage",
+          "[runtime][swapchain][validation]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = SelectColorSwapchainFormat(context.session);
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+
+    XrSwapchain swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.usageFlags |= XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    createInfo.createFlags = XR_SWAPCHAIN_CREATE_PROTECTED_CONTENT_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.createFlags = 0;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.createFlags = 0;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+
+    swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
+    createInfo.format = 252; // MTLPixelFormatDepth32Float, advertised by the runtime.
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
+    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
+          XR_ERROR_FEATURE_UNSUPPORTED);
+    CHECK(swapchain == XR_NULL_HANDLE);
+}
+
+TEST_CASE("Distinct swapchains can be created and destroyed concurrently",
+          "[runtime][swapchain][threading]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    const int64_t format = SelectColorSwapchainFormat(context.session);
+    constexpr size_t threadCount = 4;
+    constexpr size_t iterations = 8;
+    std::array<XrResult, threadCount> results{};
+    results.fill(XR_SUCCESS);
+    std::atomic<size_t> ready{0};
+    std::atomic_bool start{false};
+    std::array<std::thread, threadCount> threads;
+
+    for (size_t threadIndex = 0; threadIndex < threadCount; ++threadIndex)
+    {
+        threads[threadIndex] = std::thread([&, threadIndex] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+
+            for (size_t iteration = 0; iteration < iterations; ++iteration)
+            {
+                XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+                createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                                        XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+                createInfo.format = format;
+                createInfo.sampleCount = 1;
+                createInfo.width = 16;
+                createInfo.height = 16;
+                createInfo.faceCount = 1;
+                createInfo.arraySize = 1;
+                createInfo.mipCount = 1;
+                XrSwapchain swapchain = XR_NULL_HANDLE;
+                results[threadIndex] =
+                    xrCreateSwapchain(context.session, &createInfo, &swapchain);
+                if (results[threadIndex] != XR_SUCCESS)
+                {
+                    return;
+                }
+                results[threadIndex] = xrDestroySwapchain(swapchain);
+                if (results[threadIndex] != XR_SUCCESS)
+                {
+                    return;
+                }
+            }
+        });
+    }
+
+    while (ready.load(std::memory_order_acquire) != threadCount)
+    {
+        std::this_thread::yield();
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
+    for (const XrResult result : results)
+    {
+        CHECK(result == XR_SUCCESS);
+    }
 }

@@ -65,7 +65,7 @@ FrameImageSource MakeMetalFrameImageSource(id<MTLTexture> texture,
     FrameImageSource source = {};
     source.api = GraphicsApi::Metal;
     source.lifetime = lifetime;
-    source.sync.api = GraphicsApi::Metal;
+    source.sync.kind = FrameSyncKind::MetalSharedEvent;
     source.sync.waitObject = waitEvent;
     source.sync.waitValue = waitValue;
 
@@ -119,6 +119,28 @@ extern "C" void* OxrsysRetainMetalObjectForSwapchain(void* object)
         return nullptr;
     }
     return (void*)[(id)object retain];
+}
+
+extern "C" void* OxrsysCreateMetalTextureSliceForSwapchain(
+    void* object, uint32_t arraySize, uint32_t arrayIndex)
+{
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)object;
+    if (texture == nil || arrayIndex >= arraySize)
+    {
+        return nullptr;
+    }
+    if (arraySize <= 1 || texture.textureType != MTLTextureType2DArray)
+    {
+        return (void*)[texture retain];
+    }
+    if (arrayIndex >= texture.arrayLength)
+    {
+        return nullptr;
+    }
+    return (void*)[texture newTextureViewWithPixelFormat:texture.pixelFormat
+                                              textureType:MTLTextureType2D
+                                                   levels:NSMakeRange(0, 1)
+                                                   slices:NSMakeRange(arrayIndex, 1)];
 }
 
 // ============================================================================
@@ -283,11 +305,16 @@ XrResult Swapchain::EnumerateMetalImages(uint32_t /*imageCapacityInput*/,
 // Release-time snapshot
 // ============================================================================
 
-void Swapchain::SnapshotMetalReleasedImage()
+void Swapchain::SnapshotMetalReleasedImage(bool requested)
 {
     hasSnapshot_ = false;
     lastSnapshotValue_ = 0;
     lastSnapshotLease_.reset();
+
+    if (!requested)
+    {
+        return;
+    }
 
     if (imageCount_ > 1 && !stagingSlots_.empty() &&
         snapshotEvent_ != nullptr && metalCommandQueue_ != nullptr)
