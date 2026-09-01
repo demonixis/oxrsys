@@ -199,6 +199,7 @@ final class VisionTrackingManager: @unchecked Sendable {
         storedAccessoryAnchors = [nil, nil]
         accessoryAnchorLock.unlock()
         lastHeadOrientation = nil
+        SpatialControllerSupport.resetDiagnostics()
         lastSamplePosition = nil
         lastSampleOrientation = nil
         lastSampleTime = 0
@@ -640,6 +641,34 @@ final class VisionTrackingManager: @unchecked Sendable {
             .ancestorFromSpaceTransformFloat().matrix
     }
 
+    /// The LIVE `GCController` for this hand.
+    ///
+    /// `anchor.accessory.source` captures the controller that existed when the `Accessory` was
+    /// created. A controller that drops and reconnects — which is exactly what happens across a
+    /// stream rejoin — comes back as a NEW `GCController`, leaving that captured reference stale.
+    /// Its `physicalInputProfile` then reports everything released, which shows up as "tracking
+    /// still works but the buttons are dead". Resolve against the currently connected controllers
+    /// instead: prefer the accessory's own device while it is still connected, then fall back to
+    /// the connected spatial controller for this hand.
+    @available(visionOS 26.0, *)
+    private func liveController(for anchor: AccessoryAnchor, isLeftHand: Bool) -> GCController? {
+        let connected = GCController.controllers()
+        if case let .device(device) = anchor.accessory.source,
+           let controller = device as? GCController,
+           connected.contains(where: { $0 === controller }) {
+            return controller
+        }
+
+        let spatial = connected.filter { $0.productCategory == GCProductCategorySpatialController }
+        // The Sense pair distinguishes itself with an "(L)"/"(R)" suffix; fall back to the sole
+        // spatial controller when only one is connected.
+        let suffix = isLeftHand ? "(L)" : "(R)"
+        if let match = spatial.first(where: { ($0.vendorName ?? "").hasSuffix(suffix) }) {
+            return match
+        }
+        return spatial.count == 1 ? spatial.first : nil
+    }
+
     private func makeControllerState(from anchor: AccessoryAnchor, isLeftHand: Bool) -> VisionControllerState {
         let transform = accessoryTransform(anchor)
         let position = transform.translation
@@ -650,8 +679,7 @@ final class VisionTrackingManager: @unchecked Sendable {
 
         // PSVR2 Sense buttons/trigger/grip/thumbstick, mapped to Meta Touch (Quest 2) per hand.
         var input = SpatialControllerSupport.Input()
-        if case let .device(device) = anchor.accessory.source,
-           let controller = device as? GCController {
+        if let controller = liveController(for: anchor, isLeftHand: isLeftHand) {
             input = SpatialControllerSupport.input(from: controller, isLeftHand: isLeftHand)
         }
 

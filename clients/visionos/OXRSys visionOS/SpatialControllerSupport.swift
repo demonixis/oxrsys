@@ -110,6 +110,12 @@ enum SpatialControllerSupport {
     // to map a new spatial controller correctly.
     nonisolated(unsafe) private static var loggedElementNames = Set<String>()
 
+    /// Re-arm the one-shot dump so a reconnect reports the element names again (a controller that
+    /// reconnects is a new device, and its names are what a mapping bug would hinge on).
+    static func resetDiagnostics() {
+        loggedElementNames.removeAll()
+    }
+
     private static func logElementNamesOnce(_ controller: GCController,
                                             _ profile: GCPhysicalInputProfile) {
         let key = controller.vendorName ?? "unknown"
