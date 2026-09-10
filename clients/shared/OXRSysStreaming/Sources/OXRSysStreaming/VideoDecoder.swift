@@ -30,6 +30,10 @@ public final class VideoDecoder: @unchecked Sendable {
 
     private var sliceCount: Int = 0
     private var decodeErrorCount: Int = 0
+    // When the last dead decompression session was rebuilt. A dead session fails every frame, so
+    // without a cooldown the recovery below would run at the full frame rate.
+    private var lastSessionRebuildNs: Int64 = 0
+    private static let sessionRebuildCooldownNs: Int64 = 500_000_000
     public var totalDecodeErrors: Int { locked { decodeErrorCount } }
 
     /// Called on decode errors (from VT callback thread) for keyframe recovery.
@@ -183,6 +187,45 @@ public final class VideoDecoder: @unchecked Sendable {
         }
     }
 
+    /// VideoToolbox statuses that mean the decompression *session* is dead rather than the data
+    /// being bad: the system tore it down because the app lost its foreground/immersive
+    /// privilege, its media session was deactivated, or it hit resource pressure. Every later
+    /// frame then fails with the same status forever, so dropping to a keyframe cannot help —
+    /// only a new session can. Observed in the field as a -12903 storm that ran until the stream
+    /// itself stopped, leaving the headset on a frozen frame.
+    private static func isSessionFatal(_ status: OSStatus) -> Bool {
+        status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr
+    }
+
+    /// Discard the dead session and rebuild it from the retained parameter sets, then wait for a
+    /// keyframe before decoding again.
+    private func rebuildSessionAfterFatalError(codec: VideoCodec, status: OSStatus) {
+        let now = VideoReceiver.monotonicNs()
+        let (shouldRebuild, oldSession) = locked { () -> (Bool, VTDecompressionSession?) in
+            guard lastSessionRebuildNs == 0 || now - lastSessionRebuildNs > Self.sessionRebuildCooldownNs else {
+                return (false, nil)
+            }
+            lastSessionRebuildNs = now
+            let old = session
+            // Keep vps/sps/pps — they still describe the stream and the rebuild needs them.
+            // Only the session and the format description it was created against are dropped.
+            session = nil
+            formatDesc = nil
+            paramSetsReady = false
+            return (true, old)
+        }
+        guard shouldRebuild else { return }
+
+        print("[VideoDecoder/\(codec.logName)] Decompression session invalid (\(status)); rebuilding")
+        if let oldSession {
+            VTDecompressionSessionInvalidate(oldSession)
+        }
+        tryCreateFormatDescription()
+        // Ask the server for an IDR and drop inter slices until it lands, so the fresh session
+        // never starts on frames that reference pictures it did not decode.
+        invokeDecodeErrorCallback()
+    }
+
     private func switchCodecIfNeeded(_ codec: VideoCodec) {
         let oldSession = locked { () -> VTDecompressionSession? in
             guard activeCodec != codec else { return nil }
@@ -205,6 +248,7 @@ public final class VideoDecoder: @unchecked Sendable {
         awaitingKeyframe = false
         sliceCount = 0
         decodeErrorCount = 0
+        lastSessionRebuildNs = 0
         return oldSession
     }
 
@@ -456,6 +500,9 @@ public final class VideoDecoder: @unchecked Sendable {
             }
             if errorCount <= 5 || errorCount % 100 == 0 {
                 print("[VideoDecoder/\(codec.logName)] DecodeFrame error: \(decStatus) (slice #\(sliceNumber), NAL type \(nalType), \(nalUnit.count) bytes)")
+            }
+            if Self.isSessionFatal(decStatus) {
+                rebuildSessionAfterFatalError(codec: codec, status: decStatus)
             }
         } else if sliceNumber <= 3 || sliceNumber % 200 == 0 {
             print("[VideoDecoder/\(codec.logName)] Decoded slice #\(sliceNumber) - NAL type \(nalType), \(nalUnit.count) bytes")

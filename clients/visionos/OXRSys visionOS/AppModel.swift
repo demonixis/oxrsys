@@ -79,6 +79,25 @@ private nonisolated final class KeyframeRecoveryState: @unchecked Sendable {
     }
 }
 
+/// Whether the renderer should be drawing streamed frames. The render loop reads this every
+/// frame from its own thread, so it lives in a small lock box rather than behind the main actor.
+private nonisolated final class StreamPresentationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        active = value
+        lock.unlock()
+    }
+
+    func isActive() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
+
 private nonisolated final class EyeProjectionState: @unchecked Sendable {
     private let lock = NSLock()
     private var fovAngles = SIMD4<Float>(repeating: 0) // angleLeft, angleRight, angleUp, angleDown (radians)
@@ -217,6 +236,12 @@ final class AppModel {
     let controlWindowID = "ControlWindow"
 
     var immersiveSpaceState = ImmersiveSpaceState.closed
+    // Serializes ContentView's presentation sync. One AppModel change (a dropped connection sets
+    // both connectionState and wantsImmersiveSpace) notifies several observers at once, and two
+    // overlapping openImmersiveSpace/dismissImmersiveSpace calls leave the space open with
+    // nothing driving it — the state the client got permanently stuck in.
+    var isSynchronizingPresentation = false
+    var presentationSyncPending = false
     /// User intent to be in the immersive view, kept separate from `connectionState` so that
     /// exiting the immersive view (Digital Crown) lands on the menu instead of auto re-entering,
     /// and the menu can offer an explicit "Enter" button while still connected.
@@ -224,10 +249,15 @@ final class AppModel {
     var autoEnterImmersiveOnConnect = true
     var showHandsInImmersive = true
     var keepControlWindowVisibleInImmersive = false
+    /// Immersion style for the streamed view. `false` (default) uses `.mixed`, which composites
+    /// the opaque video over passthrough — visionOS imposes no room-scale walking limit in mixed
+    /// immersion, so you can walk your whole space. `true` uses `.full`, which looks the same but
+    /// is treated as a seated experience and breaks through to passthrough when you move around.
+    var useFullImmersion = false
     var shouldRestoreControlWindowOnImmersiveClose = false
     var connectionState: ConnectionState = .disconnected
     var discoveredServer: DiscoveredServer?
-    var statusText = "Tap Search to find the runtime"
+    var statusText = "Searching for the runtime..."
     var directServerHost = UserDefaults.standard.string(
         forKey: AppModel.directServerHostPreferenceKey
     ) ?? ""
@@ -261,8 +291,18 @@ final class AppModel {
     private nonisolated let postFXState = PostFXState()
 
     private var statsTimer: Timer?
+    /// When the stream started, so the watchdog can distinguish "video never arrived" from
+    /// "video stopped". 0 while disconnected.
+    private var connectedAtNs: Int64 = 0
+    /// Cleared on a user-initiated disconnect so we do not immediately rediscover and reconnect.
+    private var shouldAutoReconnect = true
     private var lastStatsTimeNs: Int64 = 0
     private var lastDeliveredFrames: UInt32 = 0
+    // Decoder-progress watchdog: video can keep arriving over the network long after the decode
+    // pipeline has died, which reads to the user as a frozen frame with no error anywhere.
+    private var lastDecodedFrames: UInt64 = 0
+    private var lastDecodeProgressNs: Int64 = 0
+    private let streamPresentationState = StreamPresentationState()
     private let keyframeErrorThreshold = 3
     private let keyframeRequestCooldownNs: UInt64 = 1_000_000_000
     private var usesDirectServerAddress = false
@@ -377,6 +417,15 @@ final class AppModel {
                     leftController.thumbstick.x,
                     leftController.thumbstick.y
                 )
+                // Send the pointer pose only when the controller publishes a distinct aim
+                // location; leaving it unset makes the runtime fall back to the grip pose.
+                if let aimPos = leftController.aimPosition,
+                   let aimRot = leftController.aimOrientation {
+                    packet.leftControllerAimPos = (aimPos.x, aimPos.y, aimPos.z)
+                    packet.leftControllerAimRot = (
+                        aimRot.imag.x, aimRot.imag.y, aimRot.imag.z, aimRot.real
+                    )
+                }
             }
 
             if let rightController = snapshot.rightController {
@@ -399,6 +448,15 @@ final class AppModel {
                     rightController.thumbstick.x,
                     rightController.thumbstick.y
                 )
+                // Send the pointer pose only when the controller publishes a distinct aim
+                // location; leaving it unset makes the runtime fall back to the grip pose.
+                if let aimPos = rightController.aimPosition,
+                   let aimRot = rightController.aimOrientation {
+                    packet.rightControllerAimPos = (aimPos.x, aimPos.y, aimPos.z)
+                    packet.rightControllerAimRot = (
+                        aimRot.imag.x, aimRot.imag.y, aimRot.imag.z, aimRot.real
+                    )
+                }
             }
 
             trackingSender.send(packet)
@@ -425,6 +483,7 @@ final class AppModel {
 
     func startDiscovery() {
         guard connectionState == .disconnected else { return }
+        shouldAutoReconnect = true
         usesDirectServerAddress = false
         connectionState = .discovering
         discoveredServer = nil
@@ -435,13 +494,10 @@ final class AppModel {
                 guard let self, self.connectionState == .discovering else { return }
                 self.discoveredServer = server
                 self.discovery.stop()
-                if self.autoEnterImmersiveOnConnect {
-                    self.statusText = "Found \(server.name), connecting..."
-                    self.connect()
-                } else {
-                    self.connectionState = .disconnected
-                    self.statusText = "Found \(server.name)"
-                }
+                // Connect as soon as a server appears, like the Android client. Whether we then
+                // enter the immersive space is a separate choice (autoEnterImmersiveOnConnect).
+                self.statusText = "Found \(server.name), connecting..."
+                self.connect()
             }
         }
     }
@@ -570,6 +626,7 @@ final class AppModel {
         updateTrackingState()
 
         connectionState = .streaming
+        connectedAtNs = VideoReceiver.monotonicNs()
         wantsImmersiveSpace = autoEnterImmersiveOnConnect
         statusText = "Streaming from \(server.name) via \(serverAddress)"
     }
@@ -583,7 +640,14 @@ final class AppModel {
         wantsImmersiveSpace = true
     }
 
-    func disconnect() {
+    func disconnect(userInitiated: Bool = true) {
+        if userInitiated {
+            shouldAutoReconnect = false
+        }
+        connectedAtNs = 0
+        lastDecodedFrames = 0
+        lastDecodeProgressNs = 0
+        streamPresentationState.set(false)
         stopTracking()
         stopStatsTimer()
         videoReceiver.stop()
@@ -677,12 +741,25 @@ final class AppModel {
     }
 
     private func updateTrackingState() {
-        let shouldTrack = connectionState == .streaming && immersiveSpaceState == .open
+        // Start as soon as the stream is up rather than waiting for the immersive space to open.
+        // Running the ARKit session is asynchronous (it has to clear authorization first), so
+        // gating it on the space being open meant the renderer's first frames queried a provider
+        // that was not running yet: no device anchor, "this drawable won't be presented", and a
+        // frozen image until the user reconnected. Warming it at connect closes that window.
+        let shouldTrack = connectionState == .streaming
+        streamPresentationState.set(shouldTrack)
         if shouldTrack {
             trackingManager.start()
         } else {
             stopTracking()
         }
+    }
+
+    /// Read by the render loop every frame. False while disconnected or between a dropped
+    /// connection and the next one, when the ARKit providers are stopped and there is nothing to
+    /// draw — the renderer idles instead of presenting drawables the compositor discards.
+    nonisolated func isPresentingStream() -> Bool {
+        streamPresentationState.isActive()
     }
 
     private func stopTracking() {
@@ -694,6 +771,8 @@ final class AppModel {
         stopStatsTimer()
         lastStatsTimeNs = VideoReceiver.monotonicNs()
         lastDeliveredFrames = videoReceiver.framesDelivered
+        lastDecodedFrames = framesDecoded
+        lastDecodeProgressNs = lastStatsTimeNs
 
         statsTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -707,7 +786,57 @@ final class AppModel {
         statsTimer = nil
     }
 
+    /// Mirrors the Android client's watchdogs: if video never arrives after connecting, or stops
+    /// arriving mid-session (the server app quit, the runtime stopped, the link dropped), drop the
+    /// connection and go back to discovery instead of sitting on a frozen frame.
+    private func checkStreamHealth() {
+        guard connectionState == .streaming else { return }
+        let now = VideoReceiver.monotonicNs()
+
+        if videoReceiver.framesDelivered == 0 {
+            if connectedAtNs != 0, now - connectedAtNs > 5_000_000_000 {
+                handleConnectionLost(reason: "No video from the server")
+            }
+            return
+        }
+
+        let lastFrameNs = videoReceiver.lastFrameDeliveryTimeNs
+        if lastFrameNs != 0, now - lastFrameNs > 2_000_000_000 {
+            handleConnectionLost(reason: "Server stopped streaming")
+            return
+        }
+
+        // Video is still arriving but nothing is coming out of the decoder. VideoDecoder rebuilds
+        // its own session when VideoToolbox kills it, so allow a few seconds for that to take
+        // hold; if frames still never appear the pipeline is wedged and only a fresh connection
+        // (new decoder, new ARKit session) recovers it. Without this the headset sat on a frozen
+        // frame for as long as the server kept sending.
+        if framesDecoded != lastDecodedFrames {
+            lastDecodedFrames = framesDecoded
+            lastDecodeProgressNs = now
+            return
+        }
+        if lastDecodeProgressNs != 0, now - lastDecodeProgressNs > 5_000_000_000 {
+            handleConnectionLost(reason: "Video stopped decoding")
+        }
+    }
+
+    /// Tear the session down and start looking for a server again. Distinct from a user-initiated
+    /// disconnect, which stays disconnected.
+    private func handleConnectionLost(reason: String) {
+        guard connectionState == .streaming else { return }
+        print("[Connection] lost: \(reason)")
+        disconnect(userInitiated: false)
+        statusText = "\(reason) — searching..."
+        if shouldAutoReconnect {
+            startDiscovery()
+        }
+    }
+
     private func refreshStats() {
+        checkStreamHealth()
+        guard connectionState == .streaming else { return }
+
         stats.packetsReceived = videoReceiver.packetsReceived
         stats.framesDelivered = videoReceiver.framesDelivered
         stats.framesDropped = videoReceiver.framesDropped

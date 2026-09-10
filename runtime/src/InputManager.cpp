@@ -476,9 +476,17 @@ XrPosef InputManager::GetControllerAimPose(Hand hand) const
     const glm::vec3& pos = (hand == Hand::Left) ? leftControllerAimPos_ : rightControllerAimPos_;
     glm::quat rot = (hand == Hand::Left) ? leftControllerAimRot_ : rightControllerAimRot_;
 
-    // Clients that don't populate the aim pose leave it identity/zero; fall back to the grip pose
-    // so /input/aim/pose is never worse than before this field existed.
-    if (rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 0.0f)
+    // Clients that don't populate the aim pose leave it in one of two "unset" shapes: all-zero
+    // (C++ zero-init on a short/legacy packet) or an identity rotation with a zero position (the
+    // Swift TrackingPacket defaults aim rotation to (0,0,0,1)). Treat both as "not provided" and
+    // fall back to the grip pose, otherwise an identity-defaulted client pins the aim pose at the
+    // world origin and the controller never appears to move.
+    const bool zeroRotation =
+        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 0.0f;
+    const bool identityAtOrigin =
+        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 1.0f &&
+        pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f;
+    if (zeroRotation || identityAtOrigin)
     {
         return GetControllerPose(hand);
     }

@@ -6,6 +6,7 @@ import GameController
 import OXRSysStreaming
 import QuartzCore
 import simd
+import Spatial
 
 /// Orientation correction for emulated (hand-derived) controller poses. The hand frame points
 /// +Z toward the fingertips, opposite the OpenXR grip pose's forward (−Z), so an uncorrected
@@ -37,6 +38,10 @@ struct VisionControllerState: Sendable {
     let trigger: Float
     let grip: Float
     let thumbstick: SIMD2<Float>
+    /// Pointer ("aim") pose, when the accessory publishes a distinct aim location. nil leaves the
+    /// packet's aim fields unset so the runtime falls back to the grip pose.
+    var aimPosition: SIMD3<Float>? = nil
+    var aimOrientation: simd_quatf? = nil
 }
 
 struct VisionTrackingSnapshot: Sendable {
@@ -65,10 +70,22 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var handTracking = HandTrackingProvider()
     private let queue = DispatchQueue(label: "oxr.visionos.tracking", qos: .userInteractive)
 
+    // Bumped on every teardown. An in-flight `runSession` captures the generation it started
+    // under and re-checks it after each await, so a session start that was superseded by a
+    // reconnect can never run its stale provider array against the new session.
+    private var sessionGeneration: UInt64 = 0
     private var runTask: Task<Void, Never>?
     private var sampleTimer: DispatchSourceTimer?
     private var running = false
     private var accessoryTrackingProvider: Any?
+    private var accessoryAnchorLogCounter = 0
+    // Accessory anchors from the provider's async update stream, kept fresh per hand ([0]=left,
+    // [1]=right). AccessoryTrackingProvider.latestAnchors does NOT update with the controller — it
+    // returns the anchor captured at connect — so (unlike hand tracking) the live pose must come
+    // from consuming anchorUpdates and predicting the stored anchor to the frame time.
+    private let accessoryAnchorLock = NSLock()
+    private var storedAccessoryAnchors: [AccessoryAnchor?] = [nil, nil]
+    private var accessoryConsumeTask: Task<Void, Never>?
     private var lastHeadOrientation: simd_quatf?
 
     // Previous sample for head-velocity measurement (all access on `queue`), plus a light EMA so
@@ -88,6 +105,33 @@ final class VisionTrackingManager: @unchecked Sendable {
     private var controllerLayout: ControllerOrientationLayout = .meta
 
     var onTrackingUpdate: (@Sendable (VisionTrackingSnapshot) -> Void)?
+
+    /// One-time launch probe, logged via NSLog (unified log, so it can be streamed off the device
+    /// without an Xcode debug session) to show the spatial-controller failure stage directly:
+    /// whether accessory tracking is supported at all, and whether GameController surfaces the
+    /// Sense controllers as spatial. Runs at app launch — no streaming/immersive flow required.
+    nonisolated(unsafe) private static var launchDiagnosticsStarted = false
+    static func logLaunchDiagnostics() {
+        guard !launchDiagnosticsStarted else { return }
+        launchDiagnosticsStarted = true
+        func dump(_ tag: String) {
+            let all = GCController.controllers()
+            NSLog("[SpatialDiag] \(tag): GCController.controllers()=\(all.count)")
+            for c in all {
+                var spatial = false
+                if #available(visionOS 26.0, *) { spatial = c.productCategory == GCProductCategorySpatialController }
+                NSLog("[SpatialDiag]   '\(c.vendorName ?? "?")' category='\(c.productCategory)' spatial=\(spatial)")
+            }
+        }
+        if #available(visionOS 26.0, *) {
+            NSLog("[SpatialDiag] AccessoryTrackingProvider.isSupported=\(AccessoryTrackingProvider.isSupported)")
+        } else {
+            NSLog("[SpatialDiag] visionOS < 26: accessory tracking unavailable")
+        }
+        dump("launch")
+        NotificationCenter.default.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { _ in dump("didConnect") }
+        NotificationCenter.default.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { _ in dump("didDisconnect") }
+    }
 
     /// Enable hand-gesture controller emulation (pinch/curl → buttons/trigger/grip, wrist → pose).
     func setGestureEmulationEnabled(_ enabled: Bool) {
@@ -109,8 +153,9 @@ final class VisionTrackingManager: @unchecked Sendable {
             guard !running else { return }
             running = true
 
-            runTask = Task {
-                await runSession()
+            let generation = sessionGeneration
+            runTask = Task { [weak self] in
+                await self?.runSession(generation: generation)
             }
 
             let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
@@ -147,13 +192,20 @@ final class VisionTrackingManager: @unchecked Sendable {
     /// Stop the running session and cancel work. Must be called on `queue`.
     private func tearDownLocked() {
         running = false
+        sessionGeneration &+= 1
         sampleTimer?.cancel()
         sampleTimer = nil
         runTask?.cancel()
         runTask = nil
         session.stop()
+        accessoryConsumeTask?.cancel()
+        accessoryConsumeTask = nil
         accessoryTrackingProvider = nil
+        accessoryAnchorLock.lock()
+        storedAccessoryAnchors = [nil, nil]
+        accessoryAnchorLock.unlock()
         lastHeadOrientation = nil
+        SpatialControllerSupport.resetDiagnostics()
         lastSamplePosition = nil
         lastSampleOrientation = nil
         lastSampleTime = 0
@@ -162,17 +214,57 @@ final class VisionTrackingManager: @unchecked Sendable {
         gestureEmulator.reset()
     }
 
-    private func runSession() async {
+    private func runSession(generation: UInt64) async {
         do {
-            let providers = try await makeProviders()
+            guard let (session, providers) = try await makeProviders(generation: generation) else {
+                print("[VisionTracking] Discarding superseded session start")
+                return
+            }
             try await session.run(providers)
+            guard isCurrent(generation) else {
+                print("[VisionTracking] Discarding superseded session start")
+                return
+            }
             print("[VisionTracking] Started")
+            if #available(visionOS 26.0, *) {
+                let accessoryProvider = queue.sync { () -> AccessoryTrackingProvider? in
+                    guard sessionGeneration == generation else { return nil }
+                    return accessoryTrackingProvider as? AccessoryTrackingProvider
+                }
+                if let accessoryProvider {
+                    let task: Task<Void, Never> = Task { [weak self] in
+                        await self?.consumeAccessoryAnchors(accessoryProvider)
+                    }
+                    queue.sync {
+                        guard sessionGeneration == generation else { return task.cancel() }
+                        accessoryConsumeTask = task
+                    }
+                }
+            }
         } catch {
             print("[VisionTracking] Failed to start: \(error)")
         }
     }
 
-    private func makeProviders() async throws -> [any DataProvider] {
+    private func isCurrent(_ generation: UInt64) -> Bool {
+        queue.sync { sessionGeneration == generation }
+    }
+
+    /// Builds the provider set for one session start. Returns nil once a teardown has superseded
+    /// this start: requesting authorization and constructing `Accessory(device:)` both suspend for
+    /// long enough that a disconnect/reconnect can recreate the session and providers underneath
+    /// us, and running the stale array against the new session leaves a dead provider inside a
+    /// live one — which showed up as hand tracking reporting "provider is not running" for a whole
+    /// session while world and accessory tracking worked.
+    private func makeProviders(generation: UInt64) async throws
+        -> (session: ARKitSession, providers: [any DataProvider])?
+    {
+        let snapshot = queue.sync { () -> (ARKitSession, WorldTrackingProvider, HandTrackingProvider)? in
+            guard sessionGeneration == generation else { return nil }
+            return (session, worldTracking, handTracking)
+        }
+        guard let (session, worldTracking, handTracking) = snapshot else { return nil }
+
         let authorizationTypes = Set(
             WorldTrackingProvider.requiredAuthorizations +
             (HandTrackingProvider.isSupported ? HandTrackingProvider.requiredAuthorizations : []) +
@@ -185,6 +277,7 @@ final class VisionTrackingManager: @unchecked Sendable {
                 print("[VisionTracking] Authorization \(type): \(status)")
             }
         }
+        guard isCurrent(generation) else { return nil }
 
         var providers: [any DataProvider] = [worldTracking]
 
@@ -195,13 +288,15 @@ final class VisionTrackingManager: @unchecked Sendable {
         if #available(visionOS 26.0, *),
            AccessoryTrackingProvider.isSupported,
            let accessoryProvider = await makeAccessoryTrackingProvider() {
-            accessoryTrackingProvider = accessoryProvider
+            guard isCurrent(generation) else { return nil }
+            queue.sync { accessoryTrackingProvider = accessoryProvider }
             providers.append(accessoryProvider)
         } else {
-            accessoryTrackingProvider = nil
+            guard isCurrent(generation) else { return nil }
+            queue.sync { accessoryTrackingProvider = nil }
         }
 
-        return providers
+        return (session, providers)
     }
 
     private func accessoryAuthorizationTypes() -> [ARKitSession.AuthorizationType] {
@@ -213,7 +308,13 @@ final class VisionTrackingManager: @unchecked Sendable {
 
     @available(visionOS 26.0, *)
     private func makeAccessoryTrackingProvider() async -> AccessoryTrackingProvider? {
-        let controllers = GCController.controllers()
+        // Only spatial controllers (e.g. PSVR2 Sense) can be tracked as accessories; a regular
+        // gamepad (Xbox) is not one, and Accessory(device:) would just throw for it.
+        let controllers = GCController.controllers().filter {
+            $0.productCategory == GCProductCategorySpatialController
+        }
+        print("[VisionTracking] spatial controllers detected: \(controllers.count) "
+              + "\(controllers.map { $0.vendorName ?? "?" })")
         guard !controllers.isEmpty else { return nil }
 
         var accessories: [Accessory] = []
@@ -230,6 +331,26 @@ final class VisionTrackingManager: @unchecked Sendable {
         guard !accessories.isEmpty else { return nil }
         print("[VisionTracking] Tracking \(accessories.count) accessory controllers")
         return AccessoryTrackingProvider(accessories: accessories)
+    }
+
+    /// Keep a fresh anchor per hand from the provider's async update stream. Required because
+    /// `latestAnchors` does not update for accessories — without this the controller pose freezes
+    /// at the connect pose. sampleTracking predicts these stored anchors to the frame time.
+    @available(visionOS 26.0, *)
+    private func consumeAccessoryAnchors(_ provider: AccessoryTrackingProvider) async {
+        for await update in provider.anchorUpdates {
+            let anchor = update.anchor
+            guard let chirality = controllerHandedness(for: anchor) else { continue }
+            let hand: Int
+            switch chirality {
+            case .left: hand = 0
+            case .right: hand = 1
+            default: continue
+            }
+            accessoryAnchorLock.lock()
+            storedAccessoryAnchors[hand] = (update.event == .removed) ? nil : anchor
+            accessoryAnchorLock.unlock()
+        }
     }
 
     private func sampleTracking() {
@@ -314,19 +435,29 @@ final class VisionTrackingManager: @unchecked Sendable {
 
         if #available(visionOS 26.0, *),
            let accessoryProvider = accessoryTrackingProvider as? AccessoryTrackingProvider {
-            for anchor in accessoryProvider.latestAnchors {
-                guard let handedness = controllerHandedness(for: anchor) else { continue }
-                let controllerState = makeControllerState(from: anchor)
-                switch handedness {
-                case .left:
-                    snapshot.leftController = controllerState
-                case .right:
-                    snapshot.rightController = controllerState
-                case .unspecified:
-                    break
-                @unknown default:
-                    break
-                }
+            accessoryAnchorLock.lock()
+            let stored = storedAccessoryAnchors
+            accessoryAnchorLock.unlock()
+
+            // Predict each fresh anchor to the frame's timestamp (the instant the head pose is
+            // queried for). The pose itself is read live via accessoryTransform().
+            var leftPredicted = false
+            if let leftAnchor = stored[0] {
+                let predicted = accessoryProvider.predictAnchor(for: leftAnchor, at: timestamp)
+                leftPredicted = predicted != nil
+                snapshot.leftController = makeControllerState(from: predicted ?? leftAnchor, isLeftHand: true)
+            }
+            if let rightAnchor = stored[1] {
+                let predicted = accessoryProvider.predictAnchor(for: rightAnchor, at: timestamp)
+                snapshot.rightController = makeControllerState(from: predicted ?? rightAnchor, isLeftHand: false)
+            }
+
+            accessoryAnchorLogCounter += 1
+            if accessoryAnchorLogCounter % 180 == 1 {  // ~2 s; a CHANGING Lpos means it is tracking
+                let lp = snapshot.leftController?.position
+                let state = stored[0].map { "\($0.trackingState) isTracked=\($0.isTracked)" } ?? "no-anchor"
+                print("[VisionTracking] accessory L: \(state) predicted=\(leftPredicted) "
+                      + "Lpos=\(lp.map { String(format: "(%.2f, %.2f, %.2f)", $0.x, $0.y, $0.z) } ?? "nil")")
             }
         }
 
@@ -526,36 +657,88 @@ final class VisionTrackingManager: @unchecked Sendable {
     }
 
     @available(visionOS 26.0, *)
-    private func makeControllerState(from anchor: AccessoryAnchor) -> VisionControllerState {
-        let position = anchor.originFromAnchorTransform.translation
-        let orientation = simd_quatf(anchor.originFromAnchorTransform.rotationMatrix)
+    /// The controller's LIVE pose.
+    ///
+    /// `AccessoryAnchor` is a value snapshot: `originFromAnchorTransform` is frozen at the instant
+    /// the anchor was produced, so re-reading it every frame yields a pose that snaps once and then
+    /// never moves. `coordinateSpace(for:)` resolves against the provider's live tracking state at
+    /// call time, which is what actually follows the controller. Prefer `.grip` (where the hand
+    /// holds it — the frame an OpenXR grip pose wants); fall back to the snapshot for an accessory
+    /// that publishes no grip location.
+    private func accessoryTransform(_ anchor: AccessoryAnchor) -> simd_float4x4 {
+        if anchor.accessory.locations.contains(.grip) {
+            return anchor.coordinateSpace(for: .grip, correction: .rendered)
+                .ancestorFromSpaceTransformFloat().matrix
+        }
+        return anchor.originFromAnchorTransform
+    }
 
-        var buttonState: UInt32 = 0
-        var trigger: Float = 0
-        var grip: Float = 0
-        var thumbstick = SIMD2<Float>(repeating: 0)
+    /// The controller's LIVE aim (pointer) pose, when the accessory publishes one. Resolved through
+    /// `coordinateSpace(for:)` like the grip pose so it tracks instead of freezing. Returns nil when
+    /// the accessory has no distinct aim location, which leaves the packet's aim fields unset so the
+    /// runtime keeps using the grip pose.
+    @available(visionOS 26.0, *)
+    private func accessoryAimTransform(_ anchor: AccessoryAnchor) -> simd_float4x4? {
+        guard anchor.accessory.locations.contains(.aim) else { return nil }
+        return anchor.coordinateSpace(for: .aim, correction: .rendered)
+            .ancestorFromSpaceTransformFloat().matrix
+    }
 
+    /// The LIVE `GCController` for this hand.
+    ///
+    /// `anchor.accessory.source` captures the controller that existed when the `Accessory` was
+    /// created. A controller that drops and reconnects — which is exactly what happens across a
+    /// stream rejoin — comes back as a NEW `GCController`, leaving that captured reference stale.
+    /// Its `physicalInputProfile` then reports everything released, which shows up as "tracking
+    /// still works but the buttons are dead". Resolve against the currently connected controllers
+    /// instead: prefer the accessory's own device while it is still connected, then fall back to
+    /// the connected spatial controller for this hand.
+    @available(visionOS 26.0, *)
+    private func liveController(for anchor: AccessoryAnchor, isLeftHand: Bool) -> GCController? {
+        let connected = GCController.controllers()
         if case let .device(device) = anchor.accessory.source,
            let controller = device as? GCController,
-           let gamepad = controller.extendedGamepad {
-            if gamepad.buttonA.isPressed { buttonState |= ButtonFlags.a }
-            if gamepad.buttonB.isPressed { buttonState |= ButtonFlags.b }
-            if gamepad.buttonX.isPressed { buttonState |= ButtonFlags.x }
-            if gamepad.buttonY.isPressed { buttonState |= ButtonFlags.y }
-            if gamepad.buttonMenu.isPressed { buttonState |= ButtonFlags.menu }
-            trigger = gamepad.rightTrigger.value
-            grip = max(gamepad.leftTrigger.value, gamepad.leftShoulder.value)
-            thumbstick = SIMD2<Float>(gamepad.leftThumbstick.xAxis.value, gamepad.leftThumbstick.yAxis.value)
+           connected.contains(where: { $0 === controller }) {
+            return controller
         }
 
-        return VisionControllerState(
+        let spatial = connected.filter { $0.productCategory == GCProductCategorySpatialController }
+        // The Sense pair distinguishes itself with an "(L)"/"(R)" suffix; fall back to the sole
+        // spatial controller when only one is connected.
+        let suffix = isLeftHand ? "(L)" : "(R)"
+        if let match = spatial.first(where: { ($0.vendorName ?? "").hasSuffix(suffix) }) {
+            return match
+        }
+        return spatial.count == 1 ? spatial.first : nil
+    }
+
+    private func makeControllerState(from anchor: AccessoryAnchor, isLeftHand: Bool) -> VisionControllerState {
+        let transform = accessoryTransform(anchor)
+        let position = transform.translation
+        // Apply the target profile's grip-convention correction (identity until tuned on-device).
+        let orientation = simd_normalize(
+            simd_quatf(transform.rotationMatrix)
+            * SpatialControllerSupport.gripCorrection(isLeftHand: isLeftHand))
+
+        // PSVR2 Sense buttons/trigger/grip/thumbstick, mapped to Meta Touch (Quest 2) per hand.
+        var input = SpatialControllerSupport.Input()
+        if let controller = liveController(for: anchor, isLeftHand: isLeftHand) {
+            input = SpatialControllerSupport.input(from: controller, isLeftHand: isLeftHand)
+        }
+
+        var state = VisionControllerState(
             position: position,
             orientation: orientation,
-            buttonState: buttonState,
-            trigger: trigger,
-            grip: grip,
-            thumbstick: thumbstick
+            buttonState: input.buttons,
+            trigger: input.trigger,
+            grip: input.grip,
+            thumbstick: input.thumbstick
         )
+        if let aim = accessoryAimTransform(anchor) {
+            state.aimPosition = aim.translation
+            state.aimOrientation = simd_normalize(simd_quatf(aim.rotationMatrix))
+        }
+        return state
     }
 }
 

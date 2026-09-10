@@ -128,11 +128,16 @@ final class ProtocolLayoutTests: XCTestCase {
     }
 
     func testTrackingLayoutMatchesCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1008)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1064)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headLinearVelocity), 152)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headAngularVelocity), 164)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftHandJoints), 176)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightHandJoints), 592)
+        // Aim pose appended after the hand-joint payload (must match C++ Protocol.h layout).
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimPos), 1008)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimRot), 1020)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimPos), 1036)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimRot), 1048)
         XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
         XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
     }
