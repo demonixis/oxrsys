@@ -111,7 +111,11 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
             case XR_REFERENCE_SPACE_TYPE_STAGE:
-                // Identity — world origin
+                // Distinct origins per OpenXR semantics: STAGE at the physical
+                // floor (client head pose is floor-relative), LOCAL anchored to the
+                // HMD pose at session start (yaw-only, ~eye height), LOCAL_FLOOR =
+                // LOCAL x/z + yaw at floor height.
+                result.pose = inputManager.GetReferenceSpacePose(space->GetReferenceSpaceType());
                 break;
             default:
                 break;

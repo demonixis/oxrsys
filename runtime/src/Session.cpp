@@ -8,6 +8,7 @@
 #include "Space.h"
 #include "InputManager.h"
 #include "StreamingServer.h"
+#include "Config.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,48 @@
 #include <utility>
 
 #include <openxr/openxr_platform.h>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+namespace
+{
+glm::quat ToGlmQuat(const XrQuaternionf& q) { return glm::quat(q.w, q.x, q.y, q.z); }
+glm::vec3 ToGlmVec(const XrVector3f& v) { return glm::vec3(v.x, v.y, v.z); }
+XrQuaternionf ToXrQuat(const glm::quat& q) { return {q.x, q.y, q.z, q.w}; }
+XrVector3f ToXrVec(const glm::vec3& v) { return {v.x, v.y, v.z}; }
+
+// World-space pose of a reference space's origin (mirrors Space.cpp GetWorldPose
+// for the reference-space case, including the space's own poseInSpace offset).
+XrPosef ReferenceSpaceWorldPose(Space* space, const InputManager& inputManager)
+{
+    XrPosef pose{};
+    pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    pose.position = {0.0f, 0.0f, 0.0f};
+
+    if (space->GetType() == Space::Type::Reference)
+    {
+        if (space->GetReferenceSpaceType() == XR_REFERENCE_SPACE_TYPE_VIEW)
+        {
+            pose = inputManager.GetHeadPose();
+        }
+        else
+        {
+            pose = inputManager.GetReferenceSpacePose(space->GetReferenceSpaceType());
+        }
+    }
+
+    // Apply the space's own offset pose (poseInReferenceSpace).
+    const XrPosef& offset = space->GetPoseInSpace();
+    glm::quat worldRot = ToGlmQuat(pose.orientation);
+    glm::vec3 worldPos = ToGlmVec(pose.position);
+    glm::quat offsetRot = ToGlmQuat(offset.orientation);
+    glm::vec3 offsetPos = ToGlmVec(offset.position);
+    pose.orientation = ToXrQuat(worldRot * offsetRot);
+    pose.position = ToXrVec(worldPos + worldRot * offsetPos);
+    return pose;
+}
+} // namespace
 
 namespace
 {
@@ -365,15 +408,69 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         targetRefreshHz = std::max(streamingServer_->GetTargetRefreshRateHz(), 1u);
     }
 
-    // Throttle to the negotiated headset refresh rate when available.
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - lastFrameTime_;
+    // Frame pacing: self-correcting absolute-deadline grid at the negotiated display
+    // period. The previous scheme slept for (period - elapsed) and then re-anchored
+    // to the wake time, so sleep overshoot was never corrected: periods were always
+    // >= the target and the phase drifted continuously against the panel (the app
+    // free-ran slightly under refresh, producing a slow beat and frame-duplication
+    // judder even at a good average framerate). Here each frame targets a fixed
+    // absolute deadline advanced by exactly one period, so overshoot on one frame is
+    // absorbed by the next and the cadence locks to the panel period with low
+    // variance. targetFrameTime comes from the client-reported (negotiated) refresh.
     auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
+    auto now = std::chrono::steady_clock::now();
 
-    if (elapsed < targetFrameTime)
+    if (nextFrameDeadline_.time_since_epoch().count() == 0 || pacingPeriod_ != targetFrameTime)
     {
-        std::this_thread::sleep_for(targetFrameTime - elapsed);
-        now = std::chrono::steady_clock::now();
+        // First frame, or the negotiated refresh changed: (re)seed the grid.
+        pacingPeriod_ = targetFrameTime;
+        nextFrameDeadline_ = now + targetFrameTime;
+    }
+    else
+    {
+        if (now < nextFrameDeadline_)
+        {
+            std::this_thread::sleep_until(nextFrameDeadline_);
+            now = std::chrono::steady_clock::now();
+        }
+        nextFrameDeadline_ += targetFrameTime;
+
+        // If we fell far behind (a hitch, a stall, or the app pausing), snap the grid
+        // back to the present rather than firing a burst of catch-up frames.
+        if (now - nextFrameDeadline_ > 2 * targetFrameTime)
+        {
+            nextFrameDeadline_ = now + targetFrameTime;
+        }
+    }
+
+    // Frame-pacing diagnostic: actual inter-WaitFrame interval statistics prove the
+    // cadence locks to the negotiated period (e.g. ~13.9ms @72Hz, ~11.1ms @90Hz)
+    // with low variance instead of free-running / drifting.
+    {
+        static std::vector<double> intervalSamplesMs;
+        static auto lastPacingLog = Clock::now();
+        auto intervalMs = std::chrono::duration<double, std::milli>(now - lastFrameTime_).count();
+        if (lastFrameTime_ != startTime_)
+        {
+            intervalSamplesMs.push_back(intervalMs);
+        }
+        if (now - lastPacingLog >= std::chrono::seconds(1) && !intervalSamplesMs.empty())
+        {
+            double sum = std::accumulate(intervalSamplesMs.begin(), intervalSamplesMs.end(), 0.0);
+            double mean = sum / intervalSamplesMs.size();
+            double variance = 0.0;
+            for (double s : intervalSamplesMs) { variance += (s - mean) * (s - mean); }
+            variance /= intervalSamplesMs.size();
+            double stddev = std::sqrt(variance);
+            auto mm = std::minmax_element(intervalSamplesMs.begin(), intervalSamplesMs.end());
+            spdlog::info("OXRSys: Session::WaitFrame pacing target={}Hz ({:.2f}ms) "
+                         "actual mean={:.2f}ms stddev={:.2f}ms min/max={:.2f}/{:.2f}ms (n={})",
+                         targetRefreshHz,
+                         std::chrono::duration<double, std::milli>(targetFrameTime).count(),
+                         mean, stddev, *mm.first, *mm.second, intervalSamplesMs.size());
+            intervalSamplesMs.clear();
+            lastPacingLog = now;
+        }
     }
 
     auto dt = std::chrono::duration<float>(now - lastFrameTime_).count();
@@ -737,7 +834,27 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
+    // GetEyeViews returns the eye poses in absolute (STAGE-floor) world space.
+    // Express them relative to the requested base reference space so the game
+    // renders at the correct height for its chosen origin. Previously baseSpace
+    // was ignored here, so views were always STAGE-absolute regardless of whether
+    // the game asked for LOCAL/LOCAL_FLOOR/STAGE, and the STAGE floor-calibration
+    // offset never reached the rendered image. For a STAGE base with the default
+    // zero offset the transform is identity, so STAGE behaviour is unchanged.
     inputManager_->GetEyeViews(views, 2);
+
+    // Express the STAGE-absolute eye poses relative to the requested base space
+    // (identity for a STAGE base at the default zero offset).
+    const XrPosef basePose = ReferenceSpaceWorldPose(baseSpace, *inputManager_);
+    const glm::quat baseRotInv = glm::inverse(ToGlmQuat(basePose.orientation));
+    const glm::vec3 basePos = ToGlmVec(basePose.position);
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        glm::quat viewRot = ToGlmQuat(views[i].pose.orientation);
+        glm::vec3 viewPos = ToGlmVec(views[i].pose.position);
+        views[i].pose.orientation = ToXrQuat(baseRotInv * viewRot);
+        views[i].pose.position = ToXrVec(baseRotInv * (viewPos - basePos));
+    }
 
     // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
     // tagged with it at submission instead of a later re-prediction.
@@ -851,6 +968,16 @@ XrResult Session::CreateReferenceSpace(const XrReferenceSpaceCreateInfo* createI
         default:
             return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
     }
+
+    const char* spaceName =
+        createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW ? "VIEW" :
+        createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ? "LOCAL" :
+        createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR ? "LOCAL_FLOOR" :
+        createInfo->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "STAGE" : "UNKNOWN";
+    spdlog::info("Session: game created reference space {} (offsetInSpace y={:.3f}), "
+                 "stage_height_offset_m={:.3f}",
+                 spaceName, createInfo->poseInReferenceSpace.position.y,
+                 Config::Get().GetValues().stageHeightOffsetM);
 
     auto sp = std::make_unique<Space>(this, Space::Type::Reference,
                                        createInfo->referenceSpaceType, createInfo->poseInReferenceSpace);
