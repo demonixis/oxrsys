@@ -266,9 +266,18 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         return "\(adbMode.rawValue)|\(path)"
     }
 
+    // NSAlert construction makes a synchronous IconServices XPC call; on hosts where
+    // iconservicesagent is unavailable (headless CI) that blocks launch past the XCTest
+    // attach timeout. The guidance is for people, so skip it when hosting tests.
+    private static let isHostingTests =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+        ProcessInfo.processInfo.environment["XCTestSessionIdentifier"] != nil
+
     func presentRuntimeSetupGuidanceIfNeeded() {
         refreshRuntimeStatus()
-        guard !hasPresentedRuntimeSetupGuidanceThisLaunch, !isSelectedRuntimeRegistered else {
+        guard !Self.isHostingTests,
+              !hasPresentedRuntimeSetupGuidanceThisLaunch,
+              !isSelectedRuntimeRegistered else {
             return
         }
         hasPresentedRuntimeSetupGuidanceThisLaunch = true
