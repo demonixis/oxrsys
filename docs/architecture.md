@@ -83,7 +83,12 @@ Tracking packets update head, controller, hand-joint, velocity, eye-FOV, and cli
 Controller poses are accepted only when the corresponding active flag is set. The action system is
 profile-aware and keeps hand interaction available alongside controller-first bindings.
 
-Reference spaces currently include `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+Reference spaces are `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`. Headset poses arrive in the
+client's STAGE frame, with the floor at y = 0. `STAGE` uses that origin. `LOCAL` locks to the
+yaw-only head pose when the first streamed sample arrives, and recenters if the pose jumps more
+than half a meter inside one tracking period or when the runtime recenters explicitly.
+`LOCAL_FLOOR` shares `LOCAL`'s horizontal position and yaw and stays on the floor. View, space,
+and hand-joint poses are transformed into the base space the application passes.
 `xrLocateSpacesKHR` aliases the OpenXR 1.1 `xrLocateSpaces` entry point.
 
 ## Configuration And Status

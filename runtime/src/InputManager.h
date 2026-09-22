@@ -48,6 +48,15 @@ public:
     XrPosef GetHeadPose() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
 
+    // Origin of a reference space in client STAGE coordinates. The streamed head pose
+    // is floor-relative, so STAGE is the identity. LOCAL is the yaw-only head pose
+    // captured at the first real sample (and again on recenter). LOCAL_FLOOR keeps
+    // LOCAL's horizontal position and yaw, with y = 0.
+    XrPosef GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceType) const;
+
+    // Re-anchor LOCAL and LOCAL_FLOOR to the current head pose.
+    void RecenterLocalReference();
+
     // Controller poses (world space)
     XrPosef GetControllerPose(Hand hand) const;
     XrPosef GetControllerAimPose(Hand hand) const;
@@ -108,6 +117,9 @@ private:
 
     glm::quat GetHeadRotation() const;
     void UpdateFromStreaming();
+    void UpdateLocalReference(float deltaTime, bool streamingSample);
+    void CaptureLocalReference() const;
+    bool HasUsableHeadPose() const;
     const AutomationHandState& GetAutomationState(Hand hand) const;
     AutomationHandState& GetAutomationState(Hand hand);
     void GenerateHandJoints(Hand hand, const glm::vec3& palmPos, const glm::quat& palmRot,
@@ -119,6 +131,15 @@ private:
     TrackingReceiver* trackingReceiver_ = nullptr;
 
     // Head state (quaternion from streaming client)
+    // LOCAL anchor. Captured lazily, replaced by the first streamed sample, and
+    // replaced again when a single tracking period jumps farther than a head can move.
+    mutable bool localReferenceCaptured_ = false;
+    mutable bool localReferenceFromStreaming_ = false;
+    mutable glm::vec3 localReferencePosition_ = {0.0f, 0.0f, 0.0f};
+    mutable glm::quat localReferenceYaw_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    glm::vec3 previousHeadPosition_ = {0.0f, 1.6f, 0.0f};
+    bool hasPreviousHeadSample_ = false;
+
     glm::quat headQuat_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z
     glm::quat leftControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     glm::quat rightControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);

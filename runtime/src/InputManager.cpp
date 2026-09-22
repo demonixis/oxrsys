@@ -198,11 +198,13 @@ glm::quat InputManager::GetHeadRotation() const
 
 void InputManager::Update(float deltaTime)
 {
-    (void)deltaTime;
-    if (trackingReceiver_ != nullptr && trackingReceiver_->IsReceiving())
+    const bool streamingSample =
+        trackingReceiver_ != nullptr && trackingReceiver_->IsReceiving();
+    if (streamingSample)
     {
         UpdateFromStreaming();
     }
+    UpdateLocalReference(deltaTime, streamingSample);
 }
 
 void InputManager::UpdateFromStreaming()
@@ -369,6 +371,131 @@ XrPosef InputManager::GetHeadPose() const
     pose.position.x = headPosition_.x;
     pose.position.y = headPosition_.y;
     pose.position.z = headPosition_.z;
+    return pose;
+}
+
+bool InputManager::HasUsableHeadPose() const
+{
+    if (!std::isfinite(headPosition_.x) || !std::isfinite(headPosition_.y) ||
+        !std::isfinite(headPosition_.z) || !std::isfinite(headQuat_.x) ||
+        !std::isfinite(headQuat_.y) || !std::isfinite(headQuat_.z) ||
+        !std::isfinite(headQuat_.w))
+    {
+        return false;
+    }
+
+    const float quaternionLength = glm::length(headQuat_);
+    if (quaternionLength < 0.5f || quaternionLength > 1.5f)
+    {
+        return false;
+    }
+
+    // An all-zero position with an identity orientation is an unset tracking packet,
+    // not a headset sitting on the STAGE origin (that pose still has eye height).
+    const bool atOrigin = std::fabs(headPosition_.x) < 1.0e-4f &&
+                          std::fabs(headPosition_.y) < 1.0e-4f &&
+                          std::fabs(headPosition_.z) < 1.0e-4f;
+    const bool identityRotation = std::fabs(headQuat_.x) < 1.0e-4f &&
+                                  std::fabs(headQuat_.y) < 1.0e-4f &&
+                                  std::fabs(headQuat_.z) < 1.0e-4f &&
+                                  std::fabs(headQuat_.w - 1.0f) < 1.0e-3f;
+    return !(atOrigin && identityRotation);
+}
+
+void InputManager::CaptureLocalReference() const
+{
+    localReferencePosition_ = headPosition_;
+
+    const glm::quat rotation = glm::normalize(headQuat_);
+    const glm::vec3 forward = rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    float yaw = std::atan2(-forward.x, -forward.z);
+    if (!std::isfinite(yaw))
+    {
+        yaw = 0.0f;
+    }
+    localReferenceYaw_ = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+    localReferenceCaptured_ = true;
+    spdlog::info("InputManager: LOCAL reference origin pos=({:.3f}, {:.3f}, {:.3f})",
+                 localReferencePosition_.x, localReferencePosition_.y, localReferencePosition_.z);
+}
+
+void InputManager::RecenterLocalReference()
+{
+    if (!HasUsableHeadPose())
+    {
+        localReferenceCaptured_ = false;
+        return;
+    }
+
+    CaptureLocalReference();
+    if (trackingReceiver_ != nullptr && trackingReceiver_->IsReceiving())
+    {
+        localReferenceFromStreaming_ = true;
+    }
+}
+
+void InputManager::UpdateLocalReference(float deltaTime, bool streamingSample)
+{
+    if (!HasUsableHeadPose())
+    {
+        return;
+    }
+
+    // One tracking period at headset rates. A head cannot move half a meter in that
+    // window; a larger step is the client resetting its STAGE coordinates.
+    constexpr float kRecenterMaxPeriodSeconds = 0.05f;
+    constexpr float kRecenterJumpMeters = 0.5f;
+    const bool trackingJumped = streamingSample && localReferenceFromStreaming_ &&
+                                hasPreviousHeadSample_ && deltaTime > 0.0f &&
+                                deltaTime < kRecenterMaxPeriodSeconds &&
+                                glm::distance(headPosition_, previousHeadPosition_) > kRecenterJumpMeters;
+
+    if (streamingSample && (!localReferenceCaptured_ || !localReferenceFromStreaming_))
+    {
+        CaptureLocalReference();
+        localReferenceFromStreaming_ = true;
+    }
+    else if (trackingJumped)
+    {
+        spdlog::info("InputManager: recentering LOCAL after a {:.2f}m tracking jump",
+                     glm::distance(headPosition_, previousHeadPosition_));
+        CaptureLocalReference();
+        localReferenceFromStreaming_ = true;
+    }
+    else if (!localReferenceCaptured_)
+    {
+        CaptureLocalReference();
+    }
+
+    previousHeadPosition_ = headPosition_;
+    hasPreviousHeadSample_ = true;
+}
+
+XrPosef InputManager::GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceType) const
+{
+    XrPosef pose{};
+    pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    pose.position = {0.0f, 0.0f, 0.0f};
+
+    if (referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ||
+        referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR)
+    {
+        if (!localReferenceCaptured_ && HasUsableHeadPose())
+        {
+            CaptureLocalReference();
+        }
+        if (localReferenceCaptured_)
+        {
+            pose.position.x = localReferencePosition_.x;
+            pose.position.y = referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL
+                                  ? localReferencePosition_.y
+                                  : 0.0f;
+            pose.position.z = localReferencePosition_.z;
+            pose.orientation = {localReferenceYaw_.x, localReferenceYaw_.y,
+                                localReferenceYaw_.z, localReferenceYaw_.w};
+        }
+    }
+
     return pose;
 }
 

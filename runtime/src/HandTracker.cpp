@@ -4,6 +4,7 @@
 #include "Session.h"
 #include "Runtime.h"
 #include "InputManager.h"
+#include "Space.h"
 
 namespace
 {
@@ -67,7 +68,7 @@ HandTracker::~HandTracker()
     Runtime::Get().RemoveHandle(handle_);
 }
 
-XrResult HandTracker::LocateHandJoints(XrSpace /*baseSpace*/, XrTime /*time*/,
+XrResult HandTracker::LocateHandJoints(XrSpace baseSpace, XrTime /*time*/,
                                         XrHandJointLocationsEXT* locations)
 {
     if (locations == nullptr)
@@ -86,6 +87,12 @@ XrResult HandTracker::LocateHandJoints(XrSpace /*baseSpace*/, XrTime /*time*/,
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
+    auto* base = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(baseSpace));
+    if (base == nullptr || base->GetSession() != session_)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
     const InputManager& inputManager = session_->GetInputManager();
 
     InputManager::Hand hand = (hand_ == XR_HAND_LEFT_EXT)
@@ -102,6 +109,21 @@ XrResult HandTracker::LocateHandJoints(XrSpace /*baseSpace*/, XrTime /*time*/,
 
     locations->isActive = XR_TRUE;
     inputManager.GetHandJointLocations(hand, locations->jointLocations, locations->jointCount);
+
+    const SpaceWorldPose baseWorld = base->PoseInWorld(inputManager);
+    if (!baseWorld.active)
+    {
+        locations->isActive = XR_FALSE;
+        ClearJointLocations(locations);
+        ClearJointVelocities(velocities);
+        return XR_SUCCESS;
+    }
+
+    for (uint32_t i = 0; i < locations->jointCount; ++i)
+    {
+        locations->jointLocations[i].pose =
+            PoseRelativeTo(locations->jointLocations[i].pose, baseWorld.pose);
+    }
     ClearJointVelocities(velocities);
 
     return XR_SUCCESS;

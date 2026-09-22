@@ -817,10 +817,63 @@ TEST_CASE("Runtime enumerates and creates LOCAL_FLOOR reference spaces", "[runti
     CHECK((location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0);
     CHECK((location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0);
     CHECK_THAT(location.pose.position.x, WithinAbs(0.0f, 0.001f));
-    CHECK_THAT(location.pose.position.y, WithinAbs(0.0f, 0.001f));
+    // The synthetic head starts 1.6m above the floor, and that pose anchors LOCAL.
+    // LOCAL_FLOOR stays on the floor, so it sits 1.6m below LOCAL.
+    CHECK_THAT(location.pose.position.y, WithinAbs(-1.6f, 0.001f));
     CHECK_THAT(location.pose.position.z, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(location.pose.orientation.w, WithinAbs(1.0f, 0.001f));
 
     XR_CHECK(xrDestroySpace(localFloorSpace));
+}
+
+TEST_CASE("Views are expressed in the requested reference space", "[runtime][spaces]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    auto createSpace = [&](XrReferenceSpaceType type) {
+        XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        createInfo.referenceSpaceType = type;
+        createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+        XrSpace space = XR_NULL_HANDLE;
+        XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &space));
+        return space;
+    };
+
+    XrSpace stageSpace = createSpace(XR_REFERENCE_SPACE_TYPE_STAGE);
+    XrSpace localFloorSpace = createSpace(XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR);
+    XrSpace viewSpace = createSpace(XR_REFERENCE_SPACE_TYPE_VIEW);
+
+    auto eyeHeight = [&](XrSpace space) {
+        XrViewLocateInfo locateInfo = {XR_TYPE_VIEW_LOCATE_INFO};
+        locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        locateInfo.displayTime = 1;
+        locateInfo.space = space;
+        XrViewState viewState = {XR_TYPE_VIEW_STATE};
+        uint32_t viewCount = 0;
+        std::array<XrView, 2> views = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+        XR_CHECK(xrLocateViews(context.session, &locateInfo, &viewState,
+                               static_cast<uint32_t>(views.size()), &viewCount, views.data()));
+        CHECK(viewCount == 2);
+        CHECK((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0);
+        return 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
+    };
+
+    // No headset is connected, so the runtime stands the head 1.6m above STAGE.
+    CHECK_THAT(eyeHeight(stageSpace), WithinAbs(1.6f, 0.001f));
+    CHECK_THAT(eyeHeight(context.localSpace), WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(eyeHeight(localFloorSpace), WithinAbs(1.6f, 0.001f));
+
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+    XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, 1, &location));
+    CHECK_THAT(location.pose.position.y, WithinAbs(0.0f, 0.001f));
+    XR_CHECK(xrLocateSpace(viewSpace, stageSpace, 1, &location));
+    CHECK_THAT(location.pose.position.y, WithinAbs(1.6f, 0.001f));
+    XR_CHECK(xrLocateSpace(viewSpace, localFloorSpace, 1, &location));
+    CHECK_THAT(location.pose.position.y, WithinAbs(1.6f, 0.001f));
+
+    XR_CHECK(xrDestroySpace(viewSpace));
+    XR_CHECK(xrDestroySpace(localFloorSpace));
+    XR_CHECK(xrDestroySpace(stageSpace));
 }
 
 TEST_CASE("Runtime hides LOCAL_FLOOR for OpenXR 1.0 instances", "[runtime][spaces]")

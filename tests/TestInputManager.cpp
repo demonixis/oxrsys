@@ -7,6 +7,7 @@
 #include "TrackingReceiver.h"
 #include <algorithm>
 #include <cmath>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
 
@@ -431,6 +432,96 @@ TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[
                WithinAbs(0.20f, 0.001f));
     CHECK(im.GetButtonClick(InputManager::Hand::Left, "select/click"));
     CHECK_FALSE(im.GetButtonClick(InputManager::Hand::Left, "squeeze/click"));
+}
+
+void InjectHeadPose(TrackingReceiver& receiver, float x, float y, float z, const glm::quat& rotation)
+{
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headPosition[0] = x;
+    packet.headPosition[1] = y;
+    packet.headPosition[2] = z;
+    packet.headOrientation[0] = rotation.x;
+    packet.headOrientation[1] = rotation.y;
+    packet.headOrientation[2] = rotation.z;
+    packet.headOrientation[3] = rotation.w;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+}
+
+TEST_CASE("InputManager — reference spaces and recenter", "[input][spaces]")
+{
+    TrackingReceiver receiver;
+    InputManager im;
+    im.SetTrackingReceiver(&receiver);
+
+    const glm::quat identity(1.0f, 0.0f, 0.0f, 0.0f);
+    InjectHeadPose(receiver, 1.0f, 1.7f, -2.0f, identity);
+    im.Update(0.011f);
+
+    XrPosef local = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL);
+    XrPosef localFloor = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR);
+    XrPosef stage = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_STAGE);
+
+    CHECK_THAT(local.position.x, WithinAbs(1.0f, 0.001f));
+    CHECK_THAT(local.position.y, WithinAbs(1.7f, 0.001f));
+    CHECK_THAT(local.position.z, WithinAbs(-2.0f, 0.001f));
+    CHECK_THAT(local.orientation.w, WithinAbs(1.0f, 0.001f));
+    CHECK_THAT(localFloor.position.x, WithinAbs(1.0f, 0.001f));
+    CHECK_THAT(localFloor.position.y, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(localFloor.position.z, WithinAbs(-2.0f, 0.001f));
+    CHECK_THAT(stage.position.x, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(stage.position.y, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(stage.position.z, WithinAbs(0.0f, 0.001f));
+
+    SECTION("Walking does not move the LOCAL anchor")
+    {
+        InjectHeadPose(receiver, 1.04f, 1.71f, -1.96f, identity);
+        im.Update(0.011f);
+        local = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL);
+        CHECK_THAT(local.position.x, WithinAbs(1.0f, 0.001f));
+        CHECK_THAT(local.position.y, WithinAbs(1.7f, 0.001f));
+        CHECK_THAT(local.position.z, WithinAbs(-2.0f, 0.001f));
+    }
+
+    SECTION("A single-period position jump recenters LOCAL")
+    {
+        InjectHeadPose(receiver, 1.0f, 1.5f, 2.5f, identity);
+        im.Update(0.011f);
+        local = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL);
+        localFloor = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR);
+        CHECK_THAT(local.position.x, WithinAbs(1.0f, 0.001f));
+        CHECK_THAT(local.position.y, WithinAbs(1.5f, 0.001f));
+        CHECK_THAT(local.position.z, WithinAbs(2.5f, 0.001f));
+        CHECK_THAT(localFloor.position.y, WithinAbs(0.0f, 0.001f));
+        CHECK_THAT(localFloor.position.z, WithinAbs(2.5f, 0.001f));
+    }
+
+    SECTION("RecenterLocalReference re-anchors without waiting for a jump")
+    {
+        InjectHeadPose(receiver, 1.05f, 1.65f, -1.9f, identity);
+        im.Update(0.011f);
+        im.RecenterLocalReference();
+        local = im.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL);
+        CHECK_THAT(local.position.x, WithinAbs(1.05f, 0.001f));
+        CHECK_THAT(local.position.y, WithinAbs(1.65f, 0.001f));
+        CHECK_THAT(local.position.z, WithinAbs(-1.9f, 0.001f));
+    }
+
+    SECTION("Yaw-only capture drops pitch")
+    {
+        TrackingReceiver yawReceiver;
+        InputManager yawInput;
+        yawInput.SetTrackingReceiver(&yawReceiver);
+        const glm::quat yaw = glm::angleAxis(glm::half_pi<float>(), glm::vec3(0.0f, 1.0f, 0.0f));
+        const glm::quat pitch = glm::angleAxis(glm::quarter_pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f));
+        InjectHeadPose(yawReceiver, 0.2f, 1.8f, 0.4f, pitch * yaw);
+        yawInput.Update(0.011f);
+
+        const XrPosef anchored = yawInput.GetReferenceSpacePose(XR_REFERENCE_SPACE_TYPE_LOCAL);
+        CHECK_THAT(anchored.orientation.x, WithinAbs(yaw.x, 0.001f));
+        CHECK_THAT(anchored.orientation.y, WithinAbs(yaw.y, 0.001f));
+        CHECK_THAT(anchored.orientation.z, WithinAbs(yaw.z, 0.001f));
+        CHECK_THAT(anchored.orientation.w, WithinAbs(yaw.w, 0.001f));
+    }
 }
 
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")

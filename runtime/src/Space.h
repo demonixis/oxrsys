@@ -5,7 +5,17 @@
 #include <openxr/openxr.h>
 #include <cstdint>
 
+class InputManager;
 class Session;
+
+struct SpaceWorldPose
+{
+    XrPosef pose{};
+    bool active = true;
+};
+
+// Express a world-space pose relative to a world-space base pose.
+XrPosef PoseRelativeTo(const XrPosef& worldPose, const XrPosef& baseWorldPose);
 
 class Space
 {
@@ -60,6 +70,10 @@ public:
     }
 
     XrResult LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location);
+
+    // Pose of this space's origin in client STAGE / world coordinates, including
+    // the space's own poseInReferenceSpace offset.
+    SpaceWorldPose PoseInWorld(const InputManager& inputManager) const;
 
 private:
     uint64_t handle_ = 0;

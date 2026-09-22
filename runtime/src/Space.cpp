@@ -88,22 +88,29 @@ static std::string ComponentFromBindingPath(const std::string& bindingPath)
     return bindingPath.substr(inputPos + 7);
 }
 
-struct LocatedWorldPose
+XrPosef PoseRelativeTo(const XrPosef& worldPose, const XrPosef& baseWorldPose)
 {
-    XrPosef pose{};
-    bool active = true;
-};
+    const glm::quat baseRotInv = glm::inverse(ToGlm(baseWorldPose.orientation));
+    const glm::vec3 relativePosition =
+        baseRotInv * (ToGlm(worldPose.position) - ToGlm(baseWorldPose.position));
+    const glm::quat relativeRotation = baseRotInv * ToGlm(worldPose.orientation);
 
-// Compute world pose of a space.
-static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputManager)
+    XrPosef pose{};
+    pose.orientation = ToXr(relativeRotation);
+    pose.position = ToXr(relativePosition);
+    return pose;
+}
+
+SpaceWorldPose Space::PoseInWorld(const InputManager& inputManager) const
 {
-    LocatedWorldPose result{};
+    SpaceWorldPose result{};
     result.pose.orientation = {0, 0, 0, 1};
     result.pose.position = {0, 0, 0};
+    result.active = true;
 
-    if (space->GetType() == Space::Type::Reference)
+    if (type_ == Type::Reference)
     {
-        switch (space->GetReferenceSpaceType())
+        switch (referenceSpaceType_)
         {
             case XR_REFERENCE_SPACE_TYPE_VIEW:
                 result.pose = inputManager.GetHeadPose();
@@ -111,23 +118,23 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
             case XR_REFERENCE_SPACE_TYPE_STAGE:
-                // Identity — world origin
+                result.pose = inputManager.GetReferenceSpacePose(referenceSpaceType_);
                 break;
             default:
                 break;
         }
     }
-    else if (space->GetType() == Space::Type::Action)
+    else if (type_ == Type::Action)
     {
         auto* action = Runtime::Get().FromHandle<ActionState>(
-            reinterpret_cast<uint64_t>(space->GetAction()));
+            reinterpret_cast<uint64_t>(action_));
         std::string poseBindingPath;
         std::string poseProfilePath;
         bool poseActive = false;
 
         if (action != nullptr)
         {
-            const auto& data = action->GetSubactionData(space->GetSubactionPath());
+            const auto& data = action->GetSubactionData(subactionPath_);
             poseActive = data.poseActive;
             poseBindingPath = Runtime::Get().GetPathString(data.poseSourcePath);
             poseProfilePath = data.poseSourceProfile;
@@ -150,13 +157,13 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
         }
         else
         {
-            InputManager::Hand hand = HandFromPath(space->GetSubactionPath());
+            InputManager::Hand hand = HandFromPath(subactionPath_);
             result.pose = inputManager.GetControllerPose(hand);
         }
     }
 
     // Apply the space's offset pose
-    const XrPosef& offset = space->GetPoseInSpace();
+    const XrPosef& offset = poseInSpace_;
     glm::quat worldRot = ToGlm(result.pose.orientation);
     glm::vec3 worldPos = ToGlm(result.pose.position);
     glm::quat offsetRot = ToGlm(offset.orientation);
@@ -187,26 +194,15 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
 
     const InputManager& inputManager = session_->GetInputManager();
 
-    // Get world poses for both spaces
-    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
-    LocatedWorldPose basePose = GetWorldPose(baseSpace, inputManager);
-
-    // Compute relative pose: this relative to base
-    glm::quat baseRotInv = glm::inverse(ToGlm(basePose.pose.orientation));
-    glm::vec3 basePos = ToGlm(basePose.pose.position);
-    glm::vec3 thisPos = ToGlm(thisPose.pose.position);
-    glm::quat thisRot = ToGlm(thisPose.pose.orientation);
-
-    glm::quat relRot = baseRotInv * thisRot;
-    glm::vec3 relPos = baseRotInv * (thisPos - basePos);
+    const SpaceWorldPose thisPose = PoseInWorld(inputManager);
+    const SpaceWorldPose basePose = baseSpace->PoseInWorld(inputManager);
 
     location->type = XR_TYPE_SPACE_LOCATION;
+    location->pose = PoseRelativeTo(thisPose.pose, basePose.pose);
     location->locationFlags = (thisPose.active && basePose.active)
         ? XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT |
               XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_TRACKED_BIT
         : 0;
-    location->pose.orientation = ToXr(relRot);
-    location->pose.position = ToXr(relPos);
 
     if (XrSpaceVelocity* velocity = FindSpaceVelocity(location->next))
     {

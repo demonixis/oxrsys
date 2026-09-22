@@ -56,6 +56,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed reference-space origins so `STAGE` stays on the client floor, `LOCAL` anchors to the
+  yaw-only head pose at the first streamed sample, and `LOCAL_FLOOR` keeps that horizontal pose at
+  floor height. `xrLocateViews`, space locates, and hand joints are now expressed in the requested
+  base space. `LOCAL` recenters on an explicit recenter and when one tracking period jumps by more
+  than half a meter.
 - Fixed intermittent visionOS immersive-entry stalls and compositor terminations by waiting for a
   reusable GPU slot before acquiring a finite-pool frame, reducing the shared-event wait from 10
   seconds to 10 milliseconds, and presenting startup frames without pose adjustment when ARKit has

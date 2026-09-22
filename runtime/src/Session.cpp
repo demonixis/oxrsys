@@ -814,6 +814,19 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
 
     inputManager_->GetEyeViews(views, 2);
 
+    // Eye views are produced in client STAGE coordinates. Express them in the base
+    // space the application asked for. The streamed render-pose tag stays in STAGE
+    // so the headset can match it against its own tracking frame.
+    const SpaceWorldPose basePose = baseSpace->PoseInWorld(*inputManager_);
+    if (!basePose.active)
+    {
+        viewState->viewStateFlags = 0;
+    }
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        views[i].pose = PoseRelativeTo(views[i].pose, basePose.pose);
+    }
+
     // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
     // tagged with it at submission instead of a later re-prediction.
     lastRenderHeadPose_ = inputManager_->GetHeadPose();

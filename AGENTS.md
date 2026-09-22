@@ -118,7 +118,13 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
 - Headset audio remains protocol/config scaffolding. Do not advertise the server audio feature
   until capture and playback are implemented.
 - `xrLocateSpacesKHR` remains accepted as the alias of OpenXR 1.1 `xrLocateSpaces`.
-- Reference spaces currently enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`.
+- Reference spaces enumerate `VIEW`, `LOCAL`, `LOCAL_FLOOR`, and `STAGE`. Streamed poses are
+  client-STAGE (floor) relative. `STAGE` stays at that floor origin. `LOCAL` anchors to the
+  yaw-only head pose at the first streamed sample, and again when `RecenterLocalReference()` runs
+  or a single tracking period jumps by more than half a meter. `LOCAL_FLOOR` keeps `LOCAL`'s
+  horizontal position and yaw at floor height. `xrLocateViews`, `xrLocateSpace`, and hand joints
+  must be expressed in the requested base space, including action spaces. The streamed render-pose
+  tag stays in client STAGE coordinates.
 
 ## Runtime Files And Registration
 

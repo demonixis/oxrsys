@@ -1982,55 +1982,7 @@ static XrPosef ComposePoses(const XrPosef& basePose, const XrPosef& offsetPose)
 
 static XrPosef ResolveSpaceWorldPose(Space* space)
 {
-    XrPosef worldPose = {};
-    worldPose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
-    worldPose.position = {0.0f, 0.0f, 0.0f};
-
-    const InputManager& inputManager = space->GetSession()->GetInputManager();
-
-    if (space->GetType() == Space::Type::Reference)
-    {
-        switch (space->GetReferenceSpaceType())
-        {
-            case XR_REFERENCE_SPACE_TYPE_VIEW:
-                worldPose = inputManager.GetHeadPose();
-                break;
-
-            case XR_REFERENCE_SPACE_TYPE_LOCAL:
-            case XR_REFERENCE_SPACE_TYPE_STAGE:
-            default:
-                break;
-        }
-    }
-    else
-    {
-        auto* action = Runtime::Get().FromHandle<ActionState>(
-            reinterpret_cast<uint64_t>(space->GetAction()));
-        std::string poseBindingPath;
-        std::string poseProfilePath;
-        if (action != nullptr)
-        {
-            const auto& data = action->GetSubactionData(space->GetSubactionPath());
-            poseBindingPath = Runtime::Get().GetPathString(data.poseSourcePath);
-            poseProfilePath = data.poseSourceProfile;
-        }
-
-        if (!poseBindingPath.empty())
-        {
-            InputManager::Hand hand = HandFromBindingPath(poseBindingPath);
-            worldPose = inputManager.GetPoseComponentForProfile(
-                hand, ComponentFromBindingPath(poseBindingPath), poseProfilePath);
-        }
-        else
-        {
-            worldPose = inputManager.GetControllerPose(
-                (space->GetSubactionPath() == XR_NULL_PATH) ? InputManager::Hand::Left
-                                                            : HandFromBindingPath(
-                                                                  Runtime::Get().GetPathString(space->GetSubactionPath())));
-        }
-    }
-
-    return ComposePoses(worldPose, space->GetPoseInSpace());
+    return space->PoseInWorld(space->GetSession()->GetInputManager()).pose;
 }
 
 static XrPath TopLevelPathFromHand(InputManager::Hand hand)
