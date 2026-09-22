@@ -84,6 +84,22 @@ jobs:
           path: ~/Library/Caches/ccache
           key: ccache-${{ matrix.arch }}-${{ github.sha }}
           restore-keys: ccache-${{ matrix.arch }}-
+      - name: Record toolchain version
+        # Compilation caches are toolchain-specific; a runner image bump must miss the cache
+        # rather than restore objects the new compiler rejects.
+        run: xcodebuild -version > .toolchain-version
+      - name: Cache Home compilation cache
+        uses: actions/cache@v4
+        with:
+          path: build/cas/home-${{ matrix.arch }}
+          key: cas-home-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-${{ github.sha }}
+          restore-keys: cas-home-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-
+      - name: Cache simulator compilation cache
+        uses: actions/cache@v4
+        with:
+          path: build/cas/simulator-${{ matrix.arch }}
+          key: cas-simulator-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-${{ github.sha }}
+          restore-keys: cas-simulator-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-
       - name: Configure
         run: >-
           cmake --preset ${{ matrix.preset }}
@@ -102,6 +118,9 @@ jobs:
           xcodebuild
           -showBuildTimingSummary
           COMPILER_INDEX_STORE_ENABLE=NO
+          COMPILATION_CACHE_ENABLE_CACHING=YES
+          COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
+          "COMPILATION_CACHE_CAS_PATH=${{ github.workspace }}/build/cas/home-${{ matrix.arch }}"
           -project "clients/home/OXRSys Home.xcodeproj"
           -scheme "OXRSys Home"
           -configuration Debug
@@ -133,6 +152,9 @@ jobs:
           xcodebuild
           -showBuildTimingSummary
           COMPILER_INDEX_STORE_ENABLE=NO
+          COMPILATION_CACHE_ENABLE_CACHING=YES
+          COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
+          "COMPILATION_CACHE_CAS_PATH=${{ github.workspace }}/build/cas/simulator-${{ matrix.arch }}"
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
