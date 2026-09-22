@@ -25,10 +25,14 @@ jobs:
             preset: macos-x64
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      # GitHub allows 10GB of caches per repo and evicts LRU; keep ccache well under so it
+      # cannot push out the third-party source cache.
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: brew install ninja vulkan-headers ripgrep
+        run: brew install ninja vulkan-headers ripgrep ccache
       - name: Enforce macOS-only source layout
         run: |
           removed_paths=(
@@ -74,15 +78,30 @@ jobs:
         with:
           path: build/${{ matrix.preset }}/_deps
           key: deps-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', 'runtime/CMakeLists.txt', 'cmake/**') }}
+      - name: Cache compiled objects
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.arch }}-
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: >-
+          cmake --preset ${{ matrix.preset }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build/${{ matrix.preset }}
+      - name: ccache stats
+        run: ccache --show-stats --verbose | head -20
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure
       - name: Build and test Home
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/home/OXRSys Home.xcodeproj"
           -scheme "OXRSys Home"
           -configuration Debug
@@ -112,6 +131,8 @@ jobs:
       - name: Build simulator for macOS
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -139,6 +160,18 @@ jobs:
             echo 'UIKit imports must stay under Platform/iOS.' >&2
             exit 1
           fi
+      - name: Record toolchain version
+        # Swift module caches are toolchain-specific; a runner image bump must miss the cache
+        # rather than restore modules the new compiler rejects.
+        run: xcodebuild -version > .toolchain-version
+      - name: Cache Swift package builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            clients/shared/OXRSysStreaming/.build
+            clients/shared/OXRSysSimulator/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ hashFiles('.toolchain-version', 'clients/shared/**/Package.resolved', 'clients/shared/**/Package.swift') }}
       - name: Test shared streaming package
         run: swift test --package-path clients/shared/OXRSysStreaming
       - name: Build shared simulator package
@@ -146,6 +179,8 @@ jobs:
       - name: Build simulator for iOS Simulator
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -156,6 +191,8 @@ jobs:
       - name: Build simulator for iOS device
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -166,6 +203,8 @@ jobs:
       - name: Build visionOS viewer
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/visionos/OXRSys visionOS.xcodeproj"
           -scheme "OXRSys visionOS"
           -configuration Debug
@@ -176,6 +215,8 @@ jobs:
       - name: Build visionOS viewer for device
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/visionos/OXRSys visionOS.xcodeproj"
           -scheme "OXRSys visionOS"
           -configuration Debug
