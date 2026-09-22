@@ -63,7 +63,7 @@ jobs:
             echo 'Removed CMake options must fail configuration.' >&2
             exit 1
           fi
-          if ! rg -q 'OXRSYS_VIDEO_ENCODER was removed' build/removed-option-check.log; then
+          if ! grep -q 'OXRSYS_VIDEO_ENCODER was removed' build/removed-option-check.log; then
             cat build/removed-option-check.log
             exit 1
           fi
@@ -177,6 +177,10 @@ jobs:
           cache: gradle
           cache-dependency-path: clients/android-vr/**/*.gradle*
       - uses: android-actions/setup-android@v3
+        with:
+          # The action default still installs the obsolete "tools" package, which current
+          # cmdline-tools reject. Platform, build-tools, CMake, and the NDK are installed below.
+          packages: platform-tools
       - name: Install Android build components
         run: >-
           sdkmanager
