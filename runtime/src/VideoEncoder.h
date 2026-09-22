@@ -103,6 +103,10 @@ public:
     static BackendCapabilities QueryBackendCapabilities(const GraphicsContext* graphicsContext = nullptr);
     static bool SupportsCodec(oxr::protocol::VideoCodec codec);
 
+    // Drain frames VideoToolbox still holds, through the normal callbacks. Frames reach it from
+    // a Metal completion handler, so this retries until nothing is in flight. Blocks.
+    bool FlushPendingFrames(std::chrono::milliseconds timeout = std::chrono::seconds(5));
+
     // Encode one backend-native texture/image source.
     // The callback is invoked for each NAL unit produced
     bool Encode(FrameImageSource imageSource, int64_t timestampNs, OnNalUnitCallback callback,

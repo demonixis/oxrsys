@@ -27,6 +27,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install ninja vulkan-headers ripgrep
       - name: Enforce macOS-only source layout
         run: |
           removed_paths=(
@@ -67,8 +69,6 @@ jobs:
             cat build/removed-option-check.log
             exit 1
           fi
-      - name: Install build dependencies
-        run: brew install ninja vulkan-headers
       - name: Cache third-party sources
         uses: actions/cache@v4
         with:
@@ -110,6 +110,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Install lint dependencies
+        run: brew install ripgrep
       - name: Enforce platform UI boundaries
         run: |
           if rg -n '^import AppKit' clients --glob '*.swift' | rg -v '/Platform/macOS/'; then
@@ -177,6 +179,8 @@ jobs:
           cache: gradle
           cache-dependency-path: clients/android-vr/**/*.gradle*
       - uses: android-actions/setup-android@v3
+        with:
+          packages: '' # skip obsolete "tools" package
       - name: Install Android build components
         run: >-
           sdkmanager
