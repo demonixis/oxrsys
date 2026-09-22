@@ -92,6 +92,23 @@ jobs:
           ONLY_ACTIVE_ARCH=NO
           CODE_SIGNING_ALLOWED=NO
           test
+      - name: Collect Home test diagnostics
+        if: failure()
+        run: |
+          log show --last 30m --info \
+            --predicate 'process IN {"syspolicyd", "XprotectService", "amfid", "testmanagerd", "launchservicesd", "runningboardd"} OR eventMessage CONTAINS[c] "oxrsys"' \
+            > "build/home-system.log" || true
+          cp -R "$HOME/Library/Logs/DiagnosticReports" "build/DiagnosticReports" || true
+      - name: Upload Home test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: home-test-diagnostics-${{ matrix.arch }}
+          path: |
+            build/xcode/home-${{ matrix.arch }}/Logs/Test
+            build/home-system.log
+            build/DiagnosticReports
+          if-no-files-found: ignore
       - name: Build simulator for macOS
         run: >-
           xcodebuild
