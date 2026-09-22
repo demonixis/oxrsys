@@ -58,6 +58,40 @@ inline uint32_t AlignUp(uint32_t value, uint32_t alignment)
     return alignment == 0 ? value : ((value + alignment - 1u) / alignment) * alignment;
 }
 
+// Snap a requested center shift onto the same grid the edge compression uses. Server and client
+// must call this with identical inputs or the client's un-warp will not match the server's warp.
+inline float AlignCenterShift(float requestedShift,
+                              float centerSizeAligned,
+                              float targetSize,
+                              float edgeRatio)
+{
+    const float edgeSizeAligned = targetSize - centerSizeAligned * targetSize;
+    if (edgeSizeAligned <= 0.0f)
+    {
+        return 0.0f;
+    }
+    // std::ceil rounds away from zero on the positive side, so a request of exactly 1.0 can align
+    // to slightly above 1.0 and push the warp outside [0, 1], which breaks the endpoint invariant
+    // the shader relies on. Harmless while the shift was always zero; real once gaze drives it.
+    const float aligned = std::ceil(requestedShift * edgeSizeAligned / (edgeRatio * 2.0f)) *
+                          (edgeRatio * 2.0f) / edgeSizeAligned;
+    return std::clamp(aligned, -1.0f, 1.0f);
+}
+
+// Wire representation of a gaze-driven center shift. Quantized so the value the server warps with
+// is exactly the value the client un-warps with: quantize first, then use the dequantized result
+// on both sides. Two int8s ride in VideoPacketHeader's spare bytes, so this costs no bandwidth.
+inline int8_t QuantizeCenterShift(float shift)
+{
+    const float clamped = std::clamp(shift, -1.0f, 1.0f);
+    return static_cast<int8_t>(std::lround(clamped * 127.0f));
+}
+
+inline float DequantizeCenterShift(int8_t quantized)
+{
+    return static_cast<float>(quantized) / 127.0f;
+}
+
 inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
                                                 uint32_t targetEyeHeight,
                                                 FoveationPreset preset,
@@ -93,23 +127,10 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
         1.0f - std::ceil(edgeSizeY / (params.edgeRatioY * 2.0f)) *
                    (params.edgeRatioY * 2.0f) / targetH;
 
-    const float edgeSizeXAligned = targetW - centerSizeXAligned * targetW;
-    const float edgeSizeYAligned = targetH - centerSizeYAligned * targetH;
-
-    float centerShiftXAligned = 0.0f;
-    float centerShiftYAligned = 0.0f;
-    if (edgeSizeXAligned > 0.0f)
-    {
-        centerShiftXAligned =
-            std::ceil(params.centerShiftX * edgeSizeXAligned / (params.edgeRatioX * 2.0f)) *
-            (params.edgeRatioX * 2.0f) / edgeSizeXAligned;
-    }
-    if (edgeSizeYAligned > 0.0f)
-    {
-        centerShiftYAligned =
-            std::ceil(params.centerShiftY * edgeSizeYAligned / (params.edgeRatioY * 2.0f)) *
-            (params.edgeRatioY * 2.0f) / edgeSizeYAligned;
-    }
+    const float centerShiftXAligned =
+        AlignCenterShift(params.centerShiftX, centerSizeXAligned, targetW, params.edgeRatioX);
+    const float centerShiftYAligned =
+        AlignCenterShift(params.centerShiftY, centerSizeYAligned, targetH, params.edgeRatioY);
 
     params.centerSizeX = std::clamp(centerSizeXAligned, 0.0f, 1.0f);
     params.centerSizeY = std::clamp(centerSizeYAligned, 0.0f, 1.0f);
@@ -129,6 +150,48 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.eyeHeightRatio = optimizedH / static_cast<float>(std::max(layout.optimizedEyeHeight, 1u));
     layout.parameters = params;
     return layout;
+}
+
+// The receiving half of the above: reconstruct the exact layout the server warped with, from the
+// two quantized bytes carried in VideoPacketHeader.
+inline void ApplyQuantizedCenterShift(FoveationLayout& layout, int8_t quantX, int8_t quantY)
+{
+    if (layout.preset == FoveationPreset::Off || layout.targetEyeWidth == 0 ||
+        layout.targetEyeHeight == 0)
+    {
+        return;
+    }
+
+    const float targetW = static_cast<float>(layout.targetEyeWidth);
+    const float targetH = static_cast<float>(layout.targetEyeHeight);
+    layout.parameters.centerShiftX = AlignCenterShift(DequantizeCenterShift(quantX),
+                                                      layout.parameters.centerSizeX,
+                                                      targetW,
+                                                      layout.parameters.edgeRatioX);
+    layout.parameters.centerShiftY = AlignCenterShift(DequantizeCenterShift(quantY),
+                                                      layout.parameters.centerSizeY,
+                                                      targetH,
+                                                      layout.parameters.edgeRatioY);
+}
+
+// Move the foveal region to follow gaze. Safe to call per frame: the optimized (encoded) size
+// depends only on centerSize and edgeRatio, so shifting the center never resizes the stream and
+// never needs an encoder reconfigure.
+//
+// shiftX/shiftY are normalized gaze offsets from the eye's view centre in [-1, 1]. They are
+// quantized to the wire representation before use so that a client decoding the quantized value
+// from the packet header reproduces this layout bit-for-bit.
+inline void ApplyGazeCenterShift(FoveationLayout& layout, float shiftX, float shiftY)
+{
+    if (layout.preset == FoveationPreset::Off || layout.targetEyeWidth == 0 ||
+        layout.targetEyeHeight == 0)
+    {
+        return;
+    }
+
+    ApplyQuantizedCenterShift(layout,
+                              QuantizeCenterShift(shiftX),
+                              QuantizeCenterShift(shiftY));
 }
 
 inline bool IsFoveatedEncodingLayoutUsable(const FoveationLayout& layout,

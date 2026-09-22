@@ -35,6 +35,13 @@ public:
         double totalLatencyMs = 0.0;
         bool frameDropped = false;
         bool keyframe = false;
+        // Gaze-driven foveation centre actually used for this frame, quantized. The streaming
+        // server stamps these into VideoPacketHeader so the client un-warps with exactly the
+        // values the warp used, rather than whatever gaze arrived since.
+        int8_t foveationCenterX = 0;
+        int8_t foveationCenterY = 0;
+        // Distinguishes "gaze centred straight ahead" (0,0 and valid) from "not foveated at all".
+        bool foveationCenterValid = false;
     };
 
     struct FoveationSettings
@@ -97,6 +104,15 @@ public:
     // is safe to retry; true means every callback released its FrameSource.
     bool Shutdown(std::chrono::nanoseconds timeout = std::chrono::milliseconds(500));
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
+    // Per-frame gaze centre, quantized by oxr::protocol::QuantizeCenterShift. Cheap and safe to
+    // call every frame from the streaming thread: moving the centre never changes the encoded
+    // size, so it needs no reconfigure. Packed into one atomic so x and y cannot tear apart.
+    void SetFoveationCenter(int8_t x, int8_t y)
+    {
+        foveationCenter_.store(static_cast<uint16_t>((static_cast<uint8_t>(x) << 8) |
+                                                     static_cast<uint8_t>(y)),
+                               std::memory_order_relaxed);
+    }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
     static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
@@ -181,6 +197,7 @@ private:
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> foveationValidationWarningLogged_{false};
+    std::atomic<uint16_t> foveationCenter_{0};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};

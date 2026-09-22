@@ -121,6 +121,10 @@ private:
         bool hasPose = false;
         float headPosition[3] = {};
         float headOrientation[4] = {0, 0, 0, 1};
+        // Gaze-driven foveation centre the encoder actually warped this frame with.
+        bool hasFoveationCenter = false;
+        int8_t foveationCenterX = 0;
+        int8_t foveationCenterY = 0;
         std::vector<EncodedNalUnit> nals;
     };
 
@@ -304,9 +308,14 @@ private:
     static constexpr size_t MaxVideoSendQueueFrames = 2;
     std::mutex encoderMutex_;
 
+    // Smoothed gaze-driven foveation centre. Encode-thread only; no synchronization needed.
+    float gazeCenterX_ = 0.0f;
+    float gazeCenterY_ = 0.0f;
+
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
                      bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                     bool hasFoveationCenter, int8_t foveationCenterX, int8_t foveationCenterY,
                      oxr::protocol::VideoCodec codec);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);

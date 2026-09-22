@@ -135,6 +135,31 @@ reduced encoded resolution as a normal downscaled stream. Until the protocol car
 foveated target size, the server enables AADT only when the shader target can match the announced
 source dimensions coherently; otherwise it announces a normal stream.
 
+### Gaze-driven foveation centre
+
+The announced preset parameters place the foveal region at a fixed centre. When a client reports an
+eye-gaze direction (`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`), the
+server instead steers that centre to follow gaze, normalizing the direction in tan space against the
+client's reported eye FOV and low-passing it so fixation jitter does not shimmer the foveal
+boundary.
+
+The centre must be identical on both ends: a client that un-warps with a different centre than the
+server warped with produces a geometrically wrong image, not merely stale foveation. The protocol
+therefore carries the exact value used:
+
+- the server quantizes the requested shift to `int8` via `QuantizeCenterShift`, then warps with the
+  dequantized result, so the transmitted bytes are precisely what produced the image
+- `VIDEO_FLAG_FOVEATION_CENTER` marks headers whose centre bytes are meaningful
+- the bytes ride in `VideoPacketHeader.foveationCenter{X,Y}`,
+  `TcpVideoNalHeader.foveationCenter{X,Y}`, and `TcpRenderPose.foveationCenter{X,Y}` with
+  `hasFoveationCenter`, all of which reuse previously reserved bytes, so no wire size changes
+- both ends call the shared `AlignCenterShift` in `Foveation.h` to snap the centre onto the same
+  grid the edge compression uses
+
+Moving the centre never changes the encoded resolution, because the optimized size depends only on
+centre *size* and edge ratio, not centre *shift*. The centre may therefore move every frame with no
+encoder reconfigure. Clients that report no gaze keep the previous fixed-centre behaviour.
+
 ## Video Stream
 
 UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
@@ -145,6 +170,7 @@ UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payl
 - flags
 - codec
 - FEC group final-packet payload size, only meaningful on `VIDEO_FLAG_FEC` packets
+- gaze-driven foveation centre, only meaningful on `VIDEO_FLAG_FOVEATION_CENTER` packets
 - presentation timestamp
 
 Current codec identifiers:
@@ -187,8 +213,11 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+- optional eye-gaze direction, a unit vector in head space with -Z forward
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
+Eye-gaze presence is indicated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`; it is appended at the end of the
+struct, so clients predating it send a shorter packet that the receiver accepts and zero-fills.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
 `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
 controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.

@@ -6,6 +6,16 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added gaze-driven foveated encoding. Clients may now report an eye-gaze direction in the
+  tracking packet (`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`), and
+  the runtime steers the foveated-encode centre to follow it instead of holding a fixed centre.
+  The centre the encoder warped with is carried back per frame, quantized into the two spare bytes
+  of `VideoPacketHeader`/`TcpVideoNalHeader` and of `TcpRenderPose`, flagged by
+  `VIDEO_FLAG_FOVEATION_CENTER`, so a client reconstructs with exactly the parameters the server
+  used. Wire sizes are unchanged except `TrackingPacket`, which grows by an appended field that
+  older clients simply omit. Moving the centre never changes the encoded size, so it needs no
+  encoder reconfigure; clients that report no gaze keep the previous fixed-centre behaviour.
+
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit
