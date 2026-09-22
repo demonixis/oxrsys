@@ -12,6 +12,8 @@ struct SpaceWorldPose
 {
     XrPosef pose{};
     bool active = true;
+    XrVector3f linearVelocity = {0.0f, 0.0f, 0.0f};
+    XrVector3f angularVelocity = {0.0f, 0.0f, 0.0f};
 };
 
 // Express a world-space pose relative to a world-space base pose.
@@ -73,7 +75,7 @@ public:
 
     // Pose of this space's origin in client STAGE / world coordinates, including
     // the space's own poseInReferenceSpace offset.
-    SpaceWorldPose PoseInWorld(const InputManager& inputManager) const;
+    SpaceWorldPose PoseInWorld(const InputManager& inputManager, XrTime time) const;
 
 private:
     uint64_t handle_ = 0;

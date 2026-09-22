@@ -434,15 +434,29 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         targetRefreshHz = std::max(streamingServer_->GetTargetRefreshRateHz(), 1u);
     }
 
-    // Throttle to the negotiated headset refresh rate when available.
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = now - lastFrameTime_;
+    // Absolute deadline at the negotiated period. Sleep overshoot used to be
+    // re-anchored onto the wake time, so every frame ran long and the app drifted
+    // under the headset refresh. The next deadline stays on the grid.
     auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
+    auto now = std::chrono::steady_clock::now();
 
-    if (elapsed < targetFrameTime)
+    if (nextFrameDeadline_.time_since_epoch().count() == 0 || pacingPeriod_ != targetFrameTime)
     {
-        std::this_thread::sleep_for(targetFrameTime - elapsed);
-        now = std::chrono::steady_clock::now();
+        pacingPeriod_ = targetFrameTime;
+        nextFrameDeadline_ = now + targetFrameTime;
+    }
+    else
+    {
+        if (now < nextFrameDeadline_)
+        {
+            std::this_thread::sleep_until(nextFrameDeadline_);
+            now = std::chrono::steady_clock::now();
+        }
+        nextFrameDeadline_ += targetFrameTime;
+        if (now > nextFrameDeadline_ && now - nextFrameDeadline_ > 2 * targetFrameTime)
+        {
+            nextFrameDeadline_ = now + targetFrameTime;
+        }
     }
 
     auto dt = std::chrono::duration<float>(now - lastFrameTime_).count();
@@ -451,10 +465,16 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // Update input
     inputManager_->Update(dt);
 
-    auto displayTime = std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime_).count();
+    const float horizonMs = streamingServer_ ? streamingServer_->PosePredictionHorizonMs() : 0.0f;
+    const auto horizon = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double, std::milli>(horizonMs));
+    const XrTime displayTime = static_cast<XrTime>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime_).count() +
+        horizon.count());
+    inputManager_->SetPoseSampleTime(displayTime);
 
     frameState->type = XR_TYPE_FRAME_STATE;
-    frameState->predictedDisplayTime = static_cast<XrTime>(displayTime);
+    frameState->predictedDisplayTime = displayTime;
     frameState->predictedDisplayPeriod = static_cast<XrDuration>(targetFrameTime.count());
     frameState->shouldRender = running_ && !exitRequested_ ? XR_TRUE : XR_FALSE;
 
@@ -812,12 +832,12 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
 
-    inputManager_->GetEyeViews(views, 2);
+    inputManager_->GetEyeViewsAt(viewLocateInfo->displayTime, views, 2);
 
     // Eye views are produced in client STAGE coordinates. Express them in the base
     // space the application asked for. The streamed render-pose tag stays in STAGE
     // so the headset can match it against its own tracking frame.
-    const SpaceWorldPose basePose = baseSpace->PoseInWorld(*inputManager_);
+    const SpaceWorldPose basePose = baseSpace->PoseInWorld(*inputManager_, viewLocateInfo->displayTime);
     if (!basePose.active)
     {
         viewState->viewStateFlags = 0;
@@ -829,7 +849,7 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
 
     // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
     // tagged with it at submission instead of a later re-prediction.
-    lastRenderHeadPose_ = inputManager_->GetHeadPose();
+    lastRenderHeadPose_ = inputManager_->GetHeadPoseAt(viewLocateInfo->displayTime);
     lastRenderHasPose_ = true;
 
     return XR_SUCCESS;

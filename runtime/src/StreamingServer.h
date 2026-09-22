@@ -82,6 +82,9 @@ public:
     bool IsClientConnected() const { return state_.load() == State::Connected; }
     State GetState() const { return state_.load(); }
     uint32_t GetTargetRefreshRateHz() const { return targetRefreshRateHz_.load(); }
+    // Server encode latency plus the latest client decode-to-photon report, clamped
+    // to the same 0-80ms range the tracking predictor uses.
+    float PosePredictionHorizonMs() const;
 
     // Get the connected client info
     std::string GetClientName() const;

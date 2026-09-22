@@ -56,6 +56,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed frame pacing so `xrWaitFrame` sleeps until an absolute deadline at the negotiated
+  refresh instead of re-anchoring every frame on the wake time. `predictedDisplayTime` now
+  includes the pose-prediction horizon, and `xrLocateViews` / `xrLocateSpace` extrapolate the
+  head to the requested time with the sampled head velocity.
 - Fixed reference-space origins so `STAGE` stays on the client floor, `LOCAL` anchors to the
   yaw-only head pose at the first streamed sample, and `LOCAL_FLOOR` keeps that horizontal pose at
   floor height. `xrLocateViews`, space locates, and hand joints are now expressed in the requested

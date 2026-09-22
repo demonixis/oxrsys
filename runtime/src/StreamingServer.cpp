@@ -745,7 +745,14 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     spdlog::info("StreamingServer: Started transport={} wifi={} usb_adb={} on {} ({}x{} @ {}Hz)",
                   config.streamingTransport, wifiEnabled_, usbAdbEnabled_,
                   ip, renderWidth_, renderHeight_, refreshRateHz_);
+    UpdatePredictionHorizon();
     return true;
+}
+
+float StreamingServer::PosePredictionHorizonMs() const
+{
+    const float horizonMs = serverPipelineLatencyMs_.load() + clientPipelineLatencyMs_.load();
+    return std::clamp(horizonMs, 0.0f, 80.0f);
 }
 
 bool StreamingServer::Stop(std::chrono::nanoseconds timeout)

@@ -46,7 +46,13 @@ public:
 
     // Head pose
     XrPosef GetHeadPose() const;
+    XrPosef GetHeadPoseAt(XrTime time) const;
+    XrVector3f HeadLinearVelocity() const;
+    XrVector3f HeadAngularVelocity() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
+    void GetEyeViewsAt(XrTime time, XrView* views, uint32_t viewCount) const;
+    void SetPoseSampleTime(XrTime time);
+    XrTime PoseSampleTime() const { return poseSampleTime_; }
 
     // Origin of a reference space in client STAGE coordinates. The streamed head pose
     // is floor-relative, so STAGE is the identity. LOCAL is the yaw-only head pose
@@ -141,6 +147,9 @@ private:
     bool hasPreviousHeadSample_ = false;
 
     glm::quat headQuat_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z
+    glm::vec3 headLinearVelocity_ = {0.0f, 0.0f, 0.0f};
+    glm::vec3 headAngularVelocity_ = {0.0f, 0.0f, 0.0f};
+    XrTime poseSampleTime_ = 0;
     glm::quat leftControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     glm::quat rightControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     // Aim (pointer) pose — distinct from grip; zero quaternion means "not supplied" (fall back).

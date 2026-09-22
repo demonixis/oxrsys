@@ -1373,7 +1373,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        XrSpaceVelocity spaceVelocity = {XR_TYPE_SPACE_VELOCITY};
         XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+        location.next = &spaceVelocity;
         XrResult result = space->LocateSpace(baseSpace, locateInfo->time, &location);
         if (XR_FAILED(result))
         {
@@ -1382,12 +1384,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
 
         spaceLocations->locations[i].locationFlags = location.locationFlags;
         spaceLocations->locations[i].pose = location.pose;
-        if (velocities != nullptr &&
-            (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
-            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0)
+        if (velocities != nullptr)
         {
-            velocities->velocities[i].velocityFlags =
-                XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+            velocities->velocities[i].velocityFlags = spaceVelocity.velocityFlags;
+            velocities->velocities[i].linearVelocity = spaceVelocity.linearVelocity;
+            velocities->velocities[i].angularVelocity = spaceVelocity.angularVelocity;
         }
     }
 
@@ -1982,7 +1983,8 @@ static XrPosef ComposePoses(const XrPosef& basePose, const XrPosef& offsetPose)
 
 static XrPosef ResolveSpaceWorldPose(Space* space)
 {
-    return space->PoseInWorld(space->GetSession()->GetInputManager()).pose;
+    const InputManager& inputManager = space->GetSession()->GetInputManager();
+    return space->PoseInWorld(inputManager, inputManager.PoseSampleTime()).pose;
 }
 
 static XrPath TopLevelPathFromHand(InputManager::Hand hand)

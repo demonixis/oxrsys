@@ -2772,6 +2772,35 @@ TEST_CASE("EndFrame accepts a released projection image while another swapchain 
     XR_CHECK(xrDestroySwapchain(swapchain));
 }
 
+TEST_CASE("WaitFrame keeps the negotiated period and a future display time", "[runtime][frame]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
+    });
+
+    auto convertTimespecToTime = reinterpret_cast<PFN_xrConvertTimespecTimeToTimeKHR>(
+        GetProc(context.instance, "xrConvertTimespecTimeToTimeKHR"));
+
+    struct timespec before{};
+    REQUIRE(clock_gettime(CLOCK_MONOTONIC, &before) == 0);
+    XrTime beforeXr = 0;
+    XR_CHECK(convertTimespecToTime(context.instance, &before, &beforeXr));
+
+    XrFrameState firstFrame = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &firstFrame));
+    CHECK(firstFrame.predictedDisplayPeriod == 1000000000ll / 72);
+    CHECK(firstFrame.predictedDisplayTime >= beforeXr - 20'000'000);
+    CHECK(firstFrame.predictedDisplayTime - beforeXr < 150'000'000);
+
+    XrFrameState secondFrame = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &secondFrame));
+    const XrDuration delta = secondFrame.predictedDisplayTime - firstFrame.predictedDisplayTime;
+    CHECK(delta > firstFrame.predictedDisplayPeriod / 2);
+    CHECK(delta < firstFrame.predictedDisplayPeriod * 3);
+    CHECK(secondFrame.predictedDisplayPeriod == firstFrame.predictedDisplayPeriod);
+}
+
 TEST_CASE("Space and view validation matches CTS expectations", "[runtime][space]")
 {
     RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});

@@ -225,6 +225,12 @@ void InputManager::UpdateFromStreaming()
                            packet.headOrientation[0],   // x
                            packet.headOrientation[1],   // y
                            packet.headOrientation[2]);  // z
+    headLinearVelocity_ = glm::vec3(packet.headLinearVelocity[0],
+                                    packet.headLinearVelocity[1],
+                                    packet.headLinearVelocity[2]);
+    headAngularVelocity_ = glm::vec3(packet.headAngularVelocity[0],
+                                     packet.headAngularVelocity[1],
+                                     packet.headAngularVelocity[2]);
 
     const bool leftControllerActive =
         (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
@@ -374,6 +380,54 @@ XrPosef InputManager::GetHeadPose() const
     return pose;
 }
 
+XrPosef InputManager::GetHeadPoseAt(XrTime time) const
+{
+    XrPosef pose = GetHeadPose();
+    if (poseSampleTime_ == 0 || time == poseSampleTime_)
+    {
+        return pose;
+    }
+
+    // Keep a locate far from the sampled pose from flinging the view. 80ms matches
+    // the tracking predictor's horizon cap.
+    const double deltaSeconds = std::clamp(
+        static_cast<double>(time - poseSampleTime_) * 1.0e-9, -0.080, 0.080);
+    if (deltaSeconds == 0.0)
+    {
+        return pose;
+    }
+
+    const float dt = static_cast<float>(deltaSeconds);
+    const glm::vec3 position = headPosition_ + headLinearVelocity_ * dt;
+    glm::quat rotation = headQuat_;
+    const float angularSpeed = glm::length(headAngularVelocity_);
+    if (angularSpeed > 1.0e-4f)
+    {
+        const float angle = std::clamp(angularSpeed * dt, -0.5f, 0.5f);
+        rotation = glm::normalize(
+            glm::angleAxis(angle, headAngularVelocity_ / angularSpeed) * rotation);
+    }
+
+    pose.orientation = {rotation.x, rotation.y, rotation.z, rotation.w};
+    pose.position = {position.x, position.y, position.z};
+    return pose;
+}
+
+XrVector3f InputManager::HeadLinearVelocity() const
+{
+    return {headLinearVelocity_.x, headLinearVelocity_.y, headLinearVelocity_.z};
+}
+
+XrVector3f InputManager::HeadAngularVelocity() const
+{
+    return {headAngularVelocity_.x, headAngularVelocity_.y, headAngularVelocity_.z};
+}
+
+void InputManager::SetPoseSampleTime(XrTime time)
+{
+    poseSampleTime_ = time;
+}
+
 bool InputManager::HasUsableHeadPose() const
 {
     if (!std::isfinite(headPosition_.x) || !std::isfinite(headPosition_.y) ||
@@ -501,12 +555,20 @@ XrPosef InputManager::GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceT
 
 void InputManager::GetEyeViews(XrView* views, uint32_t viewCount) const
 {
+    GetEyeViewsAt(poseSampleTime_, views, viewCount);
+}
+
+void InputManager::GetEyeViewsAt(XrTime time, XrView* views, uint32_t viewCount) const
+{
     if (viewCount < 2)
     {
         return;
     }
 
-    glm::quat rot = GetHeadRotation();
+    const XrPosef headPose = GetHeadPoseAt(time);
+    const glm::quat rot(headPose.orientation.w, headPose.orientation.x,
+                        headPose.orientation.y, headPose.orientation.z);
+    const glm::vec3 headPosition(headPose.position.x, headPose.position.y, headPose.position.z);
     glm::vec3 right = rot * glm::vec3(1.0f, 0.0f, 0.0f);
     float ipd = (IsStreaming() && streamingIpd_ > 0.0f)
         ? streamingIpd_
@@ -523,7 +585,7 @@ void InputManager::GetEyeViews(XrView* views, uint32_t viewCount) const
         views[i].next = nullptr;
 
         float sign = (i == 0) ? -1.0f : 1.0f;
-        glm::vec3 eyePos = headPosition_ + right * (sign * halfIpd);
+        glm::vec3 eyePos = headPosition + right * (sign * halfIpd);
 
         views[i].pose.orientation.x = rot.x;
         views[i].pose.orientation.y = rot.y;

@@ -68,7 +68,7 @@ HandTracker::~HandTracker()
     Runtime::Get().RemoveHandle(handle_);
 }
 
-XrResult HandTracker::LocateHandJoints(XrSpace baseSpace, XrTime /*time*/,
+XrResult HandTracker::LocateHandJoints(XrSpace baseSpace, XrTime time,
                                         XrHandJointLocationsEXT* locations)
 {
     if (locations == nullptr)
@@ -110,7 +110,7 @@ XrResult HandTracker::LocateHandJoints(XrSpace baseSpace, XrTime /*time*/,
     locations->isActive = XR_TRUE;
     inputManager.GetHandJointLocations(hand, locations->jointLocations, locations->jointCount);
 
-    const SpaceWorldPose baseWorld = base->PoseInWorld(inputManager);
+    const SpaceWorldPose baseWorld = base->PoseInWorld(inputManager, time);
     if (!baseWorld.active)
     {
         locations->isActive = XR_FALSE;

@@ -51,6 +51,13 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   application-provided dispatch path. Vulkan v1 may fall back only to an already-loaded process
   `vkGetInstanceProcAddr` through `dlsym(RTLD_DEFAULT, ...)`.
 - `Session::EndFrame()` must remain non-blocking.
+- `xrWaitFrame` paces on an absolute deadline at the client-negotiated period. Sleep overshoot
+  shortens the next wait instead of slowing the average rate. A stall of more than two periods
+  reseeds the grid rather than emitting catch-up frames.
+- `predictedDisplayTime` is the current time plus the pose-prediction horizon (server pipeline
+  latency plus the client decode-to-photon report, clamped to 80 ms). `xrLocateViews` and
+  `xrLocateSpace` extrapolate the head with the sampled linear and angular velocity to the
+  requested `XrTime`, clamped to that same 80 ms window.
 - Encoded-frame dispatch is bounded and latest-frame-oriented. Replacing a pending frame must
   release its `FrameSource` resources; backpressure must never run in VideoToolbox callbacks or
   `Session::EndFrame()`.

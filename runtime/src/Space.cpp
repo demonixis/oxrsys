@@ -101,7 +101,7 @@ XrPosef PoseRelativeTo(const XrPosef& worldPose, const XrPosef& baseWorldPose)
     return pose;
 }
 
-SpaceWorldPose Space::PoseInWorld(const InputManager& inputManager) const
+SpaceWorldPose Space::PoseInWorld(const InputManager& inputManager, XrTime time) const
 {
     SpaceWorldPose result{};
     result.pose.orientation = {0, 0, 0, 1};
@@ -113,7 +113,9 @@ SpaceWorldPose Space::PoseInWorld(const InputManager& inputManager) const
         switch (referenceSpaceType_)
         {
             case XR_REFERENCE_SPACE_TYPE_VIEW:
-                result.pose = inputManager.GetHeadPose();
+                result.pose = inputManager.GetHeadPoseAt(time);
+                result.linearVelocity = inputManager.HeadLinearVelocity();
+                result.angularVelocity = inputManager.HeadAngularVelocity();
                 break;
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
@@ -171,9 +173,16 @@ SpaceWorldPose Space::PoseInWorld(const InputManager& inputManager) const
 
     glm::quat finalRot = worldRot * offsetRot;
     glm::vec3 finalPos = worldPos + worldRot * offsetPos;
+    const glm::vec3 angular(result.angularVelocity.x, result.angularVelocity.y,
+                            result.angularVelocity.z);
+    const glm::vec3 linear(result.linearVelocity.x, result.linearVelocity.y,
+                           result.linearVelocity.z);
+    const glm::vec3 offsetWorld = worldRot * offsetPos;
+    const glm::vec3 offsetLinear = linear + glm::cross(angular, offsetWorld);
 
     result.pose.orientation = ToXr(finalRot);
     result.pose.position = ToXr(finalPos);
+    result.linearVelocity = {offsetLinear.x, offsetLinear.y, offsetLinear.z};
     return result;
 }
 
@@ -194,8 +203,8 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
 
     const InputManager& inputManager = session_->GetInputManager();
 
-    const SpaceWorldPose thisPose = PoseInWorld(inputManager);
-    const SpaceWorldPose basePose = baseSpace->PoseInWorld(inputManager);
+    const SpaceWorldPose thisPose = PoseInWorld(inputManager, time);
+    const SpaceWorldPose basePose = baseSpace->PoseInWorld(inputManager, time);
 
     location->type = XR_TYPE_SPACE_LOCATION;
     location->pose = PoseRelativeTo(thisPose.pose, basePose.pose);
@@ -209,6 +218,24 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
         velocity->velocityFlags = 0;
         velocity->linearVelocity = {0.0f, 0.0f, 0.0f};
         velocity->angularVelocity = {0.0f, 0.0f, 0.0f};
+        if (thisPose.active && basePose.active)
+        {
+            const glm::quat baseRotInv = glm::inverse(ToGlm(basePose.pose.orientation));
+            const glm::vec3 linearThis = ToGlm(thisPose.linearVelocity);
+            const glm::vec3 angularThis = ToGlm(thisPose.angularVelocity);
+            const glm::vec3 linearBase = ToGlm(basePose.linearVelocity);
+            const glm::vec3 angularBase = ToGlm(basePose.angularVelocity);
+            const glm::vec3 relativeLinearWorld =
+                linearThis - linearBase -
+                glm::cross(angularBase, ToGlm(thisPose.pose.position) - ToGlm(basePose.pose.position));
+            const glm::vec3 relativeAngularWorld = angularThis - angularBase;
+            const glm::vec3 relativeLinear = baseRotInv * relativeLinearWorld;
+            const glm::vec3 relativeAngular = baseRotInv * relativeAngularWorld;
+            velocity->linearVelocity = {relativeLinear.x, relativeLinear.y, relativeLinear.z};
+            velocity->angularVelocity = {relativeAngular.x, relativeAngular.y, relativeAngular.z};
+            velocity->velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT |
+                                      XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+        }
     }
 
     return XR_SUCCESS;

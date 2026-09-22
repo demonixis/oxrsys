@@ -27,7 +27,8 @@ Use `clients/OXRSys Clients.xcworkspace` for coordinated Apple-client developmen
 
 1. The macOS OpenXR loader resolves `oxrsys-runtime.json` and loads the runtime dylib.
 2. The application creates a Metal or Vulkan session and swapchains.
-3. The runtime receives tracking from the active client and supplies predicted views/actions.
+3. The runtime receives tracking from the active client. `xrWaitFrame` returns a display time
+   one prediction horizon ahead of now, and view/space locates extrapolate the head to that time.
 4. The application renders and releases its swapchain images.
 5. The runtime snapshots the released color layers into a bounded backend-owned slot.
 6. `xrEndFrame` enqueues the newest available snapshot without waiting for encode or transport.

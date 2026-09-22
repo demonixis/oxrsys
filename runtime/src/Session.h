@@ -151,6 +151,10 @@ private:
     // CLOCK_MONOTONIC nanoseconds sampled at the same instant as startTime_.
     int64_t monoStartNs_ = 0;
     std::chrono::steady_clock::time_point lastFrameTime_;
+    // Absolute WaitFrame deadline. Sleep overshoot is absorbed by the next period
+    // instead of permanently lengthening the frame.
+    std::chrono::steady_clock::time_point nextFrameDeadline_{};
+    std::chrono::nanoseconds pacingPeriod_{0};
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

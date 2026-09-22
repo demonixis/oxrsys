@@ -524,6 +524,32 @@ TEST_CASE("InputManager — reference spaces and recenter", "[input][spaces]")
     }
 }
 
+TEST_CASE("InputManager — head pose follows the requested locate time", "[input]")
+{
+    TrackingReceiver receiver;
+    InputManager im;
+    im.SetTrackingReceiver(&receiver);
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headPosition[1] = 1.6f;
+    packet.headOrientation[3] = 1.0f;
+    packet.headLinearVelocity[0] = 2.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.011f);
+
+    constexpr XrTime kSampleTime = 10'000'000'000;
+    im.SetPoseSampleTime(kSampleTime);
+    const XrPosef atSample = im.GetHeadPoseAt(kSampleTime);
+    const XrPosef later = im.GetHeadPoseAt(kSampleTime + 20'000'000);
+
+    CHECK_THAT(atSample.position.x, WithinAbs(0.0f, 0.001f));
+    CHECK_THAT(later.position.x, WithinAbs(0.04f, 0.001f));
+    CHECK_THAT(later.position.y, WithinAbs(1.6f, 0.001f));
+
+    const XrPosef farFuture = im.GetHeadPoseAt(kSampleTime + 1'000'000'000);
+    CHECK_THAT(farFuture.position.x, WithinAbs(0.16f, 0.001f));
+}
+
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")
 {
     TrackingReceiver receiver;
