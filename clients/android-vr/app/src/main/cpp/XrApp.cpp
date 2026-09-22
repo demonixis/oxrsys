@@ -2557,6 +2557,14 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     clientUpscalingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
         server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
+    // We always advertise CLIENT_CAPABILITY_FEC_INTERLEAVED, so the server interleaves whenever
+    // it supports it. Recovering with a different layout than the sender used would XOR the
+    // wrong packets together, so follow the announce rather than assuming.
+    if (networkReceiver_)
+    {
+        networkReceiver_->SetFecInterleaved(
+            (server.serverFeatures & protocol::SERVER_FEATURE_FEC_INTERLEAVED) != 0);
+    }
     const bool serverRequestsPassthrough =
         (server.serverFeatures & protocol::SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH) != 0;
     serverMixedRealityPassthroughEnabled_ =
@@ -2797,6 +2805,7 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.clientCapabilities =
         protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
         protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING |
+        protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED |
         protocol::CLIENT_CAPABILITY_STREAM_RECONFIGURE;
     if (foveationAvailable_ && foveationConfigurationAvailable_ && swapchainUpdateAvailable_)
     {

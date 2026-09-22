@@ -166,6 +166,17 @@ callback or `Session::EndFrame()`.
 The current stream also includes two recovery and timing helpers:
 
 - `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
+
+### FEC group layout
+
+Which data packets a parity packet covers is described by `fec::GroupLayout` (`FecCodec.h`), and the choice is negotiated.
+
+- **Contiguous** (default, original): group `g` owns packets `[g*FEC_GROUP_SIZE, g*FEC_GROUP_SIZE + FEC_GROUP_SIZE)`. Because one parity recovers one loss per group, two *adjacent* losses fall in the same group and are unrecoverable. Adjacent loss is the common case on Wi-Fi, where loss arrives in bursts.
+- **Interleaved**: group `g` owns packets `g, g + groupCount, g + 2*groupCount, ...`, so adjacent packets belong to different groups. The same single parity and the same parity overhead then recover any burst up to `groupCount` packets long. Burst tolerance becomes the group count instead of 1, at no extra bandwidth.
+
+Interleaving is used only when the client advertises `CLIENT_CAPABILITY_FEC_INTERLEAVED` and the server advertises `SERVER_FEATURE_FEC_INTERLEAVED`. It must be negotiated rather than assumed: a receiver applying a different layout than the sender XORs a packet out of the wrong group and produces plausible garbage rather than failing cleanly.
+
+Interleaved parity is emitted after all of a frame's data packets, since a group is not complete until the frame is. Group membership never exceeds `FEC_GROUP_SIZE` under either layout, which receivers rely on when gathering a group into a fixed-size array.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
 - `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
 
