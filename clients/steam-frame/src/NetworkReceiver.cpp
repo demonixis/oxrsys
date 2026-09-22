@@ -596,6 +596,12 @@ void NetworkReceiver::StoreRenderPose(const protocol::VideoPacketHeader& header,
     pose.presentationTimeUs = header.presentationTimeNs / 1000;
     memcpy(pose.position, poseData, sizeof(float) * 3);
     memcpy(pose.orientation, poseData + 3, sizeof(float) * 4);
+    if (header.flags & protocol::VIDEO_FLAG_FOVEATION_CENTER)
+    {
+        pose.hasFoveationCenter = true;
+        pose.foveationCenterX = header.foveationCenterX;
+        pose.foveationCenterY = header.foveationCenterY;
+    }
     pose.valid = true;
 
     std::lock_guard<std::mutex> lock(renderPoseMutex_);
@@ -625,6 +631,9 @@ void NetworkReceiver::StoreRenderPose(const protocol::TcpRenderPose& tcpPose)
     pose.presentationTimeUs = tcpPose.presentationTimeNs / 1000;
     memcpy(pose.position, tcpPose.position, sizeof(float) * 3);
     memcpy(pose.orientation, tcpPose.orientation, sizeof(float) * 4);
+    pose.hasFoveationCenter = tcpPose.hasFoveationCenter != 0;
+    pose.foveationCenterX = tcpPose.foveationCenterX;
+    pose.foveationCenterY = tcpPose.foveationCenterY;
     pose.valid = true;
 
     std::lock_guard<std::mutex> lock(renderPoseMutex_);

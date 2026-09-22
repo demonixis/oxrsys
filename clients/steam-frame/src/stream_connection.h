@@ -1,5 +1,5 @@
 // Frame VR client — oxrsys stream connection (V2)
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 //
 // Wraps the ported oxrsys NetworkReceiver + control channel: discover the
 // server, start receiving video (feeding the decoder), then send ClientConnect.
@@ -34,7 +34,9 @@ public:
     // The head pose the server rendered the latest frame for (for async
     // timewarp: submit the layer with THIS pose so the compositor reprojects
     // to the current pose). Returns false until a render-pose packet arrives.
-    bool LatestRenderPose(float outPos[3], float outOri[4]) const;
+    // Non-const: also refreshes the foveation centre to the value the server warped this
+    // frame with, so FoveationParams() and the pose describe the same frame.
+    bool LatestRenderPose(float outPos[3], float outOri[4]);
 
     // Report client-side latencies over the control channel (V6). oxrsys's
     // adaptive bitrate controller consumes these to tune the encode.
@@ -58,6 +60,9 @@ public:
         float centerShift[2] = {0, 0};
         float edgeRatio[2] = {1, 1};
         float eyeSizeRatio[2] = {1, 1};
+        // Pre-foveation per-eye dims, needed to re-align the gaze centre each frame.
+        uint32_t targetEyeWidth = 0;
+        uint32_t targetEyeHeight = 0;
     };
     const Foveation& FoveationParams() const { return foveation_; }
 

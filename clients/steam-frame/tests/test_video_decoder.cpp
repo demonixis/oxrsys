@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 // Decodes the bundled SBS test clip and checks the output is well-formed and
 // genuinely stereo (left and right halves differ).
 #include "test_util.h"

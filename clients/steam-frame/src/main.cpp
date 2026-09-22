@@ -1,5 +1,5 @@
 // Frame VR client — V0: hello stereo
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 //
 // Minimal Vulkan + OpenXR stereo client. Proves the spine every later
 // milestone builds on: instance/session, Vulkan binding, two-view stereo
@@ -1010,6 +1010,12 @@ static void RenderFrame(App& app)
                 pkt.headOrientation[1] = head.orientation.y;
                 pkt.headOrientation[2] = head.orientation.z;
                 pkt.headOrientation[3] = head.orientation.w;
+                // Left-eye FOV (radians, OpenXR-signed). The server normalizes gaze against this
+                // to place the foveal centre; without it it falls back to a 45 degree guess.
+                pkt.eyeFov[0] = views[0].fov.angleLeft;
+                pkt.eyeFov[1] = views[0].fov.angleRight;
+                pkt.eyeFov[2] = views[0].fov.angleUp;
+                pkt.eyeFov[3] = views[0].fov.angleDown;
                 g_xrInput.Update(fs.predictedDisplayTime, pkt);
                 g_stream.SendTrackingPacket(pkt);
 

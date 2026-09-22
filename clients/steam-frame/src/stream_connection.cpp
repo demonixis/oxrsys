@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 #include "stream_connection.h"
 #include "NetworkReceiver.h"
 #include "TrackingSender.h"
@@ -70,6 +70,8 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
         foveation_.edgeRatio[1] = srv.foveationEdgeRatioY;
         foveation_.eyeSizeRatio[0] = layout.eyeWidthRatio;
         foveation_.eyeSizeRatio[1] = layout.eyeHeightRatio;
+        foveation_.targetEyeWidth = srv.renderWidth / 2;
+        foveation_.targetEyeHeight = srv.renderHeight;
         LOG_INF("foveated encoding ON: center=%.2f,%.2f edge=%.2f,%.2f eyeRatio=%.3f,%.3f",
                 foveation_.centerSize[0], foveation_.centerSize[1],
                 foveation_.edgeRatio[0], foveation_.edgeRatio[1],
@@ -123,13 +125,29 @@ void StreamConnection::SendTrackingPacket(const protocol::TrackingPacket& pkt)
     tracker_->Send(pkt);
 }
 
-bool StreamConnection::LatestRenderPose(float outPos[3], float outOri[4]) const
+bool StreamConnection::LatestRenderPose(float outPos[3], float outOri[4])
 {
     if (!connected_ || !net_) return false;
     NetworkReceiver::RenderPose rp = net_->GetLatestRenderPose();
     if (!rp.valid) return false;
     memcpy(outPos, rp.position, sizeof(float) * 3);
     memcpy(outOri, rp.orientation, sizeof(float) * 4);
+
+    // Track the server's gaze-driven foveation centre for this frame. AlignCenterShift is the
+    // same call the server's encoder makes on the same quantized bytes, so both sides land on
+    // identical parameters; anything else un-warps to a geometrically wrong image.
+    if (foveation_.enabled && rp.hasFoveationCenter) {
+        foveation_.centerShift[0] = protocol::AlignCenterShift(
+            protocol::DequantizeCenterShift(rp.foveationCenterX),
+            foveation_.centerSize[0],
+            static_cast<float>(foveation_.targetEyeWidth),
+            foveation_.edgeRatio[0]);
+        foveation_.centerShift[1] = protocol::AlignCenterShift(
+            protocol::DequantizeCenterShift(rp.foveationCenterY),
+            foveation_.centerSize[1],
+            static_cast<float>(foveation_.targetEyeHeight),
+            foveation_.edgeRatio[1]);
+    }
     return true;
 }
 

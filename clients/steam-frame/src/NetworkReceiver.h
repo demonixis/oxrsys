@@ -69,6 +69,11 @@ public:
         int64_t presentationTimeUs = 0;
         float position[3] = {};
         float orientation[4] = {0, 0, 0, 1};
+        // Gaze-driven foveation centre the server warped THIS frame with. Must be applied before
+        // un-warping or the reconstruction is geometrically wrong, not merely stale.
+        bool hasFoveationCenter = false;
+        int8_t foveationCenterX = 0;
+        int8_t foveationCenterY = 0;
         bool valid = false;
     };
     RenderPose GetLatestRenderPose() const;

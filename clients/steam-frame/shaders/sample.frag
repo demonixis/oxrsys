@@ -16,6 +16,7 @@ layout(push_constant) uniform Push {
 } pc;
 
 // Axis-aligned foveated-encoding forward map (matches oxrsys / ALVR AADT).
+// CPU mirror + accuracy test: tests/foveation_warp.h (keep the two in sync).
 float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeRatio) {
     float c0 = (1.0 - centerSize) * 0.5;
     float c1 = (edgeRatio - 1.0) * c0 * (centerShift + 1.0) / edgeRatio;
@@ -34,10 +35,13 @@ float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeR
     return center;
 }
 
-// Binary-search inverse of compressAxis (10 iterations; the warp is smooth).
+// Binary-search inverse of compressAxis. 16 iterations: the periphery amplifies
+// the inverse error by up to edgeRatio (~7 at High), so 10 left ~5px of
+// reconstruction error at 2160px/eye; 16 keeps it sub-pixel. See
+// tests/test_foveation.cpp.
 float decompressAxis(float targetUv, float centerSize, float centerShift, float edgeRatio) {
     float lo = 0.0, hi = 1.0, mid = 0.5;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 16; ++i) {
         mid = (lo + hi) * 0.5;
         if (compressAxis(mid, centerSize, centerShift, edgeRatio) < targetUv) lo = mid;
         else hi = mid;

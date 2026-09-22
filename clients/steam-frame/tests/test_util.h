@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 #pragma once
 #include <cstdio>
 

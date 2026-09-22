@@ -1,5 +1,5 @@
 // Frame VR client — video decode layer
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 //
 // FFmpeg HEVC/H264 -> RGBA, portable across Mac (dev) and Linux (Frame).
 // Two feed modes behind one narrow seam:

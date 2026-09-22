@@ -1,5 +1,5 @@
 // Frame VR client — OpenXR input (V4): controllers + hand tracking
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 //
 // Sets up an action set (poses, trigger, squeeze, thumbstick, A/B) bound for
 // the KHR simple controller (universal) and Oculus Touch (the Frame's

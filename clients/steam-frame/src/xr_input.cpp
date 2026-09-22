@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 #include "xr_input.h"
 
 #include <oxrsys/protocol/Protocol.h>
@@ -237,6 +237,21 @@ void XrInput::Update(XrTime displayTime, protocol::TrackingPacket& pkt)
                 gazeDir_[1] = -2.0f * (q.y * q.z - q.w * q.x);
                 gazeDir_[2] = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
                 gazeValid_ = true;
+
+                // Ship gaze upstream so the server can centre its foveated encode on it.
+                // gazeDir_ is in base space; the server wants it relative to the view, so
+                // rotate by the conjugate of the head orientation set just before this call.
+                const float hx = -pkt.headOrientation[0];
+                const float hy = -pkt.headOrientation[1];
+                const float hz = -pkt.headOrientation[2];
+                const float hw = pkt.headOrientation[3];
+                const float tx = 2.0f * (hy * gazeDir_[2] - hz * gazeDir_[1]);
+                const float ty = 2.0f * (hz * gazeDir_[0] - hx * gazeDir_[2]);
+                const float tz = 2.0f * (hx * gazeDir_[1] - hy * gazeDir_[0]);
+                pkt.gazeDirection[0] = gazeDir_[0] + hw * tx + (hy * tz - hz * ty);
+                pkt.gazeDirection[1] = gazeDir_[1] + hw * ty + (hz * tx - hx * tz);
+                pkt.gazeDirection[2] = gazeDir_[2] + hw * tz + (hx * ty - hy * tx);
+                pkt.trackingFlags |= protocol::TRACKING_FLAG_EYE_GAZE_ACTIVE;
             }
         }
     }

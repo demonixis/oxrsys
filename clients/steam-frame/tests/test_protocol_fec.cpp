@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BSL-1.0
 // XOR-FEC round trip: encode a group's parity, drop one data packet, recover it.
 // This is the recovery path NetworkReceiver relies on for lost video packets.
 #include "test_util.h"
