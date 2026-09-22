@@ -37,6 +37,12 @@ public final class VideoReceiver: @unchecked Sendable {
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
+    /// Selects the FEC group layout. Must match the server: set it from
+    /// `FEC.interleavedServerFeature` in the announce, and only advertise
+    /// `FEC.interleavedCapability` in ClientConnect when this is honoured.
+    /// Defaults to the original contiguous layout.
+    public var fecInterleaved: Bool = false
+
     public var packetsReceived: UInt32 { state.withLock { $0.packetsReceived } }
     public var framesDelivered: UInt32 { state.withLock { $0.nalUnitsDelivered } }
     public var framesDropped: UInt32 { state.withLock { $0.groupsDropped } }
@@ -197,14 +203,17 @@ public final class VideoReceiver: @unchecked Sendable {
         func tryFecRecovery() -> Bool {
             guard totalExpected > 0 else { return false }
             var recovered = false
+            let layout = FEC.GroupLayout(totalDataPackets: Int(totalExpected),
+                                         interleaved: fecInterleaved)
             for g in 0..<fecGroupCount {
                 guard fecReceived[g] else { continue }
-                let groupStart = g * FEC.groupSize
-                let groupEnd = min(groupStart + FEC.groupSize, Int(totalExpected))
+                let members = layout.memberCount(g)
+                guard members > 0 else { continue }
                 // Count missing in this group
                 var missingIdx = -1
                 var missingCount = 0
-                for i in groupStart..<groupEnd {
+                for k in 0..<members {
+                    let i = layout.member(g, k)
                     if !packetReceived[i] {
                         missingIdx = i
                         missingCount += 1
@@ -215,7 +224,9 @@ public final class VideoReceiver: @unchecked Sendable {
                 let fecSrc = fecData + g * OXRProtocol.maxPacketPayload
                 let dst = frameBuf + missingIdx * OXRProtocol.maxPacketPayload
                 memcpy(dst, fecSrc, OXRProtocol.maxPacketPayload)
-                for i in groupStart..<groupEnd where i != missingIdx {
+                for k in 0..<members {
+                    let i = layout.member(g, k)
+                    guard i != missingIdx else { continue }
                     let src = frameBuf + i * OXRProtocol.maxPacketPayload
                     for j in 0..<Int(packetSizes[i]) {
                         dst[j] ^= src[j]
@@ -223,7 +234,7 @@ public final class VideoReceiver: @unchecked Sendable {
                 }
                 packetReceived[missingIdx] = true
                 var recoveredSize = UInt16(OXRProtocol.maxPacketPayload)
-                if missingIdx == groupEnd - 1 {
+                if missingIdx == layout.member(g, members - 1) {
                     let groupLastPacketSize = fecGroupLastPacketSizes[g]
                     if groupLastPacketSize > 0 && Int(groupLastPacketSize) <= OXRProtocol.maxPacketPayload {
                         recoveredSize = groupLastPacketSize

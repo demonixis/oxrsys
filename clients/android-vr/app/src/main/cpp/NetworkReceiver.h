@@ -52,6 +52,10 @@ public:
     // Set the control socket for sending NACKs (owned by XrApp, not NetworkReceiver)
     void SetControlSocket(int socket, const char* serverIp);
 
+    // Selects the FEC group layout. Must match the server, which decides from
+    // CLIENT_CAPABILITY_FEC_INTERLEAVED in our ClientConnect.
+    void SetFecInterleaved(bool interleaved) { fecInterleaved_ = interleaved; }
+
     void Stop();
 
     bool IsReceiving() const { return receiving_.load(); }
@@ -92,6 +96,8 @@ private:
                          const uint8_t* payload, size_t payloadSize);
     void StoreRenderPose(const protocol::TcpRenderPose& pose);
 
+    // Set from SERVER_FEATURE_FEC_INTERLEAVED in the announce; selects the FEC group layout.
+    bool fecInterleaved_ = false;
     int videoSocket_ = -1;
     int discoverySocket_ = -1;
 

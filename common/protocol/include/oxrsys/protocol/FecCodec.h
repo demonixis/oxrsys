@@ -67,7 +67,58 @@ inline uint32_t GroupCount(uint32_t totalDataPackets)
     return (totalDataPackets + protocol::FEC_GROUP_SIZE - 1) / protocol::FEC_GROUP_SIZE;
 }
 
+// How a frame's data packets are assigned to FEC groups.
+//
+// Contiguous is the original layout: group g owns packets [g*SIZE, g*SIZE+SIZE). One XOR parity
+// per group recovers one loss per group, so any two *adjacent* losses land in the same group and
+// are unrecoverable -- which is the common case on Wi-Fi, where loss arrives in bursts.
+//
+// Interleaved assigns group g the packets g, g+groupCount, g+2*groupCount, ... so adjacent
+// packets belong to different groups. The same single parity and the same parity overhead then
+// recover any burst up to groupCount long. Burst tolerance becomes the group count instead of 1.
+//
+// Both layouts are kept because the choice is negotiated: a receiver using a different layout
+// from the sender would XOR a packet out of the wrong group and hand plausible garbage to the
+// decoder rather than failing cleanly.
+struct GroupLayout
+{
+    uint32_t totalDataPackets = 0;
+    bool interleaved = false;
+
+    uint32_t Count() const { return GroupCount(totalDataPackets); }
+
+    // Which group owns a given data packet.
+    uint32_t GroupOf(uint32_t packetIndex) const
+    {
+        return interleaved ? (packetIndex % Count()) : (packetIndex / protocol::FEC_GROUP_SIZE);
+    }
+
+    // How many data packets a group owns.
+    uint32_t MemberCount(uint32_t groupIndex) const
+    {
+        if (groupIndex >= Count())
+        {
+            return 0;
+        }
+        if (!interleaved)
+        {
+            const uint32_t start = groupIndex * protocol::FEC_GROUP_SIZE;
+            return std::min(start + protocol::FEC_GROUP_SIZE, totalDataPackets) - start;
+        }
+        const uint32_t stride = Count();
+        return (totalDataPackets - groupIndex + stride - 1) / stride;
+    }
+
+    // The k-th data packet of a group, in ascending packet order.
+    uint32_t Member(uint32_t groupIndex, uint32_t k) const
+    {
+        return interleaved ? (groupIndex + k * Count())
+                           : (groupIndex * protocol::FEC_GROUP_SIZE + k);
+    }
+};
+
 // Compute the data packet range [outStart, outEnd) for a given FEC group index.
+// Contiguous layout only; interleaved groups are not a range. Prefer GroupLayout.
 inline void GroupRange(uint32_t groupIndex, uint32_t totalDataPackets,
                        uint32_t& outStart, uint32_t& outEnd)
 {

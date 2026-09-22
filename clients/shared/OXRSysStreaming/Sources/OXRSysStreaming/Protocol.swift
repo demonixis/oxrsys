@@ -320,6 +320,56 @@ public struct AudioPacketHeader: Sendable {
 public enum FEC {
     /// Number of data packets per FEC group. Must match server (Protocol.h FEC_GROUP_SIZE).
     public static let groupSize: Int = 10
+
+    /// Client capability advertising the interleaved group layout
+    /// (Protocol.h CLIENT_CAPABILITY_FEC_INTERLEAVED).
+    public static let interleavedCapability: UInt32 = 0x0000_0800
+    /// Server feature advertising the same (Protocol.h SERVER_FEATURE_FEC_INTERLEAVED).
+    public static let interleavedServerFeature: UInt32 = 0x0000_0400
+
+    /// How a frame's data packets map to FEC groups. Mirrors `oxr::fec::GroupLayout` in
+    /// FecCodec.h and must stay in step with it.
+    ///
+    /// Contiguous is the original layout: group g owns packets [g*size, g*size+size). One XOR
+    /// parity per group recovers one loss per group, so two *adjacent* losses land in the same
+    /// group and are unrecoverable -- the common case on Wi-Fi, where loss arrives in bursts.
+    ///
+    /// Interleaved gives group g the packets g, g+count, g+2*count, ... so adjacent packets land
+    /// in different groups. The same parity overhead then recovers any burst up to `count` long.
+    ///
+    /// The layout is negotiated. Recovering with a different layout than the sender used XORs a
+    /// packet out of the wrong group and yields plausible garbage rather than a clean failure.
+    public struct GroupLayout: Sendable {
+        public let totalDataPackets: Int
+        public let interleaved: Bool
+
+        public init(totalDataPackets: Int, interleaved: Bool) {
+            self.totalDataPackets = totalDataPackets
+            self.interleaved = interleaved
+        }
+
+        public var count: Int {
+            (totalDataPackets + FEC.groupSize - 1) / FEC.groupSize
+        }
+
+        public func group(of packetIndex: Int) -> Int {
+            interleaved ? packetIndex % count : packetIndex / FEC.groupSize
+        }
+
+        public func memberCount(_ groupIndex: Int) -> Int {
+            guard groupIndex < count else { return 0 }
+            if !interleaved {
+                let start = groupIndex * FEC.groupSize
+                return min(start + FEC.groupSize, totalDataPackets) - start
+            }
+            let stride = count
+            return (totalDataPackets - groupIndex + stride - 1) / stride
+        }
+
+        public func member(_ groupIndex: Int, _ k: Int) -> Int {
+            interleaved ? groupIndex + k * count : groupIndex * FEC.groupSize + k
+        }
+    }
 }
 
 // MARK: - Tracking

@@ -17,6 +17,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   older clients simply omit. Moving the centre never changes the encoded size, so it needs no
   encoder reconfigure; clients without the capability keep the previous fixed-centre behaviour.
 
+- Added an interleaved FEC group layout, negotiated with `CLIENT_CAPABILITY_FEC_INTERLEAVED` and
+  `SERVER_FEATURE_FEC_INTERLEAVED`. Parity groups previously covered runs of consecutive packets,
+  so any two adjacent losses landed in the same group and could not be recovered - the common case
+  on Wi-Fi, where loss arrives in bursts. Interleaving spreads each group across the frame so
+  adjacent packets fall in different groups, which recovers bursts up to the group count at
+  identical parity overhead. Clients that do not advertise the capability keep the contiguous
+  layout unchanged.
+
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit

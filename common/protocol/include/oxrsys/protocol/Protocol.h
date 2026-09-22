@@ -121,6 +121,7 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_DEPTH_OCCLUSION = 0x00000080,
     SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
     SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
+    SERVER_FEATURE_FEC_INTERLEAVED = 0x00000400,
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -141,6 +142,10 @@ enum ClientCapabilityFlags : uint32_t
     // un-warps with a different centre than the server warped with reconstructs a geometrically
     // wrong image, not merely a stale one.
     CLIENT_CAPABILITY_FOVEATION_CENTER = 0x00000800,
+    // The client assigns FEC groups by the interleaved layout (fec::GroupLayout). Must be
+    // negotiated: a receiver using a different layout from the sender XORs a packet out of the
+    // wrong group and produces plausible garbage rather than failing cleanly.
+    CLIENT_CAPABILITY_FEC_INTERLEAVED = 0x00000800,
 };
 
 enum ClientCodecCapabilityFlags : uint32_t

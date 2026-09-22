@@ -507,7 +507,9 @@ bool NetworkReceiver::TryFecRecovery()
     }
 
     bool recovered = false;
-    uint32_t groupCount = fec::GroupCount(totalPackets);
+    // Must match the layout the server used; negotiated via CLIENT_CAPABILITY_FEC_INTERLEAVED.
+    const fec::GroupLayout layout{totalPackets, fecInterleaved_};
+    const uint32_t groupCount = layout.Count();
 
     for (uint32_t g = 0; g < groupCount; g++)
     {
@@ -516,14 +518,14 @@ bool NetworkReceiver::TryFecRecovery()
             continue;  // No FEC parity for this group
         }
 
-        uint32_t groupStart, groupEnd;
-        fec::GroupRange(g, totalPackets, groupStart, groupEnd);
+        const uint32_t members = layout.MemberCount(g);
 
         // Count missing packets in this group
         uint32_t missingIdx = UINT32_MAX;
         uint32_t missingCount = 0;
-        for (uint32_t i = groupStart; i < groupEnd; i++)
+        for (uint32_t k = 0; k < members; k++)
         {
+            const uint32_t i = layout.Member(g, k);
             if (!pendingFrame_.packetReceived[i])
             {
                 missingIdx = i;
@@ -537,12 +539,13 @@ bool NetworkReceiver::TryFecRecovery()
         }
 
         // Gather present packets for XOR recovery
-        uint32_t presentCount = (groupEnd - groupStart) - 1;
+        uint32_t presentCount = members - 1;
         std::array<const uint8_t*, protocol::FEC_GROUP_SIZE> presentPtrs = {};
         std::array<uint16_t, protocol::FEC_GROUP_SIZE> presentSizes = {};
         uint32_t p = 0;
-        for (uint32_t i = groupStart; i < groupEnd; i++)
+        for (uint32_t k = 0; k < members; k++)
         {
+            const uint32_t i = layout.Member(g, k);
             if (i != missingIdx)
             {
                 presentPtrs[p] = pendingFrame_.data.data() + i * protocol::MAX_PACKET_PAYLOAD;
@@ -556,7 +559,7 @@ bool NetworkReceiver::TryFecRecovery()
         fec::Decode(presentPtrs.data(), presentSizes.data(), presentCount, fecPayload, recoveredSlot);
 
         uint16_t recoveredSize = static_cast<uint16_t>(protocol::MAX_PACKET_PAYLOAD);
-        if (missingIdx == groupEnd - 1)
+        if (missingIdx == layout.Member(g, members - 1))
         {
             const uint16_t groupLastPacketSize = pendingFrame_.fecGroupLastPacketSizes[g];
             if (groupLastPacketSize > 0 && groupLastPacketSize <= protocol::MAX_PACKET_PAYLOAD)
