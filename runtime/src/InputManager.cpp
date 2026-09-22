@@ -224,6 +224,21 @@ void InputManager::UpdateFromStreaming()
                            packet.headOrientation[1],   // y
                            packet.headOrientation[2]);  // z
 
+    // Capture the LOCAL reference space anchor from the first valid streamed head
+    // pose. OpenXR LOCAL semantics: origin at the HMD position at session start,
+    // gravity-aligned and yaw-zeroed. Without this the runtime treated LOCAL as the
+    // STAGE (floor) origin, so the view sat ~eye-height too high in LOCAL space and
+    // content authored at LOCAL y=0 appeared on the physical floor.
+    if (!localReferenceCaptured_)
+    {
+        RecenterLocalReference();
+        localReferenceCaptured_ = true;
+        spdlog::info("InputManager: captured LOCAL reference origin pos=({:.3f}, {:.3f}, {:.3f}) "
+                     "(STAGE-relative eye height={:.3f}m)",
+                     localReferencePosition_.x, localReferencePosition_.y,
+                     localReferencePosition_.z, localReferencePosition_.y);
+    }
+
     const bool leftControllerActive =
         (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE) != 0;
     const bool rightControllerActive =
@@ -348,6 +363,70 @@ XrPosef InputManager::GetHeadPose() const
     pose.position.x = headPosition_.x;
     pose.position.y = headPosition_.y;
     pose.position.z = headPosition_.z;
+    return pose;
+}
+
+void InputManager::RecenterLocalReference()
+{
+    localReferencePosition_ = headPosition_;
+
+    // Yaw-only, gravity-aligned orientation: project the head forward vector onto
+    // the horizontal (XZ) plane and keep only the rotation about world-up (+Y).
+    glm::vec3 forward = headQuat_ * glm::vec3(0.0f, 0.0f, -1.0f);
+    float yaw = std::atan2(-forward.x, -forward.z);
+    if (!std::isfinite(yaw))
+    {
+        yaw = 0.0f;
+    }
+    localReferenceYaw_ = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+XrPosef InputManager::GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceType) const
+{
+    XrPosef pose{};
+    pose.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    pose.position = {0.0f, 0.0f, 0.0f};
+
+    // Manual floor calibration. The origin's Y is shifted by -offset so that a
+    // pose located relative to it (headY - originY) becomes headY + offset:
+    // positive offset raises the player, negative lowers them. Default 0 leaves
+    // the client's floor-relative pose untouched.
+    const float stageOffset = Config::Get().GetValues().stageHeightOffsetM;
+    const float floorOriginY = -stageOffset;
+
+    switch (referenceSpaceType)
+    {
+        case XR_REFERENCE_SPACE_TYPE_STAGE:
+            // Client head pose is already STAGE (physical-floor) relative; only
+            // the optional manual floor calibration is applied.
+            pose.position = {0.0f, floorOriginY, 0.0f};
+            break;
+
+        case XR_REFERENCE_SPACE_TYPE_LOCAL:
+            if (localReferenceCaptured_)
+            {
+                pose.position = {localReferencePosition_.x,
+                                 localReferencePosition_.y,
+                                 localReferencePosition_.z};
+                pose.orientation = {localReferenceYaw_.x, localReferenceYaw_.y,
+                                    localReferenceYaw_.z, localReferenceYaw_.w};
+            }
+            break;
+
+        case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
+            // LOCAL's horizontal position and yaw, but anchored at floor height.
+            if (localReferenceCaptured_)
+            {
+                pose.position = {localReferencePosition_.x, floorOriginY, localReferencePosition_.z};
+                pose.orientation = {localReferenceYaw_.x, localReferenceYaw_.y,
+                                    localReferenceYaw_.z, localReferenceYaw_.w};
+            }
+            break;
+
+        default:
+            break;
+    }
+
     return pose;
 }
 

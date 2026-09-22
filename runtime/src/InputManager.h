@@ -48,6 +48,16 @@ public:
     XrPosef GetHeadPose() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
 
+    // World-origin pose for a reference space type (STAGE/LOCAL/LOCAL_FLOOR).
+    // The incoming client head pose is STAGE (physical-floor) relative, so STAGE is
+    // the identity origin. LOCAL is anchored to the HMD pose captured at session
+    // start (yaw-only, gravity-aligned); LOCAL_FLOOR shares LOCAL's x/z + yaw but
+    // sits at floor height. See Space::GetWorldPose.
+    XrPosef GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceType) const;
+
+    // Re-anchor the LOCAL reference to the current head pose (recenter).
+    void RecenterLocalReference();
+
     // Controller poses (world space)
     XrPosef GetControllerPose(Hand hand) const;
 
@@ -118,6 +128,13 @@ private:
     TrackingReceiver* trackingReceiver_ = nullptr;
 
     // Head state (quaternion from streaming client)
+    // LOCAL reference space anchor, captured from the first streamed head pose
+    // (and on recenter). Position is the HMD position at capture; orientation is
+    // the yaw-only (gravity-aligned) component of the head orientation at capture.
+    bool localReferenceCaptured_ = false;
+    glm::vec3 localReferencePosition_ = {0.0f, 0.0f, 0.0f};
+    glm::quat localReferenceYaw_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
     glm::quat headQuat_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z
     glm::quat leftControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     glm::quat rightControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);

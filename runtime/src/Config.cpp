@@ -354,6 +354,14 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                     values.dynamicResolutionMinScale = val;
                 }
             }
+            else if (key == "stage_height_offset_m")
+            {
+                float val = std::stof(value);
+                if (val >= -1.0f && val <= 1.0f)
+                {
+                    values.stageHeightOffsetM = val;
+                }
+            }
             else if (key == "keyframe_interval_sec")
             {
                 int val = std::stoi(value);

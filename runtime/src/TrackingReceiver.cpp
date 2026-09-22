@@ -295,21 +295,48 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     float controllerRotationHorizonSeconds = totalHorizonSeconds;
     float positionHorizonSeconds = totalHorizonSeconds * 0.5f;
 
+    // Issue: "look-down-moves-forward" (rotation -> translation coupling).
+    // The client-reported head linear velocity during a head rotation is the
+    // tangential velocity of the eye pivoting about the neck (~0.1-0.15m lever arm).
+    // Linearly extrapolating along that tangent overshoots the genuine (arc) eye
+    // motion, so the scene appears to translate when the user only rotates. Scale the
+    // HEAD position-prediction horizon down as angular speed rises: full horizon for
+    // near-pure translation, ramping to a small floor during brisk head turns. This
+    // tames the overshoot without disabling prediction (no added latency/judder) and
+    // leaves genuine walking translation unaffected.
+    constexpr float kCouplingRampLoRadPerSec = 0.5f;  // below this: no reduction
+    constexpr float kCouplingRampHiRadPerSec = 4.0f;  // at/above this: full reduction
+    constexpr float kCouplingMinHorizonScale = 0.15f; // floor on the position horizon
+    float couplingT = std::clamp(
+        (headAngularSpeed - kCouplingRampLoRadPerSec) /
+            (kCouplingRampHiRadPerSec - kCouplingRampLoRadPerSec),
+        0.0f, 1.0f);
+    float couplingScale = 1.0f - (1.0f - kCouplingMinHorizonScale) * couplingT;
+    float headPositionHorizonSeconds = positionHorizonSeconds * couplingScale;
+
+    float headReportedSpeed = glm::length(headLinVel);
+
     int64_t nowNs = SteadyClockNowNs();
     int64_t lastLogNs = lastPredictionDiagnosticNs_.load();
     if (nowNs - lastLogNs >= 5LL * 1000LL * 1000LL * 1000LL &&
         lastPredictionDiagnosticNs_.compare_exchange_strong(lastLogNs, nowNs))
     {
-        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} speed={:.2f}rad/s "
-                     "reordered_dropped={}",
+        // Diagnostic evidence for the coupling fix: reported linear/angular speed,
+        // the scaled head position horizon, and the resulting predicted forward
+        // displacement (what previously overshot as "world moves when I look").
+        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} "
+                     "ang_speed={:.2f}rad/s lin_speed={:.3f}m/s pos_horizon={:.2f}ms "
+                     "(scale={:.2f}) predicted_disp={:.1f}mm reordered_dropped={}",
                      horizonMs, hasHeadAngularVelocity ? "yes" : "no", headAngularSpeed,
+                     headReportedSpeed, headPositionHorizonSeconds * 1000.0f, couplingScale,
+                     std::min(headReportedSpeed, 3.0f) * headPositionHorizonSeconds * 1000.0f,
                      reorderedDropCount_.load());
     }
 
     StoreVec3(outPacket.headPosition,
               PredictPosition(LoadVec3(previous.packet.headPosition),
                               LoadVec3(current.packet.headPosition),
-                              dtSeconds, positionHorizonSeconds, 3.0f, headLinVel));
+                              dtSeconds, headPositionHorizonSeconds, 3.0f, headLinVel));
 
     if (hasHeadAngularVelocity)
     {
