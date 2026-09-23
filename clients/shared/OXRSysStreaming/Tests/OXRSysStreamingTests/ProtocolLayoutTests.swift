@@ -22,6 +22,7 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(ServerFeatureFlags.streamReconfigure, 0x00000010)
         XCTAssertEqual(ClientCapabilityFlags.streamReconfigure, 0x00000010)
         XCTAssertEqual(ClientCapabilityFlags.tenBitEncoding, 0x00000400)
+        XCTAssertEqual(ClientCapabilityFlags.foveationCenter, 0x00000800)
         XCTAssertEqual(VideoCodec.h264.rawValue, 1)
         XCTAssertEqual(ClientCodecCapability.h265, 0x00000001)
         XCTAssertEqual(ClientCodecCapability.h264, 0x00000002)
@@ -111,11 +112,20 @@ final class ProtocolLayoutTests: XCTestCase {
     func testVideoAndControlLayoutsMatchCppWireFormat() {
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.size, 24)
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.fecGroupLastPacketPayloadSize), 12)
-        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.reserved), 14)
+        // foveationCenterX/Y reuse bytes formerly named `reserved`: same offsets, same sizes.
+        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.foveationCenterX), 14)
+        XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.foveationCenterY), 15)
         XCTAssertEqual(MemoryLayout<VideoPacketHeader>.offset(of: \.presentationTimeNs), 16)
+        XCTAssertEqual(VideoFlags.foveationCenter, 0x80)
         XCTAssertEqual(MemoryLayout<TcpRecordHeader>.size, 12)
         XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.size, 24)
+        XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.offset(of: \.foveationCenterX), 18)
+        XCTAssertEqual(MemoryLayout<TcpVideoNalHeader>.offset(of: \.foveationCenterY), 19)
         XCTAssertEqual(MemoryLayout<TcpRenderPose>.size, 48)
+        XCTAssertEqual(MemoryLayout<TcpRenderPose>.offset(of: \.foveationCenterX), 12)
+        XCTAssertEqual(MemoryLayout<TcpRenderPose>.offset(of: \.foveationCenterY), 13)
+        XCTAssertEqual(MemoryLayout<TcpRenderPose>.offset(of: \.hasFoveationCenter), 14)
+        XCTAssertEqual(MemoryLayout<TcpRenderPose>.offset(of: \.position), 16)
         XCTAssertEqual(MemoryLayout<TcpAudioHeader>.size, 24)
         XCTAssertEqual(OXRProtocol.tcpRecordMagic, 0x4f585255)
         XCTAssertEqual(MemoryLayout<AudioPacketHeader>.size, 32)
@@ -128,7 +138,10 @@ final class ProtocolLayoutTests: XCTestCase {
     }
 
     func testTrackingLayoutMatchesCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1064)
+        // The C++ struct is 1080 (gazeDirection ends at 1076, int64 alignment pads to 8);
+        // Swift's `size` excludes that trailing padding, `stride` matches sizeof.
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1076)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.stride, 1080)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headLinearVelocity), 152)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headAngularVelocity), 164)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftHandJoints), 176)
@@ -138,7 +151,11 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimRot), 1020)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimPos), 1036)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimRot), 1048)
+        // Eye gaze appended after the aim poses; Swift clients send it zeroed with the flag
+        // clear, which the server treats as no gaze.
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.gazeDirection), 1064)
         XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
         XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
+        XCTAssertEqual(TrackingFlagsValues.eyeGazeActive, 0x0010)
     }
 }

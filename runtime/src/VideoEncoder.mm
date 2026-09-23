@@ -4,6 +4,8 @@
 #import "Config.h"
 #import "VideoTextureFormat.h"
 
+#include <oxrsys/protocol/Foveation.h>
+
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -1388,6 +1390,12 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     }
 
     bool forceKeyframe = forceKeyframe_.exchange(false);
+    // Latch the gaze centre once per frame so the uniforms below and the metrics reported to the
+    // streaming server describe the same warp, even if new gaze arrives mid-encode.
+    const uint32_t packedCenter = foveationCenter_.load(std::memory_order_relaxed);
+    const bool gazeCenterSet = (packedCenter & kFoveationCenterSet) != 0;
+    const int8_t centerQuantX = static_cast<int8_t>((packedCenter >> 8) & 0xFF);
+    const int8_t centerQuantY = static_cast<int8_t>(packedCenter & 0xFF);
     const bool useFoveatedEncoding = stereo &&
         foveationSettings_.enabled &&
         videoToolbox_.foveationPipeline != nullptr &&
@@ -1446,7 +1454,29 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         MetalFoveationUniforms uniforms = {};
         uniforms.centerSize = {foveationSettings_.centerSizeX, foveationSettings_.centerSizeY};
-        uniforms.centerShift = {foveationSettings_.centerShiftX, foveationSettings_.centerShiftY};
+        // A gaze centre, once set, overrides the static preset shift. DecodeCenterShift is the
+        // same call the client makes on the quantized bytes, so both sides land on identical
+        // parameters. Until one is set, keep the announced static shift: clients un-warp with
+        // it, so silently dropping it would desync the warp the moment a preset ships a
+        // non-zero shift.
+        if (gazeCenterSet)
+        {
+            uniforms.centerShift = {
+                oxr::protocol::DecodeCenterShift(centerQuantX,
+                                                 foveationSettings_.centerSizeX,
+                                                 static_cast<float>(foveationSettings_.targetEyeWidth),
+                                                 foveationSettings_.edgeRatioX),
+                oxr::protocol::DecodeCenterShift(centerQuantY,
+                                                 foveationSettings_.centerSizeY,
+                                                 static_cast<float>(foveationSettings_.targetEyeHeight),
+                                                 foveationSettings_.edgeRatioY),
+            };
+        }
+        else
+        {
+            uniforms.centerShift = {foveationSettings_.centerShiftX,
+                                    foveationSettings_.centerShiftY};
+        }
         uniforms.edgeRatio = {foveationSettings_.edgeRatioX, foveationSettings_.edgeRatioY};
         uniforms.eyeSizeRatio = {foveationSettings_.eyeWidthRatio, foveationSettings_.eyeHeightRatio};
         uniforms.sourceSrgb = {
@@ -1611,6 +1641,10 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     context->metrics.frameNumber = frameNumberCounter_.fetch_add(1);
     context->metrics.timestampNs = timestampNs;
     context->metrics.keyframe = forceKeyframe;
+    const bool foveationCenterValid = useFoveatedEncoding && gazeCenterSet;
+    context->metrics.foveationCenterX = foveationCenterValid ? centerQuantX : 0;
+    context->metrics.foveationCenterY = foveationCenterValid ? centerQuantY : 0;
+    context->metrics.foveationCenterValid = foveationCenterValid;
     context->codec = codec_;
     context->encodeStart = Clock::now();
     context->encodeSubmitFinished = context->encodeStart;

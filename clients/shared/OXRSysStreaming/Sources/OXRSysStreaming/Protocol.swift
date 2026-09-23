@@ -58,7 +58,10 @@ public struct TcpVideoNalHeader: Sendable {
     public var payloadSize: UInt32 = 0
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
-    public var reserved: UInt16 = 0
+    // Mirrors VideoPacketHeader: gaze-driven foveation centre for this frame, meaningful only
+    // when VideoFlags.foveationCenter is set. Reuses the two bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
     public var reserved2: UInt32 = 0
 
     public init() {}
@@ -67,7 +70,12 @@ public struct TcpVideoNalHeader: Sendable {
 public struct TcpRenderPose: Sendable {
     public var presentationTimeNs: Int64 = 0
     public var frameIndex: UInt32 = 0
-    public var reserved: UInt32 = 0
+    // Gaze-driven foveation centre for this frame, carried alongside the render pose because
+    // the client needs both to present it correctly. Reuses the bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
+    public var hasFoveationCenter: UInt8 = 0
+    public var reservedPad: UInt8 = 0
     public var position: (Float, Float, Float) = (0, 0, 0)
     public var orientation: (Float, Float, Float, Float) = (0, 0, 0, 1)
     public var reserved2: UInt32 = 0
@@ -121,6 +129,9 @@ public struct ClientCapabilityFlags {
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
     public static let tenBitEncoding: UInt32 = 0x00000400
+    // Client un-warps every frame with the centre carried in VideoFlags.foveationCenter /
+    // TcpRenderPose. Without this bit the server keeps the centre static.
+    public static let foveationCenter: UInt32 = 0x00000800
 }
 
 public enum FoveationPreset: UInt32, Sendable {
@@ -271,7 +282,11 @@ public struct VideoPacketHeader: Sendable {
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
     public var fecGroupLastPacketPayloadSize: UInt16 = 0
-    public var reserved: UInt16 = 0
+    // Gaze-driven foveated-encoding centre for this frame, quantized to [-127, 127]. Meaningful
+    // only when VideoFlags.foveationCenter is set; zero otherwise, which is the fixed-centre
+    // behaviour older clients already assume. Reuses the bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
     public var presentationTimeNs: Int64 = 0
 
     public init() {}
@@ -286,6 +301,7 @@ public struct VideoFlags {
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
     public static let alphaBlend: UInt8 = 0x40
+    public static let foveationCenter: UInt8 = 0x80
 }
 
 public struct AudioPacketHeader: Sendable {
@@ -355,6 +371,11 @@ public struct TrackingPacket: Sendable {
     public var rightControllerAimPos: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
 
+    // Eye gaze direction in head space as a unit vector (-Z forward). Valid only when
+    // TrackingFlagsValues.eyeGazeActive is set; visionOS never exposes a raw gaze ray to
+    // applications, so Swift clients leave it zero. Appended so the C++ struct stays in sync.
+    public var gazeDirection: (Float, Float, Float) = (0, 0, 0)
+
     public init() {}
 }
 
@@ -404,6 +425,7 @@ public struct TrackingFlagsValues {
     public static let rightHandActive: UInt32 = 0x0002
     public static let leftControllerActive: UInt32 = 0x0004
     public static let rightControllerActive: UInt32 = 0x0008
+    public static let eyeGazeActive: UInt32 = 0x0010
 }
 
 public struct ButtonFlags {

@@ -67,7 +67,10 @@ struct TcpVideoNalHeader
     uint32_t payloadSize = 0;
     uint8_t flags = 0;
     uint8_t codec = 0;
-    uint16_t reserved = 0;
+    // Mirrors VideoPacketHeader: gaze-driven foveation centre for this frame, meaningful only
+    // when VIDEO_FLAG_FOVEATION_CENTER is set. Reuses the two bytes formerly named `reserved`.
+    int8_t foveationCenterX = 0;
+    int8_t foveationCenterY = 0;
     uint32_t reserved2 = 0;
 };
 
@@ -75,7 +78,12 @@ struct TcpRenderPose
 {
     int64_t presentationTimeNs = 0;
     uint32_t frameIndex = 0;
-    uint32_t reserved = 0;
+    // Gaze-driven foveation centre for this frame, carried alongside the render pose because the
+    // client needs both to present it correctly. Reuses the four bytes formerly named `reserved`.
+    int8_t foveationCenterX = 0;
+    int8_t foveationCenterY = 0;
+    uint8_t hasFoveationCenter = 0;
+    uint8_t reservedPad = 0;
     float position[3] = {};
     float orientation[4] = {0, 0, 0, 1};
     uint32_t reserved2 = 0;
@@ -128,6 +136,11 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SPATIAL_ENTITY = 0x00000100,
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
     CLIENT_CAPABILITY_TEN_BIT_ENCODING = 0x00000400, // client can decode HEVC Main10
+    // Client un-warps every frame with the centre carried in VIDEO_FLAG_FOVEATION_CENTER /
+    // TcpRenderPose. Without this bit the server must keep the centre static: a client that
+    // un-warps with a different centre than the server warped with reconstructs a geometrically
+    // wrong image, not merely a stale one.
+    CLIENT_CAPABILITY_FOVEATION_CENTER = 0x00000800,
 };
 
 enum ClientCodecCapabilityFlags : uint32_t
@@ -244,7 +257,12 @@ struct VideoPacketHeader
     uint8_t flags;             // See VideoFlags
     uint8_t codec;             // VideoCodec cast to u8
     uint16_t fecGroupLastPacketPayloadSize; // FEC packets: payload size of this group's last data packet
-    uint16_t reserved = 0;
+    // Gaze-driven foveated-encoding centre for this frame, quantized to [-127, 127] by
+    // protocol::QuantizeCenterShift. Meaningful only when VIDEO_FLAG_FOVEATION_CENTER is set;
+    // zero otherwise, which is the fixed-centre behaviour older clients already assume. Occupies
+    // the two bytes previously named `reserved`, so the wire layout is unchanged.
+    int8_t foveationCenterX = 0;
+    int8_t foveationCenterY = 0;
     int64_t presentationTimeNs; // Server-side timestamp
 };
 
@@ -258,6 +276,7 @@ enum VideoFlags : uint8_t
     VIDEO_FLAG_FEC = 0x10,     // Forward Error Correction parity packet
     VIDEO_FLAG_RENDER_POSE = 0x20, // Payload contains the server's render pose for this frame
     VIDEO_FLAG_ALPHA_BLEND = 0x40, // App submitted alpha-blend environment or source-alpha projection layer
+    VIDEO_FLAG_FOVEATION_CENTER = 0x80, // foveationCenterX/Y carry this frame's gaze-driven centre
 };
 
 struct AudioPacketHeader
@@ -330,6 +349,12 @@ struct TrackingPacket
     float leftControllerAimRot[4];
     float rightControllerAimPos[3];
     float rightControllerAimRot[4];
+
+    // Eye gaze direction in head space as a unit vector (-Z forward), from
+    // XR_EXT_eye_gaze_interaction. Drives the server's foveated-encoding centre. Valid only when
+    // TRACKING_FLAG_EYE_GAZE_ACTIVE is set. Appended at the end so shorter packets from clients
+    // that predate this field stay readable.
+    float gazeDirection[3];
 };
 
 enum ButtonFlags : uint32_t
@@ -353,6 +378,7 @@ enum TrackingFlags : uint32_t
     TRACKING_FLAG_RIGHT_HAND_ACTIVE = 0x0002,
     TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE = 0x0004,
     TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE = 0x0008,
+    TRACKING_FLAG_EYE_GAZE_ACTIVE = 0x0010,
 };
 
 // ─── Control Channel (bidirectional, UDP on CONTROL_PORT) ───────────────────

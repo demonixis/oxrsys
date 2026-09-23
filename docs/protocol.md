@@ -135,6 +135,42 @@ reduced encoded resolution as a normal downscaled stream. Until the protocol car
 foveated target size, the server enables AADT only when the shader target can match the announced
 source dimensions coherently; otherwise it announces a normal stream.
 
+### Gaze-driven foveation centre
+
+The announced preset parameters place the foveal region at a fixed centre. A client that also
+advertises `CLIENT_CAPABILITY_FOVEATION_CENTER` and reports an eye-gaze direction
+(`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`) gets that centre steered
+to follow gaze instead: the server maps the direction in tan space against the client's reported
+eye FOV, scales for the warp's steering range, and low-passes the result so fixation jitter does
+not shimmer the foveal boundary. While gaze is inactive the centre decays back to zero shift
+rather than freezing at the last fixation. Without the capability bit the centre never
+moves, whatever the client reports: a client that cannot un-warp a per-frame centre must keep the
+one it was announced.
+
+The centre must be identical on both ends: a client that un-warps with a different centre than the
+server warped with produces a geometrically wrong image, not merely stale foveation. The protocol
+therefore carries the exact value used:
+
+- the server quantizes the requested shift to `int8` via `QuantizeCenterShift`, then warps with the
+  dequantized result, so the transmitted bytes are precisely what produced the image
+- `VIDEO_FLAG_FOVEATION_CENTER` marks headers whose centre bytes are meaningful
+- the bytes ride in `VideoPacketHeader.foveationCenter{X,Y}`,
+  `TcpVideoNalHeader.foveationCenter{X,Y}`, and `TcpRenderPose.foveationCenter{X,Y}` with
+  `hasFoveationCenter`, all of which reuse previously reserved bytes, so no wire size changes
+- both ends call the shared `DecodeCenterShift` in `Foveation.h` to turn the byte back into the
+  aligned shift, so the reconstruction is bit-identical
+
+The identity is per *frame*, not per connection: the centre is bound to the frame whose packets
+carry it, and a client must un-warp each displayed frame with that frame's own centre (from its
+video packets or its render pose, matched by frame index or presentation time) — never with the
+most recently received value. Decode pipelines run several frames deep, so "latest received"
+leads the displayed frame; while the centre moves, that off-by-N reconstruction stretches the
+periphery visibly even though every individual value is correct.
+
+Moving the centre never changes the encoded resolution, because the optimized size depends only on
+centre *size* and edge ratio, not centre *shift*. The centre may therefore move every frame with no
+encoder reconfigure. Clients that report no gaze keep the previous fixed-centre behaviour.
+
 ## Video Stream
 
 UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
@@ -145,6 +181,7 @@ UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payl
 - flags
 - codec
 - FEC group final-packet payload size, only meaningful on `VIDEO_FLAG_FEC` packets
+- gaze-driven foveation centre, only meaningful on `VIDEO_FLAG_FOVEATION_CENTER` packets
 - presentation timestamp
 
 Current codec identifiers:
@@ -187,8 +224,11 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+- optional eye-gaze direction, a unit vector in head space with -Z forward
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
+Eye-gaze presence is indicated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`; it is appended at the end of the
+struct, so clients predating it send a shorter packet that the receiver accepts and zero-fills.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
 `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
 controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.
