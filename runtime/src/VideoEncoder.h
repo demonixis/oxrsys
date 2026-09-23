@@ -106,11 +106,14 @@ public:
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Per-frame gaze centre, quantized by oxr::protocol::QuantizeCenterShift. Cheap and safe to
     // call every frame from the streaming thread: moving the centre never changes the encoded
-    // size, so it needs no reconfigure. Packed into one atomic so x and y cannot tear apart.
+    // size, so it needs no reconfigure. Packed into one atomic so x and y cannot tear apart; the
+    // set bit distinguishes a gaze-steered (0, 0) from "never steered", which must keep using
+    // the static preset shift the client was announced.
     void SetFoveationCenter(int8_t x, int8_t y)
     {
-        foveationCenter_.store(static_cast<uint16_t>((static_cast<uint8_t>(x) << 8) |
-                                                     static_cast<uint8_t>(y)),
+        foveationCenter_.store(kFoveationCenterSet |
+                                   (static_cast<uint32_t>(static_cast<uint8_t>(x)) << 8) |
+                                   static_cast<uint32_t>(static_cast<uint8_t>(y)),
                                std::memory_order_relaxed);
     }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
@@ -197,7 +200,8 @@ private:
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> foveationValidationWarningLogged_{false};
-    std::atomic<uint16_t> foveationCenter_{0};
+    static constexpr uint32_t kFoveationCenterSet = 0x10000;
+    std::atomic<uint32_t> foveationCenter_{0};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};

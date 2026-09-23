@@ -137,11 +137,15 @@ source dimensions coherently; otherwise it announces a normal stream.
 
 ### Gaze-driven foveation centre
 
-The announced preset parameters place the foveal region at a fixed centre. When a client reports an
-eye-gaze direction (`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`), the
-server instead steers that centre to follow gaze, normalizing the direction in tan space against the
-client's reported eye FOV and low-passing it so fixation jitter does not shimmer the foveal
-boundary.
+The announced preset parameters place the foveal region at a fixed centre. A client that also
+advertises `CLIENT_CAPABILITY_FOVEATION_CENTER` and reports an eye-gaze direction
+(`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`) gets that centre steered
+to follow gaze instead: the server maps the direction in tan space against the client's reported
+eye FOV, scales for the warp's steering range, and low-passes the result so fixation jitter does
+not shimmer the foveal boundary. While gaze is inactive the centre decays back to zero shift
+rather than freezing at the last fixation. Without the capability bit the centre never
+moves, whatever the client reports: a client that cannot un-warp a per-frame centre must keep the
+one it was announced.
 
 The centre must be identical on both ends: a client that un-warps with a different centre than the
 server warped with produces a geometrically wrong image, not merely stale foveation. The protocol
@@ -153,8 +157,8 @@ therefore carries the exact value used:
 - the bytes ride in `VideoPacketHeader.foveationCenter{X,Y}`,
   `TcpVideoNalHeader.foveationCenter{X,Y}`, and `TcpRenderPose.foveationCenter{X,Y}` with
   `hasFoveationCenter`, all of which reuse previously reserved bytes, so no wire size changes
-- both ends call the shared `AlignCenterShift` in `Foveation.h` to snap the centre onto the same
-  grid the edge compression uses
+- both ends call the shared `DecodeCenterShift` in `Foveation.h` to turn the byte back into the
+  aligned shift, so the reconstruction is bit-identical
 
 Moving the centre never changes the encoded resolution, because the optimized size depends only on
 centre *size* and edge ratio, not centre *shift*. The centre may therefore move every frame with no

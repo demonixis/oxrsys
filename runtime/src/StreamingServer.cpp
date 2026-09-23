@@ -250,53 +250,23 @@ StreamLayout BuildStreamLayout(uint32_t renderWidth,
     return layout;
 }
 
-struct GazeCenterOffset
+// Stamps the per-frame foveation centre into a video header (VideoPacketHeader or
+// TcpVideoNalHeader; both spell the fields identically). Every header of a frame must carry the
+// same centre, whichever transport or packet type delivers it: a client may reconstruct from
+// any copy, and one drifted builder means a geometrically wrong un-warp on that path only.
+template <typename Header>
+void StampFoveationCenter(Header& header,
+                          bool hasFoveationCenter,
+                          int8_t foveationCenterX,
+                          int8_t foveationCenterY)
 {
-    float x = 0.0f;
-    float y = 0.0f;
-    bool valid = false;
-};
-
-// Map an eye-gaze direction (head space, -Z forward) to the normalized foveation centre offset
-// the encoder expects, in [-1, 1] per axis. Works in tan space so the mapping matches the
-// projection rather than the raw direction, normalized by the client's reported half-FOV.
-//
-// SIGN CONVENTION: +x moves the foveal region right; the Y axis is negated because gaze is
-// Y-up while the encoder's UV space is Y-down. This is the one part of the path that cannot be
-// verified headlessly -- confirm visually that the sharp region tracks the eye rather than
-// mirroring it before trusting it on hardware.
-GazeCenterOffset ComputeGazeCenterOffset(const oxr::protocol::TrackingPacket& packet)
-{
-    if ((packet.trackingFlags & oxr::protocol::TRACKING_FLAG_EYE_GAZE_ACTIVE) == 0)
+    if (!hasFoveationCenter)
     {
-        return {};
+        return;
     }
-
-    const float forward = -packet.gazeDirection[2];
-    if (forward <= 0.05f)
-    {
-        // Gaze at or behind the view plane: no meaningful centre, keep the previous one.
-        return {};
-    }
-
-    const float tanX = packet.gazeDirection[0] / forward;
-    const float tanY = packet.gazeDirection[1] / forward;
-
-    // eyeFov is OpenXR-signed (left, right, up, down). Fall back to a 45 degree half-angle when
-    // the client does not report one.
-    const float defaultHalfTan = 1.0f;
-    const float halfTanX = (packet.eyeFov[0] != 0.0f || packet.eyeFov[1] != 0.0f)
-        ? std::max(std::fabs(std::tan(packet.eyeFov[0])), std::fabs(std::tan(packet.eyeFov[1])))
-        : defaultHalfTan;
-    const float halfTanY = (packet.eyeFov[2] != 0.0f || packet.eyeFov[3] != 0.0f)
-        ? std::max(std::fabs(std::tan(packet.eyeFov[2])), std::fabs(std::tan(packet.eyeFov[3])))
-        : defaultHalfTan;
-
-    GazeCenterOffset offset;
-    offset.x = std::clamp(tanX / std::max(halfTanX, 0.0001f), -1.0f, 1.0f);
-    offset.y = std::clamp(-tanY / std::max(halfTanY, 0.0001f), -1.0f, 1.0f);
-    offset.valid = true;
-    return offset;
+    header.flags |= oxr::protocol::VIDEO_FLAG_FOVEATION_CENTER;
+    header.foveationCenterX = foveationCenterX;
+    header.foveationCenterY = foveationCenterY;
 }
 
 VideoEncoder::FoveationSettings BuildEncoderFoveationSettings(
@@ -653,9 +623,15 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    clientSupportsFoveationCenter_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(encoderMutex_);
+        gazeSteering_ = {};
+    }
+    gazeCenterFilter_.Reset();
     activeVideoCodec_.store(oxr::protocol::VideoCodec::H265);
     {
         std::lock_guard<std::mutex> lock(streamConfigMutex_);
@@ -1399,6 +1375,7 @@ void StreamingServer::EncodeThread()
 
         std::shared_ptr<VideoEncoder> encoder;
         std::shared_ptr<CallbackAccess> callbackAccess;
+        GazeSteeringState gazeSteering;
         {
             std::lock_guard<std::mutex> lock(encoderMutex_);
             if (encoder_ != nullptr)
@@ -1406,6 +1383,7 @@ void StreamingServer::EncodeThread()
                 encoder = encoder_;
             }
             callbackAccess = GetCallbackAccess();
+            gazeSteering = gazeSteering_;
         }
 
         if (!encoder || !encoder->IsInitialized())
@@ -1426,23 +1404,19 @@ void StreamingServer::EncodeThread()
 
         // Steer the foveal region with gaze. Moving the centre never changes the encoded size
         // (see Foveation.h), so this is safe every frame and needs no encoder reconfigure.
-        if (trackingReceiver_ != nullptr)
+        // Gated on CLIENT_CAPABILITY_FOVEATION_CENTER via gazeSteering_.enabled: without it the
+        // encoder keeps the announced static centre.
+        if (gazeSteering.enabled && trackingReceiver_ != nullptr)
         {
             oxr::protocol::TrackingPacket trackingPacket = {};
             if (trackingReceiver_->GetLatestPose(trackingPacket))
             {
-                const GazeCenterOffset gaze = ComputeGazeCenterOffset(trackingPacket);
-                if (gaze.valid)
-                {
-                    // Light low-pass: saccades are fine to follow immediately, but fixation
-                    // jitter would otherwise shimmer the foveal boundary every frame.
-                    constexpr float kGazeSmoothing = 0.35f;
-                    gazeCenterX_ += (gaze.x - gazeCenterX_) * kGazeSmoothing;
-                    gazeCenterY_ += (gaze.y - gazeCenterY_) * kGazeSmoothing;
-                }
-                encoder->SetFoveationCenter(
-                    oxr::protocol::QuantizeCenterShift(gazeCenterX_),
-                    oxr::protocol::QuantizeCenterShift(gazeCenterY_));
+                const oxrsys::gaze_foveation::GazeCenterOffset gaze =
+                    oxrsys::gaze_foveation::ComputeGazeCenterOffset(
+                        trackingPacket, gazeSteering.centerSizeX, gazeSteering.centerSizeY);
+                const oxrsys::gaze_foveation::GazeCenterFilter::QuantizedCenter center =
+                    gazeCenterFilter_.Update(gaze);
+                encoder->SetFoveationCenter(center.x, center.y);
             }
         }
 
@@ -1862,6 +1836,13 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
                 encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
                     useFoveatedEncoding, layout));
+                const bool clientSupportsFoveationCenter = HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_CENTER);
+                clientSupportsFoveationCenter_.store(clientSupportsFoveationCenter);
+                gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter,
+                                 layout.parameters.centerSizeX,
+                                 layout.parameters.centerSizeY};
+                gazeCenterFilter_.Reset();
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2082,6 +2063,13 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
                 encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
                     useFoveatedEncoding, layout));
+                const bool clientSupportsFoveationCenter = HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_CENTER);
+                clientSupportsFoveationCenter_.store(clientSupportsFoveationCenter);
+                gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter,
+                                 layout.parameters.centerSizeX,
+                                 layout.parameters.centerSizeY};
+                gazeCenterFilter_.Reset();
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2219,12 +2207,17 @@ void StreamingServer::HandleClientDisconnect()
                 spdlog::warn("StreamingServer: disconnected encoder drain deferred");
             }
         }
+        gazeSteering_ = {};
     }
+    // The smoothed centre is session state: carrying it into the next client's session would
+    // start that session encoded around the previous user's last fixation.
+    gazeCenterFilter_.Reset();
 
     targetRefreshRateHz_.store(refreshRateHz_);
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    clientSupportsFoveationCenter_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
@@ -2617,6 +2610,9 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
             encoder_.reset();
             RenewCallbackAccess();
             encoder_ = std::move(newEncoder);
+            gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter_.load(),
+                             layout.foveationLayout.parameters.centerSizeX,
+                             layout.foveationLayout.parameters.centerSizeY};
         }
     }
     if (!previousEncoderDrained)
@@ -3000,12 +2996,8 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
     poseHeader.totalPackets = 0;
     poseHeader.payloadSize = sizeof(posePayload);
     poseHeader.flags = oxr::protocol::VIDEO_FLAG_RENDER_POSE;
-    if (frame.hasFoveationCenter)
-    {
-        poseHeader.flags |= oxr::protocol::VIDEO_FLAG_FOVEATION_CENTER;
-        poseHeader.foveationCenterX = frame.foveationCenterX;
-        poseHeader.foveationCenterY = frame.foveationCenterY;
-    }
+    StampFoveationCenter(poseHeader, frame.hasFoveationCenter, frame.foveationCenterX,
+                         frame.foveationCenterY);
     poseHeader.codec = static_cast<uint8_t>(frame.codec);
     poseHeader.presentationTimeNs = frame.timestampNs;
 
@@ -3076,12 +3068,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
         }
-        if (hasFoveationCenter)
-        {
-            nalHeader.flags |= oxr::protocol::VIDEO_FLAG_FOVEATION_CENTER;
-            nalHeader.foveationCenterX = foveationCenterX;
-            nalHeader.foveationCenterY = foveationCenterY;
-        }
+        StampFoveationCenter(nalHeader, hasFoveationCenter, foveationCenterX, foveationCenterY);
         nalHeader.codec = static_cast<uint8_t>(codec);
 
         std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
@@ -3159,12 +3146,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_END_OF_FRAME;
         }
-        if (hasFoveationCenter)
-        {
-            header.flags |= oxr::protocol::VIDEO_FLAG_FOVEATION_CENTER;
-            header.foveationCenterX = foveationCenterX;
-            header.foveationCenterY = foveationCenterY;
-        }
+        StampFoveationCenter(header, hasFoveationCenter, foveationCenterX, foveationCenterY);
         header.codec = static_cast<uint8_t>(codec);
         header.presentationTimeNs = timestampNs;
 
@@ -3223,6 +3205,10 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
             }
+            // Clients seed frame metadata from data packets only, but the parity header must
+            // not drift from them: any copy of a frame's header has to describe the same warp.
+            StampFoveationCenter(fecHeader, hasFoveationCenter, foveationCenterX,
+                                 foveationCenterY);
             fecHeader.codec = static_cast<uint8_t>(codec);
             fecHeader.presentationTimeNs = timestampNs;
 

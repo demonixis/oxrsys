@@ -31,7 +31,18 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(VideoPacketHeader, presentationTimeNs) == 16);
     STATIC_REQUIRE(sizeof(TcpRecordHeader) == 12);
     STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
+    // Same repurposed-reserved rule as VideoPacketHeader: a reorder that keeps sizeof intact
+    // would silently swap which wire byte means X, Y, or validity.
+    STATIC_REQUIRE(offsetof(TcpVideoNalHeader, foveationCenterX) == 18);
+    STATIC_REQUIRE(offsetof(TcpVideoNalHeader, foveationCenterY) == 19);
     STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, foveationCenterX) == 12);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, foveationCenterY) == 13);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, hasFoveationCenter) == 14);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, position) == 16);
+    STATIC_REQUIRE(VIDEO_FLAG_FOVEATION_CENTER == 0x80);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FOVEATION_CENTER == 0x00000800);
+    STATIC_REQUIRE(TRACKING_FLAG_EYE_GAZE_ACTIVE == 0x0010);
     STATIC_REQUIRE(sizeof(TcpAudioHeader) == 24);
     STATIC_REQUIRE(sizeof(AudioPacketHeader) == 32);
     STATIC_REQUIRE(TCP_RECORD_MAGIC == 0x4f585255);

@@ -70,10 +70,11 @@ inline float AlignCenterShift(float requestedShift,
     {
         return 0.0f;
     }
-    // std::ceil rounds away from zero on the positive side, so a request of exactly 1.0 can align
-    // to slightly above 1.0 and push the warp outside [0, 1], which breaks the endpoint invariant
-    // the shader relies on. Harmless while the shift was always zero; real once gaze drives it.
-    const float aligned = std::ceil(requestedShift * edgeSizeAligned / (edgeRatio * 2.0f)) *
+    // Round to nearest: std::ceil would bias every off-grid value toward +1, drifting the foveal
+    // region right/down by up to one grid cell. Harmless while the shift was always zero; real
+    // once gaze drives it. edgeSizeAligned is a multiple of 2 * edgeRatio up to float error, so
+    // +-1.0 land within an ulp of exact and the clamp holds the shader's |shift| <= 1 invariant.
+    const float aligned = std::round(requestedShift * edgeSizeAligned / (edgeRatio * 2.0f)) *
                           (edgeRatio * 2.0f) / edgeSizeAligned;
     return std::clamp(aligned, -1.0f, 1.0f);
 }
@@ -83,6 +84,12 @@ inline float AlignCenterShift(float requestedShift,
 // on both sides. Two int8s ride in VideoPacketHeader's spare bytes, so this costs no bandwidth.
 inline int8_t QuantizeCenterShift(float shift)
 {
+    // NaN falls through std::clamp unchanged and std::lround on it is unspecified; the caller
+    // guards its inputs, but a poisoned value must never reach the wire.
+    if (std::isnan(shift))
+    {
+        return 0;
+    }
     const float clamped = std::clamp(shift, -1.0f, 1.0f);
     return static_cast<int8_t>(std::lround(clamped * 127.0f));
 }
@@ -90,6 +97,17 @@ inline int8_t QuantizeCenterShift(float shift)
 inline float DequantizeCenterShift(int8_t quantized)
 {
     return static_cast<float>(quantized) / 127.0f;
+}
+
+// The one decode both ends must share: the server's warp and the client's un-warp each turn the
+// transmitted byte into a shift through this exact call, so the reconstruction is bit-identical.
+inline float DecodeCenterShift(int8_t quantized,
+                               float centerSizeAligned,
+                               float targetSize,
+                               float edgeRatio)
+{
+    return AlignCenterShift(
+        DequantizeCenterShift(quantized), centerSizeAligned, targetSize, edgeRatio);
 }
 
 inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
@@ -164,14 +182,14 @@ inline void ApplyQuantizedCenterShift(FoveationLayout& layout, int8_t quantX, in
 
     const float targetW = static_cast<float>(layout.targetEyeWidth);
     const float targetH = static_cast<float>(layout.targetEyeHeight);
-    layout.parameters.centerShiftX = AlignCenterShift(DequantizeCenterShift(quantX),
-                                                      layout.parameters.centerSizeX,
-                                                      targetW,
-                                                      layout.parameters.edgeRatioX);
-    layout.parameters.centerShiftY = AlignCenterShift(DequantizeCenterShift(quantY),
-                                                      layout.parameters.centerSizeY,
-                                                      targetH,
-                                                      layout.parameters.edgeRatioY);
+    layout.parameters.centerShiftX = DecodeCenterShift(quantX,
+                                                       layout.parameters.centerSizeX,
+                                                       targetW,
+                                                       layout.parameters.edgeRatioX);
+    layout.parameters.centerShiftY = DecodeCenterShift(quantY,
+                                                       layout.parameters.centerSizeY,
+                                                       targetH,
+                                                       layout.parameters.edgeRatioY);
 }
 
 // Move the foveal region to follow gaze. Safe to call per frame: the optimized (encoded) size

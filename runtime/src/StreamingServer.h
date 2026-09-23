@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "RuntimeSockets.h"
+#include "GazeFoveation.h"
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
 #include "StreamingFrameQueue.h"
@@ -218,6 +219,7 @@ private:
     std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic_bool tenBitEncodingActive_{false};
     std::atomic_bool clientSupportsFoveatedEncoding_{false};
+    std::atomic_bool clientSupportsFoveationCenter_{false};
     std::atomic_bool clientSupportsStreamReconfigure_{false};
     std::atomic_bool clientSupportsMixedRealityPassthrough_{false};
     std::atomic_bool clientSupportsSpatialEntity_{false};
@@ -308,9 +310,18 @@ private:
     static constexpr size_t MaxVideoSendQueueFrames = 2;
     std::mutex encoderMutex_;
 
-    // Smoothed gaze-driven foveation centre. Encode-thread only; no synchronization needed.
-    float gazeCenterX_ = 0.0f;
-    float gazeCenterY_ = 0.0f;
+    // Gaze-driven foveation steering. Enabled only for clients that advertise
+    // CLIENT_CAPABILITY_FOVEATION_CENTER: a client that cannot un-warp a moving centre must keep
+    // the static centre it was announced. Guarded by encoderMutex_ (set on connect and
+    // reconfigure, cleared on disconnect); the filter is internally synchronized.
+    struct GazeSteeringState
+    {
+        bool enabled = false;
+        float centerSizeX = 1.0f;
+        float centerSizeY = 1.0f;
+    };
+    GazeSteeringState gazeSteering_;
+    oxrsys::gaze_foveation::GazeCenterFilter gazeCenterFilter_;
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
