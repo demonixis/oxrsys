@@ -111,6 +111,11 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     cc.preferredCodec = (uint32_t)protocol::VideoCodec::H265;
     cc.maxBitrateMbps = protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG;
     cc.refreshRateHz = srv.refreshRateHz ? srv.refreshRateHz : 90;
+    // FOVEATION_CENTER commits us to un-warping every frame with the centre carried in the
+    // stream (LatestRenderPose below); without it the server keeps the centre static and the
+    // gaze we report drives nothing.
+    cc.clientCapabilities = protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
+                            protocol::CLIENT_CAPABILITY_FOVEATION_CENTER;
     strncpy(cc.deviceName, "FrameClient", sizeof(cc.deviceName) - 1);
     if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) { LOG_ERR("ClientConnect send failed"); return false; }
 
@@ -133,17 +138,17 @@ bool StreamConnection::LatestRenderPose(float outPos[3], float outOri[4])
     memcpy(outPos, rp.position, sizeof(float) * 3);
     memcpy(outOri, rp.orientation, sizeof(float) * 4);
 
-    // Track the server's gaze-driven foveation centre for this frame. AlignCenterShift is the
+    // Track the server's gaze-driven foveation centre for this frame. DecodeCenterShift is the
     // same call the server's encoder makes on the same quantized bytes, so both sides land on
     // identical parameters; anything else un-warps to a geometrically wrong image.
     if (foveation_.enabled && rp.hasFoveationCenter) {
-        foveation_.centerShift[0] = protocol::AlignCenterShift(
-            protocol::DequantizeCenterShift(rp.foveationCenterX),
+        foveation_.centerShift[0] = protocol::DecodeCenterShift(
+            rp.foveationCenterX,
             foveation_.centerSize[0],
             static_cast<float>(foveation_.targetEyeWidth),
             foveation_.edgeRatio[0]);
-        foveation_.centerShift[1] = protocol::AlignCenterShift(
-            protocol::DequantizeCenterShift(rp.foveationCenterY),
+        foveation_.centerShift[1] = protocol::DecodeCenterShift(
+            rp.foveationCenterY,
             foveation_.centerSize[1],
             static_cast<float>(foveation_.targetEyeHeight),
             foveation_.edgeRatio[1]);
