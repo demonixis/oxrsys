@@ -160,6 +160,13 @@ therefore carries the exact value used:
 - both ends call the shared `DecodeCenterShift` in `Foveation.h` to turn the byte back into the
   aligned shift, so the reconstruction is bit-identical
 
+The identity is per *frame*, not per connection: the centre is bound to the frame whose packets
+carry it, and a client must un-warp each displayed frame with that frame's own centre (from its
+video packets or its render pose, matched by frame index or presentation time) — never with the
+most recently received value. Decode pipelines run several frames deep, so "latest received"
+leads the displayed frame; while the centre moves, that off-by-N reconstruction stretches the
+periphery visibly even though every individual value is correct.
+
 Moving the centre never changes the encoded resolution, because the optimized size depends only on
 centre *size* and edge ratio, not centre *shift*. The centre may therefore move every frame with no
 encoder reconfigure. Clients that report no gaze keep the previous fixed-centre behaviour.
