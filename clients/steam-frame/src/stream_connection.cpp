@@ -83,6 +83,10 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
 
     // Start receiving BEFORE ClientConnect — the server encodes immediately on
     // connect, and the first keyframe must not arrive before we're listening.
+    // Match the server's negotiated FEC group layout; recovering with a different layout
+    // than the sender used XORs the wrong packets together.
+    net_->SetFecInterleaved(
+        (srv.serverFeatures & protocol::SERVER_FEATURE_FEC_INTERLEAVED) != 0);
     bool ok = net_->StartReceiving(ip, srv.videoPort,
         [decoder](const uint8_t* data, size_t size, int64_t, int64_t, uint8_t, uint8_t) {
             decoder->SubmitNal(data, size);
@@ -115,7 +119,8 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     // stream (LatestRenderPose below); without it the server keeps the centre static and the
     // gaze we report drives nothing.
     cc.clientCapabilities = protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
-                            protocol::CLIENT_CAPABILITY_FOVEATION_CENTER;
+                            protocol::CLIENT_CAPABILITY_FOVEATION_CENTER |
+                            protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED;
     strncpy(cc.deviceName, "FrameClient", sizeof(cc.deviceName) - 1);
     if (send(controlSocket_, &cc, sizeof(cc), 0) < 0) { LOG_ERR("ClientConnect send failed"); return false; }
 

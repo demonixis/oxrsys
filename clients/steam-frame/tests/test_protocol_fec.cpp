@@ -49,9 +49,10 @@ void test_protocol_fec()
 
     CHECK(memcmp(recovered.data(), data[missing].data(), P) == 0);
 
-    // GroupCount / GroupRange sanity for a 23-packet frame (group size 10).
+    // GroupCount / GroupLayout sanity for a 23-packet frame (group size 10).
     CHECK(fec::GroupCount(23) == 3);
-    uint32_t s = 0, e = 0;
-    fec::GroupRange(2, 23, s, e);
-    CHECK(s == 20 && e == 23);
+    const fec::GroupLayout contiguous{23, false};
+    CHECK(contiguous.MemberCount(2) == 3);
+    CHECK(contiguous.Member(2, 0) == 20);
+    CHECK(contiguous.Member(2, 2) == 22);
 }

@@ -53,6 +53,7 @@ add_custom_target(steam_frame_client_shaders DEPENDS ${SPV_FILES})
 
 # The canonical in-tree oxrsys protocol lib (header-only).
 set(OXRSYS_PROTO_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../common/protocol/include")
+set(OXRSYS_STREAMING_INC "${CMAKE_CURRENT_SOURCE_DIR}/../../common/streaming/include")
 
 set(CLIENT_SOURCES
     src/main.cpp
@@ -65,7 +66,7 @@ set(CLIENT_SOURCES
 add_executable(steam_frame_client ${CLIENT_SOURCES})
 add_dependencies(steam_frame_client steam_frame_client_shaders)
 target_include_directories(steam_frame_client PRIVATE
-    ${OPENXR_INCLUDE_DIR} ${OXRSYS_PROTO_INC} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ${OPENXR_INCLUDE_DIR} ${OXRSYS_PROTO_INC} ${OXRSYS_STREAMING_INC} ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(steam_frame_client PRIVATE
     FRAME_CLIENT_SHADER_DIR="${SHADER_OUT}")
 target_link_libraries(steam_frame_client PRIVATE
@@ -80,7 +81,7 @@ add_executable(steam_frame_client_tests
     tests/test_foveation.cpp
     src/video_decoder.cpp)
 target_include_directories(steam_frame_client_tests PRIVATE
-    ${OXRSYS_PROTO_INC} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    ${OXRSYS_PROTO_INC} ${OXRSYS_STREAMING_INC} ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(steam_frame_client_tests PRIVATE PkgConfig::FFMPEG)
 target_compile_definitions(steam_frame_client_tests PRIVATE
     TEST_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")

@@ -13,6 +13,8 @@
 
 #include <oxrsys/protocol/Protocol.h>
 
+#include <oxrsys/streaming/VideoFrameAssembler.h>
+
 namespace oxr
 {
 
@@ -52,6 +54,11 @@ public:
     // Set the control socket for sending NACKs (owned by XrApp, not NetworkReceiver)
     void SetControlSocket(int socket, const char* serverIp);
 
+    // Selects the FEC group layout. Must match the server, which decides from
+    // CLIENT_CAPABILITY_FEC_INTERLEAVED in our ClientConnect. Atomic because it is set from
+    // the connection thread and read on the video receive thread.
+    void SetFecInterleaved(bool interleaved) { fecInterleaved_.store(interleaved); }
+
     void Stop();
 
     bool IsReceiving() const { return receiving_.load(); }
@@ -89,14 +96,14 @@ private:
     void DiscoveryThread(OnServerFoundCallback callback);
     void ReceiveThread(OnNalUnitCallback callback);
     void ReceiveTcpThread(OnNalUnitCallback callback);
-    void ReassembleFrame(const protocol::VideoPacketHeader& header,
-                         const uint8_t* payload, size_t payloadSize);
-    bool TryFecRecovery();
-    void SendNack(uint32_t frameIndex, uint32_t totalPackets);
+    void WireAssemblerCallbacks();
+    void SendNack(uint32_t frameIndex, uint32_t totalPackets, const uint8_t* packetReceived);
     void StoreRenderPose(const protocol::VideoPacketHeader& header,
                          const uint8_t* payload, size_t payloadSize);
     void StoreRenderPose(const protocol::TcpRenderPose& pose);
 
+    // Set from SERVER_FEATURE_FEC_INTERLEAVED in the announce; selects the FEC group layout.
+    std::atomic<bool> fecInterleaved_{false};
     int videoSocket_ = -1;
     int discoverySocket_ = -1;
 
@@ -105,27 +112,8 @@ private:
     std::atomic<bool> receiving_{false};
     std::atomic<bool> discovering_{false};
 
-    // Frame reassembly buffer (UDP mode only)
-    struct PendingFrame
-    {
-        uint32_t frameIndex = 0;
-        uint32_t totalPackets = 0;
-        uint32_t receivedPackets = 0;
-        int64_t timestampNs = 0;
-        uint8_t flags = 0;
-        uint8_t codec = static_cast<uint8_t>(protocol::VideoCodec::H265);
-        std::vector<uint8_t> data;
-        std::vector<uint8_t> packetReceived;
-        std::vector<uint16_t> packetSizes;  // Actual size of each packet's payload
-        std::vector<uint8_t> compactedData;
-
-        // FEC parity packets indexed by group number
-        uint32_t fecGroupCount = 0;
-        std::vector<uint8_t> fecReceived;
-        std::vector<uint8_t> fecData;  // fecGroupCount * MAX_PACKET_PAYLOAD
-        std::vector<uint16_t> fecGroupLastPacketSizes;
-    };
-    PendingFrame pendingFrame_;
+    // Frame reassembly (UDP mode only); used exclusively on the receive thread.
+    streaming::VideoFrameAssembler assembler_;
     OnNalUnitCallback nalCallback_;
     OnConnectionLostCallback connectionLostCallback_;
 
