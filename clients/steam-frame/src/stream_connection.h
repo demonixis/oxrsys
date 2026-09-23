@@ -37,6 +37,10 @@ public:
     // Non-const: also refreshes the foveation centre to the value the server warped this
     // frame with, so FoveationParams() and the pose describe the same frame.
     bool LatestRenderPose(float outPos[3], float outOri[4]);
+    // Pose and foveation centre matched to the frame with this presentation timestamp; the
+    // per-frame centre is only ever applied through this path. False when no match is held
+    // (startup, metadata loss) - the caller keeps the previous frame's state.
+    bool RenderPoseForFrame(int64_t presentationTimeUs, float outPos[3], float outOri[4]);
 
     // Report client-side latencies over the control channel (V6). oxrsys's
     // adaptive bitrate controller consumes these to tune the encode.

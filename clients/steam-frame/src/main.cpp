@@ -1045,10 +1045,22 @@ static void RenderFrame(App& app)
             // Decode + upload the newest frame if one arrived. If not, keep the
             // last texture — we still re-present it, reprojected (repaint).
             int fw = 0, fh = 0;
-            bool haveNew = g_streamMode ? g_decoder.TakeLatestRGBA(g_frameBuf, fw, fh)
+            int64_t framePtsUs = 0;
+            bool haveNew = g_streamMode ? g_decoder.TakeLatestRGBA(g_frameBuf, fw, fh, &framePtsUs)
                                         : g_decoder.NextFrameRGBA(g_frameBuf, fw, fh);
+            // Pose and foveation centre for the frame on screen, cached across repaints of the
+            // same texture. Matched by presentation time: the latest received metadata leads
+            // the displayed frame by the decode pipeline depth, and a moving foveation centre
+            // applied off-by-N stretches the periphery.
+            static float displayedPos[3] = {0, 0, 0};
+            static float displayedOri[4] = {0, 0, 0, 1};
+            static bool displayedPoseValid = false;
             if (haveNew && fw > 0 && fh > 0) {
                 UploadVideoFrame(app, g_frameBuf.data(), (uint32_t)fw, (uint32_t)fh);
+                if (g_streamMode &&
+                    g_stream.RenderPoseForFrame(framePtsUs, displayedPos, displayedOri)) {
+                    displayedPoseValid = true;
+                }
                 static bool dumped = false;
                 if (!dumped && getenv("FRAME_CLIENT_DUMP")) {
                     FILE* f = fopen("/tmp/frame_client_decoded.rgba", "wb");
@@ -1064,7 +1076,18 @@ static void RenderFrame(App& app)
             // mode, or before the first render-pose packet arrives).
             XrPosef layerPose[VIEW_COUNT];
             float rpPos[3], rpOri[4];
-            bool haveRenderPose = g_streamMode && g_stream.LatestRenderPose(rpPos, rpOri);
+            bool haveRenderPose = false;
+            if (g_streamMode) {
+                if (displayedPoseValid) {
+                    memcpy(rpPos, displayedPos, sizeof(rpPos));
+                    memcpy(rpOri, displayedOri, sizeof(rpOri));
+                    haveRenderPose = true;
+                } else {
+                    // No frame-matched pose held yet (startup, metadata loss): the newest
+                    // received pose is still a better timewarp anchor than none.
+                    haveRenderPose = g_stream.LatestRenderPose(rpPos, rpOri);
+                }
+            }
             if (g_streamMode) {
                 static int rc = 0;
                 if (rc++ % 120 == 0)

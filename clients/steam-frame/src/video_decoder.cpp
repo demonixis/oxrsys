@@ -124,19 +124,21 @@ void VideoDecoder::convertToLatest()
     latest_.swap(rgba);
     latestW_ = frame_->width;
     latestH_ = frame_->height;
+    latestPtsUs_ = frame_->pts != AV_NOPTS_VALUE ? frame_->pts : lastSubmitPtsUs_;
     latestFresh_ = true;
 }
 
-void VideoDecoder::SubmitNal(const uint8_t* data, size_t size)
+void VideoDecoder::SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs)
 {
     if (!codec_ || !parser_ || size == 0) return;
+    lastSubmitPtsUs_ = ptsUs;
     const uint8_t* p = data;
     size_t remaining = size;
     while (remaining > 0) {
         uint8_t* outData = nullptr;
         int outSize = 0;
         int used = av_parser_parse2(parser_, codec_, &outData, &outSize,
-                                    p, (int)remaining, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+                                    p, (int)remaining, ptsUs, AV_NOPTS_VALUE, 0);
         if (used < 0) return;
         p += used;
         remaining -= (size_t)used;
@@ -144,6 +146,7 @@ void VideoDecoder::SubmitNal(const uint8_t* data, size_t size)
 
         packet_->data = outData;
         packet_->size = outSize;
+        packet_->pts = parser_->pts;
         auto t0 = std::chrono::steady_clock::now();
         if (avcodec_send_packet(codec_, packet_) < 0) {
             std::lock_guard<std::mutex> lk(latestMutex_);
@@ -169,13 +172,17 @@ void VideoDecoder::SubmitNal(const uint8_t* data, size_t size)
     }
 }
 
-bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height)
+bool VideoDecoder::TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
+                                  int64_t* outPtsUs)
 {
     std::lock_guard<std::mutex> lk(latestMutex_);
     if (!latestFresh_ || latest_.empty()) return false;
     out = latest_;
     width = latestW_;
     height = latestH_;
+    if (outPtsUs != nullptr) {
+        *outPtsUs = latestPtsUs_;
+    }
     latestFresh_ = false;
     return true;
 }

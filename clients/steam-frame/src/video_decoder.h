@@ -30,10 +30,14 @@ public:
 
     // ---- Stream mode ----
     bool OpenStream(Codec codec);
-    // Called from the network thread with a complete encoded access unit.
-    void SubmitNal(const uint8_t* data, size_t size);
+    // Called from the network thread with a complete encoded access unit. ptsUs is the
+    // frame's presentation timestamp; it rides through parser and codec delays so the
+    // decoded output can be matched to its per-frame metadata (render pose, foveation
+    // centre) rather than to whatever arrived most recently.
+    void SubmitNal(const uint8_t* data, size_t size, int64_t ptsUs);
     // Called from the render thread; true if a newer decoded frame was taken.
-    bool TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height);
+    bool TakeLatestRGBA(std::vector<uint8_t>& out, int& width, int& height,
+                        int64_t* outPtsUs = nullptr);
 
     void Close();
     int Width() const { return width_; }
@@ -66,6 +70,8 @@ private:
     std::mutex latestMutex_;
     std::vector<uint8_t> latest_;
     int latestW_ = 0, latestH_ = 0;
+    int64_t latestPtsUs_ = 0;
+    int64_t lastSubmitPtsUs_ = 0;
     bool latestFresh_ = false;
     double lastDecodeMs_ = 0.0;
     bool needKeyframe_ = false;

@@ -88,8 +88,11 @@ bool StreamConnection::Connect(VideoDecoder* decoder, int timeoutMs)
     net_->SetFecInterleaved(
         (srv.serverFeatures & protocol::SERVER_FEATURE_FEC_INTERLEAVED) != 0);
     bool ok = net_->StartReceiving(ip, srv.videoPort,
-        [decoder](const uint8_t* data, size_t size, int64_t, int64_t, uint8_t, uint8_t) {
-            decoder->SubmitNal(data, size);
+        [decoder](const uint8_t* data, size_t size, int64_t timestampNs, int64_t, uint8_t,
+                  uint8_t) {
+            // Microseconds to match RenderPose.presentationTimeUs, so the decoded frame can
+            // be paired with its own render pose and foveation centre.
+            decoder->SubmitNal(data, size, timestampNs / 1000);
         },
         [](const char* reason) { LOG_ERR("connection lost: %s", reason); });
     if (!ok) { LOG_ERR("StartReceiving failed"); return false; }
@@ -142,10 +145,35 @@ bool StreamConnection::LatestRenderPose(float outPos[3], float outOri[4])
     if (!rp.valid) return false;
     memcpy(outPos, rp.position, sizeof(float) * 3);
     memcpy(outOri, rp.orientation, sizeof(float) * 4);
+    return true;
+}
 
-    // Track the server's gaze-driven foveation centre for this frame. DecodeCenterShift is the
-    // same call the server's encoder makes on the same quantized bytes, so both sides land on
-    // identical parameters; anything else un-warps to a geometrically wrong image.
+bool StreamConnection::RenderPoseForFrame(int64_t presentationTimeUs, float outPos[3],
+                                          float outOri[4])
+{
+    if (!connected_ || !net_) return false;
+    NetworkReceiver::RenderPose rp = {};
+    static uint32_t hits = 0, misses = 0;
+    if (!net_->TakeRenderPoseForPresentationTimeUs(presentationTimeUs, &rp) || !rp.valid) {
+        misses++;
+        if (misses <= 10 || misses % 60 == 0)
+            LOG_INF("pose match MISS for pts=%lld (hits=%u misses=%u)",
+                    (long long)presentationTimeUs, hits, misses);
+        return false;
+    }
+    hits++;
+    if (hits <= 10 || hits % 120 == 0)
+        LOG_INF("pose match hit pts=%lld centre=%s(%d,%d) (hits=%u misses=%u)",
+                (long long)presentationTimeUs, rp.hasFoveationCenter ? "" : "NONE",
+                (int)rp.foveationCenterX, (int)rp.foveationCenterY, hits, misses);
+    memcpy(outPos, rp.position, sizeof(float) * 3);
+    memcpy(outOri, rp.orientation, sizeof(float) * 4);
+
+    // Apply THIS frame's gaze-driven foveation centre. The centre is per-frame data: decode
+    // runs several frames deep, so the most recently received centre leads the frame on
+    // screen, and un-warping with it stretches the periphery whenever the centre moves.
+    // DecodeCenterShift is the same call the server's encoder made on these bytes, so both
+    // sides land on identical parameters.
     if (foveation_.enabled && rp.hasFoveationCenter) {
         foveation_.centerShift[0] = protocol::DecodeCenterShift(
             rp.foveationCenterX,
