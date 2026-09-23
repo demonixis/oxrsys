@@ -3,7 +3,10 @@
 
 #include <oxrsys/protocol/Protocol.h>
 
+#include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -254,6 +257,28 @@ void XrInput::Update(XrTime displayTime, protocol::TrackingPacket& pkt)
                 pkt.trackingFlags |= protocol::TRACKING_FLAG_EYE_GAZE_ACTIVE;
             }
         }
+    }
+
+    // FRAME_CLIENT_SYNTHETIC_GAZE=1 substitutes a slow Lissajous sweep for the eye tracker, making the
+    // gaze-driven foveation chain visible end-to-end on machines whose runtime has no gaze
+    // extension: the sharp region should glide with the sweep, pin briefly at the horizontal
+    // extremes, and decay back to centre when the variable is unset mid-session. Overrides real
+    // gaze when both exist so demos are deterministic. The direction is authored directly in
+    // head space (-Z forward), which is exactly what the wire carries.
+    static const bool syntheticGaze = getenv("FRAME_CLIENT_SYNTHETIC_GAZE") != nullptr;
+    if (syntheticGaze) {
+        static const auto start = std::chrono::steady_clock::now();
+        const float t = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - start).count();
+        constexpr float kTau = 6.2831853f;
+        // Incommensurate periods cover the field instead of retracing one ellipse.
+        const float tanX = 0.65f * std::sin(kTau * t / 7.3f);
+        const float tanY = 0.50f * std::sin(kTau * t / 11.9f);
+        const float invLen = 1.0f / std::sqrt(tanX * tanX + tanY * tanY + 1.0f);
+        pkt.gazeDirection[0] = tanX * invLen;
+        pkt.gazeDirection[1] = tanY * invLen;
+        pkt.gazeDirection[2] = -invLen;
+        pkt.trackingFlags |= protocol::TRACKING_FLAG_EYE_GAZE_ACTIVE;
     }
 
     // Hand joints (26 per hand): x,y,z,radius, located in the base space.

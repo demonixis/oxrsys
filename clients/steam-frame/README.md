@@ -81,6 +81,11 @@ the Frame's runtime by only swapping loader discovery.
   oxrsys's `compressAxis` + binary-search inverse to un-warp each eye before sampling. Verified by
   enabling server FFE (medium) — encoded frame shrank ~21% (2272×1264 → 1792×896) and the read-back
   eye is geometrically correct; FFE-off is pixel-identical to before.
+- **Synthetic gaze sweep** (`FRAME_CLIENT_SYNTHETIC_GAZE=1`): substitutes a slow Lissajous sweep
+  for the eye tracker, making the gaze-driven foveation chain visible end-to-end on machines with
+  no gaze extension. The sharp region should glide with the sweep, pin briefly at the horizontal
+  extremes, and decay back to centre when the variable is unset mid-session. Verifies everything
+  except the physical eye→sensor sign, which needs real eye-tracking hardware.
 - Still deferred (no Mac test path / marginal): audio (oxrsys streams none on the Mac),
   server→client control (BitrateUpdate / dynamic-resolution reconfig).
 
