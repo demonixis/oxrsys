@@ -145,7 +145,8 @@ enum ClientCapabilityFlags : uint32_t
     // The client assigns FEC groups by the interleaved layout (fec::GroupLayout). Must be
     // negotiated: a receiver using a different layout from the sender XORs a packet out of the
     // wrong group and produces plausible garbage rather than failing cleanly.
-    CLIENT_CAPABILITY_FEC_INTERLEAVED = 0x00000800,
+    // 0x00000800 is claimed by CLIENT_CAPABILITY_FOVEATION_CENTER (gaze foveation PR).
+    CLIENT_CAPABILITY_FEC_INTERLEAVED = 0x00001000,
 };
 
 enum ClientCodecCapabilityFlags : uint32_t

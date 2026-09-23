@@ -33,15 +33,21 @@ public final class VideoReceiver: @unchecked Sendable {
         var totalFramesSeen: UInt32 = 0
         var lastFrameDeliveryTimeNs: Int64 = 0
         var lastPacketReceivedTimeNs: Int64 = 0
+        var fecInterleaved = false
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Selects the FEC group layout. Must match the server: set it from
-    /// `FEC.interleavedServerFeature` in the announce, and only advertise
-    /// `FEC.interleavedCapability` in ClientConnect when this is honoured.
-    /// Defaults to the original contiguous layout.
-    public var fecInterleaved: Bool = false
+    /// `ServerFeatureFlags.fecInterleaved` in the announce, and only advertise
+    /// `ClientCapabilityFlags.fecInterleaved` in ClientConnect when this is honoured.
+    /// Defaults to the original contiguous layout. Goes through the state lock because it is
+    /// set from the connection actor while the receive thread reads it; the receive loop
+    /// latches it per frame so a mid-frame flip never mixes layouts within one recovery.
+    public var fecInterleaved: Bool {
+        get { state.withLock { $0.fecInterleaved } }
+        set { state.withLock { $0.fecInterleaved = newValue } }
+    }
 
     public var packetsReceived: UInt32 { state.withLock { $0.packetsReceived } }
     public var framesDelivered: UInt32 { state.withLock { $0.nalUnitsDelivered } }
@@ -194,6 +200,8 @@ public final class VideoReceiver: @unchecked Sendable {
         var currentFrameIndex: UInt32 = UInt32.max
         var totalExpected: UInt16 = 0
         var receivedCount: UInt16 = 0
+        var fecHeldCount: UInt16 = 0
+        var frameInterleaved = false
         var frameTimestamp: Int64 = 0
         var frameCodec: VideoCodec = .h265
         var lastGroupPacketTimeNs: Int64 = 0
@@ -204,7 +212,7 @@ public final class VideoReceiver: @unchecked Sendable {
             guard totalExpected > 0 else { return false }
             var recovered = false
             let layout = FEC.GroupLayout(totalDataPackets: Int(totalExpected),
-                                         interleaved: fecInterleaved)
+                                         interleaved: frameInterleaved)
             for g in 0..<fecGroupCount {
                 guard fecReceived[g] else { continue }
                 let members = layout.memberCount(g)
@@ -317,9 +325,14 @@ public final class VideoReceiver: @unchecked Sendable {
                 droppedFrameIndex = nil
             }
 
-            // FEC parity packet — store separately
+            // FEC parity packet — store separately. The server reuses one frameIndex for every
+            // NAL of a frame, each with its own packet numbering, so frameIndex alone does not
+            // identify the NAL this parity belongs to: totalPackets must match too, or a parity
+            // packet from a small NAL (SPS/PPS) reordered behind the next NAL's data would
+            // occupy that NAL's parity slot and XOR-recover garbage.
             if header.flags & VideoFlags.fec != 0 {
-                if header.frameIndex == currentFrameIndex && totalExpected > 0 {
+                if header.frameIndex == currentFrameIndex && totalExpected > 0
+                    && header.totalPackets == totalExpected {
                     let groupIdx = Int(header.packetIndex)
                     if groupIdx < fecGroupCount && !fecReceived[groupIdx] {
                         let fecOffset = groupIdx * OXRProtocol.maxPacketPayload
@@ -327,8 +340,13 @@ public final class VideoReceiver: @unchecked Sendable {
                                min(payloadSize, OXRProtocol.maxPacketPayload))
                         fecGroupLastPacketSizes[groupIdx] = header.fecGroupLastPacketPayloadSize
                         fecReceived[groupIdx] = true
-                        // Try recovery if frame is almost complete
-                        if receivedCount + 1 >= totalExpected && tryFecRecovery() {
+                        fecHeldCount &+= 1
+                        // Each parity packet can recover at most one loss (in its own group),
+                        // so recovery is worth attempting as soon as the parity held could
+                        // cover everything missing — not only when a single packet is missing,
+                        // which would defer every burst recovery to the next frame's arrival.
+                        let missing = totalExpected - receivedCount
+                        if missing > 0 && fecHeldCount >= missing && tryFecRecovery() {
                             deliverFrame()
                         }
                     }
@@ -336,12 +354,14 @@ public final class VideoReceiver: @unchecked Sendable {
                 continue
             }
 
-            // New NAL unit group?
-            let isNewGroup = (header.frameIndex != currentFrameIndex) || (totalExpected == 0)
+            // A different frameIndex — or a different totalPackets under the same frameIndex,
+            // meaning another NAL of the same frame — starts a new reassembly.
+            let isNewGroup = (header.frameIndex != currentFrameIndex)
+                || (header.totalPackets != totalExpected) || (totalExpected == 0)
 
             if isNewGroup {
                 // Handle previous incomplete group
-                if header.frameIndex != currentFrameIndex {
+                if totalExpected > 0 {
                     if receivedCount > 0 && receivedCount == totalExpected && totalExpected > 0 {
                         deliverFrame()
                     } else if totalExpected > 0 && receivedCount < totalExpected {
@@ -410,10 +430,13 @@ public final class VideoReceiver: @unchecked Sendable {
                 packetReceived.initialize(repeating: false, count: count)
                 packetSizes.initialize(repeating: 0, count: count)
 
-                // Initialize FEC tracking
+                // Initialize FEC tracking. The layout is latched per frame so a negotiation
+                // change mid-frame never mixes layouts within one frame's recovery.
                 fecGroupCount = (count + FEC.groupSize - 1) / FEC.groupSize
                 fecReceived.initialize(repeating: false, count: fecGroupCount)
                 fecGroupLastPacketSizes.initialize(repeating: 0, count: fecGroupCount)
+                fecHeldCount = 0
+                frameInterleaved = fecInterleaved
             }
 
             let idx = Int(header.packetIndex)

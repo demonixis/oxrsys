@@ -115,6 +115,9 @@ public struct ServerFeatureFlags {
     public static let depthOcclusion: UInt32 = 0x00000080
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
+    /// Server emits FEC parity with the interleaved group layout for clients that advertise
+    /// `ClientCapabilityFlags.fecInterleaved`.
+    public static let fecInterleaved: UInt32 = 0x00000400
 }
 
 public struct ClientCapabilityFlags {
@@ -132,6 +135,10 @@ public struct ClientCapabilityFlags {
     // Client un-warps every frame with the centre carried in VideoFlags.foveationCenter /
     // TcpRenderPose. Without this bit the server keeps the centre static.
     public static let foveationCenter: UInt32 = 0x00000800
+    /// The client assigns FEC groups by the interleaved layout (`FEC.GroupLayout`). Must be
+    /// negotiated: a receiver using a different layout from the sender XORs a packet out of
+    /// the wrong group and produces plausible garbage rather than failing cleanly.
+    public static let fecInterleaved: UInt32 = 0x00001000
 }
 
 public enum FoveationPreset: UInt32, Sendable {
@@ -321,12 +328,6 @@ public enum FEC {
     /// Number of data packets per FEC group. Must match server (Protocol.h FEC_GROUP_SIZE).
     public static let groupSize: Int = 10
 
-    /// Client capability advertising the interleaved group layout
-    /// (Protocol.h CLIENT_CAPABILITY_FEC_INTERLEAVED).
-    public static let interleavedCapability: UInt32 = 0x0000_0800
-    /// Server feature advertising the same (Protocol.h SERVER_FEATURE_FEC_INTERLEAVED).
-    public static let interleavedServerFeature: UInt32 = 0x0000_0400
-
     /// How a frame's data packets map to FEC groups. Mirrors `oxr::fec::GroupLayout` in
     /// FecCodec.h and must stay in step with it.
     ///
@@ -353,7 +354,9 @@ public enum FEC {
         }
 
         public func group(of packetIndex: Int) -> Int {
-            interleaved ? packetIndex % count : packetIndex / FEC.groupSize
+            let count = self.count
+            guard count > 0 else { return 0 }
+            return interleaved ? packetIndex % count : packetIndex / FEC.groupSize
         }
 
         public func memberCount(_ groupIndex: Int) -> Int {

@@ -119,6 +119,17 @@ TEST_CASE("Both group layouts partition the frame exactly once", "[protocol][fec
     }
 }
 
+TEST_CASE("An empty layout is inert instead of dividing by zero", "[protocol][fec]")
+{
+    for (bool interleaved : {false, true})
+    {
+        const fec::GroupLayout layout{0, interleaved};
+        REQUIRE(layout.Count() == 0);
+        REQUIRE(layout.GroupOf(0) == 0);
+        REQUIRE(layout.MemberCount(0) == 0);
+    }
+}
+
 TEST_CASE("Interleaving spreads adjacent packets across groups", "[protocol][fec]")
 {
     const uint32_t total = 250;
