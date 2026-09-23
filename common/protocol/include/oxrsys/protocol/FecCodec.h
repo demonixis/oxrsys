@@ -90,7 +90,12 @@ struct GroupLayout
     // Which group owns a given data packet.
     uint32_t GroupOf(uint32_t packetIndex) const
     {
-        return interleaved ? (packetIndex % Count()) : (packetIndex / protocol::FEC_GROUP_SIZE);
+        const uint32_t count = Count();
+        if (count == 0)
+        {
+            return 0;
+        }
+        return interleaved ? (packetIndex % count) : (packetIndex / protocol::FEC_GROUP_SIZE);
     }
 
     // How many data packets a group owns.
@@ -116,15 +121,6 @@ struct GroupLayout
                            : (groupIndex * protocol::FEC_GROUP_SIZE + k);
     }
 };
-
-// Compute the data packet range [outStart, outEnd) for a given FEC group index.
-// Contiguous layout only; interleaved groups are not a range. Prefer GroupLayout.
-inline void GroupRange(uint32_t groupIndex, uint32_t totalDataPackets,
-                       uint32_t& outStart, uint32_t& outEnd)
-{
-    outStart = groupIndex * protocol::FEC_GROUP_SIZE;
-    outEnd = std::min(outStart + protocol::FEC_GROUP_SIZE, totalDataPackets);
-}
 
 } // namespace fec
 } // namespace oxr

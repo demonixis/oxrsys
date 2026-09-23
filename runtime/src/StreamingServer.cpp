@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -604,6 +605,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    fecInterleaved_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
@@ -1782,6 +1784,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                fecInterleaved_.store(HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -1798,8 +1802,6 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         config.encoder10Bit &&
                         selectedCodec == oxr::protocol::VideoCodec::H265 &&
                         HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
-                    fecInterleaved_.store(HasClientCapability(
-                        clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                     tenBitEncodingActive_.store(useTenBit);
                     encoder_->SetTenBitEncoding(useTenBit);
                     if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
@@ -2004,6 +2006,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                fecInterleaved_.store(HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -2020,8 +2024,6 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                         config.encoder10Bit &&
                         selectedCodec == oxr::protocol::VideoCodec::H265 &&
                         HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
-                    fecInterleaved_.store(HasClientCapability(
-                        clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                     tenBitEncodingActive_.store(useTenBit);
                     encoder_->SetTenBitEncoding(useTenBit);
                     if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
@@ -2154,6 +2156,7 @@ void StreamingServer::HandleClientDisconnect()
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    fecInterleaved_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
@@ -2965,6 +2968,9 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         videoSocket = dispatchState->videoSocket;
         videoUsesTcp = dispatchState->videoUsesTcp;
     }
+    // Latched with the destination snapshot: a client switch mid-NAL must not let the parity
+    // layout diverge from the client this NAL is addressed to.
+    const bool fecInterleaved = fecInterleaved_.load();
 
     if (!oxrsys::runtime_socket::IsValid(videoSocket) || (!videoUsesTcp && clientIp.empty()))
     {
@@ -3044,6 +3050,58 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
     payloadPtrs.resize(totalPackets);
     payloadSizes.resize(totalPackets);
 
+    // The layout is negotiated: sender and receiver must agree or recovery XORs the wrong
+    // packets together and yields plausible garbage instead of a clean failure. Group
+    // membership never exceeds FEC_GROUP_SIZE under either layout (see TestProtocolFec), so
+    // fixed arrays suffice, matching the receiver's gather.
+    const oxr::fec::GroupLayout fecLayout{totalPackets, fecInterleaved};
+    const auto sendFecParityPacket = [&](uint32_t g) {
+        const uint32_t members = fecLayout.MemberCount(g);
+        if (members == 0)
+        {
+            return;
+        }
+        std::array<const uint8_t*, oxr::protocol::FEC_GROUP_SIZE> groupPtrs = {};
+        std::array<uint16_t, oxr::protocol::FEC_GROUP_SIZE> groupSizes = {};
+        for (uint32_t k = 0; k < members; k++)
+        {
+            const uint32_t idx = fecLayout.Member(g, k);
+            groupPtrs[k] = payloadPtrs[idx];
+            groupSizes[k] = payloadSizes[idx];
+        }
+
+        uint8_t fecPayload[oxr::protocol::MAX_PACKET_PAYLOAD];
+        oxr::fec::Encode(groupPtrs.data(), groupSizes.data(), members, fecPayload);
+
+        oxr::protocol::VideoPacketHeader fecHeader = {};
+        fecHeader.frameIndex = frameIndex;
+        fecHeader.packetIndex = static_cast<uint16_t>(g);
+        fecHeader.totalPackets = totalPackets;
+        fecHeader.payloadSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
+        fecHeader.flags = oxr::protocol::VIDEO_FLAG_FEC | oxr::protocol::VIDEO_FLAG_STEREO;
+        if (alphaBlend)
+        {
+            fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
+        }
+        if (isKeyframe)
+        {
+            fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
+        }
+        fecHeader.fecGroupLastPacketPayloadSize = groupSizes[members - 1];
+        fecHeader.codec = static_cast<uint8_t>(codec);
+        fecHeader.presentationTimeNs = timestampNs;
+
+        memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
+        memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
+        oxrsys::runtime_socket::SendTo(
+            videoSocket,
+            packetBuffer,
+            sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
+            kBestEffortSendFlags,
+            (sockaddr*)&destAddr,
+            sizeof(destAddr));
+    };
+
     size_t offset = 0;
     for (uint16_t i = 0; i < totalPackets; i++)
     {
@@ -3097,63 +3155,28 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 
         offset += payloadSize;
 
+        // A contiguous group is complete as soon as its last data packet is out, so its parity
+        // goes out inline, dispersed among the data packets it protects: a tail burst then
+        // cannot wipe every parity packet at once, and legacy clients keep the emission
+        // schedule they were built against.
+        if (!fecInterleaved)
+        {
+            const uint32_t nextIdx = i + 1u;
+            if (nextIdx % oxr::protocol::FEC_GROUP_SIZE == 0 || nextIdx == totalPackets)
+            {
+                sendFecParityPacket(i / oxr::protocol::FEC_GROUP_SIZE);
+            }
+        }
     }
 
-    // Parity, one packet per FEC group. Emitted after every data packet because an interleaved
-    // group's members are spread across the whole frame, so no group is complete until the frame
-    // is. The layout is negotiated: sender and receiver must agree or recovery XORs the wrong
-    // packets together and yields plausible garbage instead of a clean failure.
+    // An interleaved group's members are spread across the whole frame, so no group is complete
+    // until the frame is; its parity can only be emitted at the end. The tail-burst exposure is
+    // the price of interleaving's burst tolerance, and only clients that opted in pay it.
+    if (fecInterleaved)
     {
-        const oxr::fec::GroupLayout layout{totalPackets, fecInterleaved_.load()};
-        thread_local std::vector<const uint8_t*> groupPtrs;
-        thread_local std::vector<uint16_t> groupSizes;
-
-        for (uint32_t g = 0; g < layout.Count(); g++)
+        for (uint32_t g = 0; g < fecLayout.Count(); g++)
         {
-            const uint32_t members = layout.MemberCount(g);
-            if (members == 0)
-            {
-                continue;
-            }
-            groupPtrs.resize(members);
-            groupSizes.resize(members);
-            for (uint32_t k = 0; k < members; k++)
-            {
-                const uint32_t idx = layout.Member(g, k);
-                groupPtrs[k] = payloadPtrs[idx];
-                groupSizes[k] = payloadSizes[idx];
-            }
-
-            uint8_t fecPayload[oxr::protocol::MAX_PACKET_PAYLOAD];
-            oxr::fec::Encode(groupPtrs.data(), groupSizes.data(), members, fecPayload);
-
-            oxr::protocol::VideoPacketHeader fecHeader = {};
-            fecHeader.frameIndex = frameIndex;
-            fecHeader.packetIndex = static_cast<uint16_t>(g);
-            fecHeader.totalPackets = totalPackets;
-            fecHeader.payloadSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
-            fecHeader.flags = oxr::protocol::VIDEO_FLAG_FEC | oxr::protocol::VIDEO_FLAG_STEREO;
-            if (alphaBlend)
-            {
-                fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
-            }
-            if (isKeyframe)
-            {
-                fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
-            }
-            fecHeader.fecGroupLastPacketPayloadSize = groupSizes[members - 1];
-            fecHeader.codec = static_cast<uint8_t>(codec);
-            fecHeader.presentationTimeNs = timestampNs;
-
-            memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
-            memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
-            oxrsys::runtime_socket::SendTo(
-                videoSocket,
-                packetBuffer,
-                sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
-                kBestEffortSendFlags,
-                (sockaddr*)&destAddr,
-                sizeof(destAddr));
+            sendFecParityPacket(g);
         }
     }
 
