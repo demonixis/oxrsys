@@ -58,7 +58,10 @@ public struct TcpVideoNalHeader: Sendable {
     public var payloadSize: UInt32 = 0
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
-    public var reserved: UInt16 = 0
+    // Mirrors VideoPacketHeader: gaze-driven foveation centre for this frame, meaningful only
+    // when VideoFlags.foveationCenter is set. Reuses the two bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
     public var reserved2: UInt32 = 0
 
     public init() {}
@@ -67,7 +70,12 @@ public struct TcpVideoNalHeader: Sendable {
 public struct TcpRenderPose: Sendable {
     public var presentationTimeNs: Int64 = 0
     public var frameIndex: UInt32 = 0
-    public var reserved: UInt32 = 0
+    // Gaze-driven foveation centre for this frame, carried alongside the render pose because
+    // the client needs both to present it correctly. Reuses the bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
+    public var hasFoveationCenter: UInt8 = 0
+    public var reservedPad: UInt8 = 0
     public var position: (Float, Float, Float) = (0, 0, 0)
     public var orientation: (Float, Float, Float, Float) = (0, 0, 0, 1)
     public var reserved2: UInt32 = 0
@@ -107,6 +115,9 @@ public struct ServerFeatureFlags {
     public static let depthOcclusion: UInt32 = 0x00000080
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
+    /// Server emits FEC parity with the interleaved group layout for clients that advertise
+    /// `ClientCapabilityFlags.fecInterleaved`.
+    public static let fecInterleaved: UInt32 = 0x00000400
 }
 
 public struct ClientCapabilityFlags {
@@ -121,6 +132,13 @@ public struct ClientCapabilityFlags {
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
     public static let tenBitEncoding: UInt32 = 0x00000400
+    // Client un-warps every frame with the centre carried in VideoFlags.foveationCenter /
+    // TcpRenderPose. Without this bit the server keeps the centre static.
+    public static let foveationCenter: UInt32 = 0x00000800
+    /// The client assigns FEC groups by the interleaved layout (`FEC.GroupLayout`). Must be
+    /// negotiated: a receiver using a different layout from the sender XORs a packet out of
+    /// the wrong group and produces plausible garbage rather than failing cleanly.
+    public static let fecInterleaved: UInt32 = 0x00001000
 }
 
 public enum FoveationPreset: UInt32, Sendable {
@@ -271,7 +289,11 @@ public struct VideoPacketHeader: Sendable {
     public var flags: UInt8 = 0
     public var codec: UInt8 = 0
     public var fecGroupLastPacketPayloadSize: UInt16 = 0
-    public var reserved: UInt16 = 0
+    // Gaze-driven foveated-encoding centre for this frame, quantized to [-127, 127]. Meaningful
+    // only when VideoFlags.foveationCenter is set; zero otherwise, which is the fixed-centre
+    // behaviour older clients already assume. Reuses the bytes formerly named `reserved`.
+    public var foveationCenterX: Int8 = 0
+    public var foveationCenterY: Int8 = 0
     public var presentationTimeNs: Int64 = 0
 
     public init() {}
@@ -286,6 +308,7 @@ public struct VideoFlags {
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
     public static let alphaBlend: UInt8 = 0x40
+    public static let foveationCenter: UInt8 = 0x80
 }
 
 public struct AudioPacketHeader: Sendable {
@@ -304,6 +327,52 @@ public struct AudioPacketHeader: Sendable {
 public enum FEC {
     /// Number of data packets per FEC group. Must match server (Protocol.h FEC_GROUP_SIZE).
     public static let groupSize: Int = 10
+
+    /// How a frame's data packets map to FEC groups. Mirrors `oxr::fec::GroupLayout` in
+    /// FecCodec.h and must stay in step with it.
+    ///
+    /// Contiguous is the original layout: group g owns packets [g*size, g*size+size). One XOR
+    /// parity per group recovers one loss per group, so two *adjacent* losses land in the same
+    /// group and are unrecoverable -- the common case on Wi-Fi, where loss arrives in bursts.
+    ///
+    /// Interleaved gives group g the packets g, g+count, g+2*count, ... so adjacent packets land
+    /// in different groups. The same parity overhead then recovers any burst up to `count` long.
+    ///
+    /// The layout is negotiated. Recovering with a different layout than the sender used XORs a
+    /// packet out of the wrong group and yields plausible garbage rather than a clean failure.
+    public struct GroupLayout: Sendable {
+        public let totalDataPackets: Int
+        public let interleaved: Bool
+
+        public init(totalDataPackets: Int, interleaved: Bool) {
+            self.totalDataPackets = totalDataPackets
+            self.interleaved = interleaved
+        }
+
+        public var count: Int {
+            (totalDataPackets + FEC.groupSize - 1) / FEC.groupSize
+        }
+
+        public func group(of packetIndex: Int) -> Int {
+            let count = self.count
+            guard count > 0 else { return 0 }
+            return interleaved ? packetIndex % count : packetIndex / FEC.groupSize
+        }
+
+        public func memberCount(_ groupIndex: Int) -> Int {
+            guard groupIndex < count else { return 0 }
+            if !interleaved {
+                let start = groupIndex * FEC.groupSize
+                return min(start + FEC.groupSize, totalDataPackets) - start
+            }
+            let stride = count
+            return (totalDataPackets - groupIndex + stride - 1) / stride
+        }
+
+        public func member(_ groupIndex: Int, _ k: Int) -> Int {
+            interleaved ? groupIndex + k * count : groupIndex * FEC.groupSize + k
+        }
+    }
 }
 
 // MARK: - Tracking
@@ -355,6 +424,11 @@ public struct TrackingPacket: Sendable {
     public var rightControllerAimPos: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
 
+    // Eye gaze direction in head space as a unit vector (-Z forward). Valid only when
+    // TrackingFlagsValues.eyeGazeActive is set; visionOS never exposes a raw gaze ray to
+    // applications, so Swift clients leave it zero. Appended so the C++ struct stays in sync.
+    public var gazeDirection: (Float, Float, Float) = (0, 0, 0)
+
     public init() {}
 }
 
@@ -404,6 +478,7 @@ public struct TrackingFlagsValues {
     public static let rightHandActive: UInt32 = 0x0002
     public static let leftControllerActive: UInt32 = 0x0004
     public static let rightControllerActive: UInt32 = 0x0008
+    public static let eyeGazeActive: UInt32 = 0x0010
 }
 
 public struct ButtonFlags {

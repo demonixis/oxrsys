@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -248,6 +249,25 @@ StreamLayout BuildStreamLayout(uint32_t renderWidth,
     }
 
     return layout;
+}
+
+// Stamps the per-frame foveation centre into a video header (VideoPacketHeader or
+// TcpVideoNalHeader; both spell the fields identically). Every header of a frame must carry the
+// same centre, whichever transport or packet type delivers it: a client may reconstruct from
+// any copy, and one drifted builder means a geometrically wrong un-warp on that path only.
+template <typename Header>
+void StampFoveationCenter(Header& header,
+                          bool hasFoveationCenter,
+                          int8_t foveationCenterX,
+                          int8_t foveationCenterY)
+{
+    if (!hasFoveationCenter)
+    {
+        return;
+    }
+    header.flags |= oxr::protocol::VIDEO_FLAG_FOVEATION_CENTER;
+    header.foveationCenterX = foveationCenterX;
+    header.foveationCenterY = foveationCenterY;
 }
 
 VideoEncoder::FoveationSettings BuildEncoderFoveationSettings(
@@ -604,9 +624,16 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    clientSupportsFoveationCenter_.store(false);
+    fecInterleaved_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(encoderMutex_);
+        gazeSteering_ = {};
+    }
+    gazeCenterFilter_.Reset();
     activeVideoCodec_.store(oxr::protocol::VideoCodec::H265);
     {
         std::lock_guard<std::mutex> lock(streamConfigMutex_);
@@ -898,6 +925,7 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
     {
         announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_FOVEATED_ENCODING;
     }
+    announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_FEC_INTERLEAVED;
     oxr::protocol::ClientFoveationPreset clientFoveationPreset =
         ParseClientFoveationPreset(config.clientFoveationPreset);
     if (HasClientFoveationOverride(config.clientFoveationPreset))
@@ -1225,8 +1253,10 @@ void StreamingServer::TcpTrackingThread()
             {
                 break;
             }
+            // Size validation belongs to TrackingReceiver::InjectPacket, which accepts short
+            // packets from clients predating later appended fields. Requiring the full struct
+            // here silently dropped all tracking from such clients on the TCP path.
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
-                payload.size() >= sizeof(oxr::protocol::TrackingPacket) &&
                 trackingReceiver_ != nullptr)
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
@@ -1348,6 +1378,7 @@ void StreamingServer::EncodeThread()
 
         std::shared_ptr<VideoEncoder> encoder;
         std::shared_ptr<CallbackAccess> callbackAccess;
+        GazeSteeringState gazeSteering;
         {
             std::lock_guard<std::mutex> lock(encoderMutex_);
             if (encoder_ != nullptr)
@@ -1355,6 +1386,7 @@ void StreamingServer::EncodeThread()
                 encoder = encoder_;
             }
             callbackAccess = GetCallbackAccess();
+            gazeSteering = gazeSteering_;
         }
 
         if (!encoder || !encoder->IsInitialized())
@@ -1371,6 +1403,24 @@ void StreamingServer::EncodeThread()
         if (forceKeyframe)
         {
             encoder->ForceKeyframe();
+        }
+
+        // Steer the foveal region with gaze. Moving the centre never changes the encoded size
+        // (see Foveation.h), so this is safe every frame and needs no encoder reconfigure.
+        // Gated on CLIENT_CAPABILITY_FOVEATION_CENTER via gazeSteering_.enabled: without it the
+        // encoder keeps the announced static centre.
+        if (gazeSteering.enabled && trackingReceiver_ != nullptr)
+        {
+            oxr::protocol::TrackingPacket trackingPacket = {};
+            if (trackingReceiver_->GetLatestPose(trackingPacket))
+            {
+                const oxrsys::gaze_foveation::GazeCenterOffset gaze =
+                    oxrsys::gaze_foveation::ComputeGazeCenterOffset(
+                        trackingPacket, gazeSteering.centerSizeX, gazeSteering.centerSizeY);
+                const oxrsys::gaze_foveation::GazeCenterFilter::QuantizedCenter center =
+                    gazeCenterFilter_.Update(gaze);
+                encoder->SetFoveationCenter(center.x, center.y);
+            }
         }
 
         auto encodedFrame = std::make_shared<EncodedVideoFrame>();
@@ -1434,6 +1484,9 @@ void StreamingServer::EncodeThread()
 
                 if (!metrics.frameDropped && !encodedFrame->nals.empty())
                 {
+                    encodedFrame->hasFoveationCenter = metrics.foveationCenterValid;
+                    encodedFrame->foveationCenterX = metrics.foveationCenterX;
+                    encodedFrame->foveationCenterY = metrics.foveationCenterY;
                     server->QueueEncodedVideoFrame(std::move(*encodedFrame));
                 }
                 else if (metrics.frameDropped)
@@ -1781,11 +1834,20 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                fecInterleaved_.store(HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
                 encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
                     useFoveatedEncoding, layout));
+                const bool clientSupportsFoveationCenter = HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_CENTER);
+                clientSupportsFoveationCenter_.store(clientSupportsFoveationCenter);
+                gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter,
+                                 layout.parameters.centerSizeX,
+                                 layout.parameters.centerSizeY};
+                gazeCenterFilter_.Reset();
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2001,11 +2063,20 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                fecInterleaved_.store(HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FEC_INTERLEAVED));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
                 encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
                     useFoveatedEncoding, layout));
+                const bool clientSupportsFoveationCenter = HasClientCapability(
+                    clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_CENTER);
+                clientSupportsFoveationCenter_.store(clientSupportsFoveationCenter);
+                gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter,
+                                 layout.parameters.centerSizeX,
+                                 layout.parameters.centerSizeY};
+                gazeCenterFilter_.Reset();
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2143,12 +2214,18 @@ void StreamingServer::HandleClientDisconnect()
                 spdlog::warn("StreamingServer: disconnected encoder drain deferred");
             }
         }
+        gazeSteering_ = {};
     }
+    // The smoothed centre is session state: carrying it into the next client's session would
+    // start that session encoded around the previous user's last fixation.
+    gazeCenterFilter_.Reset();
 
     targetRefreshRateHz_.store(refreshRateHz_);
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
+    clientSupportsFoveationCenter_.store(false);
+    fecInterleaved_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
     clientSupportsSpatialEntity_.store(false);
@@ -2541,6 +2618,9 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
             encoder_.reset();
             RenewCallbackAccess();
             encoder_ = std::move(newEncoder);
+            gazeSteering_ = {useFoveatedEncoding && clientSupportsFoveationCenter_.load(),
+                             layout.foveationLayout.parameters.centerSizeX,
+                             layout.foveationLayout.parameters.centerSizeY};
         }
     }
     if (!previousEncoderDrained)
@@ -2866,7 +2946,9 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec);
+                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs,
+                    frame.hasFoveationCenter, frame.foveationCenterX, frame.foveationCenterY,
+                    frame.codec);
     }
 }
 
@@ -2898,6 +2980,9 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
         pose.presentationTimeNs = frame.timestampNs;
         memcpy(pose.position, frame.headPosition, sizeof(float) * 3);
         memcpy(pose.orientation, frame.headOrientation, sizeof(float) * 4);
+        pose.hasFoveationCenter = frame.hasFoveationCenter ? 1 : 0;
+        pose.foveationCenterX = frame.foveationCenterX;
+        pose.foveationCenterY = frame.foveationCenterY;
 
         std::lock_guard<std::mutex> sendLock(packetDispatchState_->sendMutex);
         if (!SendTcpRecord(videoSocket, oxr::protocol::TcpRecordType::RenderPose,
@@ -2919,6 +3004,8 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
     poseHeader.totalPackets = 0;
     poseHeader.payloadSize = sizeof(posePayload);
     poseHeader.flags = oxr::protocol::VIDEO_FLAG_RENDER_POSE;
+    StampFoveationCenter(poseHeader, frame.hasFoveationCenter, frame.foveationCenterX,
+                         frame.foveationCenterY);
     poseHeader.codec = static_cast<uint8_t>(frame.codec);
     poseHeader.presentationTimeNs = frame.timestampNs;
 
@@ -2941,6 +3028,8 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
                                   bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                                  bool hasFoveationCenter, int8_t foveationCenterX,
+                                  int8_t foveationCenterY,
                                   oxr::protocol::VideoCodec codec)
 {
     std::string clientIp;
@@ -2960,6 +3049,9 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         videoSocket = dispatchState->videoSocket;
         videoUsesTcp = dispatchState->videoUsesTcp;
     }
+    // Latched with the destination snapshot: a client switch mid-NAL must not let the parity
+    // layout diverge from the client this NAL is addressed to.
+    const bool fecInterleaved = fecInterleaved_.load();
 
     if (!oxrsys::runtime_socket::IsValid(videoSocket) || (!videoUsesTcp && clientIp.empty()))
     {
@@ -2987,6 +3079,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
         }
+        StampFoveationCenter(nalHeader, hasFoveationCenter, foveationCenterX, foveationCenterY);
         nalHeader.codec = static_cast<uint8_t>(codec);
 
         std::lock_guard<std::mutex> sendLock(dispatchState->sendMutex);
@@ -3039,6 +3132,61 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
     payloadPtrs.resize(totalPackets);
     payloadSizes.resize(totalPackets);
 
+    // The layout is negotiated: sender and receiver must agree or recovery XORs the wrong
+    // packets together and yields plausible garbage instead of a clean failure. Group
+    // membership never exceeds FEC_GROUP_SIZE under either layout (see TestProtocolFec), so
+    // fixed arrays suffice, matching the receiver's gather.
+    const oxr::fec::GroupLayout fecLayout{totalPackets, fecInterleaved};
+    const auto sendFecParityPacket = [&](uint32_t g) {
+        const uint32_t members = fecLayout.MemberCount(g);
+        if (members == 0)
+        {
+            return;
+        }
+        std::array<const uint8_t*, oxr::protocol::FEC_GROUP_SIZE> groupPtrs = {};
+        std::array<uint16_t, oxr::protocol::FEC_GROUP_SIZE> groupSizes = {};
+        for (uint32_t k = 0; k < members; k++)
+        {
+            const uint32_t idx = fecLayout.Member(g, k);
+            groupPtrs[k] = payloadPtrs[idx];
+            groupSizes[k] = payloadSizes[idx];
+        }
+
+        uint8_t fecPayload[oxr::protocol::MAX_PACKET_PAYLOAD];
+        oxr::fec::Encode(groupPtrs.data(), groupSizes.data(), members, fecPayload);
+
+        oxr::protocol::VideoPacketHeader fecHeader = {};
+        fecHeader.frameIndex = frameIndex;
+        fecHeader.packetIndex = static_cast<uint16_t>(g);
+        fecHeader.totalPackets = totalPackets;
+        fecHeader.payloadSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
+        fecHeader.flags = oxr::protocol::VIDEO_FLAG_FEC | oxr::protocol::VIDEO_FLAG_STEREO;
+        if (alphaBlend)
+        {
+            fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
+        }
+        if (isKeyframe)
+        {
+            fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
+        }
+        // Clients seed frame metadata from data packets only, but the parity header must not
+        // drift from them: any copy of a frame's header has to describe the same warp.
+        StampFoveationCenter(fecHeader, hasFoveationCenter, foveationCenterX, foveationCenterY);
+        fecHeader.fecGroupLastPacketPayloadSize = groupSizes[members - 1];
+        fecHeader.codec = static_cast<uint8_t>(codec);
+        fecHeader.presentationTimeNs = timestampNs;
+
+        memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
+        memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
+        oxrsys::runtime_socket::SendTo(
+            videoSocket,
+            packetBuffer,
+            sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
+            kBestEffortSendFlags,
+            (sockaddr*)&destAddr,
+            sizeof(destAddr));
+    };
+
     size_t offset = 0;
     for (uint16_t i = 0; i < totalPackets; i++)
     {
@@ -3064,6 +3212,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_END_OF_FRAME;
         }
+        StampFoveationCenter(header, hasFoveationCenter, foveationCenterX, foveationCenterY);
         header.codec = static_cast<uint8_t>(codec);
         header.presentationTimeNs = timestampNs;
 
@@ -3092,48 +3241,28 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
 
         offset += payloadSize;
 
-        // After each complete FEC group (or at the end of the frame), send a parity packet
-        uint32_t nextIdx = i + 1;
-        bool isGroupEnd = (nextIdx % oxr::protocol::FEC_GROUP_SIZE == 0);
-        bool isFrameEnd = (nextIdx == totalPackets);
-        if (isGroupEnd || isFrameEnd)
+        // A contiguous group is complete as soon as its last data packet is out, so its parity
+        // goes out inline, dispersed among the data packets it protects: a tail burst then
+        // cannot wipe every parity packet at once, and legacy clients keep the emission
+        // schedule they were built against.
+        if (!fecInterleaved)
         {
-            uint32_t groupIndex = i / oxr::protocol::FEC_GROUP_SIZE;
-            uint32_t groupStart = groupIndex * oxr::protocol::FEC_GROUP_SIZE;
-            uint32_t groupCount = nextIdx - groupStart;
-
-            uint8_t fecPayload[oxr::protocol::MAX_PACKET_PAYLOAD];
-            oxr::fec::Encode(&payloadPtrs[groupStart], &payloadSizes[groupStart],
-                             groupCount, fecPayload);
-
-            oxr::protocol::VideoPacketHeader fecHeader = {};
-            fecHeader.frameIndex = frameIndex;
-            fecHeader.packetIndex = static_cast<uint16_t>(groupIndex);
-            fecHeader.totalPackets = totalPackets;
-            fecHeader.payloadSize = static_cast<uint16_t>(oxr::protocol::MAX_PACKET_PAYLOAD);
-            fecHeader.flags = oxr::protocol::VIDEO_FLAG_FEC | oxr::protocol::VIDEO_FLAG_STEREO;
-            if (alphaBlend)
+            const uint32_t nextIdx = i + 1u;
+            if (nextIdx % oxr::protocol::FEC_GROUP_SIZE == 0 || nextIdx == totalPackets)
             {
-                fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
+                sendFecParityPacket(i / oxr::protocol::FEC_GROUP_SIZE);
             }
-            fecHeader.fecGroupLastPacketPayloadSize =
-                payloadSizes[groupStart + groupCount - 1];
-            if (isKeyframe)
-            {
-                fecHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
-            }
-            fecHeader.codec = static_cast<uint8_t>(codec);
-            fecHeader.presentationTimeNs = timestampNs;
+        }
+    }
 
-            memcpy(packetBuffer, &fecHeader, sizeof(fecHeader));
-            memcpy(packetBuffer + sizeof(fecHeader), fecPayload, oxr::protocol::MAX_PACKET_PAYLOAD);
-            oxrsys::runtime_socket::SendTo(
-                videoSocket,
-                packetBuffer,
-                sizeof(fecHeader) + oxr::protocol::MAX_PACKET_PAYLOAD,
-                kBestEffortSendFlags,
-                (sockaddr*)&destAddr,
-                sizeof(destAddr));
+    // An interleaved group's members are spread across the whole frame, so no group is complete
+    // until the frame is; its parity can only be emitted at the end. The tail-burst exposure is
+    // the price of interleaving's burst tolerance, and only clients that opted in pay it.
+    if (fecInterleaved)
+    {
+        for (uint32_t g = 0; g < fecLayout.Count(); g++)
+        {
+            sendFecParityPacket(g);
         }
     }
 

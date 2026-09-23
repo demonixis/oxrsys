@@ -135,6 +135,35 @@ reduced encoded resolution as a normal downscaled stream. Until the protocol car
 foveated target size, the server enables AADT only when the shader target can match the announced
 source dimensions coherently; otherwise it announces a normal stream.
 
+### Gaze-driven foveation centre
+
+The announced preset parameters place the foveal region at a fixed centre. A client that also
+advertises `CLIENT_CAPABILITY_FOVEATION_CENTER` and reports an eye-gaze direction
+(`TrackingPacket.gazeDirection`, gated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`) gets that centre steered
+to follow gaze instead: the server maps the direction in tan space against the client's reported
+eye FOV, scales for the warp's steering range, and low-passes the result so fixation jitter does
+not shimmer the foveal boundary. While gaze is inactive the centre decays back to zero shift
+rather than freezing at the last fixation. Without the capability bit the centre never
+moves, whatever the client reports: a client that cannot un-warp a per-frame centre must keep the
+one it was announced.
+
+The centre must be identical on both ends: a client that un-warps with a different centre than the
+server warped with produces a geometrically wrong image, not merely stale foveation. The protocol
+therefore carries the exact value used:
+
+- the server quantizes the requested shift to `int8` via `QuantizeCenterShift`, then warps with the
+  dequantized result, so the transmitted bytes are precisely what produced the image
+- `VIDEO_FLAG_FOVEATION_CENTER` marks headers whose centre bytes are meaningful
+- the bytes ride in `VideoPacketHeader.foveationCenter{X,Y}`,
+  `TcpVideoNalHeader.foveationCenter{X,Y}`, and `TcpRenderPose.foveationCenter{X,Y}` with
+  `hasFoveationCenter`, all of which reuse previously reserved bytes, so no wire size changes
+- both ends call the shared `DecodeCenterShift` in `Foveation.h` to turn the byte back into the
+  aligned shift, so the reconstruction is bit-identical
+
+Moving the centre never changes the encoded resolution, because the optimized size depends only on
+centre *size* and edge ratio, not centre *shift*. The centre may therefore move every frame with no
+encoder reconfigure. Clients that report no gaze keep the previous fixed-centre behaviour.
+
 ## Video Stream
 
 UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payload. The header includes:
@@ -145,6 +174,7 @@ UDP video packets use `VideoPacketHeader` followed by up to `1400` bytes of payl
 - flags
 - codec
 - FEC group final-packet payload size, only meaningful on `VIDEO_FLAG_FEC` packets
+- gaze-driven foveation centre, only meaningful on `VIDEO_FLAG_FOVEATION_CENTER` packets
 - presentation timestamp
 
 Current codec identifiers:
@@ -165,9 +195,20 @@ callback or `Session::EndFrame()`.
 
 The current stream also includes two recovery and timing helpers:
 
-- `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
+- `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`. Which data packets a parity packet covers is negotiated; see "FEC group layout" below.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
 - `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
+
+### FEC group layout
+
+Which data packets a parity packet covers is described by `fec::GroupLayout` (`FecCodec.h`), and the choice is negotiated.
+
+- **Contiguous** (default, original): group `g` owns packets `[g*FEC_GROUP_SIZE, g*FEC_GROUP_SIZE + FEC_GROUP_SIZE)`. Because one parity recovers one loss per group, two *adjacent* losses fall in the same group and are unrecoverable. Adjacent loss is the common case on Wi-Fi, where loss arrives in bursts.
+- **Interleaved**: group `g` owns packets `g, g + groupCount, g + 2*groupCount, ...`, so adjacent packets belong to different groups. The same single parity and the same parity overhead then recover any burst up to `groupCount` packets long. Burst tolerance becomes the group count instead of 1, at no extra bandwidth.
+
+Interleaving is used only when the client advertises `CLIENT_CAPABILITY_FEC_INTERLEAVED` and the server advertises `SERVER_FEATURE_FEC_INTERLEAVED`. It must be negotiated rather than assumed: a receiver applying a different layout than the sender XORs a packet out of the wrong group and produces plausible garbage rather than failing cleanly.
+
+Contiguous parity keeps its original schedule, emitted inline as each group's last data packet goes out, so parity stays dispersed among the data it protects. Interleaved parity is emitted after all of a frame's data packets, since an interleaved group is not complete until the frame is; that tail exposure is part of what a client opts into. A parity packet belongs to a specific NAL: receivers must match it by `totalPackets` as well as `frameIndex`, because one frame's NALs share a `frameIndex` and each numbers its packets and groups from zero. Group membership never exceeds `FEC_GROUP_SIZE` under either layout, which receivers rely on when gathering a group into a fixed-size array.
 
 For passthrough, `SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH` means the desktop runtime is configured
 to keep a headset passthrough underlay available while streaming. Separately,
@@ -187,8 +228,11 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+- optional eye-gaze direction, a unit vector in head space with -Z forward
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
+Eye-gaze presence is indicated by `TRACKING_FLAG_EYE_GAZE_ACTIVE`; it is appended at the end of the
+struct, so clients predating it send a shorter packet that the receiver accepts and zero-fills.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
 `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
 controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.

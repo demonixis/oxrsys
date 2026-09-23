@@ -2,7 +2,7 @@
 
 #include "NetworkReceiver.h"
 
-#include <android/log.h>
+#include <cstdio>
 #include <array>
 #include <algorithm>
 #include <arpa/inet.h>
@@ -17,8 +17,8 @@
 #include <unistd.h>
 
 #define LOG_TAG "OXRSys-Network"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOGI(...) do { fprintf(stderr, "[INFO] " LOG_TAG ": "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#define LOGE(...) do { fprintf(stderr, "[ERROR] " LOG_TAG ": "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 
 namespace oxr
 {
@@ -214,17 +214,18 @@ void NetworkReceiver::WireAssemblerCallbacks()
                          frame.flags, frame.codec);
         }
     });
-    assembler_.SetOnFrameAbandoned([this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
-        // Send NACK for missing packets (server may retransmit from cache)
-        SendNack(frame.frameIndex, frame.totalPackets, frame.packetReceived);
+    assembler_.SetOnFrameAbandoned(
+        [this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
+            // Send NACK for missing packets (server may retransmit from cache)
+            SendNack(frame.frameIndex, frame.totalPackets, frame.packetReceived);
 
-        uint32_t dropped = framesDropped_.fetch_add(1) + 1;
-        if (dropped <= 5 || dropped % 100 == 0)
-        {
-            LOGI("Frame %u dropped (%u/%u packets received)",
-                 frame.frameIndex, frame.receivedPackets, frame.totalPackets);
-        }
-    });
+            uint32_t dropped = framesDropped_.fetch_add(1) + 1;
+            if (dropped <= 5 || dropped % 100 == 0)
+            {
+                LOGI("Frame %u dropped (%u/%u packets received)",
+                     frame.frameIndex, frame.receivedPackets, frame.totalPackets);
+            }
+        });
     assembler_.SetOnFecRecovery(
         [this](uint32_t packetIndex, uint32_t totalPackets, uint32_t frameIndex) {
             uint32_t recoveries = fecRecoveries_.fetch_add(1) + 1;
@@ -400,6 +401,12 @@ void NetworkReceiver::StoreRenderPose(const protocol::VideoPacketHeader& header,
     pose.presentationTimeUs = header.presentationTimeNs / 1000;
     memcpy(pose.position, poseData, sizeof(float) * 3);
     memcpy(pose.orientation, poseData + 3, sizeof(float) * 4);
+    if (header.flags & protocol::VIDEO_FLAG_FOVEATION_CENTER)
+    {
+        pose.hasFoveationCenter = true;
+        pose.foveationCenterX = header.foveationCenterX;
+        pose.foveationCenterY = header.foveationCenterY;
+    }
     pose.valid = true;
 
     std::lock_guard<std::mutex> lock(renderPoseMutex_);
@@ -429,6 +436,9 @@ void NetworkReceiver::StoreRenderPose(const protocol::TcpRenderPose& tcpPose)
     pose.presentationTimeUs = tcpPose.presentationTimeNs / 1000;
     memcpy(pose.position, tcpPose.position, sizeof(float) * 3);
     memcpy(pose.orientation, tcpPose.orientation, sizeof(float) * 4);
+    pose.hasFoveationCenter = tcpPose.hasFoveationCenter != 0;
+    pose.foveationCenterX = tcpPose.foveationCenterX;
+    pose.foveationCenterY = tcpPose.foveationCenterY;
     pose.valid = true;
 
     std::lock_guard<std::mutex> lock(renderPoseMutex_);

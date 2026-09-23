@@ -25,11 +25,24 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(CLIENT_CAPABILITY_TEN_BIT_ENCODING == 0x00000400);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, fecGroupLastPacketPayloadSize) == 12);
-    STATIC_REQUIRE(offsetof(VideoPacketHeader, reserved) == 14);
+    // foveationCenterX/Y reuse the two bytes formerly named `reserved`: same offset, same size.
+    STATIC_REQUIRE(offsetof(VideoPacketHeader, foveationCenterX) == 14);
+    STATIC_REQUIRE(offsetof(VideoPacketHeader, foveationCenterY) == 15);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, presentationTimeNs) == 16);
     STATIC_REQUIRE(sizeof(TcpRecordHeader) == 12);
     STATIC_REQUIRE(sizeof(TcpVideoNalHeader) == 24);
+    // Same repurposed-reserved rule as VideoPacketHeader: a reorder that keeps sizeof intact
+    // would silently swap which wire byte means X, Y, or validity.
+    STATIC_REQUIRE(offsetof(TcpVideoNalHeader, foveationCenterX) == 18);
+    STATIC_REQUIRE(offsetof(TcpVideoNalHeader, foveationCenterY) == 19);
     STATIC_REQUIRE(sizeof(TcpRenderPose) == 48);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, foveationCenterX) == 12);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, foveationCenterY) == 13);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, hasFoveationCenter) == 14);
+    STATIC_REQUIRE(offsetof(TcpRenderPose, position) == 16);
+    STATIC_REQUIRE(VIDEO_FLAG_FOVEATION_CENTER == 0x80);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FOVEATION_CENTER == 0x00000800);
+    STATIC_REQUIRE(TRACKING_FLAG_EYE_GAZE_ACTIVE == 0x0010);
     STATIC_REQUIRE(sizeof(TcpAudioHeader) == 24);
     STATIC_REQUIRE(sizeof(AudioPacketHeader) == 32);
     STATIC_REQUIRE(TCP_RECORD_MAGIC == 0x4f585255);
@@ -47,8 +60,13 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(StreamConfigAck) == 16);
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
+    // A layout mismatch XORs the wrong packets together, so these bits must agree with every
+    // client mirror (Protocol.swift pins the same values).
+    STATIC_REQUIRE(SERVER_FEATURE_FEC_INTERLEAVED == 0x00000400);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FEC_INTERLEAVED == 0x00001000);
 
-    STATIC_REQUIRE(sizeof(TrackingPacket) == 1064);
+    // 1080, not 1076: gazeDirection ends at 1076 and the struct's int64 alignment pads to 8.
+    STATIC_REQUIRE(sizeof(TrackingPacket) == 1080);
     STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
     STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
     STATIC_REQUIRE(offsetof(TrackingPacket, leftHandJoints) == 176);
@@ -56,6 +74,10 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     // Aim pose appended after the hand-joint payload (must match Swift Protocol.swift layout).
     STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimPos) == 1008);
     STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimRot) == 1020);
+    // Eye gaze appended after the aim poses. Clients predating it send a shorter packet, which
+    // TrackingReceiver accepts (kMinTrackingPacketSize) and zero-fills; the Swift client cannot
+    // supply gaze at all, since visionOS never exposes a raw gaze ray to applications.
+    STATIC_REQUIRE(offsetof(TrackingPacket, gazeDirection) == 1064);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimPos) == 1036);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimRot) == 1048);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
