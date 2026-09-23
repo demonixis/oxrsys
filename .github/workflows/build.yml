@@ -25,8 +25,14 @@ jobs:
             preset: macos-x64
             arch: x86_64
     runs-on: ${{ matrix.runner }}
+    env:
+      # GitHub allows 10GB of caches per repo and evicts LRU; keep ccache well under so it
+      # cannot push out the third-party source cache.
+      CCACHE_MAXSIZE: 500M
     steps:
       - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install ninja vulkan-headers ripgrep ccache
       - name: Enforce macOS-only source layout
         run: |
           removed_paths=(
@@ -67,22 +73,54 @@ jobs:
             cat build/removed-option-check.log
             exit 1
           fi
-      - name: Install build dependencies
-        run: brew install ninja vulkan-headers
       - name: Cache third-party sources
         uses: actions/cache@v4
         with:
           path: build/${{ matrix.preset }}/_deps
           key: deps-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', 'runtime/CMakeLists.txt', 'cmake/**') }}
+      - name: Cache compiled objects
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.arch }}-
+      - name: Record toolchain version
+        # Compilation caches are toolchain-specific; a runner image bump must miss the cache
+        # rather than restore objects the new compiler rejects.
+        run: xcodebuild -version > .toolchain-version
+      - name: Cache Home compilation cache
+        uses: actions/cache@v4
+        with:
+          path: build/cas/home-${{ matrix.arch }}
+          key: cas-home-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-${{ github.sha }}
+          restore-keys: cas-home-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-
+      - name: Cache simulator compilation cache
+        uses: actions/cache@v4
+        with:
+          path: build/cas/simulator-${{ matrix.arch }}
+          key: cas-simulator-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-${{ github.sha }}
+          restore-keys: cas-simulator-${{ matrix.arch }}-${{ hashFiles('.toolchain-version') }}-
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        run: >-
+          cmake --preset ${{ matrix.preset }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache
+          -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
       - name: Build
         run: cmake --build build/${{ matrix.preset }}
+      - name: ccache stats
+        run: ccache --show-stats --verbose | head -20
       - name: Test
         run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure
       - name: Build and test Home
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
+          COMPILATION_CACHE_ENABLE_CACHING=YES
+          COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
+          "COMPILATION_CACHE_CAS_PATH=${{ github.workspace }}/build/cas/home-${{ matrix.arch }}"
           -project "clients/home/OXRSys Home.xcodeproj"
           -scheme "OXRSys Home"
           -configuration Debug
@@ -92,9 +130,31 @@ jobs:
           ONLY_ACTIVE_ARCH=NO
           CODE_SIGNING_ALLOWED=NO
           test
+      - name: Collect Home test diagnostics
+        if: failure()
+        run: |
+          log show --last 30m --info \
+            --predicate 'process IN {"syspolicyd", "XprotectService", "amfid", "testmanagerd", "launchservicesd", "runningboardd"} OR eventMessage CONTAINS[c] "oxrsys"' \
+            > "build/home-system.log" || true
+          cp -R "$HOME/Library/Logs/DiagnosticReports" "build/DiagnosticReports" || true
+      - name: Upload Home test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: home-test-diagnostics-${{ matrix.arch }}
+          path: |
+            build/xcode/home-${{ matrix.arch }}/Logs/Test
+            build/home-system.log
+            build/DiagnosticReports
+          if-no-files-found: ignore
       - name: Build simulator for macOS
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
+          COMPILATION_CACHE_ENABLE_CACHING=YES
+          COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS=YES
+          "COMPILATION_CACHE_CAS_PATH=${{ github.workspace }}/build/cas/simulator-${{ matrix.arch }}"
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -110,6 +170,8 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Install lint dependencies
+        run: brew install ripgrep
       - name: Enforce platform UI boundaries
         run: |
           if rg -n '^import AppKit' clients --glob '*.swift' | rg -v '/Platform/macOS/'; then
@@ -120,6 +182,18 @@ jobs:
             echo 'UIKit imports must stay under Platform/iOS.' >&2
             exit 1
           fi
+      - name: Record toolchain version
+        # Swift module caches are toolchain-specific; a runner image bump must miss the cache
+        # rather than restore modules the new compiler rejects.
+        run: xcodebuild -version > .toolchain-version
+      - name: Cache Swift package builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            clients/shared/OXRSysStreaming/.build
+            clients/shared/OXRSysSimulator/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ hashFiles('.toolchain-version', 'clients/shared/**/Package.resolved', 'clients/shared/**/Package.swift') }}
       - name: Test shared streaming package
         run: swift test --package-path clients/shared/OXRSysStreaming
       - name: Build shared simulator package
@@ -127,6 +201,8 @@ jobs:
       - name: Build simulator for iOS Simulator
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -137,6 +213,8 @@ jobs:
       - name: Build simulator for iOS device
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/simulator/OXRSys Simulator.xcodeproj"
           -scheme "OXRSys Simulator"
           -configuration Debug
@@ -147,6 +225,8 @@ jobs:
       - name: Build visionOS viewer
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/visionos/OXRSys visionOS.xcodeproj"
           -scheme "OXRSys visionOS"
           -configuration Debug
@@ -157,6 +237,8 @@ jobs:
       - name: Build visionOS viewer for device
         run: >-
           xcodebuild
+          -showBuildTimingSummary
+          COMPILER_INDEX_STORE_ENABLE=NO
           -project "clients/visionos/OXRSys visionOS.xcodeproj"
           -scheme "OXRSys visionOS"
           -configuration Debug
@@ -177,6 +259,8 @@ jobs:
           cache: gradle
           cache-dependency-path: clients/android-vr/**/*.gradle*
       - uses: android-actions/setup-android@v3
+        with:
+          packages: '' # skip obsolete "tools" package
       - name: Install Android build components
         run: >-
           sdkmanager
@@ -196,12 +280,38 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: brew install ninja vulkan-headers
+      - name: Record toolchain version
+        # Compilation caches are toolchain-specific; a runner image bump must miss the cache
+        # rather than restore objects the new compiler rejects.
+        run: xcodebuild -version > .toolchain-version
+      - name: Cache third-party sources
+        uses: actions/cache@v4
+        with:
+          path: build/macos-package/cmake/_deps
+          key: deps-${{ runner.os }}-universal-${{ hashFiles('CMakeLists.txt', 'runtime/CMakeLists.txt', 'cmake/**') }}
+      - name: Cache Home compilation cache
+        uses: actions/cache@v4
+        with:
+          path: build/cas/package-home
+          key: cas-package-home-${{ hashFiles('.toolchain-version') }}-${{ github.sha }}
+          restore-keys: cas-package-home-${{ hashFiles('.toolchain-version') }}-
       - name: Build universal package
-        run: >-
-          ./scripts/macos_build_package.sh
-          --configuration Release
-          --architectures universal
-          --output-dir build/OXRSys-macOS-Release
+        # The script owns the cmake and xcodebuild invocations, so cache settings arrive by
+        # environment: XCODE_XCCONFIG_FILE injects the compilation cache into the Home build.
+        # ccache is not used here: the universal cmake build passes two -arch flags per
+        # compile, which ccache does not cache.
+        run: |
+          printf '%s\n' \
+            'COMPILATION_CACHE_ENABLE_CACHING = YES' \
+            'COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS = YES' \
+            "COMPILATION_CACHE_CAS_PATH = ${GITHUB_WORKSPACE}/build/cas/package-home" \
+            'COMPILER_INDEX_STORE_ENABLE = NO' \
+            > "${RUNNER_TEMP}/package-cache.xcconfig"
+          XCODE_XCCONFIG_FILE="${RUNNER_TEMP}/package-cache.xcconfig" \
+            ./scripts/macos_build_package.sh \
+            --configuration Release \
+            --architectures universal \
+            --output-dir build/OXRSys-macOS-Release
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:

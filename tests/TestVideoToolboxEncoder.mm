@@ -109,6 +109,10 @@ void EncodeOneFrame(oxr::protocol::VideoCodec codec,
             ready.notify_one();
         }));
 
+    // A software encoder holds output until the session completes, so wait on a drained
+    // pipeline rather than on one frame emerging unprompted.
+    encoder.FlushPendingFrames();
+
     {
         std::unique_lock<std::mutex> lock(mutex);
         REQUIRE(ready.wait_for(lock, std::chrono::seconds(5), [&] { return completed; }));

@@ -1155,6 +1155,41 @@ bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnN
                           std::move(callback), std::move(frameCallback));
 }
 
+bool VideoEncoder::FlushPendingFrames(std::chrono::milliseconds timeout)
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true)
+    {
+        // Retain under the lock, complete outside it: CompleteFrames blocks and would otherwise
+        // stall a concurrent EncodeFrame.
+        VTCompressionSessionRef compressionSession = nullptr;
+        {
+            std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
+            compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
+            if (compressionSession != nullptr)
+            {
+                CFRetain(compressionSession);
+            }
+        }
+        if (compressionSession == nullptr)
+        {
+            return true;
+        }
+        VTCompressionSessionCompleteFrames(compressionSession, kCMTimeInvalid);
+        CFRelease(compressionSession);
+
+        if (inFlightFrameCount_.load() == 0)
+        {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
 bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
                                  OnFrameEncodedCallback frameCallback)
 {

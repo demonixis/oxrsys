@@ -90,3 +90,6 @@ clients/android-vr/.gradle
 clients/android-vr/app/.cxx
 clients/shared/OXRSysSimulator/.build
 clients/shared/OXRSysStreaming/.build
+
+# generated in CI for the Swift cache key
+.toolchain-version
