@@ -31,9 +31,24 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added bounded world-space reprojection to the visionOS viewer, applying exact rotation and
   translation from each frame's runtime render pose to the live head pose against the shared 2 m
   reprojection plane.
+- Added `oxrsys-encoder-helper`, a native `arm64` VideoToolbox encoder process that gives an
+  `x86_64` runtime under Rosetta (for example inside CrossOver) the hardware encoder VideoToolbox
+  refuses it in-process for H.265. It encodes H.265 Main, H.265 Main10, and H.264 Main from the
+  runtime's compose IOSurfaces, shared zero-copy as Mach send rights, and returns Annex-B NAL units
+  over a versioned Unix-socket protocol. It is built with the runtime, is always `arm64`, and ships
+  next to the runtime dylib in every package, universal and `x86_64` included.
+- Added `streaming.encoder_helper = "auto" | "true" | "false"` (default `"auto"`) and
+  `streaming.encoder_helper_path` (default empty, meaning the helper next to the runtime dylib).
+  `auto` uses the helper only when a VideoToolbox query reports no hardware encoder for the
+  negotiated codec in the runtime's own process, so native `arm64` hosts, H.264 under Rosetta, and
+  AV1 stay in-process. Any helper failure, including its death mid-stream, falls back to the
+  in-process encoder without ending the stream.
 
 ### Changed
 
+- The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
+  one for the negotiated codec, retrying without the requirement only if that create fails, and the
+  runtime log states whether the session it got is hardware or software.
 - Made the visionOS connection flow seamless, matching the Android client: discovery starts automatically on launch, a discovered server is connected to immediately (entering the immersive view remains a separate preference), and losing the stream returns to discovery and reconnects instead of holding a frozen frame. A user-initiated disconnect still stays disconnected.
 - Fixed the visionOS first connection often needing a reconnect before tracking worked: the ARKit session now starts when the stream comes up instead of when the immersive space opens, so the renderer no longer queries a world-tracking provider that has not started yet (previously the first frames had no device anchor and were never presented).
 - Focused the host runtime exclusively on macOS with Metal, Vulkan/MoltenVK, and VideoToolbox, while
@@ -56,6 +71,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed an `x86_64` runtime under Rosetta silently encoding H.265 on VideoToolbox's software
+  encoder (about 20-34 ms per frame, over the 11.1 ms budget at 90 Hz) with nothing in the log to
+  say so. H.265 now reaches the hardware encoder through the native `arm64` helper.
+- Fixed VideoToolbox's software HEVC encoder signaling full-range video, against the limited-range
+  stream contract, when it encodes directly from the BGRA compose surface. Software sessions,
+  which a Rosetta host falls back to when the encoder helper dies, now encode a BT.709 video-range
+  4:2:0 conversion of each frame, so the stream stays limited range on every encode path.
 - Fixed intermittent visionOS immersive-entry stalls and compositor terminations by waiting for a
   reusable GPU slot before acquiring a finite-pool frame, reducing the shared-event wait from 10
   seconds to 10 milliseconds, and presenting startup frames without pose adjustment when ARKit has

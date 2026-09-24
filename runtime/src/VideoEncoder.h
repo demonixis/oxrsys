@@ -7,14 +7,21 @@
 #include <cstdint>
 #include <functional>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "GraphicsTypes.h"
 #include "BoundedDrain.h"
+#include "EncoderPathPolicy.h"
 #include <oxrsys/protocol/Protocol.h>
+
+// Runtime-side client for the out-of-process native-arm64 hardware HEVC
+// encoder helper (see runtime/encoder_helper/README.md).
+class EncoderHelperClient;
 
 /**
  * Low-latency video encoder facade.
@@ -99,6 +106,17 @@ public:
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
+    // Diagnostics (and tests): pid of the live out-of-process encoder helper
+    // frames are currently sent to, or -1 when they are encoded in-process.
+    int EncoderHelperPid() const;
+    // Diagnostics (and tests): whether the in-process VideoToolbox session
+    // Initialize() created is hardware-accelerated. A software session is fed a
+    // video-range 4:2:0 conversion of each frame (EncoderSessionColor.h).
+    bool InProcessSessionUsesHardware() const { return inProcessSessionHardware_; }
+    // Tests only, before Initialize(): create the in-process session on the
+    // software encoder and never start the helper, so the software path the
+    // helper-death fallback lands on under Rosetta can be exercised anywhere.
+    void SetForceSoftwareEncoderForTesting(bool enabled) { forceSoftwareForTesting_ = enabled; }
     static bool SupportsFoveatedEncoding(const GraphicsContext& graphicsContext);
     static BackendCapabilities QueryBackendCapabilities(const GraphicsContext* graphicsContext = nullptr);
     static bool SupportsCodec(oxr::protocol::VideoCodec codec);
@@ -152,6 +170,35 @@ private:
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();
 
+    // Software in-process sessions only (EncoderSessionColor.h): sets up, and
+    // per frame performs, the BGRA -> video-range 4:2:0 conversion. Convert
+    // returns a +1 CVPixelBufferRef, or nullptr to encode the BGRA slot as is.
+    bool CreateVideoRangeConversion(uint32_t width, uint32_t height);
+    void* ConvertToVideoRange(void* bgraPixelBuffer);
+
+    // Native-arm64 hardware encoder helper integration. When the helper starts and
+    // reports the hardware encoder, the per-frame VideoToolbox encode is
+    // delegated to it (out-of-process, native arm64); the in-process session
+    // stays live as the fallback for helper death.
+    bool TryStartHelper();
+    // Stops the helper and finalizes every frame still in flight to it, so their
+    // slots and callback-drain leases are released. The client object itself is
+    // released only once the callback drain is empty (ReleaseHelperClient), so a
+    // Metal completion handler racing teardown cannot use a freed client.
+    void StopHelper();
+    void ReleaseHelperClient();
+    std::shared_ptr<EncoderHelperClient> AcquireHelperClient() const;
+    void ReclaimHelperFrames(const char* reason);
+    // Invoked from the helper client's reader thread. `cookie` is the sequence
+    // number the frame was submitted with, the key of its EncodeFrameContext in
+    // helperContexts_ (opaque across the IPC).
+    void OnHelperNal(uint64_t cookie, const uint8_t* data, size_t size, bool keyframe,
+                     int64_t ptsNs);
+    void OnHelperFrameDone(uint64_t cookie, bool dropped, double encodeMs, bool keyframe);
+    // Reclaims every frame in flight to a helper that just died, so the
+    // in-process fallback is not starved of slots.
+    void OnHelperDied();
+
     struct VideoToolboxState
     {
         void* session = nullptr;          // VTCompressionSessionRef
@@ -164,6 +211,9 @@ private:
         void* copySampler = nullptr;       // id<MTLSamplerState>
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        // Software sessions only: BGRA -> video-range 4:2:0 before encode.
+        void* videoRangeTransfer = nullptr; // VTPixelTransferSessionRef
+        void* videoRangePool = nullptr;     // CVPixelBufferPoolRef
     };
 
     GraphicsContext graphicsContext_ = {};
@@ -176,11 +226,33 @@ private:
     oxr::protocol::VideoCodec codec_ = oxr::protocol::VideoCodec::H265;
     FoveationSettings foveationSettings_ = {};
     bool tenBit_ = false;
+    bool forceSoftwareForTesting_ = false;
+    bool inProcessSessionHardware_ = false;
+
+    // Which process encodes, and why — decided once in Initialize() from an
+    // actual VideoToolbox hardware-encoder query plus the encoder_helper
+    // override, and used both to pick RequireHardware for the in-process
+    // session and to decide whether to spawn the helper at all.
+    oxrsys::encoder::EncodePathDecision encodePath_ = {};
+
+    // Out-of-process native-arm64 hardware encoder helper. useHelper_ is set only
+    // once the helper is up AND reports the hardware encoder; if it dies
+    // mid-session the client reports not-alive and EncodeInternal reverts to the
+    // in-process session (never a black screen).
+    mutable std::mutex helperClientMutex_;
+    std::shared_ptr<EncoderHelperClient> helperClient_;
+    std::atomic<bool> useHelper_{false};
+    std::mutex helperContextMutex_;
+    std::unordered_map<uint64_t, void*> helperContexts_; // cookie -> EncodeFrameContext*
+    // Source of helper cookies: unique for the encoder's lifetime, unlike a
+    // context address, which the allocator may hand to the next frame.
+    std::atomic<uint64_t> nextHelperCookie_{0};
     std::atomic_bool initialized_{false};
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
     std::atomic<bool> foveationValidationWarningLogged_{false};
+    std::atomic<bool> videoRangeConversionWarningLogged_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};
     std::atomic<uint64_t> frameNumberCounter_{0};

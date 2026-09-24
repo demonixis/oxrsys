@@ -8,11 +8,17 @@ slices, and assembles a relocatable directory at `build/OXRSys-macOS/` by defaul
 ```text
 OXRSys Home.app
 runtime/liboxrsys-runtime.dylib
+runtime/oxrsys-encoder-helper
 runtime/oxrsys-runtime.json
 runtime/oxrsys-runtime.toml
 ```
 
 The package manifest is rewritten to use `./liboxrsys-runtime.dylib`.
+
+`oxrsys-encoder-helper` is the native-arm64 hardware video encoder helper (see
+`runtime/encoder_helper/README.md`). It is built by the `oxrsys_runtime` target and is **always
+arm64**, whatever `--architectures` selects: it exists so an x86_64 runtime running under Rosetta
+can still reach the hardware HEVC encoder. Both scripts refuse a helper that is not arm64-only.
 
 ```bash
 ./scripts/macos_build_package.sh
@@ -31,7 +37,7 @@ requested architectures. The verification still rejects missing slices.
 
 ## Signing And Notarization
 
-`macos_sign_notarize.sh` signs the runtime and Home app, creates a combined zip, optionally submits
+`macos_sign_notarize.sh` signs the runtime, its encoder helper (hardened runtime) and Home app, creates a combined zip, optionally submits
 it through `xcrun notarytool`, staples the accepted Home ticket, and rebuilds the archive.
 
 Build and sign a universal Release:

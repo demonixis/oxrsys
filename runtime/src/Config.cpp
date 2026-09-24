@@ -391,6 +391,26 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
             {
                 values.encoder10Bit = ParseBool(value);
             }
+            else if (key == "encoder_helper")
+            {
+                // Tri-state: "auto" (decide from the measured hardware-encoder
+                // availability), or an explicit true/false override. Anything
+                // unrecognised keeps the current value rather than silently
+                // flipping the policy on a typo.
+                value = ParseString(value);
+                std::string lowered = value;
+                std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+                if (lowered == "auto" || lowered == "true" || lowered == "false" ||
+                    lowered == "yes" || lowered == "no" || lowered == "on" || lowered == "off" ||
+                    lowered == "1" || lowered == "0")
+                {
+                    values.encoderHelperMode = lowered;
+                }
+            }
+            else if (key == "encoder_helper_path")
+            {
+                values.encoderHelperPath = ParseString(value);
+            }
             else if (key == "transport")
             {
                 value = ParseString(value);

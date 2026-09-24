@@ -172,6 +172,8 @@ add_executable(oxrsys_runtime_tests
     tests/TestBoundedDrain.cpp
     tests/TestClientLiveness.cpp
     tests/TestConfig.cpp
+    tests/TestEncoderHelperIpc.cpp
+    tests/TestEncoderPathPolicy.cpp
     tests/TestInputManager.cpp
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
@@ -195,10 +197,12 @@ add_executable(oxrsys_runtime_tests
     runtime/src/RuntimeSockets.cpp
     runtime/src/StreamingFrameQueue.cpp
     runtime/src/VideoCodecSelection.cpp
+    runtime/src/EncoderPathPolicy.cpp
     runtime/src/VulkanDispatch.cpp
 )
 target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
+    runtime/encoder_helper
     clients/android-vr/app/src/main/cpp
     common/protocol/include
     ${openxr_SOURCE_DIR}/include
@@ -306,12 +310,16 @@ list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
 
 add_executable(oxrsys_videotoolbox_encoder_tests
     tests/TestVideoToolboxEncoder.mm
+    tests/TestEncoderHelperClient.mm
     runtime/src/VideoEncoder.mm
+    runtime/src/EncoderHelperClient.mm
+    runtime/src/EncoderPathPolicy.cpp
     runtime/src/Config.cpp
     runtime/src/RuntimePlatform.cpp
 )
 target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
     runtime/src
+    runtime/encoder_helper
     common/protocol/include
     ${openxr_SOURCE_DIR}/include
 )
@@ -324,6 +332,7 @@ target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
     "-framework VideoToolbox"
     "-framework CoreMedia"
     "-framework CoreVideo"
+    "-framework IOSurface"
 )
 target_compile_definitions(oxrsys_videotoolbox_encoder_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
@@ -334,9 +343,13 @@ target_compile_definitions(oxrsys_videotoolbox_encoder_tests PRIVATE
 add_test(NAME oxrsys_videotoolbox_encoder_tests
     COMMAND oxrsys_videotoolbox_encoder_tests
 )
+# The encoder tests drive the build's own native-arm64 helper, wherever the
+# runtime dylib that would normally sit beside it is.
+add_dependencies(oxrsys_videotoolbox_encoder_tests oxrsys-encoder-helper)
 set_tests_properties(oxrsys_videotoolbox_encoder_tests PROPERTIES
-    ENVIRONMENT "${OXRSYS_ISOLATED_TEST_ENV}"
-    TIMEOUT 30
+    ENVIRONMENT
+        "${OXRSYS_ISOLATED_TEST_ENV};OXRSYS_ENCODER_HELPER_PATH=$<TARGET_FILE:oxrsys-encoder-helper>"
+    TIMEOUT 60
 )
 list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_videotoolbox_encoder_tests)
 

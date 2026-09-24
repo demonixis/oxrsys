@@ -19,7 +19,8 @@ trademarks referenced by this project.
 - macOS runtime for `arm64` and `x86_64`, with universal release packaging
 - `XR_KHR_metal_enable`, including blit-to-swapchain applications such as Blender, and
   Vulkan/MoltenVK graphics paths
-- VideoToolbox H.264, H.265, and negotiated HEVC Main10 streaming
+- VideoToolbox H.264, H.265, and negotiated HEVC Main10 streaming, with a native `arm64` encoder
+  helper that keeps H.265 on the hardware encoder when an `x86_64` runtime runs under Rosetta
 - WiFi UDP and reconnecting USB ADB reverse TCP transport
 - SDK-free native ADB setup in OXRSys Home, with local ADB server and external `adb` fallbacks
 - Quest controller, hand tracking, reprojection, passthrough, foveation, and ABR paths

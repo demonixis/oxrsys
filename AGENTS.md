@@ -65,6 +65,28 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   instead of falling back to a live image or CPU readback.
 - VideoToolbox is the only host encoder. Its stream is BT.709 SDR limited-range YCbCr; encoder
   metadata and client conversion must use the exact matching 8-bit and 10-bit code ranges.
+- Every VideoToolbox session, in-process or in the helper, applies
+  `runtime/encoder_helper/EncoderSessionColor.h`. VideoToolbox has no range property and its
+  software HEVC encoder signals full range for BGRA, so a software in-process session encodes a
+  BT.709 video-range 4:2:0 conversion of the compose surface, never BGRA.
+- VideoToolbox runs either in-process or in the native `arm64` `oxrsys-encoder-helper`.
+  `encoder_helper = "auto"` uses the helper only when a VideoToolbox query in the runtime's own
+  process finds no hardware encoder for the negotiated codec; never infer it from the process
+  architecture. Native `arm64`, H.264 under Rosetta, and AV1 stay in-process; `"true"` and
+  `"false"` force a path for debugging.
+- The helper encodes exactly the negotiated codec and profile from the runtime's compose
+  IOSurfaces, shared once as Mach send rights; pixels never cross the process boundary. Control,
+  frame, and result messages use one inherited Unix stream socket with the versioned framing in
+  `runtime/encoder_helper/EncoderHelperIpc.h`; both peers reject a foreign protocol version. Do not
+  set the child's bootstrap port through `posix_spawnattr_setspecialport_np`.
+- Helper submission runs on the Metal completion path, never in `Session::EndFrame()`, and helper
+  frames in flight are bounded by the encoder slots. Any helper failure, including death
+  mid-stream, falls back to the in-process session and reclaims every in-flight frame's slot and
+  drain lease. Helper sockets use `SO_NOSIGPIPE` and `MSG_NOSIGNAL`; the runtime must not install a
+  process-wide `SIGPIPE` handler in the host application.
+- The helper is always `arm64`. Every package, universal and `x86_64` included, ships it at
+  `runtime/oxrsys-encoder-helper` beside the runtime dylib, and packaging rejects any other slice
+  set.
 - The VideoToolbox decoder path is latency-first: enable but do not require hardware decode, set
   real-time decode, never combine it with maximize-power-efficiency, and scan NAL units in place.
 - Codec negotiation is conservative. `supportedCodecs = 0` means a legacy H.265-only client. H.265

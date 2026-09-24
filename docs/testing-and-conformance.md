@@ -14,6 +14,13 @@ Before merging host-runtime changes, repeat the explicit `macos-arm64` and `maco
 cover configuration, platform helpers, input/actions, protocol layout, status, frame-queue resource
 release, codec selection, Vulkan dispatch, and loader-backed OpenXR behavior.
 
+The VideoToolbox encoder tests also cover the encode-path policy, the encoder helper's IPC framing,
+host and helper survival when either side dies, the in-process fallback after the helper is killed
+mid-stream, and the BT.709 limited-range color description on every path: in-process hardware, the
+helper, and a pinned software session for H.264, HEVC Main, and HEVC Main10. ctest points them at
+the build's own helper. Helper cases skip on an Intel Mac, which cannot run the `arm64` helper, and
+the mid-stream death case skips where the policy keeps the encode in-process.
+
 Graphics-extension tests must verify that Metal and Vulkan are exposed and that unsupported host
 graphics bindings are not advertised.
 
@@ -55,7 +62,8 @@ Use `assembleOptimizedRelease` as an additional diagnostic, not as the stable si
   --architectures universal
 ```
 
-The helper validates both `arm64` and `x86_64` slices in the runtime and Home executable. Also check
+The helper validates both `arm64` and `x86_64` slices in the runtime and Home executable, and that
+`runtime/oxrsys-encoder-helper` is arm64 only. Also check
 that the package manifest contains the relative `./liboxrsys-runtime.dylib` path. A package build is
 not evidence that signing, notarization, launch, or streaming succeeds.
 
@@ -83,6 +91,9 @@ Automated checks do not replace these release gates:
 - stream an actual Metal application and an actual Vulkan/MoltenVK application
 - test WiFi and native ADB reverse USB on affected Quest 1/2/3/Pro and Pico devices
 - validate controller, hand, codec, refresh-rate, passthrough, ABR, and reprojection changes
+- for encoder-helper changes, stream H.265 Main, H.265 Main10, and H.264 from an `x86_64` runtime
+  under Rosetta to a physical headset, then kill the helper mid-stream and confirm the stream
+  continues without a color shift
 - validate immersive presentation, tracking, reconnect, and latency on a physical Vision Pro
 - validate Cardboard stereo presentation and ARKit tracking on a physical iPhone
 - sign, notarize, staple, unpack, register, and launch the distribution archive

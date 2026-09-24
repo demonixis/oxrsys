@@ -34,9 +34,15 @@ Runtime outputs are under the selected build directory:
 
 ```text
 runtime/liboxrsys-runtime.dylib
+runtime/oxrsys-encoder-helper
 runtime/oxrsys-runtime.json
 runtime/oxrsys-runtime.toml
 ```
+
+`oxrsys-encoder-helper` is the out-of-process hardware video encoder the runtime spawns when it
+cannot get a hardware encoder in its own process (an x86_64 runtime under Rosetta is refused the
+hardware HEVC encoder). It is built with the runtime and is always arm64, whatever the preset's
+architecture; see [`runtime/encoder_helper/README.md`](../runtime/encoder_helper/README.md).
 
 The runtime needs Vulkan headers at compile time but does not link a Vulkan loader. Metal and
 VideoToolbox are macOS frameworks.
@@ -185,9 +191,13 @@ The output contains:
 ```text
 OXRSys Home.app
 runtime/liboxrsys-runtime.dylib
+runtime/oxrsys-encoder-helper
 runtime/oxrsys-runtime.json
 runtime/oxrsys-runtime.toml
 ```
+
+The encoder helper is arm64-only in every package, universal included; the script rejects any other
+slice set for it.
 
 The packaged manifest uses `./liboxrsys-runtime.dylib`, so the folder remains relocatable.
 

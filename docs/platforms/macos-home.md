@@ -224,6 +224,18 @@ for clients that explicitly advertise H.264 support.
 The `encoder_10bit` control requests HEVC Main10 and takes effect only for an H.265 stream to a
 client that advertises 10-bit decode support. H.264 remains 8-bit.
 
+Two encoder keys are edited in the TOML only, not in Home:
+
+- `streaming.encoder_helper` (default `"auto"`) chooses where VideoToolbox encodes. `auto` uses the
+  native `arm64` encoder helper only when the runtime's own process has no hardware encoder for the
+  negotiated codec, which is the case for H.265 in an `x86_64` runtime under Rosetta. `"true"` and
+  `"false"` force the helper on or off; any other value is treated as `auto`.
+- `streaming.encoder_helper_path` (default empty) overrides where the helper binary is found. Empty
+  means `oxrsys-encoder-helper` next to the runtime dylib. The `OXRSYS_ENCODER_HELPER_PATH`
+  environment variable takes precedence over both.
+
+See [Architecture](../architecture.md#encode-path) for the encode-path decision and fallback.
+
 The refresh control writes one of `60`, `72`, `80`, `90`, or `120` Hz. The
 runtime announces that value, and Quest clients request it through
 `XR_FB_display_refresh_rate` before reporting the active display rate back.
@@ -289,8 +301,8 @@ The runtime reloads config file changes opportunistically:
 - `bitrate_mbps`, `resolution_scale`, `dynamic_resolution_min_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
   `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`,
   `client_reprojection`, `abr_mode`, `passthrough_enabled`,
-  `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, and `headset_audio` apply when streaming or the
-  encoder/client connection is recreated
+  `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, `headset_audio`, `encoder_helper`,
+  and `encoder_helper_path` apply when streaming or the encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
 The Settings ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the native USB ADB protocol, the local ADB server protocol, or `adb reverse --list` fallback. USB refresh/setup results are request-scoped so stale results after ADB mode, path, selected device, or transport changes are ignored. If a periodic refresh cannot read reverse mappings for the same still-authorized device, Home preserves previously verified reverse ports instead of flipping the main readiness pill to not ready. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.

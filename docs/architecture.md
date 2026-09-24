@@ -74,6 +74,30 @@ Apple streams use BT.709 SDR limited-range YCbCr. Foveated encoding runs as a Me
 before the VideoToolbox pixel-buffer copy and is enabled only for clients that advertise the exact
 inverse transform.
 
+### Encode Path
+
+The runtime decides once per encoder session where the VideoToolbox encode runs. VideoToolbox does
+not give an `x86_64` process under Rosetta, such as a runtime loaded by CrossOver's Wine host, the
+hardware H.265 encoder; that process only gets the software encoder, which misses a 90 Hz frame
+budget. Rosetta does get hardware H.264. A native `arm64` process gets both.
+
+With `streaming.encoder_helper = "auto"`, the default, the runtime asks VideoToolbox whether its own
+process can obtain a hardware encoder for the negotiated codec. If it can, the encode stays
+in-process. If it cannot, the runtime spawns `oxrsys-encoder-helper`, a native `arm64` process found
+next to the runtime dylib or at `streaming.encoder_helper_path`, and sends it the compose
+IOSurfaces once as Mach send rights. Each frame then crosses the process boundary as a slot index
+on a Unix socket, and Annex-B NAL units come back the same way. The helper encodes the negotiated
+H.265 Main, H.265 Main10, or H.264 Main profile. There is no AV1 encoder in VideoToolbox, so AV1
+never uses the helper. `"true"` and `"false"` force the helper on or off for debugging.
+
+The in-process session stays open behind the helper. If the helper cannot start, does not get a
+hardware encoder, or dies mid-stream, the runtime logs where it failed, reclaims frames that were in
+flight, and keeps streaming from the in-process session. Under Rosetta that session is the software
+encoder. Because the software HEVC encoder would signal full range for the BGRA compose surface,
+software sessions encode a BT.709 video-range 4:2:0 conversion, so a fallback does not change the
+stream's color contract. The helper's design and IPC are described in
+[`runtime/encoder_helper/README.md`](../runtime/encoder_helper/README.md).
+
 The C++ and Swift protocol layouts must remain byte-compatible. See [Protocol](protocol.md) for
 ports, messages, feature flags, and compatibility rules.
 

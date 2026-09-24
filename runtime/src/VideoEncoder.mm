@@ -2,10 +2,14 @@
 
 #import "VideoEncoder.h"
 #import "Config.h"
+#import "EncoderHelperClient.h"
+#import "EncoderPathPolicy.h"
+#import "EncoderSessionColor.h"
 #import "VideoTextureFormat.h"
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -16,8 +20,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -306,6 +312,71 @@ CMVideoCodecType VideoToolboxCodecType(oxr::protocol::VideoCodec codec)
         default:
             return kCMVideoCodecType_HEVC;
     }
+}
+
+// Does THIS process actually get a hardware encoder for `codecType`?
+//
+// The answer is not a property of the machine: VideoToolbox grants an x86_64
+// (Rosetta) process the hardware H.264 encoder but not the hardware HEVC one,
+// and that grant is Apple's to change. So ask VideoToolbox rather than reading
+// the architecture: VTCopyVideoEncoderList reports, per codec, whether a
+// hardware encoder is visible here. If the list cannot be had, fall back to the
+// definitive test — try to create a RequireHardware=YES session and see.
+bool ProbeHardwareSession(CMVideoCodecType codecType, uint32_t width, uint32_t height)
+{
+    NSDictionary* spec = @{
+        (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
+        (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES,
+    };
+    VTCompressionSessionRef probe = nullptr;
+    const OSStatus status = VTCompressionSessionCreate(
+        kCFAllocatorDefault, (int32_t)std::max(width, 16u), (int32_t)std::max(height, 16u),
+        codecType, (__bridge CFDictionaryRef)spec, nullptr, kCFAllocatorDefault, nullptr, nullptr,
+        &probe);
+    if (status != noErr || probe == nullptr)
+    {
+        spdlog::info("VideoEncoder: RequireHardware=YES probe failed ({}) - no hardware encoder in "
+                     "this process",
+                     status);
+        return false;
+    }
+    VTCompressionSessionInvalidate(probe);
+    CFRelease(probe);
+    return true;
+}
+
+bool HardwareEncoderAvailableInProcess(CMVideoCodecType codecType, uint32_t width, uint32_t height)
+{
+    CFArrayRef encoderList = nullptr;
+    if (VTCopyVideoEncoderList(nullptr, &encoderList) == noErr && encoderList != nullptr)
+    {
+        bool sawCodec = false;
+        bool hardware = false;
+        const CFIndex count = CFArrayGetCount(encoderList);
+        for (CFIndex i = 0; i < count; i++)
+        {
+            NSDictionary* entry = (__bridge NSDictionary*)(CFDictionaryRef)CFArrayGetValueAtIndex(
+                encoderList, i);
+            NSNumber* entryCodec = entry[(NSString*)kVTVideoEncoderList_CodecType];
+            if (entryCodec == nil || (CMVideoCodecType)[entryCodec intValue] != codecType)
+            {
+                continue;
+            }
+            sawCodec = true;
+            NSNumber* isHardware = entry[(NSString*)kVTVideoEncoderList_IsHardwareAccelerated];
+            if (isHardware != nil && [isHardware boolValue])
+            {
+                hardware = true;
+                break;
+            }
+        }
+        CFRelease(encoderList);
+        if (sawCodec)
+        {
+            return hardware;
+        }
+    }
+    return ProbeHardwareSession(codecType, width, height);
 }
 
 CFStringRef VideoToolboxProfileLevel(oxr::protocol::VideoCodec codec, bool tenBit)
@@ -889,9 +960,43 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         slots_[i].inUse = false;
     }
 
+    const ConfigValues initialConfig = Config::Get().GetValues();
+
+    // Which process encodes this codec, and why. Decided from what VideoToolbox
+    // will actually grant this process — not from its architecture — so the
+    // logic survives Apple changing what Rosetta is allowed.
+    // Tests can pin the in-process session to the software encoder, the one a
+    // Rosetta host falls back to when the helper dies, on any machine.
+    const bool forceSoftware = forceSoftwareForTesting_;
+    const bool hardwareInProcess =
+        !forceSoftware &&
+        HardwareEncoderAvailableInProcess(VideoToolboxCodecType(codec_), width, height);
+    {
+        oxrsys::encoder::EncodePathInputs pathInputs;
+        pathInputs.codec = codec_;
+        pathInputs.tenBit = tenBit_ && codec_ == oxr::protocol::VideoCodec::H265;
+        pathInputs.inProcessHardwareAvailable = hardwareInProcess;
+        pathInputs.override_ =
+            forceSoftware ? oxrsys::encoder::HelperOverride::ForceInProcess
+                          : oxrsys::encoder::ParseHelperOverride(initialConfig.encoderHelperMode);
+        encodePath_ = oxrsys::encoder::ChooseEncodePath(pathInputs);
+        spdlog::info("VideoEncoder: {} encode path for {} - {} (in-process hardware encoder: {})",
+                     encodePath_.useHelper ? "out-of-process native-arm64 helper" : "in-process",
+                     VideoCodecName(codec_),
+                     oxrsys::encoder::DescribeEncodePathReason(encodePath_.reason),
+                     hardwareInProcess ? "yes" : "no");
+    }
+
+    // RequireHardware is an assertion, not a wish: we only demand it when the
+    // query above says this process can have it. The @NO that used to be
+    // unconditional is what made a Rosetta host silently get the ~27-40ms/frame
+    // software HEVC encoder; now that path is entered knowingly, logged, and
+    // (when the helper covers the codec) only as the fallback behind it.
     NSDictionary* encoderSpec = @{
-        (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
-        (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
+        (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder:
+            forceSoftware ? @NO : @YES,
+        (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder:
+            hardwareInProcess ? @YES : @NO,
     };
 
     VTCompressionSessionRef compressionSession = nullptr;
@@ -906,6 +1011,23 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CompressionOutputCallback,
         nullptr,
         &compressionSession);
+    if (status != noErr && hardwareInProcess)
+    {
+        // The query promised a hardware encoder and the create still refused it.
+        // Retry without the requirement rather than failing the session: a slow
+        // encoder beats no video. Loudly, because it should not happen.
+        spdlog::warn("VideoEncoder: hardware-required compression session failed ({}) although a "
+                     "hardware {} encoder was reported - retrying without the requirement",
+                     status, VideoCodecName(codec_));
+        NSDictionary* relaxedSpec = @{
+            (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
+            (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
+        };
+        status = VTCompressionSessionCreate(
+            kCFAllocatorDefault, width, height, VideoToolboxCodecType(codec_),
+            (__bridge CFDictionaryRef)relaxedSpec, nullptr, kCFAllocatorDefault,
+            CompressionOutputCallback, nullptr, &compressionSession);
+    }
     if (status != noErr)
     {
         spdlog::error("VideoEncoder: Failed to create compression session: {}", status);
@@ -920,22 +1042,17 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     // Define one deterministic SDR color contract for every encoded stream. VideoToolbox embeds
     // these values in H.264/H.265 metadata and uses the matching matrix for RGB-to-YCbCr conversion.
-    const OSStatus primariesStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_ColorPrimaries,
-        kCVImageBufferColorPrimaries_ITU_R_709_2);
-    const OSStatus transferStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_TransferFunction,
-        kCVImageBufferTransferFunction_ITU_R_709_2);
-    const OSStatus matrixStatus = VTSessionSetProperty(compressionSession,
-        kVTCompressionPropertyKey_YCbCrMatrix,
-        kCVImageBufferYCbCrMatrix_ITU_R_709_2);
-    if (primariesStatus != noErr || transferStatus != noErr || matrixStatus != noErr)
+    // The contract lives in EncoderSessionColor.h, shared with the out-of-process helper's session,
+    // so the two encode paths cannot drift apart.
+    const oxrsys::encoder_color::ApplyResult colorStatus =
+        oxrsys::encoder_color::ApplySessionColorProperties(compressionSession);
+    if (!colorStatus.ok())
     {
         spdlog::warn("VideoEncoder: failed to apply complete BT.709 color metadata (primaries={} transfer={} matrix={})",
-                     primariesStatus, transferStatus, matrixStatus);
+                     colorStatus.primaries, colorStatus.transferFunction, colorStatus.yCbCrMatrix);
     }
 
-    const ConfigValues config = Config::Get().GetValues();
+    const ConfigValues& config = initialConfig;
     const std::string& preset = config.encoderPreset;
     const OSStatus profileStatus = VTSessionSetProperty(compressionSession,
         kVTCompressionPropertyKey_ProfileLevel,
@@ -1010,11 +1127,338 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         std::lock_guard<std::mutex> sessionLock(videoToolboxSessionMutex_);
         videoToolbox_.session = compressionSession;
     }
+
+    // Say out loud what this session actually is. The old unconditional
+    // RequireHardware=NO meant a Rosetta host ran the software HEVC encoder with
+    // nothing in the log to say so; a line here makes that impossible.
+    {
+        bool sessionUsesHardware = false;
+        CFBooleanRef hardwareRef = nullptr;
+        if (VTSessionCopyProperty(compressionSession,
+                                  kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                                  kCFAllocatorDefault, &hardwareRef) == noErr &&
+            hardwareRef != nullptr)
+        {
+            sessionUsesHardware = CFBooleanGetValue(hardwareRef);
+            CFRelease(hardwareRef);
+        }
+        inProcessSessionHardware_ = sessionUsesHardware;
+        if (sessionUsesHardware)
+        {
+            spdlog::info("VideoEncoder: in-process {} session is hardware-accelerated",
+                         VideoCodecName(codec_));
+        }
+        else if (encodePath_.useHelper)
+        {
+            spdlog::info("VideoEncoder: in-process {} session is SOFTWARE - kept only as the "
+                         "fallback behind the native-arm64 hardware helper",
+                         VideoCodecName(codec_));
+        }
+        else
+        {
+            spdlog::warn("VideoEncoder: in-process {} session is SOFTWARE ({}) - expect high "
+                         "per-frame encode cost",
+                         VideoCodecName(codec_),
+                         oxrsys::encoder::DescribeEncodePathReason(encodePath_.reason));
+        }
+    }
+
+    // A software session writes full range for a BGRA source (HEVC Main), which
+    // would break the limited-range stream contract exactly when the helper dies
+    // and this session takes over mid-stream. Hand it an explicitly video-range
+    // 4:2:0 conversion of each frame instead; see EncoderSessionColor.h. Set up
+    // now, not on helper death, so the fallback never allocates on the frame path.
+    if (!inProcessSessionHardware_ && !CreateVideoRangeConversion(width, height))
+    {
+        spdlog::warn("VideoEncoder: could not set up the video-range conversion for the software "
+                     "{} session - its stream may signal full range",
+                     VideoCodecName(codec_));
+    }
+
+    // VideoToolbox refuses the hardware HEVC encoder to an x86_64/Rosetta
+    // process and silently returns a software session instead. When the policy
+    // above chose the helper, delegate the per-frame encode to a native-arm64
+    // child process that is granted the hardware encoder; this session stays
+    // live as the fallback. See runtime/encoder_helper/README.md.
+    if (encodePath_.useHelper && !forceSoftware && TryStartHelper())
+    {
+        spdlog::info("VideoEncoder: hardware {} via the native-arm64 out-of-process helper",
+                     VideoCodecName(codec_));
+    }
+
     initialized_ = true;
 
     spdlog::info("VideoEncoder: Initialized {} encoder {}x{} @ {}fps, {}Mbps (slots={}, keyframe={}s, preset={})",
                   VideoCodecName(codec_), width, height, fps, bitrateMbps, SlotCount, keyframeIntervalSec, preset);
     return true;
+}
+
+bool VideoEncoder::CreateVideoRangeConversion(uint32_t width, uint32_t height)
+{
+    VTPixelTransferSessionRef transfer = oxrsys::encoder_color::CreateVideoRangeTransferSession();
+    if (transfer == nullptr)
+    {
+        return false;
+    }
+    NSDictionary* poolAttributes = @{
+        (NSString*)kCVPixelBufferPoolMinimumBufferCountKey: @(SlotCount),
+    };
+    NSDictionary* bufferAttributes = @{
+        (NSString*)kCVPixelBufferWidthKey: @(width),
+        (NSString*)kCVPixelBufferHeightKey: @(height),
+        (NSString*)kCVPixelBufferPixelFormatTypeKey:
+            @(oxrsys::encoder_color::kVideoRangeSourcePixelFormat),
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
+    };
+    CVPixelBufferPoolRef pool = nullptr;
+    if (CVPixelBufferPoolCreate(kCFAllocatorDefault, (__bridge CFDictionaryRef)poolAttributes,
+                                (__bridge CFDictionaryRef)bufferAttributes,
+                                &pool) != kCVReturnSuccess ||
+        pool == nullptr)
+    {
+        VTPixelTransferSessionInvalidate(transfer);
+        CFRelease(transfer);
+        return false;
+    }
+    videoToolbox_.videoRangeTransfer = transfer;
+    videoToolbox_.videoRangePool = pool;
+    spdlog::info("VideoEncoder: software {} session is fed a BT.709 video-range 4:2:0 conversion "
+                 "of each frame, keeping the stream limited-range",
+                 VideoCodecName(codec_));
+    return true;
+}
+
+void* VideoEncoder::ConvertToVideoRange(void* bgraPixelBuffer)
+{
+    VTPixelTransferSessionRef transfer =
+        (VTPixelTransferSessionRef)videoToolbox_.videoRangeTransfer;
+    CVPixelBufferPoolRef pool = (CVPixelBufferPoolRef)videoToolbox_.videoRangePool;
+    if (transfer == nullptr || pool == nullptr || bgraPixelBuffer == nullptr)
+    {
+        return nullptr;
+    }
+    CVPixelBufferRef converted = nullptr;
+    if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &converted) !=
+            kCVReturnSuccess ||
+        converted == nullptr)
+    {
+        return nullptr;
+    }
+    const OSStatus status =
+        VTPixelTransferSessionTransferImage(transfer, (CVPixelBufferRef)bgraPixelBuffer, converted);
+    if (status != noErr)
+    {
+        if (!videoRangeConversionWarningLogged_.exchange(true))
+        {
+            spdlog::warn("VideoEncoder: video-range conversion failed ({}); encoding the BGRA "
+                         "surface directly, which may signal full range",
+                         status);
+        }
+        CVPixelBufferRelease(converted);
+        return nullptr;
+    }
+    return converted;
+}
+
+bool VideoEncoder::TryStartHelper()
+{
+    const ConfigValues config = Config::Get().GetValues();
+
+    // Resolve the helper binary: explicit config, then environment override,
+    // then a sibling of the runtime dylib.
+    std::string helperPath = config.encoderHelperPath;
+    if (const char* environmentPath = std::getenv("OXRSYS_ENCODER_HELPER_PATH"))
+    {
+        helperPath = environmentPath;
+    }
+    if (helperPath.empty())
+    {
+        const std::string& dylibDir = Config::Get().dylibDir;
+        helperPath = (dylibDir.empty() ? std::string(".") : dylibDir) + "/oxrsys-encoder-helper";
+    }
+
+    // The IOSurface behind each preallocated slot is what the helper encodes
+    // from; it is shared zero-copy as a mach send right, never copied.
+    std::vector<void*> surfaces(SlotCount, nullptr);
+    for (size_t i = 0; i < SlotCount; i++)
+    {
+        CVPixelBufferRef pixelBuffer = (CVPixelBufferRef)slots_[i].pixelBuffer;
+        IOSurfaceRef surface =
+            pixelBuffer != nullptr ? CVPixelBufferGetIOSurface(pixelBuffer) : nullptr;
+        if (surface == nullptr)
+        {
+            spdlog::warn("VideoEncoder: encoder helper disabled - slot {} is not IOSurface-backed",
+                         i);
+            return false;
+        }
+        surfaces[i] = (void*)surface;
+    }
+
+    EncoderHelperClient::Config helperConfig;
+    helperConfig.width = width_;
+    helperConfig.height = height_;
+    helperConfig.fps = fps_;
+    helperConfig.bitrateMbps = bitrateMbps_;
+    helperConfig.keyframeIntervalSec = config.keyframeIntervalSec;
+    helperConfig.preset = config.encoderPreset == "speed"      ? 1u
+                          : config.encoderPreset == "quality"  ? 2u
+                                                               : 0u;
+    // The helper encodes what the client and runtime negotiated, nothing else.
+    helperConfig.codec = codec_ == oxr::protocol::VideoCodec::H264
+                             ? EncoderHelperClient::Codec::H264
+                             : EncoderHelperClient::Codec::H265;
+    helperConfig.profile = (tenBit_ && codec_ == oxr::protocol::VideoCodec::H265)
+                               ? EncoderHelperClient::Profile::Main10
+                               : EncoderHelperClient::Profile::Main;
+    helperConfig.helperPath = helperPath;
+
+    auto client = std::make_shared<EncoderHelperClient>();
+    client->SetDiedCallback([this]() { OnHelperDied(); });
+    const bool started = client->Start(
+        helperConfig, surfaces.data(), surfaces.size(),
+        [this](uint64_t cookie, const uint8_t* data, size_t size, bool keyframe, int64_t ptsNs) {
+            OnHelperNal(cookie, data, size, keyframe, ptsNs);
+        },
+        [this](uint64_t cookie, bool dropped, double encodeMs, bool keyframe) {
+            OnHelperFrameDone(cookie, dropped, encodeMs, keyframe);
+        });
+    if (!started)
+    {
+        spdlog::warn("VideoEncoder: native-arm64 hardware helper unavailable - continuing on the "
+                     "in-process encoder");
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(helperClientMutex_);
+        helperClient_ = std::move(client);
+    }
+    useHelper_.store(true);
+    return true;
+}
+
+int VideoEncoder::EncoderHelperPid() const
+{
+    if (!useHelper_.load())
+    {
+        return -1;
+    }
+    std::shared_ptr<EncoderHelperClient> client = AcquireHelperClient();
+    return client != nullptr && client->IsAlive() ? client->HelperPid() : -1;
+}
+
+std::shared_ptr<EncoderHelperClient> VideoEncoder::AcquireHelperClient() const
+{
+    // Only the pointer copy is guarded: callers keep the client alive for the
+    // duration of their use, so teardown never frees it underneath them.
+    std::lock_guard<std::mutex> lock(helperClientMutex_);
+    return helperClient_;
+}
+
+void VideoEncoder::StopHelper()
+{
+    useHelper_.store(false);
+    if (std::shared_ptr<EncoderHelperClient> client = AcquireHelperClient())
+    {
+        client->Stop();
+    }
+    // The helper will send no further completions, so reclaim whatever is still
+    // in flight: each context owns a slot and a callback-drain lease that
+    // Shutdown waits on.
+    ReclaimHelperFrames(nullptr);
+}
+
+void VideoEncoder::ReleaseHelperClient()
+{
+    std::lock_guard<std::mutex> lock(helperClientMutex_);
+    helperClient_.reset();
+}
+
+void VideoEncoder::ReclaimHelperFrames(const char* reason)
+{
+    std::vector<EncodeFrameContext*> pending;
+    {
+        std::lock_guard<std::mutex> lock(helperContextMutex_);
+        pending.reserve(helperContexts_.size());
+        for (const auto& entry : helperContexts_)
+        {
+            pending.push_back(static_cast<EncodeFrameContext*>(entry.second));
+        }
+        helperContexts_.clear();
+    }
+    if (!pending.empty() && reason != nullptr)
+    {
+        spdlog::warn("VideoEncoder: {} with {} frame(s) in flight - reclaiming their slots",
+                     reason, pending.size());
+    }
+    for (EncodeFrameContext* context : pending)
+    {
+        FinalizeEncodeFrame(context, true);
+    }
+}
+
+void VideoEncoder::OnHelperNal(uint64_t cookie, const uint8_t* data, size_t size, bool keyframe,
+                               int64_t ptsNs)
+{
+    // The context stays owned by helperContexts_ until FrameDone, and the helper
+    // client delivers NAL and FrameDone from one reader thread in order, so the
+    // pointer cannot be finalized underneath this call.
+    EncodeFrameContext* context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(helperContextMutex_);
+        auto it = helperContexts_.find(cookie);
+        if (it != helperContexts_.end())
+        {
+            context = static_cast<EncodeFrameContext*>(it->second);
+        }
+    }
+    if (context == nullptr || !context->nalCallback)
+    {
+        return;
+    }
+    try
+    {
+        context->nalCallback(data, size, keyframe, ptsNs);
+    }
+    catch (const std::exception& error)
+    {
+        spdlog::warn("VideoEncoder: helper NAL callback threw: {}", error.what());
+    }
+    catch (...)
+    {
+        spdlog::warn("VideoEncoder: helper NAL callback threw an unknown exception");
+    }
+}
+
+void VideoEncoder::OnHelperFrameDone(uint64_t cookie, bool dropped, double encodeMs, bool keyframe)
+{
+    EncodeFrameContext* context = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(helperContextMutex_);
+        auto it = helperContexts_.find(cookie);
+        if (it != helperContexts_.end())
+        {
+            context = static_cast<EncodeFrameContext*>(it->second);
+            helperContexts_.erase(it);
+        }
+    }
+    if (context == nullptr)
+    {
+        return;
+    }
+    context->metrics.keyframe = keyframe;
+    // The helper measures the hardware VideoToolbox encode entirely within its
+    // own process and reports it in milliseconds; mach clocks are not comparable
+    // across the Rosetta boundary, so nothing else it sends is a timestamp.
+    context->metrics.encodeSubmitMs = encodeMs;
+    FinalizeEncodeFrame(context, dropped);
+}
+
+void VideoEncoder::OnHelperDied()
+{
+    // No completion will ever arrive for these. useHelper_ stays set, but the
+    // client now reports not-alive, so EncodeInternal takes the in-process path.
+    ReclaimHelperFrames("encoder helper died");
 }
 
 bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
@@ -1026,6 +1470,9 @@ bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
     // calls retain a lease until they either return or transfer it to their
     // Metal/VideoToolbox callback context.
     callbackDrain_.Stop();
+    // Stop the helper before the VideoToolbox drain so no new frame is submitted
+    // to it, and so frames in flight to it release their slots and drain leases.
+    StopHelper();
 
     {
         std::lock_guard<std::mutex> lock(shutdownMutex_);
@@ -1084,6 +1531,9 @@ bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
         spdlog::warn("VideoEncoder: asynchronous callback drain timed out");
         return false;
     }
+    // Every Metal completion handler has returned, so nothing can still be
+    // holding the helper client.
+    ReleaseHelperClient();
 
     {
         std::lock_guard<std::mutex> lock(shutdownMutex_);
@@ -1129,6 +1579,17 @@ bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
     {
         CFRelease(videoToolbox_.pixelBufferPool);
         videoToolbox_.pixelBufferPool = nullptr;
+    }
+    if (videoToolbox_.videoRangeTransfer != nullptr)
+    {
+        VTPixelTransferSessionInvalidate((VTPixelTransferSessionRef)videoToolbox_.videoRangeTransfer);
+        CFRelease(videoToolbox_.videoRangeTransfer);
+        videoToolbox_.videoRangeTransfer = nullptr;
+    }
+    if (videoToolbox_.videoRangePool != nullptr)
+    {
+        CFRelease(videoToolbox_.videoRangePool);
+        videoToolbox_.videoRangePool = nullptr;
     }
     if (videoToolbox_.textureCache != nullptr)
     {
@@ -1625,6 +2086,62 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
         context->metrics.gpuCopyMs = ToMilliseconds(Clock::now() - context->encodeStart);
 
+        // Preferred path: delegate the VideoToolbox encode to the native-arm64
+        // helper, which is granted the hardware HEVC encoder. Composition into
+        // this slot's IOSurface has completed (this is the command buffer's
+        // completion handler), so the helper reads finished pixels.
+        //
+        // Publishing the context (inserting it into helperContexts_) hands its
+        // ownership away: from that instant the helper's reader thread may
+        // finalize and delete it - on FrameDone, or on helper death via
+        // OnHelperDied -> ReclaimHelperFrames, which reclaims every published
+        // context whether or not it was ever submitted. So everything the
+        // submit needs is read out of `context` BEFORE publishing, and
+        // `context` is not dereferenced again on this thread afterwards.
+        std::shared_ptr<EncoderHelperClient> helperClient =
+            this->useHelper_.load() ? this->AcquireHelperClient() : nullptr;
+        if (helperClient != nullptr && helperClient->IsAlive())
+        {
+            // A per-encoder sequence number, not the context's address: an
+            // address can be reused by the next frame's context as soon as this
+            // one is freed, and the orphan lookup below must never find (and
+            // finalize) a different frame than the one it published.
+            const uint64_t cookie = this->nextHelperCookie_.fetch_add(1) + 1;
+            const uint32_t slot = (uint32_t)context->slotIndex;
+            context->metrics.encodeSubmitMs = 0.0;
+            context->encodeSubmitFinished = Clock::now();
+            {
+                std::lock_guard<std::mutex> lock(this->helperContextMutex_);
+                this->helperContexts_[cookie] = context;
+            }
+            // `context` is published: only `cookie` identifies it from here on.
+            if (!helperClient->SubmitFrame(cookie, slot, timestampNs, forceKeyframe))
+            {
+                // Never sent: the helper was already gone, or died under this
+                // write (EPIPE; the client has marked it dead). No completion
+                // will come for this frame. OnHelperDied may already have
+                // reclaimed it; otherwise take it back here. Looked up by
+                // cookie, never through the `context` pointer, which may
+                // already have been finalized. A frame that WAS sent is left to
+                // the helper: FrameDone, or OnHelperDied if it never answers.
+                EncodeFrameContext* orphan = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(this->helperContextMutex_);
+                    auto it = this->helperContexts_.find(cookie);
+                    if (it != this->helperContexts_.end())
+                    {
+                        orphan = static_cast<EncodeFrameContext*>(it->second);
+                        this->helperContexts_.erase(it);
+                    }
+                }
+                if (orphan != nullptr)
+                {
+                    FinalizeEncodeFrame(orphan, true);
+                }
+            }
+            return;
+        }
+
         CFMutableDictionaryRef frameProps = nullptr;
         if (forceKeyframe)
         {
@@ -1653,14 +2170,23 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                 FinalizeEncodeFrame(context, true);
                 return;
             }
+            // A software session encodes a video-range 4:2:0 copy of the
+            // slot (EncoderSessionColor.h); VideoToolbox retains it for as
+            // long as it needs it, so the local reference is dropped below.
+            CVPixelBufferRef videoRangeBuffer =
+                (CVPixelBufferRef)this->ConvertToVideoRange(pixelBuffer);
             status = VTCompressionSessionEncodeFrame(
                 compressionSession,
-                pixelBuffer,
+                videoRangeBuffer != nullptr ? videoRangeBuffer : pixelBuffer,
                 presentationTime,
                 kCMTimeInvalid,
                 frameProps,
                 context,
                 nullptr);
+            if (videoRangeBuffer != nullptr)
+            {
+                CVPixelBufferRelease(videoRangeBuffer);
+            }
         }
         context->metrics.encodeSubmitMs = ToMilliseconds(Clock::now() - submitStart);
         context->encodeSubmitFinished = Clock::now();
@@ -1775,6 +2301,17 @@ void VideoEncoder::SetBitrate(uint32_t bitrateMbps)
     if (videoToolbox_.session == nullptr || bitrateMbps == bitrateMbps_)
     {
         return;
+    }
+
+    // Keep the out-of-process helper's bitrate in lockstep with the in-process
+    // fallback session.
+    if (useHelper_.load())
+    {
+        if (std::shared_ptr<EncoderHelperClient> client = AcquireHelperClient();
+            client != nullptr && client->IsAlive())
+        {
+            client->SetBitrate(bitrateMbps);
+        }
     }
 
     VTCompressionSessionRef compressionSession = (VTCompressionSessionRef)videoToolbox_.session;
