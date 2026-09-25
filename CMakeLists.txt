@@ -185,6 +185,8 @@ add_executable(oxrsys_runtime_tests
     tests/TestVideoTextureFormat.cpp
     tests/TestVulkanDispatch.cpp
     tests/TestCompositionLayerAlpha.cpp
+    tests/TestProtocolFec.cpp
+    tests/TestVideoFrameAssembler.cpp
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
@@ -205,6 +207,7 @@ target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/encoder_helper
     clients/android-vr/app/src/main/cpp
     common/protocol/include
+    common/streaming/include
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_runtime_tests PRIVATE
@@ -321,6 +324,7 @@ target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
     runtime/src
     runtime/encoder_helper
     common/protocol/include
+    common/streaming/include
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
