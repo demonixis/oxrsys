@@ -152,6 +152,12 @@ private:
     int64_t monoStartNs_ = 0;
     std::chrono::steady_clock::time_point lastFrameTime_;
 
+    // Self-correcting absolute-deadline frame-pacing grid (see WaitFrame). Anchors
+    // each frame to a fixed cadence at the negotiated display period so sleep
+    // overshoot does not accumulate into phase drift / a slow beat against the panel.
+    std::chrono::steady_clock::time_point nextFrameDeadline_{};
+    std::chrono::nanoseconds pacingPeriod_{0};
+
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;
 

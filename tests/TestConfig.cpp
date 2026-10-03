@@ -139,6 +139,31 @@ occlusion_mode = "magic"
     CHECK(values.encoderHelperPath == "/opt/oxrsys/oxrsys-encoder-helper");
 }
 
+TEST_CASE("Config parser accepts render presets alongside floor calibration", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+render_device = "avp"
+stage_height_offset_m = -0.25
+keyframe_interval_sec = 4
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+    CHECK(values.renderDevice == "avp");
+    CHECK(values.stageHeightOffsetM == -0.25f);
+    CHECK(values.keyframeIntervalSec == 4);
+
+    std::istringstream invalid(R"TOML(
+[streaming]
+render_device = "unknown"
+stage_height_offset_m = 1.5
+)TOML");
+
+    const ConfigValues preserved = ParseConfigToml(invalid, values);
+    CHECK(preserved.renderDevice == "avp");
+    CHECK(preserved.stageHeightOffsetM == -0.25f);
+}
+
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")
 {
     // Default: the runtime decides from the measured hardware-encoder
