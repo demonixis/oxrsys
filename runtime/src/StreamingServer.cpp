@@ -722,7 +722,11 @@ void StreamingServer::Stop()
     std::lock_guard<std::mutex> stopLock(stopMutex_);
 
     InvalidateCallbackAccess();
-    running_.store(false);
+    {
+        // Serialize the stop predicate with the sender wait to prevent a lost wakeup.
+        std::lock_guard<std::mutex> sendLock(videoSendMutex_);
+        running_.store(false);
+    }
     state_.store(State::Stopped);
     frameQueue_.Stop();
     videoSendCv_.notify_all();

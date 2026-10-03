@@ -22,6 +22,22 @@ The default test layers are:
 
 `oxrsys_runtime_api_tests` is Apple-only in this pass because it exercises the loader-backed Metal path. Linux builds still run the runtime, config, input, protocol, and status tests.
 
+### Session Shutdown
+
+On macOS, `oxrsys_runtime_shutdown` runs the API suite's `[shutdown]` case separately
+with a 15-second CTest timeout. It creates and immediately destroys 20 sessions
+without a connected client, checking that they finish within 10 seconds. The
+process timeout also catches a blocked `xrDestroySession()` that never returns.
+This is a stress check; a passing run does not rule out every thread interleaving.
+Run it with other runtime applications and viewers stopped:
+
+```bash
+ctest --test-dir build -R '^oxrsys_runtime_shutdown$' --output-on-failure
+```
+
+The test uses the API suite's isolated configuration and runs serially to avoid
+overlapping runtime listeners with other tests in the same CTest run.
+
 ## Home Tests
 
 The macOS Home has a small Swift test runner for bundle inspection, launcher persistence

@@ -98,6 +98,7 @@ Avoid duplicating the same guidance in multiple files. If commands, platform sta
 - Home USB setup should prefer the native ADB host-server protocol on `127.0.0.1:5037` when available, fall back to a selected or auto-detected `adb` executable only when needed, and configure missing reverse mappings automatically when the user selects USB.
 - Quest USB TCP sockets must keep bounded send behavior; failed video sends must clear stale TCP dispatch state and must not block the encoded-frame sender, VideoToolbox callback, or `Session::EndFrame()`.
 - Encoded video dispatch is latest-frame-oriented and bounded; stale queued frames may be dropped instead of building latency when the transport cannot keep up.
+- Shutdown must update `running_` under `videoSendMutex_` before notifying `videoSendCv_`, so the sender cannot miss the stop notification between checking its predicate and waiting.
 - Runtime-managed Quest logcat capture is optional and disabled by default; if enabled, clearing the headset log before capture must remain bounded/best-effort and must not block runtime startup or tests.
 - Headset refresh rate is selected by the server config/Home, requested by the Quest client through `XR_FB_display_refresh_rate`, and negotiated back from the active client rate.
 - The Quest Android client still uses the build-time `OXRSYS_PREFERRED_DISPLAY_REFRESH_RATE_HZ` value as a fallback before a server is discovered.

@@ -2695,3 +2695,18 @@ TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime]
     CHECK(xrAcquireSwapchainImage(staticSwapchain, nullptr, &extraIndex) == XR_ERROR_CALL_ORDER_INVALID);
     XR_CHECK(xrDestroySwapchain(staticSwapchain));
 }
+
+TEST_CASE("Immediate session shutdown without a client remains bounded", "[runtime][shutdown]")
+{
+    const auto started = std::chrono::steady_clock::now();
+    for (int iteration = 0; iteration < 20; ++iteration)
+    {
+        INFO("Shutdown iteration: " << iteration);
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        XR_CHECK(xrDestroySpace(context.localSpace));
+        context.localSpace = XR_NULL_HANDLE;
+        XR_CHECK(xrDestroySession(context.session));
+        context.session = XR_NULL_HANDLE;
+    }
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
+}

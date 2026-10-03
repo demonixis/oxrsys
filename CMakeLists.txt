@@ -253,10 +253,17 @@ if(APPLE)
     )
     add_dependencies(oxrsys_runtime_api_tests oxrsys_runtime)
     add_test(NAME oxrsys_runtime_api_tests COMMAND oxrsys_runtime_api_tests)
-    set_tests_properties(oxrsys_runtime_api_tests PROPERTIES
+    add_test(NAME oxrsys_runtime_shutdown
+        COMMAND oxrsys_runtime_api_tests "[shutdown]"
+    )
+    set_tests_properties(oxrsys_runtime_api_tests oxrsys_runtime_shutdown PROPERTIES
         ENVIRONMENT
             "HOME=${OXRSYS_TEST_HOME};XDG_CONFIG_HOME=${OXRSYS_TEST_XDG_CONFIG_HOME};XDG_STATE_HOME=${OXRSYS_TEST_XDG_STATE_HOME};APPDATA=${OXRSYS_TEST_APPDATA};XR_RUNTIME_JSON=$<TARGET_FILE_DIR:oxrsys_runtime>/oxrsys-runtime.json"
         TIMEOUT 120
+    )
+    set_tests_properties(oxrsys_runtime_shutdown PROPERTIES
+        TIMEOUT 15
+        RUN_SERIAL TRUE
     )
     list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
 endif()

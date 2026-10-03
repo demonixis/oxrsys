@@ -70,7 +70,7 @@ This project uses AI-generated code and documentation. We appreciate professiona
 - [Qt Home](docs/platforms/qt-home.md)
 - [iOS Viewer](docs/platforms/ios-viewer.md)
 - [Vision OS](docs/platforms/visionos.md)
-- [Testing And Conformance](docs/testing-and-conformance.md)
+- [Testing And Conformance](docs/testing-and-conformance.md) (including the session shutdown check)
 - [Licensing](docs/licensing.md)
 - [Scripts](scripts/README.md)
 

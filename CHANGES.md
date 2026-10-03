@@ -55,6 +55,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed a session shutdown hang caused by the encoded video sender missing its stop notification.
 - Fixed Metal streaming frame snapshots so the async encoder reads a release-time staging texture instead of a swapchain slot that the app may already have reused.
 - Fixed server-side foveated encoding on Metal by running the AADT pass through a compute shader into a private GPU scratch texture before blitting into the VideoToolbox pixel buffer, avoiding render-encoder validation aborts on the first encoded frame.
 - Fixed Quest connection recovery when a server is discovered but no first video frame arrives, returning the client to discovery/retry instead of leaving the standby/loading screen stuck.
