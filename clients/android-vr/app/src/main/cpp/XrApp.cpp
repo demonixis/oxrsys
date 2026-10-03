@@ -4063,15 +4063,9 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                     presentedVideoFrame_.consecutiveReuses++;
                     staleFrameReusesSinceLastReport_++;
 
-                    const int64_t nowNs = SteadyClockNowNs();
-                    const double ageMs =
-                        presentedVideoFrame_.localReceiveTimeNs > 0 && nowNs >= presentedVideoFrame_.localReceiveTimeNs
-                            ? static_cast<double>(nowNs - presentedVideoFrame_.localReceiveTimeNs) / 1.0e6
-                            : 0.0;
                     const bool canUseReprojectedPose =
                         clientReprojectionMode_ != protocol::ClientReprojectionMode::Off &&
-                        presentedVideoFrame_.hasRenderPose &&
-                        ageMs <= 120.0;
+                        presentedVideoFrame_.hasRenderPose;
                     if (canUseReprojectedPose)
                     {
                         currentRenderPose_ = presentedVideoFrame_.renderPose;
