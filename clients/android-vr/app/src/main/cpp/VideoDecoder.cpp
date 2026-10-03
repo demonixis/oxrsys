@@ -228,7 +228,13 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
 
     memcpy(buffer, data, size);
     int64_t submitTimeNs = SteadyClockNowNs();
-    AMediaCodec_queueInputBuffer(codec_, bufferIndex, 0, size, presentationTimeUs, 0);
+    media_status_t status = AMediaCodec_queueInputBuffer(
+        codec_, bufferIndex, 0, size, presentationTimeUs, 0);
+    if (status != AMEDIA_OK)
+    {
+        LOGE("Failed to queue decoder input: %d", status);
+        return false;
+    }
     RememberSubmittedFrame(presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend);
     return true;
 }
