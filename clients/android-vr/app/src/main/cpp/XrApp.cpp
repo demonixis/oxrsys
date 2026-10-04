@@ -3875,7 +3875,7 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
     {
         VideoDecoder::DecodedFrame frame;
 
-        if (videoDecoder_->AcquireFrame(&frame))
+        if (videoDecoder_->AcquireFrame(&frame, []() { glFinish(); }))
         {
             decodedFrameCount_++;
             if (decodedFrameCount_ <= 5 || decodedFrameCount_ % 300 == 0)
@@ -4048,9 +4048,6 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                 }
             }
 
-            // DON'T call ReleaseFrame() here — keep the AImage/AHardwareBuffer alive
-            // until next AcquireFrame(), so the texture data remains valid during rendering.
-            // AcquireFrame() automatically releases the previous image.
         }
         else if (hasVideoTexture_)
         {
@@ -4066,7 +4063,6 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
             }
             else
             {
-                // Reuse the last frame — the AHardwareBuffer is still alive (not released).
                 if (presentedVideoFrame_.valid)
                 {
                     hasVideo = true;
