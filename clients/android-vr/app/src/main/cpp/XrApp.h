@@ -387,6 +387,7 @@ private:
 
     // Diagnostic counters
     uint32_t nalUnitsReceived_ = 0;
+    std::atomic<uint32_t> pendingDecoderSubmitFailures_{0};
     uint32_t decodedFrameCount_ = 0;
 
     struct ShellControllerInput
