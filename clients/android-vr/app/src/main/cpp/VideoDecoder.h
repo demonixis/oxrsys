@@ -65,8 +65,9 @@ public:
     };
 
     // Get the next decoded frame (returns false if no frame ready).
-    // The AHardwareBuffer is valid until ReleaseFrame() is called.
-    bool AcquireFrame(DecodedFrame* outFrame);
+    // The AHardwareBuffer remains owned until a successful acquire or ReleaseFrame().
+    // beforeReleasePrevious must complete GPU reads of the previous frame.
+    bool AcquireFrame(DecodedFrame* outFrame, void (*beforeReleasePrevious)());
     void ReleaseFrame();
 
     bool IsInitialized() const { return codec_ != nullptr; }

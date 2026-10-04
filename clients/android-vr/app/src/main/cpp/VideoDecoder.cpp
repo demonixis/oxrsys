@@ -295,39 +295,38 @@ void VideoDecoder::OutputThreadMain()
     LOGI("Decoder output thread ended");
 }
 
-bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
+bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame, void (*beforeReleasePrevious)())
 {
     if (codec_ == nullptr || imageReader_ == nullptr || outFrame == nullptr)
     {
         return false;
     }
 
-    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
-
-    // Release previous image if still held
-    if (currentImage_ != nullptr)
-    {
-        AImage_delete(currentImage_);
-        currentImage_ = nullptr;
-    }
-
     // Acquire the latest decoded image (drops older images automatically)
-    media_status_t status = AImageReader_acquireLatestImage(imageReader_, &currentImage_);
-    if (status != AMEDIA_OK || currentImage_ == nullptr)
+    AImage* nextImage = nullptr;
+    media_status_t status = AImageReader_acquireLatestImage(imageReader_, &nextImage);
+    if (status != AMEDIA_OK || nextImage == nullptr)
     {
         return false;  // No image available yet
     }
 
     // Get AHardwareBuffer for zero-copy GPU rendering
     AHardwareBuffer* hwBuffer = nullptr;
-    status = AImage_getHardwareBuffer(currentImage_, &hwBuffer);
+    status = AImage_getHardwareBuffer(nextImage, &hwBuffer);
     if (status != AMEDIA_OK || hwBuffer == nullptr)
     {
         LOGE("Failed to get AHardwareBuffer from AImage: %d", status);
-        AImage_delete(currentImage_);
-        currentImage_ = nullptr;
+        AImage_delete(nextImage);
         return false;
     }
+
+    if (currentImage_ != nullptr)
+    {
+        beforeReleasePrevious();
+        AImage_delete(currentImage_);
+    }
+    currentImage_ = nextImage;
+    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
 
     // Get timestamp
     int64_t timestampNs = 0;
