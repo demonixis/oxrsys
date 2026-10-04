@@ -2279,6 +2279,7 @@ void XrApp::ResetConnection(const char* reason)
     streamConfigSequence_ = 0;
     latencySamples_ = {};
     nalUnitsReceived_ = 0;
+    pendingDecoderSubmitFailures_.store(0);
     decodedFrameCount_ = 0;
 }
 
@@ -3162,6 +3163,7 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
     skippedDecodedFrames_ = 0;
     decodedFrameCount_ = 0;
     nalUnitsReceived_ = 0;
+    pendingDecoderSubmitFailures_.store(0);
     streamConfigSequence_.store(update.sequence);
 
     SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
@@ -3537,10 +3539,13 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
         const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;
         bool submitted = videoDecoder_->SubmitNalUnit(
             data, size, timestampNs / 1000, receiveTimeNs, alphaBlend);
-        if (!submitted && nalUnitsReceived_ <= 10)
+        if (!submitted)
         {
-            LOGW("Failed to submit NAL unit #%u to decoder (no input buffer available)",
-                 nalUnitsReceived_);
+            pendingDecoderSubmitFailures_.fetch_add(1);
+            if (nalUnitsReceived_ <= 10)
+            {
+                LOGW("Failed to submit NAL unit #%u to decoder", nalUnitsReceived_);
+            }
         }
     }
     else if (nalUnitsReceived_ <= 5)
@@ -3833,6 +3838,12 @@ void XrApp::RunFrame()
     {
         uint32_t droppedFrames = networkReceiver_->GetFramesDropped();
         auto now = std::chrono::steady_clock::now();
+        if (pendingDecoderSubmitFailures_.load() > 0 &&
+            now - lastKeyframeRequestTime_ >= std::chrono::milliseconds(100))
+        {
+            const uint32_t losses = pendingDecoderSubmitFailures_.exchange(0);
+            RequestKeyframe(protocol::KEYFRAME_REASON_FRAME_LOSS, losses);
+        }
         if (droppedFrames > lastObservedDroppedFrames_ &&
             now - lastKeyframeRequestTime_ >= std::chrono::milliseconds(100))
         {
