@@ -71,6 +71,7 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed Quest stale video becoming head-locked after 120 ms by preserving the held frame's render pose until replacement or disconnect.
 - Fixed Quest decoded-image reuse by retaining the current image until a valid replacement is acquired and prior GPU reads complete.
 - Fixed Quest decoder input failures being ignored by checking queue submission errors and requesting a rate-limited recovery keyframe.
 - Fixed an `x86_64` runtime under Rosetta silently encoding H.265 on VideoToolbox's software
