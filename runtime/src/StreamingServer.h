@@ -304,6 +304,9 @@ private:
     static constexpr size_t MaxVideoSendQueueFrames = 2;
     std::mutex encoderMutex_;
 
+    // Negotiated per connection: true when the client advertised CLIENT_CAPABILITY_FEC_INTERLEAVED.
+    std::atomic<bool> fecInterleaved_{false};
+
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
                      bool isKeyframe, bool alphaBlend, int64_t timestampNs,

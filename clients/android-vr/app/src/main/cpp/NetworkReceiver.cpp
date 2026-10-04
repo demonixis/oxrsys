@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "NetworkReceiver.h"
-#include <oxrsys/protocol/FecCodec.h>
 
 #include <android/log.h>
 #include <array>
@@ -190,10 +189,51 @@ bool NetworkReceiver::StartReceiving(const char* serverIp, uint16_t videoPort,
 
     nalCallback_ = std::move(callback);
     connectionLostCallback_ = std::move(connectionLostCallback);
+    assembler_.Reset();
+    WireAssemblerCallbacks();
     receiving_.store(true);
     receiveThread_ = std::thread(&NetworkReceiver::ReceiveThread, this, nalCallback_);
     LOGI("Video receiver started on port %d", videoPort);
     return true;
+}
+
+void NetworkReceiver::WireAssemblerCallbacks()
+{
+    assembler_.SetOnFrame([this](const streaming::VideoFrameAssembler::Frame& frame) {
+        uint32_t delivered = framesDelivered_.fetch_add(1) + 1;
+        int64_t receiveTimeNs = SteadyClockNowNs();
+        lastCompletedFrameReceiveTimeNs_.store(receiveTimeNs);
+        if (delivered <= 5 || delivered % 300 == 0)
+        {
+            LOGI("Frame %u complete: %u packets, %zu bytes total",
+                 frame.frameIndex, frame.totalPackets, frame.size);
+        }
+        if (nalCallback_)
+        {
+            nalCallback_(frame.data, frame.size, frame.timestampNs, receiveTimeNs,
+                         frame.flags, frame.codec);
+        }
+    });
+    assembler_.SetOnFrameAbandoned([this](const streaming::VideoFrameAssembler::AbandonedFrame& frame) {
+        // Send NACK for missing packets (server may retransmit from cache)
+        SendNack(frame.frameIndex, frame.totalPackets, frame.packetReceived);
+
+        uint32_t dropped = framesDropped_.fetch_add(1) + 1;
+        if (dropped <= 5 || dropped % 100 == 0)
+        {
+            LOGI("Frame %u dropped (%u/%u packets received)",
+                 frame.frameIndex, frame.receivedPackets, frame.totalPackets);
+        }
+    });
+    assembler_.SetOnFecRecovery(
+        [this](uint32_t packetIndex, uint32_t totalPackets, uint32_t frameIndex) {
+            uint32_t recoveries = fecRecoveries_.fetch_add(1) + 1;
+            if (recoveries <= 10 || recoveries % 100 == 0)
+            {
+                LOGI("FEC recovered packet %u/%u in frame %u (recovery #%u)",
+                     packetIndex, totalPackets, frameIndex, recoveries);
+            }
+        });
 }
 
 bool NetworkReceiver::StartReceivingTcp(uint16_t videoPort, OnNalUnitCallback callback,
@@ -275,7 +315,8 @@ void NetworkReceiver::ReceiveThread(OnNalUnitCallback callback)
             continue;
         }
 
-        ReassembleFrame(*header, payload, payloadSize);
+        assembler_.SetInterleaved(fecInterleaved_.load());
+        assembler_.ProcessPacket(*header, payload, payloadSize);
     }
 
     LOGI("Video receive thread ended (packets=%u frames=%u dropped=%u)",
@@ -342,243 +383,6 @@ void NetworkReceiver::ReceiveTcpThread(OnNalUnitCallback callback)
     {
         connectionLostCallback_("USB TCP video socket closed");
     }
-}
-
-void NetworkReceiver::ReassembleFrame(const protocol::VideoPacketHeader& header,
-                                      const uint8_t* payload, size_t payloadSize)
-{
-    // FEC parity packet — store it separately
-    if (header.flags & protocol::VIDEO_FLAG_FEC)
-    {
-        if (header.frameIndex == pendingFrame_.frameIndex && pendingFrame_.totalPackets > 0)
-        {
-            uint32_t groupIdx = header.packetIndex;
-            if (groupIdx < pendingFrame_.fecGroupCount && !pendingFrame_.fecReceived[groupIdx])
-            {
-                size_t fecOffset = groupIdx * protocol::MAX_PACKET_PAYLOAD;
-                memcpy(pendingFrame_.fecData.data() + fecOffset, payload,
-                       std::min(payloadSize, protocol::MAX_PACKET_PAYLOAD));
-                pendingFrame_.fecGroupLastPacketSizes[groupIdx] =
-                    header.fecGroupLastPacketPayloadSize;
-                pendingFrame_.fecReceived[groupIdx] = 1;
-
-                // Try FEC recovery if frame is almost complete
-                if (pendingFrame_.receivedPackets + 1 >= pendingFrame_.totalPackets)
-                {
-                    if (TryFecRecovery())
-                    {
-                        goto deliver;
-                    }
-                }
-            }
-        }
-        return;
-    }
-
-    // New frame?
-    if (header.frameIndex != pendingFrame_.frameIndex ||
-        pendingFrame_.totalPackets == 0)
-    {
-        // If we had a partial frame, try FEC recovery before dropping
-        if (pendingFrame_.totalPackets > 0 && pendingFrame_.receivedPackets > 0 &&
-            pendingFrame_.receivedPackets < pendingFrame_.totalPackets)
-        {
-            if (!TryFecRecovery())
-            {
-                // Send NACK for missing packets (server may retransmit from cache)
-                SendNack(pendingFrame_.frameIndex, pendingFrame_.totalPackets);
-
-                uint32_t dropped = framesDropped_.fetch_add(1) + 1;
-                if (dropped <= 5 || dropped % 100 == 0)
-                {
-                    LOGI("Frame %u dropped (%u/%u packets received)",
-                         pendingFrame_.frameIndex, pendingFrame_.receivedPackets,
-                         pendingFrame_.totalPackets);
-                }
-            }
-            else
-            {
-                goto deliver;
-            }
-        }
-
-        pendingFrame_.frameIndex = header.frameIndex;
-        pendingFrame_.totalPackets = header.totalPackets;
-        pendingFrame_.receivedPackets = 0;
-        pendingFrame_.timestampNs = header.presentationTimeNs;
-        pendingFrame_.flags = header.flags;
-        pendingFrame_.codec = header.codec;
-        const size_t dataBytes = header.totalPackets * protocol::MAX_PACKET_PAYLOAD;
-        if (pendingFrame_.data.size() < dataBytes)
-        {
-            pendingFrame_.data.resize(dataBytes);
-        }
-        pendingFrame_.packetReceived.assign(header.totalPackets, 0);
-        pendingFrame_.packetSizes.assign(header.totalPackets, 0);
-
-        // Initialize FEC tracking
-        pendingFrame_.fecGroupCount = fec::GroupCount(header.totalPackets);
-        pendingFrame_.fecReceived.assign(pendingFrame_.fecGroupCount, 0);
-        const size_t fecBytes = pendingFrame_.fecGroupCount * protocol::MAX_PACKET_PAYLOAD;
-        if (pendingFrame_.fecData.size() < fecBytes)
-        {
-            pendingFrame_.fecData.resize(fecBytes);
-        }
-        pendingFrame_.fecGroupLastPacketSizes.assign(pendingFrame_.fecGroupCount, 0);
-    }
-
-    // Store this packet's data
-    if (header.packetIndex < header.totalPackets &&
-        !pendingFrame_.packetReceived[header.packetIndex])
-    {
-        size_t offset = header.packetIndex * protocol::MAX_PACKET_PAYLOAD;
-        memcpy(pendingFrame_.data.data() + offset, payload, payloadSize);
-        pendingFrame_.packetReceived[header.packetIndex] = 1;
-        pendingFrame_.packetSizes[header.packetIndex] = static_cast<uint16_t>(payloadSize);
-        pendingFrame_.receivedPackets++;
-
-        // Frame complete?
-        if (pendingFrame_.receivedPackets == pendingFrame_.totalPackets)
-        {
-            goto deliver;
-        }
-    }
-    return;
-
-deliver:
-    {
-        // Calculate actual total size using tracked per-packet sizes
-        size_t totalSize = 0;
-        for (uint32_t i = 0; i < pendingFrame_.totalPackets; i++)
-        {
-            totalSize += pendingFrame_.packetSizes[i];
-        }
-
-        uint32_t delivered = framesDelivered_.fetch_add(1) + 1;
-        int64_t receiveTimeNs = SteadyClockNowNs();
-        lastCompletedFrameReceiveTimeNs_.store(receiveTimeNs);
-        if (delivered <= 5 || delivered % 300 == 0)
-        {
-            LOGI("Frame %u complete: %u packets, %zu bytes total",
-                 pendingFrame_.frameIndex, pendingFrame_.totalPackets, totalSize);
-        }
-
-        // Compact the data (remove gaps from fixed-size slots) into a reused buffer.
-        if (pendingFrame_.totalPackets > 1)
-        {
-            pendingFrame_.compactedData.resize(totalSize);
-            size_t dstOffset = 0;
-            for (uint32_t i = 0; i < pendingFrame_.totalPackets; i++)
-            {
-                size_t srcOffset = i * protocol::MAX_PACKET_PAYLOAD;
-                memcpy(pendingFrame_.compactedData.data() + dstOffset,
-                       pendingFrame_.data.data() + srcOffset,
-                       pendingFrame_.packetSizes[i]);
-                dstOffset += pendingFrame_.packetSizes[i];
-            }
-
-            if (nalCallback_)
-            {
-                nalCallback_(pendingFrame_.compactedData.data(), totalSize,
-                             pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags, pendingFrame_.codec);
-            }
-        }
-        else
-        {
-            if (nalCallback_)
-            {
-                nalCallback_(pendingFrame_.data.data(), totalSize,
-                             pendingFrame_.timestampNs, receiveTimeNs,
-                             pendingFrame_.flags, pendingFrame_.codec);
-            }
-        }
-
-        pendingFrame_.totalPackets = 0;  // Mark as consumed
-    }
-}
-
-bool NetworkReceiver::TryFecRecovery()
-{
-    uint32_t totalPackets = pendingFrame_.totalPackets;
-    if (totalPackets == 0)
-    {
-        return false;
-    }
-
-    bool recovered = false;
-    uint32_t groupCount = fec::GroupCount(totalPackets);
-
-    for (uint32_t g = 0; g < groupCount; g++)
-    {
-        if (!pendingFrame_.fecReceived[g])
-        {
-            continue;  // No FEC parity for this group
-        }
-
-        uint32_t groupStart, groupEnd;
-        fec::GroupRange(g, totalPackets, groupStart, groupEnd);
-
-        // Count missing packets in this group
-        uint32_t missingIdx = UINT32_MAX;
-        uint32_t missingCount = 0;
-        for (uint32_t i = groupStart; i < groupEnd; i++)
-        {
-            if (!pendingFrame_.packetReceived[i])
-            {
-                missingIdx = i;
-                missingCount++;
-            }
-        }
-
-        if (missingCount != 1)
-        {
-            continue;  // FEC can only recover exactly 1 missing packet per group
-        }
-
-        // Gather present packets for XOR recovery
-        uint32_t presentCount = (groupEnd - groupStart) - 1;
-        std::array<const uint8_t*, protocol::FEC_GROUP_SIZE> presentPtrs = {};
-        std::array<uint16_t, protocol::FEC_GROUP_SIZE> presentSizes = {};
-        uint32_t p = 0;
-        for (uint32_t i = groupStart; i < groupEnd; i++)
-        {
-            if (i != missingIdx)
-            {
-                presentPtrs[p] = pendingFrame_.data.data() + i * protocol::MAX_PACKET_PAYLOAD;
-                presentSizes[p] = pendingFrame_.packetSizes[i];
-                p++;
-            }
-        }
-
-        const uint8_t* fecPayload = pendingFrame_.fecData.data() + g * protocol::MAX_PACKET_PAYLOAD;
-        uint8_t* recoveredSlot = pendingFrame_.data.data() + missingIdx * protocol::MAX_PACKET_PAYLOAD;
-        fec::Decode(presentPtrs.data(), presentSizes.data(), presentCount, fecPayload, recoveredSlot);
-
-        uint16_t recoveredSize = static_cast<uint16_t>(protocol::MAX_PACKET_PAYLOAD);
-        if (missingIdx == groupEnd - 1)
-        {
-            const uint16_t groupLastPacketSize = pendingFrame_.fecGroupLastPacketSizes[g];
-            if (groupLastPacketSize > 0 && groupLastPacketSize <= protocol::MAX_PACKET_PAYLOAD)
-            {
-                recoveredSize = groupLastPacketSize;
-            }
-        }
-
-        pendingFrame_.packetReceived[missingIdx] = 1;
-        pendingFrame_.packetSizes[missingIdx] = recoveredSize;
-        pendingFrame_.receivedPackets++;
-        recovered = true;
-
-        uint32_t recoveries = fecRecoveries_.fetch_add(1) + 1;
-        if (recoveries <= 10 || recoveries % 100 == 0)
-        {
-            LOGI("FEC recovered packet %u/%u in frame %u (recovery #%u)",
-                 missingIdx, totalPackets, pendingFrame_.frameIndex, recoveries);
-        }
-    }
-
-    return recovered && (pendingFrame_.receivedPackets == pendingFrame_.totalPackets);
 }
 
 void NetworkReceiver::StoreRenderPose(const protocol::VideoPacketHeader& header,
@@ -684,9 +488,11 @@ void NetworkReceiver::SetControlSocket(int socket, const char* serverIp)
     serverIp_ = serverIp ? serverIp : "";
 }
 
-void NetworkReceiver::SendNack(uint32_t frameIndex, uint32_t totalPackets)
+void NetworkReceiver::SendNack(uint32_t frameIndex, uint32_t totalPackets,
+                               const uint8_t* packetReceived)
 {
-    if (controlSocket_ < 0 || serverIp_.empty() || totalPackets == 0)
+    if (controlSocket_ < 0 || serverIp_.empty() || totalPackets == 0 ||
+        packetReceived == nullptr)
     {
         return;
     }
@@ -705,7 +511,7 @@ void NetworkReceiver::SendNack(uint32_t frameIndex, uint32_t totalPackets)
 
         for (uint32_t i = start; i < end; i++)
         {
-            if (!pendingFrame_.packetReceived[i])
+            if (!packetReceived[i])
             {
                 bitmask |= (1ULL << (i - start));
                 anyMissing = true;

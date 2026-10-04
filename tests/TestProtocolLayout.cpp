@@ -47,6 +47,10 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(StreamConfigAck) == 16);
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
+    // A layout mismatch XORs the wrong packets together, so these bits must agree with every
+    // client mirror (Protocol.swift pins the same values).
+    STATIC_REQUIRE(SERVER_FEATURE_FEC_INTERLEAVED == 0x00000400);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FEC_INTERLEAVED == 0x00001000);
 
     STATIC_REQUIRE(sizeof(TrackingPacket) == 1064);
     STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);

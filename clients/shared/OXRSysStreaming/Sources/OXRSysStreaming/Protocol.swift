@@ -107,6 +107,9 @@ public struct ServerFeatureFlags {
     public static let depthOcclusion: UInt32 = 0x00000080
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
+    /// Server emits FEC parity with the interleaved group layout for clients that advertise
+    /// `ClientCapabilityFlags.fecInterleaved`.
+    public static let fecInterleaved: UInt32 = 0x00000400
 }
 
 public struct ClientCapabilityFlags {
@@ -121,6 +124,11 @@ public struct ClientCapabilityFlags {
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
     public static let tenBitEncoding: UInt32 = 0x00000400
+    // 0x00000800 is claimed by the foveation-centre capability (gaze foveation PR).
+    /// The client assigns FEC groups by the interleaved layout (`FEC.GroupLayout`). Must be
+    /// negotiated: a receiver using a different layout from the sender XORs a packet out of
+    /// the wrong group and produces plausible garbage rather than failing cleanly.
+    public static let fecInterleaved: UInt32 = 0x00001000
 }
 
 public enum FoveationPreset: UInt32, Sendable {
@@ -304,6 +312,52 @@ public struct AudioPacketHeader: Sendable {
 public enum FEC {
     /// Number of data packets per FEC group. Must match server (Protocol.h FEC_GROUP_SIZE).
     public static let groupSize: Int = 10
+
+    /// How a frame's data packets map to FEC groups. Mirrors `oxr::fec::GroupLayout` in
+    /// FecCodec.h and must stay in step with it.
+    ///
+    /// Contiguous is the original layout: group g owns packets [g*size, g*size+size). One XOR
+    /// parity per group recovers one loss per group, so two *adjacent* losses land in the same
+    /// group and are unrecoverable -- the common case on Wi-Fi, where loss arrives in bursts.
+    ///
+    /// Interleaved gives group g the packets g, g+count, g+2*count, ... so adjacent packets land
+    /// in different groups. The same parity overhead then recovers any burst up to `count` long.
+    ///
+    /// The layout is negotiated. Recovering with a different layout than the sender used XORs a
+    /// packet out of the wrong group and yields plausible garbage rather than a clean failure.
+    public struct GroupLayout: Sendable {
+        public let totalDataPackets: Int
+        public let interleaved: Bool
+
+        public init(totalDataPackets: Int, interleaved: Bool) {
+            self.totalDataPackets = totalDataPackets
+            self.interleaved = interleaved
+        }
+
+        public var count: Int {
+            (totalDataPackets + FEC.groupSize - 1) / FEC.groupSize
+        }
+
+        public func group(of packetIndex: Int) -> Int {
+            let count = self.count
+            guard count > 0 else { return 0 }
+            return interleaved ? packetIndex % count : packetIndex / FEC.groupSize
+        }
+
+        public func memberCount(_ groupIndex: Int) -> Int {
+            guard groupIndex < count else { return 0 }
+            if !interleaved {
+                let start = groupIndex * FEC.groupSize
+                return min(start + FEC.groupSize, totalDataPackets) - start
+            }
+            let stride = count
+            return (totalDataPackets - groupIndex + stride - 1) / stride
+        }
+
+        public func member(_ groupIndex: Int, _ k: Int) -> Int {
+            interleaved ? groupIndex + k * count : groupIndex * FEC.groupSize + k
+        }
+    }
 }
 
 // MARK: - Tracking
