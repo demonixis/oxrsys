@@ -162,6 +162,39 @@ TEST_CASE("RuntimeStatus writes streaming stats only while streaming", "[runtime
     CHECK(Contains(idleStatus, "\"state\": \"idle\""));
     CHECK(!Contains(idleStatus, "\"streaming_stats\""));
 
+    // A failed temporary-file open must preserve the last complete status.
+    const auto tempPath = std::filesystem::path(statusPath.string() + ".tmp");
+    REQUIRE(std::filesystem::create_directory(tempPath));
+    RuntimeStatus::SetStreaming("wifi", "Quest 3");
+    CHECK(ReadFile(statusPath) == idleStatus);
+    REQUIRE(std::filesystem::remove(tempPath));
+
+    // A failed replacement must leave the destination intact and remove the temporary file.
+    REQUIRE(std::filesystem::remove(statusPath));
+    REQUIRE(std::filesystem::create_directory(statusPath));
+    {
+        std::ofstream file(statusPath / "keep.txt");
+        file << "existing data";
+    }
+    RuntimeStatus::SetIdle();
+    CHECK(ReadFile(statusPath / "keep.txt") == "existing data");
+    CHECK_FALSE(std::filesystem::exists(tempPath));
+    std::filesystem::remove_all(statusPath);
+    RuntimeStatus::SetStreaming("wifi", "Quest 3");
+    CHECK(Contains(ReadFile(statusPath), "\"state\": \"streaming\""));
+
+    // A file blocking the parent directory must not throw, and a later write must recover.
+    std::filesystem::remove_all(home);
+    {
+        std::ofstream file(home);
+        file << "blocked directory";
+    }
+    CHECK_NOTHROW(RuntimeStatus::SetIdle());
+    CHECK(ReadFile(home) == "blocked directory");
+    REQUIRE(std::filesystem::remove(home));
+    RuntimeStatus::SetIdle();
+    CHECK(Contains(ReadFile(statusPath), "\"state\": \"idle\""));
+
     std::error_code ec;
     std::filesystem::remove_all(home, ec);
 }
