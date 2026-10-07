@@ -661,7 +661,9 @@ struct ContentView: View {
                                 Text(mode.displayName).tag(mode)
                             }
                         }
-                        Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
+                        Toggle("Headset audio (unavailable)", isOn: streamingBinding(\.headsetAudio))
+                            .disabled(true)
+                            .help("Audio capture and playback are not implemented.")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 8)

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// ControlChannel.swift — Bidirectional control on UDP 9946.
+// ControlChannel.swift — Outbound control on UDP 9946.
 // Sends latency reports and keyframe requests to the server.
-// Receives haptics commands (future: vibration via CoreHaptics).
+// Haptic command reception and playback are not implemented.
 
 import Foundation
 import os

@@ -231,8 +231,8 @@ stream reconfiguration, passthrough, depth occlusion, spatial entities, and scen
 OpenXR extensions are still advertised only when there is a coherent runtime
 implementation or fallback for the selected mode.
 
-Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from
-the runtime to the client.
+Keyframe requests let the client recover after packet loss or decode stalls. `HapticsCommand` is
+reserved; runtime delivery and client playback are not implemented.
 
 `NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
 
