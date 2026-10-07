@@ -48,7 +48,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
 
-    STATIC_REQUIRE(sizeof(TrackingPacket) == 1064);
+    STATIC_REQUIRE(sizeof(TrackingPacket) == 1168);
+    STATIC_REQUIRE(TRACKING_PACKET_BASE_SIZE == 1008);
     STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
     STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
     STATIC_REQUIRE(offsetof(TrackingPacket, leftHandJoints) == 176);
@@ -58,8 +59,29 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimRot) == 1020);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimPos) == 1036);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimRot) == 1048);
+    STATIC_REQUIRE(offsetof(TrackingPacket, stageBoundsWidth) == 1064);
+    STATIC_REQUIRE(offsetof(TrackingPacket, stageBoundsHeight) == 1068);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerLinearVelocity) == 1072);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAngularVelocity) == 1084);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerLinearVelocity) == 1096);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAngularVelocity) == 1108);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimLinearVelocity) == 1120);
+    STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimAngularVelocity) == 1132);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimLinearVelocity) == 1144);
+    STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimAngularVelocity) == 1156);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
     STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
+    STATIC_REQUIRE(TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID == 0x0010);
+    STATIC_REQUIRE(TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID == 0x0020);
+    STATIC_REQUIRE(TRACKING_FLAG_STAGE_BOUNDS_VALID == 0x0040);
+    STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID == 0x0080);
+    STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID == 0x0100);
+    STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID == 0x0200);
+    STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID == 0x0400);
+    STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID == 0x0800);
+    STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID == 0x1000);
+    STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID == 0x2000);
+    STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID == 0x4000);
 }
 
 TEST_CASE("Foveated encoding presets calculate ALVR-style optimized eye sizes", "[protocol][foveation]")

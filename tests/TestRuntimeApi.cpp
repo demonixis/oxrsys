@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <openxr/openxr.h>
 #include "OpenXRPlatform.h"
+#include <Protocol.h>
 
 #include <algorithm>
 #include <array>
@@ -17,6 +19,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <arpa/inet.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using Catch::Matchers::WithinAbs;
 
@@ -318,6 +325,187 @@ struct RuntimeSessionContext
     PFN_xrSetInputDeviceStateVector2fEXT setInputDeviceStateVector2fEXT = nullptr;
     PFN_xrSetInputDeviceLocationEXT setInputDeviceLocationEXT = nullptr;
 };
+
+class LoopbackTrackingPeer
+{
+public:
+    explicit LoopbackTrackingPeer(bool tcp) : tcp_(tcp)
+    {
+        controlSocket_ = OpenSocket(oxr::protocol::CONTROL_PORT);
+        trackingSocket_ = OpenSocket(oxr::protocol::TRACKING_PORT);
+        if (tcp_)
+        {
+            oxr::protocol::TcpRecordHeader header = {};
+            REQUIRE(ReadAll(&header, sizeof(header)));
+            REQUIRE(header.magic == oxr::protocol::TCP_RECORD_MAGIC);
+            REQUIRE(header.version == oxr::protocol::TCP_RECORD_VERSION);
+            REQUIRE(header.type == oxr::protocol::TcpRecordType::ServerAnnounce);
+            REQUIRE(header.payloadSize == sizeof(oxr::protocol::ServerAnnounce));
+            oxr::protocol::ServerAnnounce announce = {};
+            REQUIRE(ReadAll(&announce, sizeof(announce)));
+        }
+
+        oxr::protocol::ClientConnect connect = {};
+        connect.type = oxr::protocol::MessageType::ClientConnect;
+        connect.versionMajor = 1;
+        connect.versionMinor = 2;
+        connect.supportedCodecs = oxr::protocol::CLIENT_CODEC_CAPABILITY_H265 |
+                                  oxr::protocol::CLIENT_CODEC_CAPABILITY_H264;
+        connect.refreshRateHz = 90;
+        std::strncpy(connect.deviceName, "Loopback tracking test", sizeof(connect.deviceName) - 1);
+        Send(controlSocket_, oxr::protocol::TcpRecordType::ClientConnect, &connect, sizeof(connect));
+    }
+
+    ~LoopbackTrackingPeer()
+    {
+        for (int socket : {controlSocket_, trackingSocket_})
+        {
+            if (socket >= 0)
+            {
+                shutdown(socket, SHUT_RDWR);
+                close(socket);
+            }
+        }
+    }
+
+    void SendTracking(oxr::protocol::TrackingPacket packet, size_t size)
+    {
+        REQUIRE(size <= sizeof(packet));
+        packet.timestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        Send(trackingSocket_, oxr::protocol::TcpRecordType::Tracking, &packet, size);
+    }
+
+    void Disconnect()
+    {
+        const auto type = oxr::protocol::MessageType::ServerDisconnect;
+        Send(controlSocket_, oxr::protocol::TcpRecordType::Disconnect,
+             tcp_ ? nullptr : &type, tcp_ ? 0 : sizeof(type));
+    }
+
+    bool WaitForDisconnect()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!tcp_)
+            {
+                const auto type = oxr::protocol::MessageType::DiscoveryRequest;
+                Send(controlSocket_, oxr::protocol::TcpRecordType::Control, &type, sizeof(type));
+            }
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            pollfd descriptor = {controlSocket_, POLLIN, 0};
+            const int ready = poll(&descriptor, 1, static_cast<int>(std::clamp<int64_t>(remaining, 0, 100)));
+            if (ready < 0)
+            {
+                return false;
+            }
+            if (ready == 0)
+            {
+                continue;
+            }
+            std::array<uint8_t, sizeof(oxr::protocol::ServerAnnounce)> buffer = {};
+            const ssize_t received = recv(controlSocket_, buffer.data(), buffer.size(), 0);
+            if (tcp_)
+            {
+                return received == 0;
+            }
+            return received == static_cast<ssize_t>(buffer.size()) &&
+                   buffer[0] == static_cast<uint8_t>(oxr::protocol::MessageType::ServerAnnounce);
+        }
+        return false;
+    }
+
+private:
+    int OpenSocket(uint16_t port)
+    {
+        const int socket = ::socket(AF_INET, tcp_ ? SOCK_STREAM : SOCK_DGRAM, 0);
+        REQUIRE(socket >= 0);
+        int enabled = 1;
+        REQUIRE(setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0);
+        timeval timeout = {2, 0};
+        REQUIRE(setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
+        REQUIRE(setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0);
+        sockaddr_in address = {};
+        address.sin_len = sizeof(address);
+        address.sin_family = AF_INET;
+        address.sin_port = htons(port);
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        REQUIRE(connect(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+        return socket;
+    }
+
+    bool ReadAll(void* data, size_t size)
+    {
+        auto* bytes = static_cast<uint8_t*>(data);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (size > 0 && std::chrono::steady_clock::now() < deadline)
+        {
+            const ssize_t received = recv(controlSocket_, bytes, size, 0);
+            if (received <= 0)
+            {
+                return false;
+            }
+            bytes += received;
+            size -= static_cast<size_t>(received);
+        }
+        return size == 0;
+    }
+
+    void Send(int socket, oxr::protocol::TcpRecordType type, const void* data, size_t size)
+    {
+        if (tcp_)
+        {
+            oxr::protocol::TcpRecordHeader header = {};
+            header.type = type;
+            header.payloadSize = static_cast<uint32_t>(size);
+            REQUIRE(send(socket, &header, sizeof(header), 0) == sizeof(header));
+        }
+        if (size > 0)
+        {
+            REQUIRE(send(socket, data, size, 0) == static_cast<ssize_t>(size));
+        }
+    }
+
+    bool tcp_;
+    int controlSocket_ = -1;
+    int trackingSocket_ = -1;
+};
+
+XrTime PumpTrackingFrame(XrSession session)
+{
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(session, nullptr));
+    XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.displayTime = frameState.predictedDisplayTime;
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    XR_CHECK(xrEndFrame(session, &endInfo));
+    return frameState.predictedDisplayTime;
+}
+
+uint32_t CountStageChanges(const RuntimeSessionContext& context)
+{
+    uint32_t count = 0;
+    XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+    XrResult result;
+    while ((result = xrPollEvent(context.instance, &event)) == XR_SUCCESS)
+    {
+        if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING)
+        {
+            const auto* change = reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+            CHECK(change->session == context.session);
+            CHECK(change->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE);
+            CHECK(change->changeTime > 0);
+            CHECK(change->poseValid == XR_FALSE);
+            ++count;
+        }
+        event = {XR_TYPE_EVENT_DATA_BUFFER};
+    }
+    REQUIRE(result == XR_EVENT_UNAVAILABLE);
+    return count;
+}
 
 } // namespace
 
@@ -884,11 +1072,12 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
     RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
 
     XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
-    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
     createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
 
     std::array<XrSpace, 2> spaces = {};
     XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &spaces[0]));
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
     XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &spaces[1]));
 
     std::array<XrSpaceLocationData, 2> locationData = {};
@@ -924,13 +1113,197 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
         XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
         XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
         XR_CHECK(xrLocateSpace(spaces[i], context.localSpace, locateInfo.time, &location));
-        CHECK(velocity.velocityFlags == 0);
+        CHECK(velocity.velocityFlags ==
+              (XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT));
+        CHECK(velocity.linearVelocity.x == 0.0f);
+        CHECK(velocity.linearVelocity.y == 0.0f);
+        CHECK(velocity.linearVelocity.z == 0.0f);
+        CHECK(velocity.angularVelocity.x == 0.0f);
+        CHECK(velocity.angularVelocity.y == 0.0f);
+        CHECK(velocity.angularVelocity.z == 0.0f);
         CHECK(velocityData[i].velocityFlags == velocity.velocityFlags);
         CHECK(locationData[i].locationFlags == location.locationFlags);
     }
 
     XR_CHECK(xrDestroySpace(spaces[1]));
     XR_CHECK(xrDestroySpace(spaces[0]));
+}
+
+TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runtime][tracking][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    createInfo.poseInReferenceSpace.orientation.w = 1.0f;
+    XrSpace viewSpace = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpace));
+
+    XrExtent2Df bounds = {123.0f, 456.0f};
+    CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
+          XR_SPACE_BOUNDS_UNAVAILABLE);
+    CHECK(bounds.width == 0.0f);
+    CHECK(bounds.height == 0.0f);
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
+    XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, 1, &location));
+    CHECK(velocity.velocityFlags == 0);
+    CHECK(CountStageChanges(context) == 0);
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.headPosition[1] = 1.6f;
+    packet.headLinearVelocity[0] = 1.0f;
+    packet.headLinearVelocity[1] = -2.0f;
+    packet.headLinearVelocity[2] = 3.0f;
+    packet.headAngularVelocity[0] = 0.5f;
+    packet.headAngularVelocity[1] = 0.25f;
+    packet.headAngularVelocity[2] = -0.75f;
+    packet.stageBoundsWidth = 2.0f;
+    packet.stageBoundsHeight = 3.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID |
+                           oxr::protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID |
+                           oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+    const XrSpaceVelocityFlags validVelocity =
+        XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+    XrTime sampleTime = 1;
+    XrResult boundsResult = XR_SPACE_BOUNDS_UNAVAILABLE;
+
+    auto readTracking = [&] {
+        sampleTime = PumpTrackingFrame(context.session);
+        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
+    };
+    auto waitForPacket = [&](size_t size, auto matches) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do
+        {
+            peer.SendTracking(packet, size);
+            readTracking();
+            if (matches())
+            {
+                return true;
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    };
+
+    REQUIRE(waitForPacket(sizeof(packet), [&] {
+        return velocity.velocityFlags == validVelocity && velocity.linearVelocity.x == 1.0f &&
+               boundsResult == XR_SUCCESS && bounds.width == 2.0f && bounds.height == 3.0f;
+    }));
+    CHECK_THAT(velocity.linearVelocity.y, WithinAbs(-2.0f, 0.0001f));
+    CHECK_THAT(velocity.linearVelocity.z, WithinAbs(3.0f, 0.0001f));
+    CHECK_THAT(velocity.angularVelocity.x, WithinAbs(0.5f, 0.0001f));
+    CHECK_THAT(velocity.angularVelocity.y, WithinAbs(0.25f, 0.0001f));
+    CHECK_THAT(velocity.angularVelocity.z, WithinAbs(-0.75f, 0.0001f));
+    CHECK(CountStageChanges(context) == 1);
+
+    std::array<XrSpace, 2> spaces = {viewSpace, context.localSpace};
+    std::array<XrSpaceLocationData, 2> locationData = {};
+    std::array<XrSpaceVelocityData, 2> velocityData = {};
+    XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
+    velocities.velocityCount = static_cast<uint32_t>(velocityData.size());
+    velocities.velocities = velocityData.data();
+    XrSpaceLocations locations = {XR_TYPE_SPACE_LOCATIONS, &velocities};
+    locations.locationCount = static_cast<uint32_t>(locationData.size());
+    locations.locations = locationData.data();
+    XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
+    locateInfo.baseSpace = context.localSpace;
+    locateInfo.time = sampleTime;
+    locateInfo.spaceCount = static_cast<uint32_t>(spaces.size());
+    locateInfo.spaces = spaces.data();
+    XR_CHECK(xrLocateSpaces(context.session, &locateInfo, &locations));
+    for (size_t i = 0; i < spaces.size(); ++i)
+    {
+        XrSpaceVelocity singleVelocity = {XR_TYPE_SPACE_VELOCITY};
+        XrSpaceLocation singleLocation = {XR_TYPE_SPACE_LOCATION, &singleVelocity};
+        XR_CHECK(xrLocateSpace(spaces[i], context.localSpace, sampleTime, &singleLocation));
+        CHECK(velocityData[i].velocityFlags == singleVelocity.velocityFlags);
+        CHECK(velocityData[i].linearVelocity.x == singleVelocity.linearVelocity.x);
+        CHECK(velocityData[i].linearVelocity.y == singleVelocity.linearVelocity.y);
+        CHECK(velocityData[i].linearVelocity.z == singleVelocity.linearVelocity.z);
+        CHECK(velocityData[i].angularVelocity.x == singleVelocity.angularVelocity.x);
+        CHECK(velocityData[i].angularVelocity.y == singleVelocity.angularVelocity.y);
+        CHECK(velocityData[i].angularVelocity.z == singleVelocity.angularVelocity.z);
+        CHECK(locationData[i].locationFlags == singleLocation.locationFlags);
+    }
+
+    std::fill(std::begin(packet.headLinearVelocity), std::end(packet.headLinearVelocity), 0.0f);
+    std::fill(std::begin(packet.headAngularVelocity), std::end(packet.headAngularVelocity), 0.0f);
+    REQUIRE(waitForPacket(sizeof(packet), [&] {
+        return velocity.velocityFlags == validVelocity && velocity.linearVelocity.x == 0.0f &&
+               velocity.linearVelocity.y == 0.0f && velocity.linearVelocity.z == 0.0f &&
+               velocity.angularVelocity.x == 0.0f && velocity.angularVelocity.y == 0.0f &&
+               velocity.angularVelocity.z == 0.0f;
+    }));
+    CHECK(CountStageChanges(context) == 0);
+
+    packet.stageBoundsWidth = 4.5f;
+    packet.stageBoundsHeight = 1.75f;
+    REQUIRE(waitForPacket(sizeof(packet), [&] {
+        return boundsResult == XR_SUCCESS && bounds.width == 4.5f && bounds.height == 1.75f;
+    }));
+    CHECK(CountStageChanges(context) == 1);
+
+    packet.trackingFlags &= ~oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+    REQUIRE(waitForPacket(sizeof(packet), [&] {
+        return boundsResult == XR_SPACE_BOUNDS_UNAVAILABLE && bounds.width == 0.0f && bounds.height == 0.0f;
+    }));
+    CHECK(CountStageChanges(context) == 1);
+
+    packet.trackingFlags |= oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+    for (size_t size : {oxr::protocol::TRACKING_PACKET_BASE_SIZE,
+                        offsetof(oxr::protocol::TrackingPacket, stageBoundsWidth)})
+    {
+        CAPTURE(tcp, size);
+        packet.headLinearVelocity[0] += 1.0f;
+        REQUIRE(waitForPacket(size, [&] {
+            return velocity.velocityFlags == validVelocity &&
+                   velocity.linearVelocity.x == packet.headLinearVelocity[0] &&
+                   boundsResult == XR_SPACE_BOUNDS_UNAVAILABLE;
+        }));
+        CHECK(bounds.width == 0.0f);
+        CHECK(bounds.height == 0.0f);
+        CHECK(CountStageChanges(context) == 0);
+    }
+
+    REQUIRE(waitForPacket(sizeof(packet), [&] { return boundsResult == XR_SUCCESS; }));
+    CHECK(CountStageChanges(context) == 1);
+    peer.Disconnect();
+    REQUIRE(peer.WaitForDisconnect());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do
+    {
+        boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
+        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while ((boundsResult != XR_SPACE_BOUNDS_UNAVAILABLE || velocity.velocityFlags != 0) &&
+             std::chrono::steady_clock::now() < deadline);
+    CHECK(boundsResult == XR_SPACE_BOUNDS_UNAVAILABLE);
+    CHECK(bounds.width == 0.0f);
+    CHECK(bounds.height == 0.0f);
+    CHECK(velocity.velocityFlags == 0);
+    CHECK(CountStageChanges(context) == 1);
+
+    if (!tcp)
+    {
+        for (int i = 0; i < 10; ++i)
+        {
+            peer.SendTracking(packet, sizeof(packet));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+            CHECK(velocity.velocityFlags == 0);
+            CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
+                  XR_SPACE_BOUNDS_UNAVAILABLE);
+        }
+        CHECK(CountStageChanges(context) == 0);
+    }
+
+    XR_CHECK(xrDestroySpace(viewSpace));
 }
 
 TEST_CASE("Runtime stringifies OpenXR result and structure enums", "[runtime][loader]")

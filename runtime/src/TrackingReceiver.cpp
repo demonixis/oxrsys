@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <glm/glm.hpp>
@@ -60,7 +61,8 @@ void StoreVec3(float* dst, const glm::vec3& vec)
 // Predict position using client-reported velocity if available, otherwise finite difference.
 glm::vec3 PredictPosition(const glm::vec3& previous, const glm::vec3& current,
                           float dtSeconds, float horizonSeconds, float maxSpeed,
-                          const glm::vec3& reportedVelocity = glm::vec3(0.0f))
+                          const glm::vec3& reportedVelocity = glm::vec3(0.0f),
+                          bool reportedVelocityValid = false)
 {
     if (horizonSeconds <= 0.0f)
     {
@@ -69,7 +71,7 @@ glm::vec3 PredictPosition(const glm::vec3& previous, const glm::vec3& current,
 
     glm::vec3 velocity;
     float reportedSpeed = glm::length(reportedVelocity);
-    if (reportedSpeed > 0.001f)
+    if (std::isfinite(reportedSpeed) && (reportedVelocityValid || reportedSpeed > 0.001f))
     {
         // Use client-reported IMU velocity (more accurate than finite difference)
         velocity = reportedVelocity;
@@ -202,7 +204,17 @@ void TrackingReceiver::Stop()
         receiveThread_.join();
     }
 
+    Reset();
+
     spdlog::info("TrackingReceiver: Stopped ({} packets received)", packetCount_.load());
+}
+
+void TrackingReceiver::Reset()
+{
+    std::lock_guard<std::mutex> lock(poseMutex_);
+    history_.clear();
+    latestPacket_ = {};
+    hasData_.store(false);
 }
 
 // Minimum acceptable tracking packet: everything up to (but not including) the aim-pose fields,
@@ -211,7 +223,7 @@ void TrackingReceiver::Stop()
 // aim pose) stay zero, and the runtime falls back to the grip pose for aim/pose. This keeps the
 // protocol backward-compatible instead of dropping every shorter packet as "no tracking".
 static constexpr size_t kMinTrackingPacketSize =
-    offsetof(oxr::protocol::TrackingPacket, leftControllerAimPos);
+    oxr::protocol::TRACKING_PACKET_BASE_SIZE;
 
 void TrackingReceiver::ReceiveThread()
 {
@@ -227,33 +239,79 @@ void TrackingReceiver::ReceiveThread()
             continue;
         }
 
-        oxr::protocol::TrackingPacket packet = {};
-        size_t copyBytes = std::min(static_cast<size_t>(received), sizeof(packet));
-        memcpy(&packet, buffer, copyBytes);
-        StorePacket(packet, SteadyClockNowNs());
+        InjectPacket(buffer, static_cast<size_t>(received));
     }
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
 {
-    if (size < kMinTrackingPacketSize)
+    if (data == nullptr || size < kMinTrackingPacketSize)
     {
         return;
     }
 
     oxr::protocol::TrackingPacket packet = {};
     memcpy(&packet, data, std::min(size, sizeof(packet)));
+
+    // A short legacy packet cannot validate fields it did not actually carry.
+    using namespace oxr::protocol;
+    const struct
+    {
+        uint32_t flag;
+        size_t end;
+    } fields[] = {
+        {TRACKING_FLAG_STAGE_BOUNDS_VALID, offsetof(TrackingPacket, stageBoundsHeight) + sizeof(float)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerLinearVelocity) + sizeof(packet.leftControllerLinearVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAngularVelocity) + sizeof(packet.leftControllerAngularVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerLinearVelocity) + sizeof(packet.rightControllerLinearVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAngularVelocity) + sizeof(packet.rightControllerAngularVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAimLinearVelocity) + sizeof(packet.leftControllerAimLinearVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAimAngularVelocity) + sizeof(packet.leftControllerAimAngularVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAimLinearVelocity) + sizeof(packet.rightControllerAimLinearVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAimAngularVelocity) + sizeof(packet.rightControllerAimAngularVelocity)},
+    };
+    for (const auto& field : fields)
+    {
+        if (size < field.end)
+        {
+            packet.trackingFlags &= ~field.flag;
+        }
+    }
     StorePacket(packet, SteadyClockNowNs());
 }
 
 bool TrackingReceiver::GetLatestPose(oxr::protocol::TrackingPacket& outPacket) const
 {
+    std::lock_guard<std::mutex> lock(poseMutex_);
     if (!hasData_.load())
     {
         return false;
     }
 
+    outPacket = latestPacket_;
+    return true;
+}
+
+bool TrackingReceiver::GetFreshPose(oxr::protocol::TrackingPacket& outPacket) const
+{
     std::lock_guard<std::mutex> lock(poseMutex_);
+    if (!hasData_.load() || history_.empty())
+    {
+        return false;
+    }
+    const int64_t age = SteadyClockNowNs() - history_.back().receiveTimeNs;
+    if (age < 0 || age > 250'000'000)
+    {
+        return false;
+    }
     outPacket = latestPacket_;
     return true;
 }
@@ -296,7 +354,9 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     glm::vec3 headLinVel = LoadVec3(current.packet.headLinearVelocity);
     glm::vec3 headAngVel = LoadVec3(current.packet.headAngularVelocity);
     float headAngularSpeed = glm::length(headAngVel);
-    bool hasHeadAngularVelocity = headAngularSpeed > 0.001f;
+    bool hasHeadAngularVelocity = std::isfinite(headAngularSpeed) &&
+        ((current.packet.trackingFlags & oxr::protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID) != 0 ||
+         headAngularSpeed > 0.001f);
 
     float totalHorizonSeconds = horizonMs / 1000.0f;
     float headRotationHorizonSeconds = hasHeadAngularVelocity
@@ -319,7 +379,9 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     StoreVec3(outPacket.headPosition,
               PredictPosition(LoadVec3(previous.packet.headPosition),
                               LoadVec3(current.packet.headPosition),
-                              dtSeconds, positionHorizonSeconds, 3.0f, headLinVel));
+                              dtSeconds, positionHorizonSeconds, 3.0f, headLinVel,
+                              (current.packet.trackingFlags &
+                               oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID) != 0));
 
     if (hasHeadAngularVelocity)
     {
@@ -436,8 +498,8 @@ void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, 
         {
             history_.pop_front();
         }
+        hasData_.store(true);
     }
 
-    hasData_.store(true);
     packetCount_.fetch_add(1);
 }

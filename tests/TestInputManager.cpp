@@ -6,8 +6,11 @@
 #include "InputManager.h"
 #include "TrackingReceiver.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
+#include <limits>
+#include <thread>
 #include <vector>
 
 using Catch::Matchers::WithinAbs;
@@ -126,6 +129,276 @@ TEST_CASE("InputManager — hand joint generation", "[input]")
         CHECK_THAT(joints[0].pose.position.y, WithinAbs(ctrl.position.y, 0.001));
         CHECK_THAT(joints[0].pose.position.z, WithinAbs(ctrl.position.z, 0.001));
     }
+}
+
+TEST_CASE("InputManager exposes only explicitly valid finite head velocities", "[input][velocity]")
+{
+    InputManager im;
+    CHECK(im.GetHeadVelocity().velocityFlags == 0);
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    CHECK(im.GetHeadVelocity().velocityFlags == 0);
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID |
+                           oxr::protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID;
+    XrSpaceVelocityFlags expectedFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+
+    SECTION("Explicitly measured stationary motion is valid")
+    {
+        packet.headLinearVelocity[0] = 0.0f;
+        packet.headAngularVelocity[1] = 0.0f;
+    }
+    SECTION("Measured nonzero motion is preserved")
+    {
+        packet.headLinearVelocity[0] = 1.25f;
+        packet.headAngularVelocity[1] = -2.5f;
+    }
+    SECTION("Legacy nonzero values without validity flags remain unavailable")
+    {
+        packet.trackingFlags = 0;
+        packet.headLinearVelocity[0] = 2.0f;
+        packet.headAngularVelocity[1] = 3.0f;
+        expectedFlags = 0;
+    }
+    SECTION("Non-finite linear motion leaves valid angular motion intact")
+    {
+        packet.headLinearVelocity[0] = std::numeric_limits<float>::quiet_NaN();
+        packet.headAngularVelocity[1] = 3.0f;
+        expectedFlags = XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+    }
+    SECTION("Non-finite angular motion leaves valid linear motion intact")
+    {
+        packet.headLinearVelocity[0] = 2.0f;
+        packet.headAngularVelocity[1] = std::numeric_limits<float>::infinity();
+        expectedFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+    }
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    const XrSpaceVelocity velocity = im.GetHeadVelocity();
+    CHECK(velocity.velocityFlags == expectedFlags);
+    if ((expectedFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0)
+    {
+        CHECK(velocity.linearVelocity.x == packet.headLinearVelocity[0]);
+    }
+    if ((expectedFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0)
+    {
+        CHECK(velocity.angularVelocity.y == packet.headAngularVelocity[1]);
+    }
+}
+
+TEST_CASE("InputManager keeps grip and aim velocity sources distinct", "[input][velocity]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.leftControllerAimRot[3] = 1.0f;
+    packet.rightControllerAimRot[3] = 1.0f;
+    packet.leftControllerAimPos[0] = -0.25f;
+    packet.rightControllerAimPos[0] = 0.25f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID;
+    packet.leftControllerLinearVelocity[0] = 1.0f;
+    packet.leftControllerAngularVelocity[1] = 2.0f;
+    packet.rightControllerLinearVelocity[0] = 3.0f;
+    packet.rightControllerAngularVelocity[1] = 4.0f;
+    packet.leftControllerAimLinearVelocity[0] = 5.0f;
+    packet.leftControllerAimAngularVelocity[1] = 6.0f;
+    packet.rightControllerAimLinearVelocity[0] = 7.0f;
+    packet.rightControllerAimAngularVelocity[1] = 8.0f;
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+    const std::string profile = "/interaction_profiles/oculus/touch_controller";
+    const XrSpaceVelocity leftGrip = im.GetPoseVelocityForProfile(InputManager::Hand::Left, "grip/pose", profile);
+    const XrSpaceVelocity rightGrip = im.GetPoseVelocityForProfile(InputManager::Hand::Right, "grip/pose", profile);
+    const XrSpaceVelocity leftAim = im.GetPoseVelocityForProfile(InputManager::Hand::Left, "aim/pose", profile);
+    const XrSpaceVelocity rightAim = im.GetPoseVelocityForProfile(InputManager::Hand::Right, "aim/pose", profile);
+    const XrSpaceVelocityFlags validFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+    CHECK(leftGrip.velocityFlags == validFlags);
+    CHECK(rightGrip.velocityFlags == validFlags);
+    CHECK(leftAim.velocityFlags == validFlags);
+    CHECK(rightAim.velocityFlags == validFlags);
+    CHECK(leftGrip.linearVelocity.x == 1.0f);
+    CHECK(leftGrip.angularVelocity.y == 2.0f);
+    CHECK(rightGrip.linearVelocity.x == 3.0f);
+    CHECK(rightGrip.angularVelocity.y == 4.0f);
+    CHECK(leftAim.linearVelocity.x == 5.0f);
+    CHECK(leftAim.angularVelocity.y == 6.0f);
+    CHECK(rightAim.linearVelocity.x == 7.0f);
+    CHECK(rightAim.angularVelocity.y == 8.0f);
+}
+
+TEST_CASE("InputManager does not attach controller motion to another pose source", "[input][velocity]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID;
+    packet.leftControllerLinearVelocity[0] = 2.0f;
+    packet.rightControllerLinearVelocity[0] = 3.0f;
+    std::string profile = "/interaction_profiles/oculus/touch_controller";
+    bool expectedAvailable = false;
+
+    SECTION("Inactive controller data is unavailable")
+    {
+        packet.trackingFlags &= ~oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    }
+    SECTION("Automation poses have no measured velocity")
+    {
+        XrPosef pose = {};
+        pose.orientation.w = 1.0f;
+        im.SetAutomationPose(InputManager::Hand::Left, "grip/pose", pose);
+    }
+    SECTION("Hand interaction never borrows controller velocity")
+    {
+        profile = "/interaction_profiles/ext/hand_interaction_ext";
+    }
+    SECTION("Unqualified hand poses never borrow controller velocity")
+    {
+        packet.trackingFlags |= oxr::protocol::TRACKING_FLAG_LEFT_HAND_ACTIVE;
+        profile.clear();
+    }
+    SECTION("Measured zero angular velocity remains valid")
+    {
+        expectedAvailable = true;
+    }
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+    const XrSpaceVelocity velocity = im.GetPoseVelocityForProfile(InputManager::Hand::Left, "grip/pose", profile);
+    CHECK(velocity.velocityFlags == (expectedAvailable
+        ? XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT : 0));
+    CHECK(im.GetPoseVelocityForProfile(InputManager::Hand::Right, "grip/pose", profile).velocityFlags == 0);
+    CHECK(im.GetPoseVelocityForProfile(InputManager::Hand::Left, "pinch_ext/pose", profile).velocityFlags == 0);
+}
+
+TEST_CASE("InputManager aim velocity follows the legacy grip-pose fallback", "[input][velocity]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID;
+    packet.leftControllerLinearVelocity[0] = 1.0f;
+    packet.leftControllerAimLinearVelocity[0] = 2.0f;
+    for (float orientationW : {0.0f, 1.0f})
+    {
+        packet.leftControllerAimRot[3] = orientationW;
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+        const XrSpaceVelocity velocity = im.GetPoseVelocityForProfile(
+            InputManager::Hand::Left, "aim/pose", "/interaction_profiles/oculus/touch_controller");
+        CHECK(velocity.velocityFlags == XR_SPACE_VELOCITY_LINEAR_VALID_BIT);
+        CHECK(velocity.linearVelocity.x == 1.0f);
+    }
+}
+
+TEST_CASE("InputManager accepts only valid measured stage bounds", "[input][bounds]")
+{
+    InputManager im;
+    XrExtent2Df bounds = {9.0f, 9.0f};
+    CHECK_FALSE(im.GetStageBounds(bounds));
+    CHECK(bounds.width == 0.0f);
+    CHECK(bounds.height == 0.0f);
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+    packet.stageBoundsWidth = 2.25f;
+    packet.stageBoundsHeight = 3.5f;
+    bool expectedAvailable = true;
+
+    SECTION("Measured rectangular bounds are preserved")
+    {
+        packet.stageBoundsWidth = 2.25f;
+    }
+    SECTION("A missing validity flag clears retained bounds")
+    {
+        packet.trackingFlags = 0;
+        expectedAvailable = false;
+    }
+    SECTION("Zero dimensions are invalid")
+    {
+        packet.stageBoundsHeight = 0.0f;
+        expectedAvailable = false;
+    }
+    SECTION("Negative dimensions are invalid")
+    {
+        packet.stageBoundsWidth = -2.0f;
+        expectedAvailable = false;
+    }
+    SECTION("Non-finite dimensions are invalid")
+    {
+        packet.stageBoundsWidth = std::numeric_limits<float>::infinity();
+        expectedAvailable = false;
+    }
+
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    CHECK(im.GetStageBounds(bounds) == expectedAvailable);
+    CHECK(bounds.width == (expectedAvailable ? packet.stageBoundsWidth : 0.0f));
+    CHECK(bounds.height == (expectedAvailable ? packet.stageBoundsHeight : 0.0f));
+}
+
+TEST_CASE("InputManager expires measured velocities and stage bounds", "[input][velocity][bounds]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+        oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID |
+        oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+    packet.headLinearVelocity[0] = 1.0f;
+    packet.leftControllerLinearVelocity[0] = 2.0f;
+    packet.stageBoundsWidth = 2.0f;
+    packet.stageBoundsHeight = 3.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+    XrExtent2Df bounds = {};
+    REQUIRE(im.GetHeadVelocity().velocityFlags == XR_SPACE_VELOCITY_LINEAR_VALID_BIT);
+    REQUIRE(im.GetStageBounds(bounds));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(im.GetHeadVelocity().velocityFlags == 0);
+    CHECK(im.GetPoseVelocityForProfile(InputManager::Hand::Left, "grip/pose", "").velocityFlags == 0);
+    CHECK_FALSE(im.GetStageBounds(bounds));
+    CHECK(bounds.width == 0.0f);
+    CHECK(bounds.height == 0.0f);
 }
 
 TEST_CASE("InputManager — eye views", "[input]")

@@ -46,7 +46,9 @@ public:
 
     // Head pose
     XrPosef GetHeadPose() const;
+    XrSpaceVelocity GetHeadVelocity() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
+    bool GetStageBounds(XrExtent2Df& bounds) const;
 
     // Controller poses (world space)
     XrPosef GetControllerPose(Hand hand) const;
@@ -79,6 +81,8 @@ public:
                                               const std::string& profilePath) const;
     XrPosef GetPoseComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
+    XrSpaceVelocity GetPoseVelocityForProfile(Hand hand, const std::string& componentPath,
+                                             const std::string& profilePath) const;
     void SetStreamingClientName(const std::string& clientName);
 
     // Conformance automation overrides

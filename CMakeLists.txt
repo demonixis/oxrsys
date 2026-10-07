@@ -175,6 +175,8 @@ add_executable(oxrsys_runtime_tests
     tests/TestEncoderHelperIpc.cpp
     tests/TestEncoderPathPolicy.cpp
     tests/TestInputManager.cpp
+    tests/TestTrackingReceiver.cpp
+    tests/TestSpaceVelocity.cpp
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
@@ -285,6 +287,7 @@ add_executable(oxrsys_runtime_api_tests
 )
 target_include_directories(oxrsys_runtime_api_tests PRIVATE
     runtime/src
+    common
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_runtime_api_tests PRIVATE

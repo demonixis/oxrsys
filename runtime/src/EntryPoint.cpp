@@ -1411,6 +1411,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetReferenceSpaceBoundsRect(
     switch (referenceSpaceType)
     {
         case XR_REFERENCE_SPACE_TYPE_STAGE:
+            return sess->GetStageBounds(bounds);
         case XR_REFERENCE_SPACE_TYPE_VIEW:
         case XR_REFERENCE_SPACE_TYPE_LOCAL:
         case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:

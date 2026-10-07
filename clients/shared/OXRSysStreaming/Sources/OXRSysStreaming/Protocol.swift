@@ -339,7 +339,7 @@ public struct TrackingPacket: Sendable {
     public var ipd: Float = 0
     public var eyeFov: (Float, Float, Float, Float) = (0, 0, 0, 0)
 
-    // Velocity from the client IMU, used by the runtime for bounded pose prediction.
+    // Measured velocities are valid only with their matching tracking flag.
     public var headLinearVelocity: (Float, Float, Float) = (0, 0, 0)
     public var headAngularVelocity: (Float, Float, Float) = (0, 0, 0)
 
@@ -354,6 +354,17 @@ public struct TrackingPacket: Sendable {
     public var leftControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
     public var rightControllerAimPos: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
+
+    public var stageBoundsWidth: Float = 0
+    public var stageBoundsHeight: Float = 0
+    public var leftControllerLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAimLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAimLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
 
     public init() {}
 }
@@ -404,6 +415,17 @@ public struct TrackingFlagsValues {
     public static let rightHandActive: UInt32 = 0x0002
     public static let leftControllerActive: UInt32 = 0x0004
     public static let rightControllerActive: UInt32 = 0x0008
+    public static let headLinearVelocityValid: UInt32 = 0x0010
+    public static let headAngularVelocityValid: UInt32 = 0x0020
+    public static let stageBoundsValid: UInt32 = 0x0040
+    public static let leftControllerLinearVelocityValid: UInt32 = 0x0080
+    public static let leftControllerAngularVelocityValid: UInt32 = 0x0100
+    public static let rightControllerLinearVelocityValid: UInt32 = 0x0200
+    public static let rightControllerAngularVelocityValid: UInt32 = 0x0400
+    public static let leftControllerAimLinearVelocityValid: UInt32 = 0x0800
+    public static let leftControllerAimAngularVelocityValid: UInt32 = 0x1000
+    public static let rightControllerAimLinearVelocityValid: UInt32 = 0x2000
+    public static let rightControllerAimAngularVelocityValid: UInt32 = 0x4000
 }
 
 public struct ButtonFlags {

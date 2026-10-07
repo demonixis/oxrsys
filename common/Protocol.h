@@ -314,9 +314,9 @@ struct TrackingPacket
     float ipd;                 // Inter-pupillary distance in meters (0 = use default)
     float eyeFov[4];           // Left eye FOV: left, right, up, down (radians, 0 = use default)
 
-    // Velocity from IMU (for improved server-side pose prediction)
-    float headLinearVelocity[3];   // m/s (0 = not available)
-    float headAngularVelocity[3];  // rad/s (0 = not available)
+    // Velocity in the tracking reference space; availability is carried in trackingFlags.
+    float headLinearVelocity[3];   // m/s
+    float headAngularVelocity[3];  // rad/s
 
     // Optional hand tracking payload per joint: x, y, z, radius
     float leftHandJoints[HAND_JOINT_COUNT][4];
@@ -330,7 +330,21 @@ struct TrackingPacket
     float leftControllerAimRot[4];
     float rightControllerAimPos[3];
     float rightControllerAimRot[4];
+
+    // Optional measured STAGE bounds and controller velocities, appended for older clients.
+    float stageBoundsWidth;
+    float stageBoundsHeight;
+    float leftControllerLinearVelocity[3];
+    float leftControllerAngularVelocity[3];
+    float rightControllerLinearVelocity[3];
+    float rightControllerAngularVelocity[3];
+    float leftControllerAimLinearVelocity[3];
+    float leftControllerAimAngularVelocity[3];
+    float rightControllerAimLinearVelocity[3];
+    float rightControllerAimAngularVelocity[3];
 };
+
+constexpr size_t TRACKING_PACKET_BASE_SIZE = offsetof(TrackingPacket, leftControllerAimPos);
 
 enum ButtonFlags : uint32_t
 {
@@ -353,6 +367,17 @@ enum TrackingFlags : uint32_t
     TRACKING_FLAG_RIGHT_HAND_ACTIVE = 0x0002,
     TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE = 0x0004,
     TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE = 0x0008,
+    TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID = 0x0010,
+    TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID = 0x0020,
+    TRACKING_FLAG_STAGE_BOUNDS_VALID = 0x0040,
+    TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID = 0x0080,
+    TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID = 0x0100,
+    TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID = 0x0200,
+    TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID = 0x0400,
+    TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID = 0x0800,
+    TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID = 0x1000,
+    TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID = 0x2000,
+    TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID = 0x4000,
 };
 
 // ─── Control Channel (bidirectional, UDP on CONTROL_PORT) ───────────────────

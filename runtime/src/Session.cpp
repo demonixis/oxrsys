@@ -450,6 +450,8 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
 
     // Update input
     inputManager_->Update(dt);
+    XrExtent2Df bounds = {};
+    GetStageBounds(&bounds);
 
     auto displayTime = std::chrono::duration_cast<std::chrono::nanoseconds>(now - startTime_).count();
 
@@ -971,6 +973,34 @@ XrResult Session::DestroySwapchain(Swapchain* swapchain)
         }
     }
     return XR_ERROR_HANDLE_INVALID;
+}
+
+bool Session::HasTrackingConnection() const
+{
+    return streamingServer_ != nullptr && streamingServer_->IsClientConnected();
+}
+
+XrResult Session::GetStageBounds(XrExtent2Df* bounds)
+{
+    std::lock_guard<std::mutex> lock(stageBoundsMutex_);
+    *bounds = {};
+    const bool available = HasTrackingConnection() && inputManager_->GetStageBounds(*bounds);
+    if (available != stageBoundsAvailable_ || bounds->width != stageBounds_.width ||
+        bounds->height != stageBounds_.height)
+    {
+        XrEventDataBuffer event = {};
+        auto* change = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&event);
+        change->type = XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING;
+        change->session = reinterpret_cast<XrSession>(handle_);
+        change->referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+        change->changeTime = GetCurrentTime();
+        change->poseValid = XR_FALSE;
+        change->poseInPreviousSpace.orientation.w = 1.0f;
+        instance_->PushEvent(event);
+        stageBounds_ = *bounds;
+        stageBoundsAvailable_ = available;
+    }
+    return available ? XR_SUCCESS : XR_SPACE_BOUNDS_UNAVAILABLE;
 }
 
 XrResult Session::CreateReferenceSpace(const XrReferenceSpaceCreateInfo* createInfo, XrSpace* space)

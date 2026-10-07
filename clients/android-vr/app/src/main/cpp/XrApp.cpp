@@ -4744,6 +4744,46 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
     protocol::TrackingPacket packet = {};
     packet.timestampNs = predictedDisplayTime;
 
+    auto copyVelocity = [&packet](const XrSpaceVelocity& velocity, XrSpaceLocationFlags locationFlags,
+                                  float* linearVelocity, float* angularVelocity,
+                                  uint32_t linearFlag, uint32_t angularFlag) {
+        if ((locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
+            (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0 &&
+            std::isfinite(velocity.linearVelocity.x) &&
+            std::isfinite(velocity.linearVelocity.y) &&
+            std::isfinite(velocity.linearVelocity.z))
+        {
+            linearVelocity[0] = velocity.linearVelocity.x;
+            linearVelocity[1] = velocity.linearVelocity.y;
+            linearVelocity[2] = velocity.linearVelocity.z;
+            packet.trackingFlags |= linearFlag;
+        }
+        if ((locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 &&
+            (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0 &&
+            std::isfinite(velocity.angularVelocity.x) &&
+            std::isfinite(velocity.angularVelocity.y) &&
+            std::isfinite(velocity.angularVelocity.z))
+        {
+            angularVelocity[0] = velocity.angularVelocity.x;
+            angularVelocity[1] = velocity.angularVelocity.y;
+            angularVelocity[2] = velocity.angularVelocity.z;
+            packet.trackingFlags |= angularFlag;
+        }
+    };
+
+    if (appSpaceIsStage_)
+    {
+        XrExtent2Df bounds = {};
+        if (xrGetReferenceSpaceBoundsRect(session_, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) == XR_SUCCESS &&
+            std::isfinite(bounds.width) && std::isfinite(bounds.height) &&
+            bounds.width > 0.0f && bounds.height > 0.0f)
+        {
+            packet.stageBoundsWidth = bounds.width;
+            packet.stageBoundsHeight = bounds.height;
+            packet.trackingFlags |= protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID;
+        }
+    }
+
     // Head pose — compute center head position from the two eye views
     // (average of left and right eye positions gives the head center)
     float centerX = (views_[0].pose.position.x + views_[1].pose.position.x) * 0.5f;
@@ -4765,18 +4805,10 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
         location.next = &velocity;
         if (XR_SUCCEEDED(xrLocateSpace(viewSpace_, appSpace_, predictedDisplayTime, &location)))
         {
-            if (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT)
-            {
-                packet.headLinearVelocity[0] = velocity.linearVelocity.x;
-                packet.headLinearVelocity[1] = velocity.linearVelocity.y;
-                packet.headLinearVelocity[2] = velocity.linearVelocity.z;
-            }
-            if (velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT)
-            {
-                packet.headAngularVelocity[0] = velocity.angularVelocity.x;
-                packet.headAngularVelocity[1] = velocity.angularVelocity.y;
-                packet.headAngularVelocity[2] = velocity.angularVelocity.z;
-            }
+            copyVelocity(velocity, location.locationFlags,
+                         packet.headLinearVelocity, packet.headAngularVelocity,
+                         protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID,
+                         protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID);
         }
     }
 
@@ -5039,13 +5071,17 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
             XrResult poseStateResult = XR_ERROR_HANDLE_INVALID;
             const bool poseActionActive =
                 readPoseActionActive(gripPoseAction_, hand, &poseStateResult);
+            XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
             XrSpaceLocation loc = {XR_TYPE_SPACE_LOCATION};
+            loc.next = &velocity;
             XrResult locResult = xrLocateSpace(gripSpaces_[hand], appSpace_,
                                                 predictedDisplayTime, &loc);
             XrResult aimPoseStateResult = XR_ERROR_HANDLE_INVALID;
             const bool aimPoseActionActive =
                 readPoseActionActive(aimPoseAction_, hand, &aimPoseStateResult);
+            XrSpaceVelocity aimVelocity = {XR_TYPE_SPACE_VELOCITY};
             XrSpaceLocation aimLoc = {XR_TYPE_SPACE_LOCATION};
+            aimLoc.next = &aimVelocity;
             XrResult aimLocResult = XR_ERROR_HANDLE_INVALID;
             if (aimSpaces_[hand] != XR_NULL_HANDLE)
             {
@@ -5110,6 +5146,23 @@ protocol::TrackingPacket XrApp::BuildTrackingPacket(XrTime predictedDisplayTime)
                 rot[1] = loc.pose.orientation.y;
                 rot[2] = loc.pose.orientation.z;
                 rot[3] = loc.pose.orientation.w;
+                copyVelocity(velocity, loc.locationFlags,
+                             hand == 0 ? packet.leftControllerLinearVelocity : packet.rightControllerLinearVelocity,
+                             hand == 0 ? packet.leftControllerAngularVelocity : packet.rightControllerAngularVelocity,
+                             hand == 0 ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID
+                                       : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID,
+                             hand == 0 ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID
+                                       : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID);
+                if (aimActive)
+                {
+                    copyVelocity(aimVelocity, aimLoc.locationFlags,
+                                 hand == 0 ? packet.leftControllerAimLinearVelocity : packet.rightControllerAimLinearVelocity,
+                                 hand == 0 ? packet.leftControllerAimAngularVelocity : packet.rightControllerAimAngularVelocity,
+                                 hand == 0 ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID
+                                           : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID,
+                                 hand == 0 ? protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID
+                                           : protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID);
+                }
             }
             if (controllerActive || aimActive)
             {

@@ -32,9 +32,11 @@ public:
 
     bool Start();
     void Stop();
+    void Reset();
 
     // Get the latest tracking data (thread-safe)
     bool GetLatestPose(oxr::protocol::TrackingPacket& outPacket) const;
+    bool GetFreshPose(oxr::protocol::TrackingPacket& outPacket) const;
     bool GetPredictedPose(oxr::protocol::TrackingPacket& outPacket) const;
 
     // Inject a tracking packet from TCP (USB mode) — same effect as receiving via UDP

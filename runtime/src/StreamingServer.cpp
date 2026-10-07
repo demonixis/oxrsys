@@ -1226,7 +1226,7 @@ void StreamingServer::TcpTrackingThread()
                 break;
             }
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
-                payload.size() >= sizeof(oxr::protocol::TrackingPacket) &&
+                payload.size() >= oxr::protocol::TRACKING_PACKET_BASE_SIZE &&
                 trackingReceiver_ != nullptr)
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
@@ -1636,6 +1636,10 @@ void StreamingServer::EncodeThread()
 void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                                           const sockaddr_in& clientAddr)
 {
+    if (trackingReceiver_ != nullptr)
+    {
+        trackingReceiver_->Reset();
+    }
     char ipStr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
     std::string clientName(clientConnect.deviceName,
@@ -1860,6 +1864,10 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
+    if (trackingReceiver_ != nullptr)
+    {
+        trackingReceiver_->Reset();
+    }
     std::string clientName(clientConnect.deviceName,
         BoundedStringLength(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
     {
@@ -2103,6 +2111,10 @@ void StreamingServer::HandleClientDisconnect()
     if (previousState != State::Connected && !hadClient)
     {
         return;
+    }
+    if (trackingReceiver_ != nullptr)
+    {
+        trackingReceiver_->Reset();
     }
     InvalidateCallbackAccess();
 

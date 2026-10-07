@@ -297,6 +297,12 @@ final class AppModel {
                 snapshot.angularVelocity.y,
                 snapshot.angularVelocity.z
             )
+            if snapshot.linearVelocityValid {
+                packet.trackingFlags |= TrackingFlagsValues.headLinearVelocityValid
+            }
+            if snapshot.angularVelocityValid {
+                packet.trackingFlags |= TrackingFlagsValues.headAngularVelocityValid
+            }
             let eyeProjection = self.eyeProjectionState.get()
             packet.ipd = eyeProjection.ipd > 0 ? eyeProjection.ipd : 0.064
             if eyeProjection.fovAngles != SIMD4<Float>(repeating: 0) {

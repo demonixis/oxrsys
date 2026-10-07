@@ -259,6 +259,11 @@ void Instance::RemoveEventsForSession(XrSession session)
 {
     std::lock_guard lock(eventMutex_);
     std::erase_if(eventQueue_, [session](const XrEventDataBuffer& event) {
+        if (event.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING)
+        {
+            const auto* change = reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
+            return change->session == session;
+        }
         if (event.type != XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
         {
             return false;

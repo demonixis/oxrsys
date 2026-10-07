@@ -164,6 +164,33 @@ XrPosef MakePose(const glm::vec3& position, const glm::quat& orientation)
     return pose;
 }
 
+bool IsUnsetAimPose(const glm::vec3& pos, const glm::quat& rot)
+{
+    const bool zeroRotation =
+        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 0.0f;
+    const bool identityAtOrigin =
+        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 1.0f &&
+        pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f;
+    return zeroRotation || identityAtOrigin;
+}
+
+XrSpaceVelocity ReadTrackedVelocity(bool linearValid, bool angularValid,
+                                    const float* linear, const float* angular)
+{
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    if (linearValid && std::isfinite(linear[0]) && std::isfinite(linear[1]) && std::isfinite(linear[2]))
+    {
+        velocity.velocityFlags |= XR_SPACE_VELOCITY_LINEAR_VALID_BIT;
+        velocity.linearVelocity = {linear[0], linear[1], linear[2]};
+    }
+    if (angularValid && std::isfinite(angular[0]) && std::isfinite(angular[1]) && std::isfinite(angular[2]))
+    {
+        velocity.velocityFlags |= XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+        velocity.angularVelocity = {angular[0], angular[1], angular[2]};
+    }
+    return velocity;
+}
+
 } // namespace
 
 InputManager::InputManager() = default;
@@ -454,6 +481,34 @@ void InputManager::GetEyeViews(XrView* views, uint32_t viewCount) const
     }
 }
 
+XrSpaceVelocity InputManager::GetHeadVelocity() const
+{
+    oxr::protocol::TrackingPacket packet = {};
+    if (trackingReceiver_ == nullptr || !trackingReceiver_->GetFreshPose(packet))
+    {
+        return {XR_TYPE_SPACE_VELOCITY};
+    }
+    return ReadTrackedVelocity(
+        (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID) != 0,
+        (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID) != 0,
+        packet.headLinearVelocity, packet.headAngularVelocity);
+}
+
+bool InputManager::GetStageBounds(XrExtent2Df& bounds) const
+{
+    bounds = {};
+    oxr::protocol::TrackingPacket packet = {};
+    if (trackingReceiver_ == nullptr || !trackingReceiver_->GetFreshPose(packet) ||
+        (packet.trackingFlags & oxr::protocol::TRACKING_FLAG_STAGE_BOUNDS_VALID) == 0 ||
+        !std::isfinite(packet.stageBoundsWidth) || !std::isfinite(packet.stageBoundsHeight) ||
+        packet.stageBoundsWidth <= 0.0f || packet.stageBoundsHeight <= 0.0f)
+    {
+        return false;
+    }
+    bounds = {packet.stageBoundsWidth, packet.stageBoundsHeight};
+    return true;
+}
+
 XrPosef InputManager::GetControllerPose(Hand hand) const
 {
     const glm::vec3& pos = (hand == Hand::Left) ? leftControllerPos_ : rightControllerPos_;
@@ -481,12 +536,7 @@ XrPosef InputManager::GetControllerAimPose(Hand hand) const
     // Swift TrackingPacket defaults aim rotation to (0,0,0,1)). Treat both as "not provided" and
     // fall back to the grip pose, otherwise an identity-defaulted client pins the aim pose at the
     // world origin and the controller never appears to move.
-    const bool zeroRotation =
-        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 0.0f;
-    const bool identityAtOrigin =
-        rot.x == 0.0f && rot.y == 0.0f && rot.z == 0.0f && rot.w == 1.0f &&
-        pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f;
-    if (zeroRotation || identityAtOrigin)
+    if (IsUnsetAimPose(pos, rot))
     {
         return GetControllerPose(hand);
     }
@@ -921,6 +971,58 @@ XrPosef InputManager::GetPoseComponentForProfile(Hand hand, const std::string& c
     }
 
     return GetControllerPose(hand);
+}
+
+XrSpaceVelocity InputManager::GetPoseVelocityForProfile(Hand hand, const std::string& componentPath,
+                                                       const std::string& profilePath) const
+{
+    const auto& automation = GetAutomationState(hand);
+    if ((componentPath != "grip/pose" && componentPath != "aim/pose") ||
+        automation.poseStates.contains(componentPath) ||
+        (automation.hasExplicitActivity && !automation.isActive) ||
+        IsHandInteractionProfile(profilePath) ||
+        (profilePath.empty() && IsHandTrackingActive(hand)))
+    {
+        return {XR_TYPE_SPACE_VELOCITY};
+    }
+
+    oxr::protocol::TrackingPacket packet = {};
+    if (trackingReceiver_ == nullptr || !trackingReceiver_->GetFreshPose(packet))
+    {
+        return {XR_TYPE_SPACE_VELOCITY};
+    }
+    const uint32_t activeFlag = hand == Hand::Left
+        ? oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE
+        : oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    if ((packet.trackingFlags & activeFlag) == 0)
+    {
+        return {XR_TYPE_SPACE_VELOCITY};
+    }
+
+    const glm::vec3& pos = hand == Hand::Left ? leftControllerAimPos_ : rightControllerAimPos_;
+    const glm::quat& rot = hand == Hand::Left ? leftControllerAimRot_ : rightControllerAimRot_;
+    const bool aim = componentPath == "aim/pose" && !IsUnsetAimPose(pos, rot);
+    if (hand == Hand::Left)
+    {
+        return ReadTrackedVelocity(
+            (packet.trackingFlags & (aim
+                ? oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID
+                : oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID)) != 0,
+            (packet.trackingFlags & (aim
+                ? oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID
+                : oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID)) != 0,
+            aim ? packet.leftControllerAimLinearVelocity : packet.leftControllerLinearVelocity,
+            aim ? packet.leftControllerAimAngularVelocity : packet.leftControllerAngularVelocity);
+    }
+    return ReadTrackedVelocity(
+        (packet.trackingFlags & (aim
+            ? oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID
+            : oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID)) != 0,
+        (packet.trackingFlags & (aim
+            ? oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID
+            : oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID)) != 0,
+        aim ? packet.rightControllerAimLinearVelocity : packet.rightControllerLinearVelocity,
+        aim ? packet.rightControllerAimAngularVelocity : packet.rightControllerAngularVelocity);
 }
 
 float InputManager::GetTrackedPinchValue(Hand hand) const
