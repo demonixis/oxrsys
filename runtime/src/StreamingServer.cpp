@@ -1547,8 +1547,8 @@ void StreamingServer::EncodeThread()
                         server->clientSupportsMixedRealityPassthrough_.load();
                     stats.passthroughReady =
                         stats.passthroughEnabled && stats.passthroughSupported;
-                    stats.occlusionMode = config.occlusionMode;
-                    stats.spatialEnabled = config.spatialEnabled;
+                    stats.occlusionMode = "off";
+                    stats.spatialEnabled = false;
                     stats.headsetAudio = false;
                     stats.serverPipelineLatencyMs = server->serverPipelineLatencyMs_.load();
                     stats.clientPipelineLatencyMs = server->clientPipelineLatencyMs_.load();

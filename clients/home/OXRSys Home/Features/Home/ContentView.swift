@@ -606,16 +606,22 @@ struct ContentView: View {
 
                         Toggle("Passthrough", isOn: streamingBinding(\.passthroughEnabled))
 
-                        Picker("Occlusion", selection: streamingBinding(\.occlusionMode)) {
+                        Picker("Occlusion (unavailable)", selection: streamingBinding(\.occlusionMode)) {
                             ForEach(OcclusionModeSetting.allCases) { mode in
                                 Text(mode.displayName).tag(mode)
                             }
                         }
+                        .disabled(true)
+                        .help("Depth and scene mesh occlusion are not implemented.")
 
-                        Toggle("Spatial features", isOn: streamingBinding(\.spatialEnabled))
-                        Toggle("Spatial anchors", isOn: streamingBinding(\.spatialAnchors))
-                        Toggle("Scene scan", isOn: streamingBinding(\.spatialScene))
-                        Toggle("Spatial persistence", isOn: streamingBinding(\.spatialPersistence))
+                        Group {
+                            Toggle("Spatial features (unavailable)", isOn: streamingBinding(\.spatialEnabled))
+                            Toggle("Spatial anchors (unavailable)", isOn: streamingBinding(\.spatialAnchors))
+                            Toggle("Scene scan (unavailable)", isOn: streamingBinding(\.spatialScene))
+                            Toggle("Spatial persistence (unavailable)", isOn: streamingBinding(\.spatialPersistence))
+                        }
+                        .disabled(true)
+                        .help("Spatial data exchange and persistence are not implemented.")
 
                         HStack {
                             Button("Default") {
