@@ -139,6 +139,83 @@ occlusion_mode = "magic"
     CHECK(values.encoderHelperPath == "/opt/oxrsys/oxrsys-encoder-helper");
 }
 
+TEST_CASE("Config parser accepts signed numbers exponents and inline numeric comments", "[config]")
+{
+    std::istringstream input(R"TOML(
+bitrate_mbps = +85 # Mbps
+fov_degrees = +110
+refresh_rate_hz = +90# Hz
+resolution_scale = +8e-1 # scale
+dynamic_resolution_min_scale = 5.5E-1
+keyframe_interval_sec = +4
+client_sharpening = -0.0 # off
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.bitrateMbps == 85);
+    CHECK(values.fovDegrees == 110);
+    CHECK(values.refreshRateHz == 90);
+    CHECK(values.resolutionScale == 0.8f);
+    CHECK(values.dynamicResolutionMinScale == 0.55f);
+    CHECK(values.keyframeIntervalSec == 4);
+    CHECK(values.clientSharpening == 0.0f);
+}
+
+TEST_CASE("Config parser preserves defaults for malformed numeric input", "[config]")
+{
+    ConfigValues defaults;
+    defaults.bitrateMbps = 64;
+    defaults.clientSharpening = 0.25f;
+
+    for (const char* value : {"", "nope", "+", "--85", "85Mbps", "85 90", "85.0", "85e0",
+                             "2147483648", "-2147483649", "999999999999999999999999",
+                             "-999999999999999999999999"})
+    {
+        CAPTURE(value);
+        std::istringstream input(std::string("bitrate_mbps = ") + value);
+        CHECK(ParseConfigToml(input, defaults).bitrateMbps == defaults.bitrateMbps);
+    }
+
+    for (const char* value : {"", "nope", ".", "+", "0.8junk", "0.8 0.9", "0.8e", "0.8f",
+                             "nan", "NAN(123)", "inf", "+inf", "-inf", "1e40", "1e-50"})
+    {
+        CAPTURE(value);
+        std::istringstream input(std::string("client_sharpening = ") + value);
+        CHECK(ParseConfigToml(input, defaults).clientSharpening == defaults.clientSharpening);
+    }
+}
+
+TEST_CASE("Config parser preserves the last valid number after malformed values", "[config]")
+{
+    std::istringstream input(R"TOML(
+bitrate_mbps = 64
+bitrate_mbps = 85Mbps
+fov_degrees = 110
+fov_degrees = 120degrees
+refresh_rate_hz = 80
+refresh_rate_hz = 90Hz
+resolution_scale = 0.6
+resolution_scale = 0.8suffix
+dynamic_resolution_min_scale = 0.45
+dynamic_resolution_min_scale = 0.55suffix
+keyframe_interval_sec = 3
+keyframe_interval_sec = 4seconds
+client_sharpening = 0.25
+client_sharpening = 0.8suffix
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.bitrateMbps == 64);
+    CHECK(values.fovDegrees == 110);
+    CHECK(values.refreshRateHz == 80);
+    CHECK(values.resolutionScale == 0.6f);
+    CHECK(values.dynamicResolutionMinScale == 0.45f);
+    CHECK(values.keyframeIntervalSec == 3);
+    CHECK(values.clientSharpening == 0.25f);
+}
+
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")
 {
     // Default: the runtime decides from the measured hardware-encoder
