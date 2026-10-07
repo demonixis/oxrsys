@@ -919,10 +919,15 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
 
     velocities.velocityCount = static_cast<uint32_t>(velocityData.size());
     XR_CHECK(xrLocateSpaces(context.session, &locateInfo, &spaceLocations));
-    CHECK((velocityData[0].velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0);
-    CHECK((velocityData[0].velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0);
-    CHECK((velocityData[1].velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0);
-    CHECK((velocityData[1].velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0);
+    for (size_t i = 0; i < spaces.size(); ++i)
+    {
+        XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+        XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
+        XR_CHECK(xrLocateSpace(spaces[i], context.localSpace, locateInfo.time, &location));
+        CHECK(velocity.velocityFlags == 0);
+        CHECK(velocityData[i].velocityFlags == velocity.velocityFlags);
+        CHECK(locationData[i].locationFlags == location.locationFlags);
+    }
 
     XR_CHECK(xrDestroySpace(spaces[1]));
     XR_CHECK(xrDestroySpace(spaces[0]));
@@ -2308,8 +2313,11 @@ TEST_CASE("Hand interaction pose and value inputs work through automation", "[ru
     CHECK_THAT(locationData[0].pose.position.x, WithinAbs(0.15f, 0.001f));
     CHECK_THAT(locationData[0].pose.position.y, WithinAbs(1.25f, 0.001f));
     CHECK_THAT(locationData[0].pose.position.z, WithinAbs(-0.35f, 0.001f));
-    CHECK((velocityData[0].velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0);
-    CHECK((velocityData[0].velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0);
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    spaceLocation.next = &velocity;
+    XR_CHECK(xrLocateSpace(pinchActionSpace, context.localSpace, sampleTime, &spaceLocation));
+    CHECK(velocity.velocityFlags == 0);
+    CHECK(velocityData[0].velocityFlags == velocity.velocityFlags);
     CHECK_THAT(velocityData[0].linearVelocity.x, WithinAbs(0.0f, 0.001f));
     CHECK_THAT(velocityData[0].linearVelocity.y, WithinAbs(0.0f, 0.001f));
     CHECK_THAT(velocityData[0].linearVelocity.z, WithinAbs(0.0f, 0.001f));
@@ -2755,6 +2763,26 @@ TEST_CASE("Space and view validation matches CTS expectations", "[runtime][space
           XR_ERROR_TIME_INVALID);
     CHECK(xrLocateSpace(context.localSpace, context.localSpace, -42, &location) ==
           XR_ERROR_TIME_INVALID);
+}
+
+TEST_CASE("Reference space bounds remain unavailable without boundary data", "[runtime][spaces]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    uint32_t spaceCount = 0;
+    XR_CHECK(xrEnumerateReferenceSpaces(context.session, 0, &spaceCount, nullptr));
+    std::vector<XrReferenceSpaceType> spaces(spaceCount);
+    XR_CHECK(xrEnumerateReferenceSpaces(context.session, spaceCount, &spaceCount, spaces.data()));
+
+    for (XrReferenceSpaceType space : spaces)
+    {
+        CAPTURE(space);
+        XrExtent2Df bounds = {123.0f, 456.0f};
+        CHECK(xrGetReferenceSpaceBoundsRect(context.session, space, &bounds) ==
+              XR_SPACE_BOUNDS_UNAVAILABLE);
+        CHECK(bounds.width == 0.0f);
+        CHECK(bounds.height == 0.0f);
+    }
 }
 
 TEST_CASE("Swapchain image order follows acquire wait release rules", "[runtime][swapchain]")

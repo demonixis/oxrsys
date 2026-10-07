@@ -1373,7 +1373,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
             return XR_ERROR_HANDLE_INVALID;
         }
 
+        XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
         XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+        location.next = velocities != nullptr ? &velocity : nullptr;
         XrResult result = space->LocateSpace(baseSpace, locateInfo->time, &location);
         if (XR_FAILED(result))
         {
@@ -1382,12 +1384,11 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrLocateSpaces(
 
         spaceLocations->locations[i].locationFlags = location.locationFlags;
         spaceLocations->locations[i].pose = location.pose;
-        if (velocities != nullptr &&
-            (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0 &&
-            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0)
+        if (velocities != nullptr)
         {
-            velocities->velocities[i].velocityFlags =
-                XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+            velocities->velocities[i].velocityFlags = velocity.velocityFlags;
+            velocities->velocities[i].linearVelocity = velocity.linearVelocity;
+            velocities->velocities[i].angularVelocity = velocity.angularVelocity;
         }
     }
 
@@ -1410,10 +1411,6 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetReferenceSpaceBoundsRect(
     switch (referenceSpaceType)
     {
         case XR_REFERENCE_SPACE_TYPE_STAGE:
-            bounds->width = 5.0f;
-            bounds->height = 5.0f;
-            return XR_SUCCESS;
-
         case XR_REFERENCE_SPACE_TYPE_VIEW:
         case XR_REFERENCE_SPACE_TYPE_LOCAL:
         case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
