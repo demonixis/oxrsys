@@ -14,7 +14,7 @@ targets, not additional runtime hosts.
 
 - `runtime/`: OpenXR entry points, instance/session/action state, graphics integration, streaming,
   VideoToolbox encoding, configuration, and status.
-- `common/protocol/`: wire-layout definitions shared with native clients.
+- `common/`: wire-layout definitions shared with native clients.
 - `clients/home/`: SwiftUI macOS launcher, runtime selector, configuration, ADB, and diagnostics.
 - `clients/simulator/`: standalone macOS/iOS simulator and Cardboard viewer.
 - `clients/visionos/`: immersive Vision Pro client.

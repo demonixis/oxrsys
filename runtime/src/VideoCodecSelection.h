@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 namespace oxrsys::video_codec_selection
 {

@@ -17,7 +17,7 @@
 #include "GraphicsTypes.h"
 #include "BoundedDrain.h"
 #include "EncoderPathPolicy.h"
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 // Runtime-side client for the out-of-process native-arm64 hardware HEVC
 // encoder helper (see runtime/encoder_helper/README.md).

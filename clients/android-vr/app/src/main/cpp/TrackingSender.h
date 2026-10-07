@@ -5,7 +5,7 @@
 #include <atomic>
 #include <cstdint>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 namespace oxr
 {

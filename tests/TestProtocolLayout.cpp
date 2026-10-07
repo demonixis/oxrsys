@@ -2,8 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <oxrsys/protocol/Foveation.h>
-#include <oxrsys/protocol/Protocol.h>
+#include <Foveation.h>
+#include <Protocol.h>
 
 #include <cstddef>
 

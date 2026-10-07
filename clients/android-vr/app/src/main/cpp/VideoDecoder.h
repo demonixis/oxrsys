@@ -9,7 +9,7 @@
 #include <media/NdkImage.h>
 #include <media/NdkImageReader.h>
 #include <mutex>
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 #include <thread>
 
 struct ANativeWindow;

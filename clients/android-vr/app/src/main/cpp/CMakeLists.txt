@@ -54,7 +54,7 @@ target_link_libraries(native_app_glue PUBLIC
 )
 
 # ─── Shared protocol definitions ────────────────────────────────────────────
-set(OXRSYS_PROTOCOL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../common/protocol/include")
+set(OXRSYS_PROTOCOL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../common")
 
 # ─── Native client library ──────────────────────────────────────────────────
 add_library(oxrsys_android SHARED

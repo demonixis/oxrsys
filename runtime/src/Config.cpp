@@ -3,7 +3,7 @@
 #include "Config.h"
 #include "RuntimePlatform.h"
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>

@@ -10,7 +10,7 @@
 // If exactly 1 data packet in a group is lost, it can be recovered by
 // XOR-ing the parity packet with the remaining data packets.
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>

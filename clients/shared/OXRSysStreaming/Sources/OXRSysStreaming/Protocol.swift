@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// Protocol.swift — Swift port of common/protocol/include/oxrsys/protocol/Protocol.h
+// Protocol.swift — Swift port of common/Protocol.h
 // Binary-compatible with the C++ structs for UDP wire format.
 
 import Foundation

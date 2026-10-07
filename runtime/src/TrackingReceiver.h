@@ -11,7 +11,7 @@
 
 #include "RuntimeSockets.h"
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 /**
  * Receives 6DOF tracking data from the headset client via UDP.

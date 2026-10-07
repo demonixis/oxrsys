@@ -33,7 +33,7 @@ add_library(oxrsys_runtime SHARED
 target_include_directories(oxrsys_runtime PRIVATE
     src
     encoder_helper
-    ${CMAKE_SOURCE_DIR}/common/protocol/include
+    ${CMAKE_SOURCE_DIR}/common
     ${openxr_SOURCE_DIR}/include
     ${openxr_SOURCE_DIR}/src/common
 )

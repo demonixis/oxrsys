@@ -4,7 +4,7 @@
 
 #include <string>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 /**
  * Where the per-frame VideoToolbox encode runs.

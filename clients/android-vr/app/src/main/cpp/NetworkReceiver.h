@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 namespace oxr
 {

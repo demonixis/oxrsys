@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "NetworkReceiver.h"
-#include <oxrsys/protocol/FecCodec.h>
+#include <FecCodec.h>
 
 #include <android/log.h>
 #include <array>

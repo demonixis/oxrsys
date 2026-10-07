@@ -22,7 +22,7 @@
 #include "StreamingReconfigure.h"
 
 // Shared protocol definitions
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 class VideoEncoder;
 class TrackingReceiver;

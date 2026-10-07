@@ -204,7 +204,7 @@ target_include_directories(oxrsys_runtime_tests PRIVATE
     runtime/src
     runtime/encoder_helper
     clients/android-vr/app/src/main/cpp
-    common/protocol/include
+    common
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_runtime_tests PRIVATE
@@ -239,7 +239,7 @@ add_executable(oxrsys_runtime_status_tests
 )
 target_include_directories(oxrsys_runtime_status_tests PRIVATE
     runtime/src
-    common/protocol/include
+    common
 )
 target_link_libraries(oxrsys_runtime_status_tests PRIVATE
     Catch2::Catch2WithMain
@@ -320,7 +320,7 @@ add_executable(oxrsys_videotoolbox_encoder_tests
 target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
     runtime/src
     runtime/encoder_helper
-    common/protocol/include
+    common
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE

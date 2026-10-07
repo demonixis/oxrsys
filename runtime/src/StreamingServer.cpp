@@ -11,8 +11,8 @@
 #include "TrackingReceiver.h"
 #include "VideoCodecSelection.h"
 #include "VideoEncoder.h"
-#include <oxrsys/protocol/Foveation.h>
-#include <oxrsys/protocol/FecCodec.h>
+#include <Foveation.h>
+#include <FecCodec.h>
 
 #include <spdlog/spdlog.h>
 

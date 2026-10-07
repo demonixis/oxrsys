@@ -43,7 +43,7 @@ clients/
   visionos/              visionOS immersive viewer
   android-vr/            Quest/Pico OpenXR client
   shared/                shared Swift streaming and simulator packages
-common/protocol/         shared C++ wire protocol
+common/                  shared C++ wire protocol
 scripts/                 packaging, notarization, registration, and Unity helpers
 tests/                   runtime and protocol tests
 docs/                    detailed project documentation

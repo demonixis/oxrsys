@@ -24,7 +24,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <openxr/openxr_platform.h>
-#include <oxrsys/protocol/Foveation.h>
+#include <Foveation.h>
 
 #define LOG_TAG "OXRSys-Android"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
