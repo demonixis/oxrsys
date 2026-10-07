@@ -4,6 +4,7 @@ import ARKit
 import CompositorServices
 import CoreVideo
 import Metal
+import OXRSysStreaming
 import os
 import simd
 
@@ -217,7 +218,11 @@ actor ImmersiveRenderer {
         let currentPose = deviceAnchor.map {
             (position: headPosition(from: $0), orientation: headOrientation(from: $0))
         }
-        let renderPose = appModel.renderPose(forPresentationTimeNs: frame.presentationTimeNs)
+        let renderPose = appModel.renderPose(
+            forPresentationTimeNs: frame.presentationTimeNs,
+            decodeTimeNs: frame.decodeTimeNs,
+            nowNs: Int64(presentationTime * 1_000_000_000)
+        )
         var reprojData = reprojectionData(drawable: drawable,
                                           currentPose: currentPose,
                                           renderPose: renderPose)
@@ -338,7 +343,10 @@ actor ImmersiveRenderer {
             return ReprojData(rot: matrix_identity_float3x3, tangents: tangents, translation: .zero)
         }
 
-        guard let currentPose, let renderPose else {
+        guard let currentPose, let renderPose,
+              renderPose.canReproject(from: RenderPose(
+                position: currentPose.position, orientation: currentPose.orientation
+              )) else {
             return data
         }
 
@@ -349,14 +357,8 @@ actor ImmersiveRenderer {
 
         // Head translation since the frame was rendered, expressed in the render-eye frame. For a
         // point assumed at the reprojection plane distance d along the current ray, the render-eye
-        // position is rot·dir·d + Δ, so the shader adds Δ/d to the rotated ray. Clamped so a bad
-        // pose match can never explode the warp; zero delta stays an exact passthrough.
-        var headDelta = currentPose.position - renderPose.position
-        let deltaLength = simd_length(headDelta)
-        let maxDelta: Float = 0.5
-        if deltaLength > maxDelta {
-            headDelta *= maxDelta / deltaLength
-        }
+        // position is rot·dir·d + Δ, so the shader adds Δ/d to the rotated ray.
+        let headDelta = currentPose.position - renderPose.position
         let baseDelta = renderPose.orientation.inverse.act(headDelta)
 
         for index in data.indices {

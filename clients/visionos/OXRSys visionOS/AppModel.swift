@@ -117,45 +117,6 @@ private nonisolated final class EyeProjectionState: @unchecked Sendable {
     }
 }
 
-/// The full head pose (position + orientation) the server rendered a frame for.
-nonisolated struct RenderPose: Sendable {
-    var position: SIMD3<Float>
-    var orientation: simd_quatf
-}
-
-/// Stores the head pose the server rendered each frame for, keyed by the frame's presentation
-/// timestamp, so the renderer can reproject the displayed frame to the live pose — rotation
-/// exactly, and translation against the reprojection depth plane.
-private nonisolated final class RenderPoseReprojector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var poseByPresentationNs: [Int64: RenderPose] = [:]
-    private let capacity = 240   // ring-buffer cap (~a few seconds of frames); bounds memory only
-    private var latestKey: Int64 = 0
-    private var latestPose: RenderPose?
-
-    func note(presentationTimeNs: Int64, pose: RenderPose) {
-        lock.lock()
-        poseByPresentationNs[presentationTimeNs] = pose
-        if presentationTimeNs >= latestKey {
-            latestKey = presentationTimeNs
-            latestPose = pose
-        }
-        if poseByPresentationNs.count > capacity,
-           let oldest = poseByPresentationNs.keys.min() {
-            poseByPresentationNs.removeValue(forKey: oldest)
-        }
-        lock.unlock()
-    }
-
-    /// Exact render pose for this frame, falling back to the most recent one if this frame's pose
-    /// packet was lost (it's a single un-FEC'd UDP packet) — exact match first, recent pose second.
-    func pose(forPresentationTimeNs presentationTimeNs: Int64) -> RenderPose? {
-        lock.lock()
-        defer { lock.unlock() }
-        return poseByPresentationNs[presentationTimeNs] ?? latestPose
-    }
-}
-
 /// Foveated-encoding (AADT) parameters handed to the fragment shader. Memory layout must match
 /// the Metal `FoveationParams` struct. `enabled == 0` is a passthrough.
 nonisolated struct FoveationShaderParams {
@@ -549,6 +510,9 @@ final class AppModel {
 
         connectionState = .connecting
         statusText = "Connecting to \(server.name)..."
+        renderPoseReprojector.reset(
+            enabled: server.announce.clientReprojectionMode != ClientReprojectionMode.off.rawValue
+        )
 
         let keyframeErrorThreshold = keyframeErrorThreshold
         let keyframeRequestCooldownNs = keyframeRequestCooldownNs
@@ -667,6 +631,7 @@ final class AppModel {
         statusText = "Tap Search to find the runtime"
         pixelBufferState.set(nil, presentationTimeNs: 0, decodeTimeNs: 0)
         keyframeRecoveryState.reset()
+        renderPoseReprojector.reset()
         foveationState.set(FoveationShaderParams())
         postFXState.setSharpen(0)
     }
@@ -872,8 +837,17 @@ final class AppModel {
 
     /// The head pose the frame with this presentation timestamp was rendered for, used by the
     /// renderer to reproject it to the live head pose.
-    nonisolated func renderPose(forPresentationTimeNs presentationTimeNs: Int64) -> RenderPose? {
-        renderPoseReprojector.pose(forPresentationTimeNs: presentationTimeNs)
+    nonisolated func renderPose(
+        forPresentationTimeNs presentationTimeNs: Int64,
+        decodeTimeNs: Int64,
+        nowNs: Int64
+    ) -> RenderPose? {
+        renderPoseReprojector.pose(
+            forPresentationTimeNs: presentationTimeNs,
+            decodeTimeNs: decodeTimeNs,
+            nowNs: nowNs,
+            isRecovering: decoder.isRecovering
+        )
     }
 
     /// Called from the render loop with the device's real per-eye FOV (radians, OpenXR
