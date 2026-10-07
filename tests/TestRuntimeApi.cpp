@@ -2189,6 +2189,20 @@ TEST_CASE("Inactive action spaces clear location flags", "[runtime][actions]")
     XR_CHECK(xrLocateSpace(actionSpace, context.localSpace, 1, &location));
     CHECK(location.locationFlags == 0);
 
+    XrViewLocateInfo locateInfo = {XR_TYPE_VIEW_LOCATE_INFO};
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = 1;
+    locateInfo.space = actionSpace;
+    XrViewState viewState = {XR_TYPE_VIEW_STATE};
+    uint32_t viewCount = 0;
+    XR_CHECK(xrLocateViews(context.session, &locateInfo, &viewState, 0, &viewCount, nullptr));
+    CHECK(viewState.viewStateFlags == 0);
+
+    std::array<XrView, 2> views = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    XR_CHECK(xrLocateViews(context.session, &locateInfo, &viewState,
+                          static_cast<uint32_t>(views.size()), &viewCount, views.data()));
+    CHECK(viewState.viewStateFlags == 0);
+
     XR_CHECK(xrDestroySpace(actionSpace));
     XR_CHECK(xrDestroyAction(poseAction));
     XR_CHECK(xrDestroyActionSet(actionSet));
@@ -2763,6 +2777,59 @@ TEST_CASE("Space and view validation matches CTS expectations", "[runtime][space
           XR_ERROR_TIME_INVALID);
     CHECK(xrLocateSpace(context.localSpace, context.localSpace, -42, &location) ==
           XR_ERROR_TIME_INVALID);
+}
+
+TEST_CASE("Located views honor translated and rotated reference spaces", "[runtime][spaces][views]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrViewLocateInfo locateInfo = {XR_TYPE_VIEW_LOCATE_INFO};
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = 1;
+    locateInfo.space = context.localSpace;
+    XrViewState viewState = {XR_TYPE_VIEW_STATE};
+    uint32_t viewCount = 0;
+    std::array<XrView, 2> localViews = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+    XR_CHECK(xrLocateViews(context.session, &locateInfo, &viewState,
+                          static_cast<uint32_t>(localViews.size()), &viewCount, localViews.data()));
+    REQUIRE(viewCount == 2);
+    REQUIRE((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0);
+
+    for (XrReferenceSpaceType type : {XR_REFERENCE_SPACE_TYPE_LOCAL, XR_REFERENCE_SPACE_TYPE_VIEW})
+    {
+        CAPTURE(type);
+        XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        createInfo.referenceSpaceType = type;
+        createInfo.poseInReferenceSpace.position = {1.0f, 2.0f, 3.0f};
+        createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.70710678f, 0.70710678f};
+        XrSpace space = XR_NULL_HANDLE;
+        XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &space));
+
+        XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+        XR_CHECK(xrLocateSpace(space, context.localSpace, locateInfo.displayTime, &location));
+        REQUIRE((location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0);
+
+        locateInfo.space = space;
+        std::array<XrView, 2> views = {{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
+        XR_CHECK(xrLocateViews(context.session, &locateInfo, &viewState,
+                              static_cast<uint32_t>(views.size()), &viewCount, views.data()));
+        CHECK((viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0);
+        for (size_t i = 0; i < views.size(); ++i)
+        {
+            // A +90 degree Z origin rotation maps a world delta (x, y, z) to (y, -x, z).
+            CHECK_THAT(views[i].pose.position.x,
+                       WithinAbs(localViews[i].pose.position.y - location.pose.position.y, 0.001f));
+            CHECK_THAT(views[i].pose.position.y,
+                       WithinAbs(location.pose.position.x - localViews[i].pose.position.x, 0.001f));
+            CHECK_THAT(views[i].pose.position.z,
+                       WithinAbs(localViews[i].pose.position.z - location.pose.position.z, 0.001f));
+            CHECK_THAT(views[i].pose.orientation.z, WithinAbs(-0.70710678f, 0.001f));
+            CHECK_THAT(views[i].pose.orientation.w, WithinAbs(0.70710678f, 0.001f));
+            CHECK(views[i].fov.angleLeft == localViews[i].fov.angleLeft);
+            CHECK(views[i].fov.angleRight == localViews[i].fov.angleRight);
+        }
+        XR_CHECK(xrDestroySpace(space));
+    }
 }
 
 TEST_CASE("Reference space bounds remain unavailable without boundary data", "[runtime][spaces]")

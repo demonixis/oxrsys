@@ -795,9 +795,12 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
 
     *viewCountOutput = 2;
 
+    const XrSpaceLocation location = baseSpace->LocateWorldPose(inputManager_->GetHeadPose());
     viewState->type = XR_TYPE_VIEW_STATE;
-    viewState->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
-                                XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT;
+    viewState->viewStateFlags = location.locationFlags != 0
+        ? XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT |
+              XR_VIEW_STATE_ORIENTATION_TRACKED_BIT | XR_VIEW_STATE_POSITION_TRACKED_BIT
+        : 0;
 
     if (viewCapacityInput == 0)
     {
@@ -813,6 +816,10 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     }
 
     inputManager_->GetEyeViews(views, 2);
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        views[i].pose = baseSpace->LocateWorldPose(views[i].pose).pose;
+    }
 
     // Remember the exact head pose this frame is being rendered for, so the streamed frame can be
     // tagged with it at submission instead of a later re-prediction.

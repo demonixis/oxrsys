@@ -60,6 +60,7 @@ public:
     }
 
     XrResult LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location);
+    XrSpaceLocation LocateWorldPose(const XrPosef& pose) const;
 
 private:
     uint64_t handle_ = 0;

@@ -95,7 +95,7 @@ struct LocatedWorldPose
 };
 
 // Compute world pose of a space.
-static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputManager)
+static LocatedWorldPose GetWorldPose(const Space* space, const InputManager& inputManager)
 {
     LocatedWorldPose result{};
     result.pose.orientation = {0, 0, 0, 1};
@@ -170,27 +170,9 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
     return result;
 }
 
-XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)
+static void LocateRelativePose(const LocatedWorldPose& thisPose, const LocatedWorldPose& basePose,
+                               XrSpaceLocation* location)
 {
-    if (location == nullptr || baseSpace == nullptr)
-    {
-        return XR_ERROR_VALIDATION_FAILURE;
-    }
-    if (time <= 0)
-    {
-        return XR_ERROR_TIME_INVALID;
-    }
-    if (baseSpace->GetSession() != session_)
-    {
-        return XR_ERROR_HANDLE_INVALID;
-    }
-
-    const InputManager& inputManager = session_->GetInputManager();
-
-    // Get world poses for both spaces
-    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
-    LocatedWorldPose basePose = GetWorldPose(baseSpace, inputManager);
-
     // Compute relative pose: this relative to base
     glm::quat baseRotInv = glm::inverse(ToGlm(basePose.pose.orientation));
     glm::vec3 basePos = ToGlm(basePose.pose.position);
@@ -214,6 +196,37 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
         velocity->linearVelocity = {0.0f, 0.0f, 0.0f};
         velocity->angularVelocity = {0.0f, 0.0f, 0.0f};
     }
+}
+
+XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)
+{
+    if (location == nullptr || baseSpace == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (time <= 0)
+    {
+        return XR_ERROR_TIME_INVALID;
+    }
+    if (baseSpace->GetSession() != session_)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+
+    const InputManager& inputManager = session_->GetInputManager();
+
+    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
+    LocatedWorldPose basePose = GetWorldPose(baseSpace, inputManager);
+    LocateRelativePose(thisPose, basePose, location);
 
     return XR_SUCCESS;
+}
+
+XrSpaceLocation Space::LocateWorldPose(const XrPosef& pose) const
+{
+    LocatedWorldPose thisPose = {pose};
+    LocatedWorldPose basePose = GetWorldPose(this, session_->GetInputManager());
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+    LocateRelativePose(thisPose, basePose, &location);
+    return location;
 }
