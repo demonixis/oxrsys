@@ -545,6 +545,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     bool sourceAlphaProjectionLayer = false;
 
     FrameSource frameSource = {};
+    bool hasProjectionLayer = false;
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
     {
@@ -558,6 +559,15 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         {
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
+                if (hasProjectionLayer)
+                {
+                    static std::atomic_bool loggedUnsupportedProjections{false};
+                    if (!loggedUnsupportedProjections.exchange(true))
+                    {
+                        spdlog::warn("OXRSys: multiple projection layer composition is unavailable");
+                    }
+                    return XR_ERROR_LAYER_LIMIT_EXCEEDED;
+                }
                 const auto& projectionLayer =
                     *reinterpret_cast<const XrCompositionLayerProjection*>(layer);
                 if (oxrsys::runtime::IsSourceAlphaProjectionLayerForStreaming(
@@ -571,6 +581,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                 {
                     return result;
                 }
+                hasProjectionLayer = true;
                 break;
             }
             case XR_TYPE_COMPOSITION_LAYER_QUAD:
@@ -580,7 +591,12 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                 {
                     return result;
                 }
-                break;
+                static std::atomic_bool loggedUnsupportedQuad{false};
+                if (!loggedUnsupportedQuad.exchange(true))
+                {
+                    spdlog::warn("OXRSys: quad layer composition is unavailable");
+                }
+                return XR_ERROR_LAYER_INVALID;
             }
             default:
                 return XR_ERROR_LAYER_INVALID;

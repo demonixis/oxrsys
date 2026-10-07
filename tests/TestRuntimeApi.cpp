@@ -2606,6 +2606,79 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
         XR_ERROR_VALIDATION_FAILURE);
 }
 
+TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][frame][layers]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
+    uint32_t imageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = 0;
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+    XrCompositionLayerProjectionView projectionViews[2] = {};
+    for (auto& view : projectionViews)
+    {
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose.orientation.w = 1.0f;
+        view.fov = {-0.5f, 0.5f, 0.5f, -0.5f};
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect.extent = {16, 16};
+    }
+    XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    projectionLayer.space = context.localSpace;
+    projectionLayer.viewCount = 2;
+    projectionLayer.views = projectionViews;
+
+    XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quadLayer.space = context.localSpace;
+    quadLayer.pose.orientation.w = 1.0f;
+    quadLayer.size = {1.0f, 1.0f};
+    quadLayer.subImage.swapchain = swapchain;
+    quadLayer.subImage.imageRect.extent = {16, 16};
+
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+    };
+    XrResult expectedResult = XR_ERROR_LAYER_LIMIT_EXCEEDED;
+    uint32_t layerCount = 2;
+    SECTION("Quad only")
+    {
+        layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
+        layerCount = 1;
+        expectedResult = XR_ERROR_LAYER_INVALID;
+    }
+    SECTION("Projection followed by quad")
+    {
+        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
+        expectedResult = XR_ERROR_LAYER_INVALID;
+    }
+    SECTION("Two projection layers")
+    {
+        projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    }
+
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    frameEndInfo.layerCount = layerCount;
+    frameEndInfo.layers = layers;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.layerCount = 1;
+    XR_CHECK(xrEndFrame(context.session, &frameEndInfo));
+    XR_CHECK(xrDestroySwapchain(swapchain));
+}
+
 TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[runtime][timespec]")
 {
     // Both conversion directions must be resolvable and must round-trip losslessly.
