@@ -17,9 +17,13 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
 
 - Always build and verify before declaring success. Report source/build, package, launch, live
   streaming, visual, and physical-device results as separate gates.
-- Significant changes must update `README.md`, `AGENTS.md`, `CHANGES.md`, and the page in `docs/`
-  that owns the affected workflow.
-- All project-owned source and documentation must be in English.
+- Keep this file and all project-owned source and documentation in English.
+- Do not generate documentation unless explicitly requested. Keep any requested documentation
+  changes focused on the affected workflow.
+- Keep work within the requested scope. A bug fix must not include unrelated fixes; use separate,
+  focused commits and pull requests so each change is easy to review.
+- Do not implement anticipated needs unless explicitly requested.
+- Keep completion reports short and simple unless a detailed explanation is requested.
 - Product versions come only from `config/OXRSysVersion.xcconfig`.
 - Project-owned source uses MPL-2.0. Preserve SPDX headers and upstream third-party licenses.
 - Do not add dependencies without a clear need. C++ dependencies use CMake FetchContent; platform
@@ -33,7 +37,20 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   manual qualification gate explicitly.
 - Preserve non-blocking frame submission and bounded latency-sensitive queues.
 - Keep pull requests easy to rebase: separate mechanical moves from semantic edits and avoid broad
-  formatting changes.
+  formatting changes. Do not add unrelated whitespace or indentation changes to the diff.
+- Prefer simple, clean, readable code and pragmatic solutions. Avoid over-engineering and
+  unnecessary design patterns or abstractions.
+- Avoid try/catch where practical. Prefer return values or explicit status enums, and avoid
+  `Result` wrappers. Retain necessary error handling at throwing SDK and library boundaries.
+- Do not rename variables unless explicitly requested.
+- Do not leave dead code or empty implementation blocks.
+- This is a shared project: preserve working behavior and compatibility for other contributors
+  and users.
+- Tests must exercise real behavior and expose failures. Do not weaken assertions, fabricate
+  success, or hide known problems to make checks pass. Fix recurring problems when evidence shows
+  they remain, and report unresolved failures honestly.
+- Advertise a feature as available only when its implementation and required runtime support are
+  present. Keep scaffolding and unsupported paths clearly unavailable.
 - Preserve bundle identifiers, Xcode schemes, protocol layouts, runtime configuration keys, and
   user preferences unless the change explicitly migrates them.
 - Keep `README.md` short. Detailed build, platform, protocol, simulator, and test guidance belongs
