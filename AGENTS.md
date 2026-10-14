@@ -51,6 +51,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   application-provided dispatch path. Vulkan v1 may fall back only to an already-loaded process
   `vkGetInstanceProcAddr` through `dlsym(RTLD_DEFAULT, ...)`.
 - `Session::EndFrame()` must remain non-blocking.
+- Session-state transitions driven by frame submission and by `xrRequestExitSession` share one
+  short-held mutex. A session that never ran a frame loop goes straight to `STOPPING` on an exit
+  request.
 - Encoded-frame dispatch is bounded and latest-frame-oriented. Replacing a pending frame must
   release its `FrameSource` resources; backpressure must never run in VideoToolbox callbacks or
   `Session::EndFrame()`.

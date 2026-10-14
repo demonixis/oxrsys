@@ -1108,6 +1108,38 @@ TEST_CASE("BeginSession rejects unsupported view configuration types", "[runtime
     CHECK(xrBeginSession(context.session, &beginInfo) == XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
 }
 
+// OpenComposite (Arizona Sunshine) begins a session, then requests exit and only pumps events,
+// never running a frame. Exit must still reach STOPPING, or the app waits out its timeout.
+TEST_CASE("RequestExitSession reaches STOPPING without a frame loop", "[runtime][loader]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    auto drainStates = [&]() {
+        std::vector<XrSessionState> states;
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                states.push_back(reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state);
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+        return states;
+    };
+
+    drainStates();
+    XR_CHECK(xrRequestExitSession(context.session));
+    std::vector<XrSessionState> states = drainStates();
+    REQUIRE_FALSE(states.empty());
+    CHECK(states.back() == XR_SESSION_STATE_STOPPING);
+
+    XR_CHECK(xrEndSession(context.session));
+    states = drainStates();
+    REQUIRE_FALSE(states.empty());
+    CHECK(states.back() == XR_SESSION_STATE_EXITING);
+}
+
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
@@ -2966,4 +2998,83 @@ TEST_CASE("Distinct swapchains can be created and destroyed concurrently",
     {
         CHECK(result == XR_SUCCESS);
     }
+}
+
+// xrRequestExitSession racing the first xrEndFrame: EndFrame clears frameBegun_ and then advances the
+// session state, so without one lock around both transition paths an exit request landing in that
+// window could emit STOPPING and then be overwritten back to SYNCHRONIZED, leaving xrEndSession to
+// fail with XR_ERROR_SESSION_NOT_STOPPING. Every interleaving must still reach STOPPING and end.
+TEST_CASE("RequestExitSession racing the first frame submission still reaches STOPPING", "[runtime][loader]")
+{
+    // Hold the frame-driven READY -> SYNCHRONIZED step for 2 ms after its branch is chosen, and send the
+    // exit request 1 ms into that window, so the bad interleaving happens every time.
+    setenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US", "2000", 1);
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+        XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+        bool sawStopping = false;
+        bool regressed = false;
+        auto drainStates = [&]() {
+            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+            while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+            {
+                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+                    regressed = regressed || (sawStopping && lastState != XR_SESSION_STATE_STOPPING);
+                    sawStopping = sawStopping || lastState == XR_SESSION_STATE_STOPPING;
+                }
+                event = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
+        };
+        drainStates();
+
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_CHECK(xrBeginFrame(context.session, nullptr));
+        XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+        endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        endInfo.displayTime = frameState.predictedDisplayTime;
+
+        std::atomic<bool> go{false};
+        XrResult exitResult = XR_ERROR_RUNTIME_FAILURE;
+        std::thread exiter([&] {
+            while (!go.load(std::memory_order_acquire))
+            {
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            exitResult = xrRequestExitSession(context.session);
+        });
+        go.store(true, std::memory_order_release);
+        CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+        exiter.join();
+        CHECK(exitResult == XR_SUCCESS);
+
+        // An app ends the session as soon as it sees STOPPING. If the race emitted STOPPING, the state
+        // must not have regressed after it, and xrEndSession must succeed right away.
+        sawStopping = false;
+        regressed = false;
+        drainStates();
+        if (sawStopping)
+        {
+            CHECK_FALSE(regressed);
+            CHECK(xrEndSession(context.session) == XR_SUCCESS);
+            continue;
+        }
+        // Otherwise the exit request landed after the transition: a rendering session advances one
+        // state per frame, so keep the loop running until STOPPING, then end.
+        for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
+        {
+            XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+            XR_CHECK(xrBeginFrame(context.session, nullptr));
+            endInfo.displayTime = frameState.predictedDisplayTime;
+            XR_CHECK(xrEndFrame(context.session, &endInfo));
+            drainStates();
+        }
+        REQUIRE(lastState == XR_SESSION_STATE_STOPPING);
+        CHECK(xrEndSession(context.session) == XR_SUCCESS);
+    }
+    unsetenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US");
 }

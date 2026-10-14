@@ -71,6 +71,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed `xrRequestExitSession` stalling when the app never ran a frame loop. Exit advanced one state
+  per submitted frame, so a session still in `READY` never reached `STOPPING`; OpenComposite (for
+  example Arizona Sunshine under Wine) waited out its timeout and re-initialised. Such a session now
+  moves to `STOPPING` immediately. Frame-driven and exit-driven state transitions are serialized so
+  an exit request racing the first `xrEndFrame` can no longer be overwritten back to `SYNCHRONIZED`.
 - Fixed Vulkan apps that render through an sRGB view of a UNORM swapchain image, such as Godot 4,
   failing at `xrCreateSwapchain` with `XR_ERROR_FEATURE_UNSUPPORTED`. Vulkan swapchains now accept
   `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create images with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`.
