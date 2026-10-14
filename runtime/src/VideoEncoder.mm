@@ -535,9 +535,16 @@ bool IsFoveationSettingsValid(const VideoEncoder::FoveationSettings& settings,
                               uint32_t sourceEyeWidth,
                               uint32_t sourceEyeHeight)
 {
+    // The kernel samples the source in normalized coordinates, so a source eye of another size is
+    // simply rescaled; only its shape must match. The Lab renders 1600x1777 for a 1512x1680 target
+    // and an exact-size check dropped every frame.
+    const bool sameAspect = sourceEyeWidth > 0 && sourceEyeHeight > 0 &&
+        settings.targetEyeWidth > 0 && settings.targetEyeHeight > 0 &&
+        std::fabs((double)sourceEyeWidth * settings.targetEyeHeight -
+                  (double)settings.targetEyeWidth * sourceEyeHeight) <=
+            0.01 * (double)settings.targetEyeWidth * sourceEyeHeight;
     return settings.enabled &&
-           settings.targetEyeWidth == sourceEyeWidth &&
-           settings.targetEyeHeight == sourceEyeHeight &&
+           sameAspect &&
            IsFiniteRatio(settings.eyeWidthRatio) &&
            IsFiniteRatio(settings.eyeHeightRatio) &&
            IsFiniteNormalized(settings.centerSizeX) &&

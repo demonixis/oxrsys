@@ -71,6 +71,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
+  other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
+  The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
+  aspect ratio is within 1% of the target.
 - Fixed Vulkan apps that render through an sRGB view of a UNORM swapchain image, such as Godot 4,
   failing at `xrCreateSwapchain` with `XR_ERROR_FEATURE_UNSUPPORTED`. Vulkan swapchains now accept
   `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create images with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`.
