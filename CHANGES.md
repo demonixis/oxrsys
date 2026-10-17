@@ -75,6 +75,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   failing at `xrCreateSwapchain` with `XR_ERROR_FEATURE_UNSUPPORTED`. Vulkan swapchains now accept
   `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create images with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`.
   Rejected swapchain requests are now logged with their format, size, and flags.
+- Fixed a second WiFi client hijacking a live session: a `ClientConnect` from a different address
+  while a client is connected is now refused instead of taking the session over and
+  rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
+  view). The connected address can still reconnect.
 - Fixed H.264 streams on Quest holding about 16 frames (around 220 ms at 72 Hz) in the decoder before
   output. The Android VR client now sets the Qualcomm decode-order and low-latency MediaCodec keys,
   which brings H.264 decode on Quest 3 to about 11 ms.

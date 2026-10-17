@@ -61,6 +61,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   their rendered view into the runtime-owned texture before releasing it.
 - Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those images with
   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`; Godot renders through an sRGB view of UNORM images.
+- The WiFi control thread admits one client at a time: a `ClientConnect` from a second address
+  while a client is connected is refused (logged at most every 5 s per address); the connected
+  address may always reconnect. `ClientAdmission.h` holds the pure decision and its tests.
 - Vulkan streaming snapshots released color images with application-dispatched Vulkan functions
   into bounded exportable images. Queue submission is non-blocking; fence waits belong to the
   encoder worker. Missing export support, exhausted slots, or wait failures drop the streaming frame
