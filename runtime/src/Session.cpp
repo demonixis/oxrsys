@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -153,6 +154,12 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
+    // Test seam: holds the frame-driven READY -> SYNCHRONIZED transition after its branch is chosen,
+    // so the RequestExitSession race test is deterministic. Unset in normal use.
+    if (const char* delay = std::getenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US"))
+    {
+        endFrameAdvanceDelayUs_ = std::atoi(delay);
+    }
     monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
 
@@ -171,6 +178,12 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     inputManager_ = std::make_unique<InputManager>();
 
     startTime_ = std::chrono::steady_clock::now();
+    // Test seam: holds the frame-driven READY -> SYNCHRONIZED transition after its branch is chosen,
+    // so the RequestExitSession race test is deterministic. Unset in normal use.
+    if (const char* delay = std::getenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US"))
+    {
+        endFrameAdvanceDelayUs_ = std::atoi(delay);
+    }
     monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
 
@@ -328,7 +341,20 @@ XrResult Session::RequestExitSession()
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
 
+    std::scoped_lock transitionLock(stateTransitionMutex_);
     exitRequested_ = true;
+
+    // Exit normally advances one step per submitted frame. A session that never left READY has
+    // no frame loop to do that (OpenComposite requests exit and only pumps events), so step
+    // straight to STOPPING here instead of leaving the app to time out.
+    {
+        std::scoped_lock lock(frameStateMutex_);
+        if (state_ == XR_SESSION_STATE_READY && !frameBegun_ && waitedFrameCount_ == 0)
+        {
+            TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
+            TransitionState(XR_SESSION_STATE_STOPPING);
+        }
+    }
     return XR_SUCCESS;
 }
 
@@ -934,8 +960,17 @@ XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewStat
     return XR_SUCCESS;
 }
 
+void Session::DelayFrameTransitionForTest() const
+{
+    if (endFrameAdvanceDelayUs_ > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(endFrameAdvanceDelayUs_));
+    }
+}
+
 void Session::AdvanceSessionStateAfterFrameSubmission()
 {
+    std::scoped_lock transitionLock(stateTransitionMutex_);
     if (!running_)
     {
         return;
@@ -954,6 +989,7 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
                 break;
 
             case XR_SESSION_STATE_READY:
+                DelayFrameTransitionForTest();
                 TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
                 break;
 
@@ -970,6 +1006,7 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
     switch (state_)
     {
         case XR_SESSION_STATE_READY:
+            DelayFrameTransitionForTest();
             TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
             break;
 

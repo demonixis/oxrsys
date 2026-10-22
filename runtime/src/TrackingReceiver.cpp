@@ -410,6 +410,17 @@ void TrackingReceiver::SetPredictionHorizonMs(float predictionHorizonMs)
     predictionHorizonMs_.store(std::max(predictionHorizonMs, 0.0f));
 }
 
+void TrackingReceiver::ResetHistory()
+{
+    {
+        std::lock_guard<std::mutex> lock(poseMutex_);
+        history_.clear();
+        latestPacket_ = {};
+    }
+    hasData_.store(false);
+    spdlog::info("TrackingReceiver: history reset for a new client");
+}
+
 void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs)
 {
     oxr::protocol::TrackingPacket normalizedPacket = packet;

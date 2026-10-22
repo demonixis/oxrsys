@@ -47,7 +47,15 @@ TEST_CASE("Swapchain usage and creation flags are validated per graphics API",
     CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Metal, createInfo) ==
           XR_ERROR_FEATURE_UNSUPPORTED);
     createInfo.createFlags = 0;
-    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    // Godot's Metal driver renders through an sRGB/UNORM view of the swapchain texture.
+    createInfo.format = 71;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                            XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Metal, createInfo) == XR_SUCCESS);
+    createInfo.format = 252;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
     CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Metal, createInfo) ==
           XR_ERROR_FEATURE_UNSUPPORTED);
     // Godot creates UNORM images and renders through an sRGB view of them.

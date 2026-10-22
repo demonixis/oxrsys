@@ -49,6 +49,11 @@ public:
 
     // Stats
     uint64_t GetPacketCount() const { return packetCount_.load(); }
+
+    // Forget the previous client's samples. The reorder guard in StorePacket compares client
+    // timestamps, and clients do not share a clock: a headset whose XrTime is seconds of uptime
+    // would have every packet dropped as "reordered" behind a simulator that ran for days.
+    void ResetHistory();
     uint64_t GetReorderedDropCount() const { return reorderedDropCount_.load(); }
 
 private:

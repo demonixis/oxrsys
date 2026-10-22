@@ -113,6 +113,7 @@ private:
 
     void TransitionState(XrSessionState newState);
     void AdvanceSessionStateAfterFrameSubmission();
+    void DelayFrameTransitionForTest() const;
     bool IsFrameLoopRunningState() const;
     bool OwnsSwapchain(const Swapchain* swapchain) const;
     XrResult ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage) const;
@@ -130,6 +131,10 @@ private:
     bool frameBegun_ = false;
     uint32_t waitedFrameCount_ = 0;
     mutable std::mutex frameStateMutex_;
+    // Serializes session-state transitions driven by the frame loop with those driven by
+    // xrRequestExitSession. Lock order: stateTransitionMutex_ before frameStateMutex_.
+    std::mutex stateTransitionMutex_;
+    int endFrameAdvanceDelayUs_ = 0; // test seam, see Session constructor
     mutable std::mutex debugUtilsMutex_;
 
     std::unique_ptr<InputManager> inputManager_;

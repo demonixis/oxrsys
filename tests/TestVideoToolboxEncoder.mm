@@ -68,7 +68,10 @@ void EncodeOneFrame(oxr::protocol::VideoCodec codec,
                     MTLPixelFormat pixelFormat = MTLPixelFormatBGRA8Unorm,
                     bool foveated = false,
                     bool tenBit = false,
-                    bool forceSoftware = false)
+                    bool forceSoftware = false,
+                    uint32_t sourceEyeWidth = 64,
+                    uint32_t sourceEyeHeight = 64,
+                    bool expectEncoded = true)
 {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     REQUIRE(device != nil);
@@ -121,11 +124,11 @@ void EncodeOneFrame(oxr::protocol::VideoCodec codec,
     }
 
     FrameSource frame = {};
-    frame.left = MakeSource(device, 64, 64, pixelFormat);
-    frame.right = MakeSource(device, 64, 64, pixelFormat);
+    frame.left = MakeSource(device, sourceEyeWidth, sourceEyeHeight, pixelFormat);
+    frame.right = MakeSource(device, sourceEyeWidth, sourceEyeHeight, pixelFormat);
 
     encoder.ForceKeyframe();
-    REQUIRE(encoder.EncodeStereo(
+    const bool submitted = encoder.EncodeStereo(
         std::move(frame),
         1'000'000,
         [&](const uint8_t* data, size_t size, bool /*keyframe*/, int64_t /*timestampNs*/) {
@@ -145,7 +148,18 @@ void EncodeOneFrame(oxr::protocol::VideoCodec codec,
                 completed = true;
             }
             ready.notify_one();
-        }));
+        });
+    if (!expectEncoded)
+    {
+        // Rejected before any GPU or encoder work: the submit fails and nothing is emitted.
+        CHECK_FALSE(submitted);
+        CHECK(nalCount == 0);
+        encoder.Shutdown();
+        [queue release];
+        [device release];
+        return;
+    }
+    REQUIRE(submitted);
 
     // A software encoder holds output until the session completes, so wait on a drained
     // pipeline rather than on one frame emerging unprompted.
@@ -222,6 +236,28 @@ TEST_CASE("Foveated encoding converts sRGB Metal sources",
     EncodeOneFrame(oxr::protocol::VideoCodec::H264,
                    MTLPixelFormatRGBA8Unorm_sRGB,
                    true);
+}
+
+TEST_CASE("Foveated encoding accepts source eyes of another size with the target aspect",
+          "[video][encoder][videotoolbox][foveation]")
+{
+    // The foveation kernel samples in normalized coordinates, so apps that render larger or
+    // smaller than the 64x64 target eye (The Lab renders 1600x1777 for a 1512x1680 Quest eye)
+    // must still encode instead of having every frame dropped.
+    EncodeOneFrame(oxr::protocol::VideoCodec::H264, MTLPixelFormatBGRA8Unorm, /*foveated=*/true,
+                   /*tenBit=*/false, /*forceSoftware=*/false, 128, 128);
+    EncodeOneFrame(oxr::protocol::VideoCodec::H264, MTLPixelFormatBGRA8Unorm, /*foveated=*/true,
+                   /*tenBit=*/false, /*forceSoftware=*/false, 32, 32);
+}
+
+TEST_CASE("Foveated encoding allows a 1% aspect mismatch and rejects more",
+          "[video][encoder][videotoolbox][foveation]")
+{
+    // 128x129 is within 1% of the 64x64 target aspect; 128x130 is not and is dropped.
+    EncodeOneFrame(oxr::protocol::VideoCodec::H264, MTLPixelFormatBGRA8Unorm, /*foveated=*/true,
+                   /*tenBit=*/false, /*forceSoftware=*/false, 128, 129);
+    EncodeOneFrame(oxr::protocol::VideoCodec::H264, MTLPixelFormatBGRA8Unorm, /*foveated=*/true,
+                   /*tenBit=*/false, /*forceSoftware=*/false, 128, 130, /*expectEncoded=*/false);
 }
 
 TEST_CASE("VideoToolbox shutdown drains submitted frame-source ownership",

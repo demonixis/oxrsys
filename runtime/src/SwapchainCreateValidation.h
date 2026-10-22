@@ -23,6 +23,10 @@ constexpr XrSwapchainUsageFlags SupportedUsageFlags(GraphicsApi api)
         // Metal blit destinations do not require an MTLTextureUsage flag. Blender
         // copies its rendered view into the OpenXR texture and declares that use.
         flags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        // Godot's Metal driver renders through a view of the swapchain texture with the
+        // sibling sRGB/UNORM pixel format. SwapchainMetal maps this to
+        // MTLTextureUsagePixelFormatView.
+        flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
     }
     if (api == GraphicsApi::Vulkan)
     {

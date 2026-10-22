@@ -522,3 +522,35 @@ TEST_CASE("TrackingReceiver — angular velocity uses the full prediction horizo
     CHECK_THAT(predicted.headOrientation[1], WithinAbs(std::sin(0.010f), 0.001f));
     CHECK_THAT(predicted.headOrientation[3], WithinAbs(std::cos(0.010f), 0.001f));
 }
+
+TEST_CASE("TrackingReceiver — a new client's clock is not ordered behind the last client's", "[input]")
+{
+    TrackingReceiver receiver;
+
+    // The previous client stamped its samples with a clock far ahead of the next one
+    // (a simulator on Mac uptime in days, then a headset on seconds of its own uptime).
+    oxr::protocol::TrackingPacket previousClient = {};
+    previousClient.timestampNs = 500000000000000;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&previousClient), sizeof(previousClient));
+
+    oxr::protocol::TrackingPacket nextClient = {};
+    nextClient.timestampNs = 2000000000;
+
+    SECTION("Without a reset the reorder guard drops the next client's samples")
+    {
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&nextClient), sizeof(nextClient));
+        CHECK(receiver.GetReorderedDropCount() == 1);
+    }
+
+    SECTION("After a reset the next client's samples are stored")
+    {
+        receiver.ResetHistory();
+        oxr::protocol::TrackingPacket latest = {};
+        CHECK_FALSE(receiver.GetLatestPose(latest));
+
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&nextClient), sizeof(nextClient));
+        CHECK(receiver.GetReorderedDropCount() == 0);
+        REQUIRE(receiver.GetLatestPose(latest));
+        CHECK(latest.timestampNs == nextClient.timestampNs);
+    }
+}

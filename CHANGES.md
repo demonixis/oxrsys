@@ -71,10 +71,27 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
+  other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
+  The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
+  aspect ratio is within 1% of the target.
+- Fixed `xrRequestExitSession` stalling when the app never ran a frame loop. Exit advanced one state
+  per submitted frame, so a session still in `READY` never reached `STOPPING`; OpenComposite (for
+  example Arizona Sunshine under Wine) waited out its timeout and re-initialised. Such a session now
+  moves to `STOPPING` immediately. Frame-driven and exit-driven state transitions are serialized so
+  an exit request racing the first `xrEndFrame` can no longer be overwritten back to `SYNCHRONIZED`.
+- Fixed a headset that connects after another client, such as the desktop simulator, losing every
+  tracking packet as "reordered" and being disconnected by the liveness watchdog. Clients do not
+  share a clock, and the reorder guard compared the new client's timestamps against the previous
+  client's last one; the tracking history is now reset on every client connect and disconnect.
 - Fixed Vulkan apps that render through an sRGB view of a UNORM swapchain image, such as Godot 4,
   failing at `xrCreateSwapchain` with `XR_ERROR_FEATURE_UNSUPPORTED`. Vulkan swapchains now accept
   `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create images with `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`.
   Rejected swapchain requests are now logged with their format, size, and flags.
+- Fixed Godot 4 with the Metal rendering driver failing at `xrCreateSwapchain` with
+  `XR_ERROR_FEATURE_UNSUPPORTED` ("No swapchain could be acquired to render to!") because it
+  requests `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT`. Metal swapchains now accept the bit and create
+  those textures with `MTLTextureUsagePixelFormatView`.
 - Fixed a second WiFi client hijacking a live session: a `ClientConnect` from a different address
   while a client is connected is now refused instead of taking the session over and
   rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
