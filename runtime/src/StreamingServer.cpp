@@ -51,6 +51,11 @@ constexpr int64_t kStreamConfigAckTimeoutNs =
         std::chrono::milliseconds(500)).count();
 constexpr uint32_t kStreamConfigMaxRetries = 2;
 // Treat a connected client as gone if it sends no tracking for this long (abrupt UDP kill).
+// A refused ClientConnect is logged at most this often per address: the desktop
+// simulator retries every second when it auto-connects.
+constexpr int64_t kClientAdmissionLogIntervalNs =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::seconds(5)).count();
 constexpr int64_t kClientLivenessTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::seconds(3)).count();
@@ -1645,6 +1650,35 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
     char ipStr[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+
+    // One client at a time. A ClientConnect from a second address while a client is
+    // streaming would take the session over and rebuild its encoder underneath it,
+    // and two tracking clocks interleaved in one TrackingReceiver make the rendered head
+    // pose jump. The connected address may always reconnect (a resent ClientConnect, or a
+    // restart on a new port before the liveness watchdog has noticed).
+    {
+        std::string connectedIp;
+        std::string connectedName;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex_);
+            connectedIp = clientIp_;
+            connectedName = clientName_;
+        }
+        const oxrsys::ClientAdmissionDecision admission = oxrsys::EvaluateClientAdmission(
+            clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
+            SteadyClockNowNs(), kClientAdmissionLogIntervalNs);
+        if (!admission.accept)
+        {
+            if (admission.log)
+            {
+                spdlog::warn("StreamingServer: refusing ClientConnect from {} while '{}' ({}) is "
+                             "connected; disconnect it first",
+                             ipStr, connectedName, connectedIp);
+            }
+            return;
+        }
+    }
+
     std::string clientName(clientConnect.deviceName,
         BoundedStringLength(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
 
