@@ -79,9 +79,11 @@ encoder_helper_path = ""
 # listeners, and "usb_adb" disables WiFi discovery fallback.
 transport = "auto"
 
-# Server-side foveated video encoding preset: "off", "light", "medium", or "high".
+# Server-side foveated video encoding preset: "off", "light", "medium", "medium_plus", or "high".
 # This compresses frame edges before video encoding and asks compatible clients
-# to re-expand the image after decode.
+# to re-expand the image after decode. "medium_plus" sits between medium and light
+# (2160x2160 eyes: medium 2560x1120, medium_plus 2752x1216, light 3456x1536); it is
+# announced as medium with its own centre/edge parameters, which clients read.
 foveated_encoding_preset = "off"
 
 # Headset client foveation override: "auto", "off", "light", "medium", or "high".
