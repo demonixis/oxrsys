@@ -6,6 +6,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added foveated_encoding_preset = "medium_plus": centre 0.50x0.45, edges 4x5, between medium
+  and light (2752x1216 encoded for 2160x2160 eyes, against 2560x1120 and 3456x1536). It is
+  announced as Medium with its own centre/edge parameters, which clients already read.
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit

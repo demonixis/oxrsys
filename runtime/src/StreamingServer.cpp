@@ -82,7 +82,9 @@ oxr::protocol::FoveationPreset ParseFoveationPreset(const std::string& value)
     {
         return oxr::protocol::FoveationPreset::Light;
     }
-    if (value == "medium")
+    // medium_plus travels as Medium: clients read the centre/edge parameters the
+    // announce carries, and need only a non-Off preset.
+    if (value == "medium" || value == "medium_plus")
     {
         return oxr::protocol::FoveationPreset::Medium;
     }
@@ -91,6 +93,31 @@ oxr::protocol::FoveationPreset ParseFoveationPreset(const std::string& value)
         return oxr::protocol::FoveationPreset::High;
     }
     return oxr::protocol::FoveationPreset::Off;
+}
+
+// The parameters for a configured preset name. medium_plus is centre 0.50x0.45,
+// edges 4x5: 2752x1216 for 2160x2160 eyes, 17 % more pixels than medium. On the
+// M5 Pro low-latency encoder it measured +0.7 ms per frame over medium (sparse
+// bench, 2026-10-18); whether it holds 90 Hz live is not yet measured.
+oxr::protocol::FoveationPresetParameters FoveationParametersForConfig(const std::string& value)
+{
+    if (value == "medium_plus")
+    {
+        return oxr::protocol::MediumPlusParameters();
+    }
+    return oxr::protocol::ParametersForPreset(ParseFoveationPreset(value));
+}
+
+oxr::protocol::FoveationLayout ConfiguredFoveationLayout(uint32_t targetEyeWidth,
+                                                         uint32_t targetEyeHeight,
+                                                         oxr::protocol::FoveationPreset preset,
+                                                         const std::string& configPreset)
+{
+    return oxr::protocol::CalculateFoveationLayout(
+        targetEyeWidth, targetEyeHeight, preset,
+        preset == oxr::protocol::FoveationPreset::Off
+            ? oxr::protocol::ParametersForPreset(preset)
+            : FoveationParametersForConfig(configPreset));
 }
 
 oxr::protocol::ClientFoveationPreset ParseClientFoveationPreset(const std::string& value)
@@ -215,10 +242,11 @@ StreamLayout BuildStreamLayout(uint32_t renderWidth,
             unscaledFoveationTarget ? renderWidth : layout.scaledWidth;
         layout.foveatedTargetEyeHeight =
             unscaledFoveationTarget ? renderHeight : layout.scaledHeight;
-        layout.foveationLayout = oxr::protocol::CalculateFoveationLayout(
+        layout.foveationLayout = ConfiguredFoveationLayout(
             layout.foveatedTargetEyeWidth,
             layout.foveatedTargetEyeHeight,
-            layout.foveationPreset);
+            layout.foveationPreset,
+            config.foveatedEncodingPreset);
         if (unscaledFoveationTarget &&
             oxr::protocol::IsFoveatedEncodingLayoutUsable(
                 layout.foveationLayout, renderWidth, renderHeight))
@@ -890,9 +918,10 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
             ? ParseFoveationPreset(config.foveatedEncodingPreset)
             : oxr::protocol::FoveationPreset::Off;
     const oxr::protocol::FoveationLayout layout =
-        oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+        ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                 layoutState.foveatedTargetEyeHeight,
-                                                foveationPreset);
+                                                foveationPreset,
+                                                config.foveatedEncodingPreset);
 
     if (layoutState.foveatedEncodingActive)
     {
@@ -1782,9 +1811,10 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         ? ParseFoveationPreset(config.foveatedEncodingPreset)
                         : oxr::protocol::FoveationPreset::Off;
                 const oxr::protocol::FoveationLayout layout =
-                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                             layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset);
+                                                            foveationPreset,
+                                                            config.foveatedEncodingPreset);
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
@@ -2008,9 +2038,10 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                         ? ParseFoveationPreset(config.foveatedEncodingPreset)
                         : oxr::protocol::FoveationPreset::Off;
                 const oxr::protocol::FoveationLayout layout =
-                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                             layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset);
+                                                            foveationPreset,
+                                                            config.foveatedEncodingPreset);
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
