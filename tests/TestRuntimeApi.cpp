@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -88,6 +89,40 @@ std::filesystem::path RuntimeConfigPath()
     return std::filesystem::path(home) /
            "Library/Application Support/OXRSys/oxrsys-runtime.toml";
 }
+
+// WriteRuntimeConfig replaces the user's real runtime config; a test that calls it holds one of these, which puts the
+// file back (or removes it, if there was none) when the test ends, failed REQUIREs included.
+class RuntimeConfigRestore
+{
+public:
+    RuntimeConfigRestore() : path_(RuntimeConfigPath())
+    {
+        std::ifstream file(path_, std::ios::binary);
+        if (file.is_open())
+        {
+            existed_ = true;
+            saved_.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+    }
+    ~RuntimeConfigRestore()
+    {
+        std::error_code ignored;
+        if (!existed_)
+        {
+            std::filesystem::remove(path_, ignored);
+            return;
+        }
+        std::ofstream file(path_, std::ios::binary | std::ios::trunc);
+        file << saved_;
+    }
+    RuntimeConfigRestore(const RuntimeConfigRestore&) = delete;
+    RuntimeConfigRestore& operator=(const RuntimeConfigRestore&) = delete;
+
+private:
+    std::filesystem::path path_;
+    std::string saved_;
+    bool existed_ = false;
+};
 
 void WriteRuntimeConfig(bool passthroughEnabled, bool appAlphaBlendPassthrough = false)
 {
@@ -420,6 +455,7 @@ TEST_CASE("Instance view and blend APIs reject missing output pointers", "[runti
 
 TEST_CASE("Alpha blend modes are stable for an instance after config reload", "[runtime][passthrough]")
 {
+    RuntimeConfigRestore restoreConfig;
     WriteRuntimeConfig(true, true);
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
@@ -458,6 +494,7 @@ TEST_CASE("Alpha blend modes are stable for an instance after config reload", "[
 
 TEST_CASE("Passthrough underlay alone does not advertise alpha blend", "[runtime][passthrough]")
 {
+    RuntimeConfigRestore restoreConfig;
     WriteRuntimeConfig(true, false);
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
