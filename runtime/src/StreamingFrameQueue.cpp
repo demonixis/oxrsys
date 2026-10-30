@@ -69,6 +69,22 @@ bool StreamingFrameQueue::WaitPop(const std::atomic<bool>& running, StreamingFra
     return true;
 }
 
+bool StreamingFrameQueue::HasFinishedPendingFrame() const
+{
+    // The copy shares the pending frame's resources, so its fences stay valid
+    // while they are checked outside the lock, even if the frame is replaced.
+    FrameSource pending = {};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!pendingFrame_.valid)
+        {
+            return false;
+        }
+        pending = pendingFrame_.source;
+    }
+    return pending.left.sync.WaitForHostReady(0) && pending.right.sync.WaitForHostReady(0);
+}
+
 void StreamingFrameQueue::Clear()
 {
     StreamingFrame frame = {};

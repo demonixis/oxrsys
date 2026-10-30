@@ -183,6 +183,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestPacketPacer.cpp
     tests/TestStreamingReconfigure.cpp
     tests/TestSnapshotLeasePool.cpp
+    tests/TestSnapshotWaitPolicy.cpp
     tests/TestSwapchainCreateValidation.cpp
     tests/TestVideoCodecSelection.cpp
     tests/TestVideoTextureFormat.cpp

@@ -1619,6 +1619,16 @@ void StreamingServer::EncodeThread()
 
                     telemetry->lastLogTime = now;
                 }
+            },
+            [this]
+            {
+                // A newer frame finished while this one was waited for: encode that one instead.
+                if (!frameQueue_.HasFinishedPendingFrame())
+                {
+                    return false;
+                }
+                replacedFrameCount_.fetch_add(1);
+                return true;
             });
 
         ReleaseStreamingFrame(frame);

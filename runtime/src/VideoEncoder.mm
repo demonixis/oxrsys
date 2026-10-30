@@ -516,11 +516,6 @@ void EncodeWaitForFrameImage(id<MTLCommandBuffer> commandBuffer, const FrameImag
     }
 }
 
-bool WaitForHostFrameImage(const FrameImageSource& source, uint64_t timeoutNs)
-{
-    return source.sync.WaitForHostReady(timeoutNs);
-}
-
 bool IsFiniteRatio(float value)
 {
     return std::isfinite(value) && value > 0.0f && value <= 1.0f;
@@ -827,6 +822,11 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     graphicsContext_ = graphicsContext;
     videoToolbox_.metalDevice = graphicsContext.metalDevice;
     shuttingDown_.store(false);
+    snapshotWaitSettings_ = oxrsys::SnapshotWaitSettingsForFps(fps);
+    snapshotWait_ = {};
+    snapshotWaitSwitches_ = 0;
+    snapshotWaitSwitchesLogged_ = 0;
+    snapshotWaitLastLog_ = {};
     foveationValidationWarningLogged_.store(false);
     droppedFrameCount_.store(0);
     inFlightFrameCount_.store(0);
@@ -1611,6 +1611,11 @@ bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
 
     spdlog::info("VideoEncoder: Shut down (submitted={} dropped={})",
                   frameCount_, droppedFrameCount_.load());
+    if (snapshotWaitSwitches_ > 0)
+    {
+        spdlog::info("VideoEncoder: snapshot wait switched {} times in this encoder, {} at the end",
+                     snapshotWaitSwitches_, snapshotWait_.longWait ? "long" : "short");
+    }
     return true;
 }
 
@@ -1623,7 +1628,7 @@ bool VideoEncoder::Encode(FrameImageSource imageSource, int64_t timestampNs, OnN
     @autoreleasepool
     {
         submitted = EncodeInternal(std::move(frameSource), false, timestampNs,
-                                   std::move(callback), std::move(frameCallback));
+                                   std::move(callback), std::move(frameCallback), {});
     }
     return submitted;
 }
@@ -1664,13 +1669,13 @@ bool VideoEncoder::FlushPendingFrames(std::chrono::milliseconds timeout)
 }
 
 bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
-                                 OnFrameEncodedCallback frameCallback)
+                                 OnFrameEncodedCallback frameCallback, std::function<bool()> isSuperseded)
 {
     bool submitted = false;
     @autoreleasepool
     {
         submitted = EncodeInternal(std::move(frameSource), true, timestampNs,
-                                   std::move(callback), std::move(frameCallback));
+                                   std::move(callback), std::move(frameCallback), isSuperseded);
     }
     return submitted;
 }
@@ -1682,7 +1687,8 @@ bool VideoEncoder::EncodeStereo(FrameSource frameSource, int64_t timestampNs, On
 // queue's 64 the next commandBuffer call blocked the encoder for good.
 bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
                                    int64_t timestampNs, OnNalUnitCallback callback,
-                                   OnFrameEncodedCallback frameCallback)
+                                   OnFrameEncodedCallback frameCallback,
+                                   const std::function<bool()>& isSuperseded)
 {
     if (!frameSource.left.IsValid() ||
         (stereo && !frameSource.right.IsValid()))
@@ -1708,13 +1714,69 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
 
     // Vulkan/MoltenVK snapshots are submitted from xrReleaseSwapchainImage on
-    // the application's queue. Wait for those copies only on this encoder
-    // worker, never from Session::EndFrame(). A stalled GPU drops the streaming
-    // frame instead of accumulating latency.
-    const uint64_t framePeriodNs = 1'000'000'000ull / std::max(fps_, 1u);
-    const uint64_t snapshotWaitNs = std::min<uint64_t>(framePeriodNs, 16'666'667ull);
-    if (!WaitForHostFrameImage(frameSource.left, snapshotWaitNs) ||
-        (stereo && !WaitForHostFrameImage(frameSource.right, snapshotWaitNs)))
+    // the application's queue, behind the application's own rendering, so the
+    // fence signals only when the application's GPU frame is done. Wait for
+    // those copies only on this encoder worker, never from Session::EndFrame().
+    //
+    // The wait was min(frame period, 16.7 ms), so that a stalled GPU drops the
+    // frame instead of accumulating latency. But then an application whose GPU
+    // frame takes longer than one panel period (11.1 ms at 90 Hz) never had a
+    // single frame encoded: every snapshot timed out, silently, and the headset
+    // got a black stream.
+    //
+    // So the wait has two modes (SnapshotWaitPolicy.h). While frames arrive on
+    // time it is still the short wait, and a stray late frame is dropped as it
+    // always was. After three late frames in a row it becomes the long wait, up
+    // to 100 ms, and a slow application degrades to a slow picture instead of a
+    // black one; two seconds of frames on time bring it back. An application
+    // that keeps up gets exactly the wait it had before, and the hysteresis
+    // keeps one near the period from flapping between the two.
+    //
+    // The long wait cannot pile up latency: frameQueue_ is latest-only
+    // (StreamingFrameQueue::PushLatest), so while this worker waits, newer
+    // frames replace one another in its single pending slot and the next one
+    // encoded is the newest. Both eyes share one deadline, so a stereo frame
+    // waits at most the one budget. A frame that is ready but whose successor
+    // has also finished meanwhile is stale and dropped, so the newer one is
+    // encoded next. A frame that is already done returns at once. The wait is
+    // still bounded, so a GPU that hangs or a swapchain being torn down lets
+    // the worker go: below about 10 fps the frame is dropped.
+    const uint64_t snapshotWaitNs = oxrsys::SnapshotWaitNs(snapshotWait_, snapshotWaitSettings_);
+    uint64_t snapshotWaitedNs = 0;
+    const oxrsys::SnapshotWaitResult snapshotResult = oxrsys::WaitForFrameSnapshots(
+        frameSource, stereo, snapshotWaitNs,
+        [] { return (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 Clock::now().time_since_epoch()).count(); },
+        isSuperseded, snapshotWaitedNs);
+    const bool snapshotReady = snapshotResult != oxrsys::SnapshotWaitResult::TimedOut;
+    if (oxrsys::RecordSnapshotWait(snapshotWait_, snapshotWaitSettings_, snapshotReady, snapshotWaitedNs))
+    {
+        // Each switch is counted; a line goes out for the first and then at most one a second, carrying the switches
+        // it stood for, so an application that flapped would show as a count, not a flood.
+        ++snapshotWaitSwitches_;
+        const auto now = Clock::now();
+        if (snapshotWaitSwitchesLogged_ == 0 || now - snapshotWaitLastLog_ >= std::chrono::seconds(1))
+        {
+            const uint64_t unlogged = snapshotWaitSwitches_ - snapshotWaitSwitchesLogged_ - 1;
+            if (snapshotWait_.longWait)
+            {
+                spdlog::info("VideoEncoder: snapshot wait now long ({:.1f} ms) after {} late frames in a row "
+                             "(switch {}, {} unlogged since the last line)",
+                             (double)snapshotWaitSettings_.longWaitNs / 1.0e6, snapshotWaitSettings_.enterLongAfterLate,
+                             snapshotWaitSwitches_, unlogged);
+            }
+            else
+            {
+                spdlog::info("VideoEncoder: snapshot wait now short ({:.1f} ms) after {} frames on time in a row "
+                             "(switch {}, {} unlogged since the last line)",
+                             (double)snapshotWaitSettings_.shortWaitNs / 1.0e6,
+                             snapshotWaitSettings_.leaveLongAfterOnTime, snapshotWaitSwitches_, unlogged);
+            }
+            snapshotWaitSwitchesLogged_ = snapshotWaitSwitches_;
+            snapshotWaitLastLog_ = now;
+        }
+    }
+    if (!snapshotReady)
     {
         droppedFrameCount_.fetch_add(1);
         if (frameCallback)
@@ -1725,6 +1787,11 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
             metrics.frameDropped = true;
             frameCallback(metrics);
         }
+        return false;
+    }
+    if (snapshotResult == oxrsys::SnapshotWaitResult::Superseded)
+    {
+        // Not an encoder drop: the caller counts it as a replaced frame, as the latest-only queue does.
         return false;
     }
 
