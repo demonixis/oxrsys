@@ -244,14 +244,28 @@ void TrackingReceiver::ReceiveThread()
     {
         oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
-        int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
+        sockaddr_in source = {};
+        oxrsys::runtime_socket::SocketLength sourceLength = sizeof(source);
+        int received = oxrsys::runtime_socket::ReceiveFrom(socket_, buffer, sizeof(buffer), 0,
+                                                           (sockaddr*)&source, &sourceLength);
         if (received < static_cast<int>(kMinTrackingPacketSize))
         {
             continue;
         }
 
-        InjectPacket(buffer, static_cast<size_t>(received));
+        ReceivePacket(buffer, static_cast<size_t>(received), source);
     }
+}
+
+void TrackingReceiver::ReceivePacket(const uint8_t* data, size_t size, const sockaddr_in& source)
+{
+    // Only the admitted client may drive the pose. A refused or not-yet-admitted client keeps
+    // sending tracking, and its clock interleaved with the active one makes the head pose jump.
+    if (source.sin_addr.s_addr != clientAddress_.load())
+    {
+        return;
+    }
+    InjectPacket(data, size);
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)

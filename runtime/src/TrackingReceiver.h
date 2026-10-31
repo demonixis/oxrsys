@@ -42,6 +42,14 @@ public:
     // Inject a tracking packet from TCP (USB mode) — same effect as receiving via UDP
     void InjectPacket(const uint8_t* data, size_t size);
 
+    // A UDP tracking datagram. It is stored only when its source is the connected client's
+    // address (see SetClientAddress); any other sender is ignored.
+    void ReceivePacket(const uint8_t* data, size_t size, const sockaddr_in& source);
+
+    // The admitted WiFi client's IPv4 address in network byte order, or 0 when no WiFi
+    // client is connected (UDP tracking is then ignored). The port is not compared.
+    void SetClientAddress(uint32_t address) { clientAddress_.store(address); }
+
     void SetPredictionHorizonMs(float predictionHorizonMs);
     float GetPredictionHorizonMs() const { return predictionHorizonMs_.load(); }
 
@@ -74,6 +82,7 @@ private:
     std::atomic<bool> hasData_{false};
     std::atomic<uint64_t> packetCount_{0};
     std::atomic<uint64_t> reorderedDropCount_{0};
+    std::atomic<uint32_t> clientAddress_{0};
 
     mutable std::mutex poseMutex_;
     oxr::protocol::TrackingPacket latestPacket_ = {};

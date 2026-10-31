@@ -50,6 +50,11 @@ constexpr int64_t kStreamConfigAckTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::milliseconds(500)).count();
 constexpr uint32_t kStreamConfigMaxRetries = 2;
+// A refused ClientConnect is logged at most this often per address: the desktop
+// simulator retries every second when it auto-connects.
+constexpr int64_t kClientAdmissionLogIntervalNs =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::seconds(5)).count();
 // Treat a connected client as gone if it sends no tracking for this long (abrupt UDP kill).
 constexpr int64_t kClientLivenessTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -1643,15 +1648,46 @@ void StreamingServer::EncodeThread()
 void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                                           const sockaddr_in& clientAddr)
 {
+    char ipStr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+
+    // One client at a time. A ClientConnect from a second address while a client is
+    // streaming would take the session over and rebuild its encoder underneath it,
+    // and two tracking clocks interleaved in one TrackingReceiver make the rendered head
+    // pose jump. The connected address may always reconnect (a resent ClientConnect, or a
+    // restart on a new port before the liveness watchdog has noticed).
+    {
+        std::string connectedIp;
+        std::string connectedName;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex_);
+            connectedIp = clientIp_;
+            connectedName = clientName_;
+        }
+        const oxrsys::ClientAdmissionDecision admission = oxrsys::EvaluateClientAdmission(
+            clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
+            SteadyClockNowNs(), kClientAdmissionLogIntervalNs);
+        if (!admission.accept)
+        {
+            if (admission.log)
+            {
+                spdlog::warn("StreamingServer: refusing ClientConnect from {} while '{}' ({}) is "
+                             "connected; disconnect it first",
+                             ipStr, connectedName, connectedIp);
+            }
+            return;
+        }
+    }
+
     // A new client brings a new clock; drop the previous client's tracking history so its
     // last timestamp cannot shadow every packet of this one (see TrackingReceiver::ResetHistory).
+    // From here on only this address may send tracking.
     if (trackingReceiver_)
     {
         trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
     }
 
-    char ipStr[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
     std::string clientName(clientConnect.deviceName,
         BoundedStringLength(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
 
@@ -1874,10 +1910,12 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
-    // Same as HandleClientConnect: a new client brings a new clock.
+    // Same as HandleClientConnect: a new client brings a new clock. USB tracking arrives over
+    // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
         trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(0);
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2127,6 +2165,7 @@ void StreamingServer::HandleClientDisconnect()
     if (trackingReceiver_ != nullptr)
     {
         trackingReceiver_->Reset();
+        trackingReceiver_->SetClientAddress(0);
     }
     InvalidateCallbackAccess();
 

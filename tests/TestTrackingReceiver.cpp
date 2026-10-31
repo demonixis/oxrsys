@@ -185,3 +185,47 @@ TEST_CASE("Tracking prediction rejects nonfinite reported velocity and retains l
         }
     }
 }
+
+TEST_CASE("Tracking receiver accepts UDP tracking only from the connected client", "[tracking]")
+{
+    TrackingReceiver receiver;
+    sockaddr_in client = {};
+    client.sin_family = AF_INET;
+    client.sin_addr.s_addr = inet_addr("127.0.0.1");
+    client.sin_port = htons(50000);
+    sockaddr_in other = client;
+    other.sin_addr.s_addr = inet_addr("127.0.0.2");
+
+    TrackingPacket clientPacket = {};
+    clientPacket.timestampNs = 1'000'000'000;
+    clientPacket.headOrientation[3] = 1.0f;
+    clientPacket.headPosition[0] = 1.0f;
+    // Later than the client's packet, so the reorder guard alone would accept it.
+    TrackingPacket otherPacket = clientPacket;
+    otherPacket.timestampNs = 2'000'000'000;
+    otherPacket.headPosition[0] = 2.0f;
+    const auto* clientBytes = reinterpret_cast<const uint8_t*>(&clientPacket);
+    const auto* otherBytes = reinterpret_cast<const uint8_t*>(&otherPacket);
+
+    TrackingPacket received = {};
+    receiver.ReceivePacket(clientBytes, sizeof(clientPacket), client);
+    CHECK_FALSE(receiver.GetLatestPose(received));
+
+    receiver.SetClientAddress(client.sin_addr.s_addr);
+    receiver.ReceivePacket(clientBytes, sizeof(clientPacket), client);
+    receiver.ReceivePacket(otherBytes, sizeof(otherPacket), other);
+    REQUIRE(receiver.GetLatestPose(received));
+    CHECK(received.headPosition[0] == 1.0f);
+    CHECK(receiver.GetPacketCount() == 1);
+
+    // The client keeps its place after a restart on a new port.
+    clientPacket.timestampNs = 3'000'000'000;
+    client.sin_port = htons(50001);
+    receiver.ReceivePacket(clientBytes, sizeof(clientPacket), client);
+    CHECK(receiver.GetPacketCount() == 2);
+
+    receiver.SetClientAddress(0);
+    clientPacket.timestampNs = 4'000'000'000;
+    receiver.ReceivePacket(clientBytes, sizeof(clientPacket), client);
+    CHECK(receiver.GetPacketCount() == 2);
+}
