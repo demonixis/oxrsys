@@ -51,7 +51,7 @@ struct ConfigValues
     std::string encoderHelperMode = "auto";
     std::string encoderHelperPath; // empty = sibling of the runtime dylib
     std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
-    std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
+    std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "medium_plus", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling
     float clientSharpening = 0.0f;   // Headset contrast-adaptive sharpen strength (0.0-1.0); 0 = off

@@ -518,7 +518,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "foveated_encoding_preset")
         {
             value = ParseString(value);
-            if (value == "off" || value == "light" || value == "medium" || value == "high")
+            if (value == "off" || value == "light" || value == "medium" ||
+                value == "medium_plus" || value == "high")
             {
                 values.foveatedEncodingPreset = value;
             }

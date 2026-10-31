@@ -53,14 +53,27 @@ inline FoveationPresetParameters ParametersForPreset(FoveationPreset preset)
     }
 }
 
+// "medium_plus" (config name only; it travels as FoveationPreset::Medium with
+// these parameters in the announce): medium's edge ratios with a larger centre,
+// between medium and light in encoded size.
+inline FoveationPresetParameters MediumPlusParameters()
+{
+    return {0.50f, 0.45f, 0.0f, 0.0f, 4.0f, 5.0f};
+}
+
 inline uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
     return alignment == 0 ? value : ((value + alignment - 1u) / alignment) * alignment;
 }
 
+// The layout for explicit parameters. The wire carries the aligned parameters
+// (StreamConfig foveationCenterSize*/EdgeRatio*), so a config preset whose
+// parameters differ from ParametersForPreset(preset) still decodes on clients
+// that read them; preset only has to be non-Off.
 inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
                                                 uint32_t targetEyeHeight,
                                                 FoveationPreset preset,
+                                                FoveationPresetParameters params,
                                                 uint32_t alignment = 32)
 {
     FoveationLayout layout = {};
@@ -70,7 +83,6 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.optimizedEyeWidth = targetEyeWidth;
     layout.optimizedEyeHeight = targetEyeHeight;
 
-    FoveationPresetParameters params = ParametersForPreset(preset);
     if (preset == FoveationPreset::Off ||
         targetEyeWidth == 0 ||
         targetEyeHeight == 0 ||
@@ -129,6 +141,15 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.eyeHeightRatio = optimizedH / static_cast<float>(std::max(layout.optimizedEyeHeight, 1u));
     layout.parameters = params;
     return layout;
+}
+
+inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
+                                                uint32_t targetEyeHeight,
+                                                FoveationPreset preset,
+                                                uint32_t alignment = 32)
+{
+    return CalculateFoveationLayout(targetEyeWidth, targetEyeHeight, preset,
+                                    ParametersForPreset(preset), alignment);
 }
 
 inline bool IsFoveatedEncodingLayoutUsable(const FoveationLayout& layout,

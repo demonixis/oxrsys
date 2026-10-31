@@ -76,6 +76,7 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
 enum FoveationPresetSetting: String, CaseIterable, Identifiable {
     case off
     case light
+    case mediumPlus = "medium_plus"
     case medium
     case high
 
@@ -87,6 +88,8 @@ enum FoveationPresetSetting: String, CaseIterable, Identifiable {
             return "Off"
         case .light:
             return "Light"
+        case .mediumPlus:
+            return "Medium Plus"
         case .medium:
             return "Medium"
         case .high:

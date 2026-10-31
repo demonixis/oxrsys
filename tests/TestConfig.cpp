@@ -262,6 +262,20 @@ client_sharpening = 0.8suffix
     CHECK(values.clientSharpening == 0.25f);
 }
 
+TEST_CASE("Config parser accepts the medium_plus foveated encoding preset", "[config]")
+{
+    std::istringstream plus(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_plus"
+)TOML");
+    CHECK(ParseConfigToml(plus).foveatedEncodingPreset == "medium_plus");
+    std::istringstream unknown(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_minus"
+)TOML");
+    CHECK(ParseConfigToml(unknown).foveatedEncodingPreset == "off");
+}
+
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")
 {
     // Default: the runtime decides from the measured hardware-encoder
