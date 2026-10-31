@@ -722,6 +722,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     }
 
     oxrsys::runtime_socket::SetSendBuffer(videoSocket_, 4 * 1024 * 1024);
+    // Video sends are best effort and carry MSG_DONTWAIT; the timeout bounds any send that still
+    // blocks in the kernel, so Stop's join of the video send thread cannot wait on one forever.
+    oxrsys::runtime_socket::SetSendTimeout(videoSocket_, 0, 100 * 1000);
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->videoSocket = videoSocket_;
@@ -818,7 +821,18 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
 
     oxrsys::runtime_socket::Close(broadcastSocket_);
     oxrsys::runtime_socket::Close(controlSocket_);
-    oxrsys::runtime_socket::Close(videoSocket_);
+    // The video send thread (render poses, NAL units and FEC parity) and the control thread
+    // (NACK retransmits) copy this handle under the dispatch mutex, then send a run of
+    // datagrams through the copy. Closing it here released a sender blocked in sendto(), which
+    // the joins below depend on, but freed the number while a run could still be using it. So
+    // the socket is released now and the number is kept, holding /dev/null, until the joins.
+    // If that fails, the socket stays open until the joins; the send timeout set in Start bounds
+    // a sender blocked in it.
+    if (!oxrsys::runtime_socket::RetireKeepingDescriptor(videoSocket_))
+    {
+        spdlog::warn("StreamingServer: could not release the video socket early; it stays open "
+                     "until its senders are joined");
+    }
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -831,6 +845,7 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
     JoinWorkerThread(tcpVideoThread_, "USB video");
     JoinWorkerThread(tcpTrackingThread_, "USB tracking");
     JoinWorkerThread(tcpSpatialThread_, "USB spatial");
+    oxrsys::runtime_socket::Close(videoSocket_);
     frameQueue_.Clear();
     ClearVideoSendQueue();
 

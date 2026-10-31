@@ -69,6 +69,22 @@ void Shutdown(SocketHandle socket)
     shutdown(socket, SHUT_RDWR);
 }
 
+bool RetireKeepingDescriptor(SocketHandle& socket)
+{
+    if (!IsValid(socket))
+    {
+        return true;
+    }
+    const int placeholder = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (placeholder < 0)
+    {
+        return false;
+    }
+    const bool replaced = dup2(placeholder, socket) == socket;
+    close(placeholder);
+    return replaced;
+}
+
 void ShutdownAndClose(SocketHandle& socket)
 {
     if (!IsValid(socket))
