@@ -4,6 +4,8 @@
 
 #include <openxr/openxr.h>
 #include "GraphicsTypes.h"
+#include "PacingThreadPolicy.h"
+#include "RuntimePlatform.h"
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -173,6 +175,13 @@ private:
     // overshoot does not accumulate into phase drift / a slow beat against the panel.
     std::chrono::steady_clock::time_point nextFrameDeadline_{};
     std::chrono::nanoseconds pacingPeriod_{0};
+
+    // pacing_thread = "realtime": the app thread WaitFrame promoted, and its policy from before.
+    oxrsys::pacing_thread::Promoted pacingThread_;
+    oxrsys::runtime_platform::SavedThreadPolicy pacingThreadSaved_;
+    std::mutex pacingThreadMutex_;
+    void UpdatePacingThread(std::chrono::nanoseconds framePeriod);
+    void RestorePacingThreadLocked();
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

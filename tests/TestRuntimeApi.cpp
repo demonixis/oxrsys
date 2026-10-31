@@ -16,13 +16,17 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -3053,6 +3057,69 @@ TEST_CASE("Frame API supports pipelined waits and discarded begin semantics", "[
 
     frameEndInfo.displayTime = recoveredFrameState.predictedDisplayTime;
     CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
+}
+
+// Reads whether a live thread has a Mach time-constraint policy. Returns false if the query failed.
+static bool QueryTimeConstraintPolicy(std::thread& thread, bool& timeConstraint)
+{
+    thread_time_constraint_policy_data_t policy{};
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t isDefault = FALSE;
+    const kern_return_t result =
+        thread_policy_get(pthread_mach_thread_np(thread.native_handle()), THREAD_TIME_CONSTRAINT_POLICY,
+                          reinterpret_cast<thread_policy_t>(&policy), &count, &isDefault);
+    timeConstraint = !isDefault;
+    return result == KERN_SUCCESS;
+}
+
+TEST_CASE("pacing_thread realtime is given back when the session is destroyed", "[runtime][frame][pacing]")
+{
+    RuntimeConfigRestore restoreConfig;
+    {
+        const std::filesystem::path path = RuntimeConfigPath();
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream file(path);
+        REQUIRE(file.is_open());
+        file << "[streaming]\n"
+             << "pacing_thread = \"realtime\"\n"
+             << "[logging]\n"
+             << "file_logging = false\n";
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    // The app's render thread waits one frame, then stays alive past the session so its policy can
+    // be read afterwards. Catch2 assertions stay on the test thread.
+    std::promise<XrResult> waited;
+    std::promise<void> release;
+    std::thread renderThread([&] {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        waited.set_value(xrWaitFrame(context.session, nullptr, &frameState));
+        release.get_future().wait();
+    });
+    const XrResult waitResult = waited.get_future().get();
+
+    bool realtimeWhileRunning = false;
+    const bool queriedWhileRunning = QueryTimeConstraintPolicy(renderThread, realtimeWhileRunning);
+
+    xrDestroySpace(context.localSpace);
+    context.localSpace = XR_NULL_HANDLE;
+    const XrResult destroyResult = xrDestroySession(context.session);
+    context.session = XR_NULL_HANDLE;
+
+    bool realtimeAfterSession = true;
+    const bool queriedAfterSession = QueryTimeConstraintPolicy(renderThread, realtimeAfterSession);
+
+    release.set_value();
+    renderThread.join();
+
+    CHECK(waitResult == XR_SUCCESS);
+    REQUIRE(queriedWhileRunning);
+    CHECK(realtimeWhileRunning);
+    CHECK(destroyResult == XR_SUCCESS);
+    REQUIRE(queriedAfterSession);
+    CHECK_FALSE(realtimeAfterSession);
 }
 
 TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][frame][layers]")

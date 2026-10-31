@@ -6,6 +6,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `pacing_thread = "realtime"` (`[streaming]`, default `"default"`): the thread that waits in
+  `xrWaitFrame` gets a Mach time-constraint policy, so its sleep to each frame deadline wakes on time.
+  At default priority that wake lands about 2.7 ms late on average and up to 6 ms (M5, 72 Hz), which
+  puts 2.2-2.7 ms of jitter on the frame interval; with the policy it wakes within 0.1 ms.
 - Quad layers and `XR_KHR_composition_layer_cylinder` layers are now composited into each eye before
   encode, so application menus, HUDs and panels reach the headset; before, quads were validated and
   dropped, and cylinders failed the frame. Layers before the projection layer and other layer types are

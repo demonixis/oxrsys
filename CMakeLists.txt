@@ -180,6 +180,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
+    tests/TestPacingThreadPolicy.cpp
     tests/TestPacketPacer.cpp
     tests/TestStreamingReconfigure.cpp
     tests/TestSnapshotLeasePool.cpp

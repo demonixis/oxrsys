@@ -354,6 +354,22 @@ TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[conf
     Config::Get().Shutdown();
 }
 
+TEST_CASE("Config parser reads pacing_thread and falls back to default", "[config][pacing]")
+{
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"realtime\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "realtime");
+    }
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"fastest\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
+    {
+        std::istringstream input("[streaming]\nbitrate_mbps = 50\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
+}
+
 TEST_CASE("Config parser reads send pacing windows and clamps them", "[config][pacing]")
 {
     {

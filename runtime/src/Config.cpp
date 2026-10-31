@@ -482,6 +482,11 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
                 values.sendPacingKeyframeMs = std::clamp(val, 0.0f, 20.0f);
             }
         }
+        else if (key == "pacing_thread")
+        {
+            value = ParseString(value);
+            values.pacingThread = value == "realtime" ? value : "default";
+        }
         else if (key == "encoder_helper")
         {
             // Tri-state: "auto" (decide from the measured hardware-encoder

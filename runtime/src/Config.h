@@ -32,6 +32,12 @@ struct ConfigValues
     // send_pacing_keyframe_ms: the window for frames that carry a keyframe (up to ~300 kB).
     // 0 = twice send_pacing_ms. Same cap.
     float sendPacingKeyframeMs = 0.0f;
+    // pacing_thread: "default" | "realtime". realtime gives each thread that calls xrWaitFrame a
+    // Mach time-constraint policy (period = one frame, computation = a third of it, constraint =
+    // half of it), so its sleep to the frame deadline wakes on time instead of up to several ms
+    // late. Set again when the frame period changes; the thread's previous policy comes back when
+    // the session ends or the key is switched off. Anything else reads as "default".
+    std::string pacingThread = "default";
 
     // Out-of-process native-arm64 hardware encoder helper. When the runtime
     // dylib is loaded by an x86_64/Rosetta host it cannot reach VideoToolbox's

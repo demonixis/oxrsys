@@ -52,6 +52,12 @@ encoder_preset = "balanced"
 # H.264 and clients without the capability continue to receive 8-bit video.
 encoder_10bit = false
 
+# Scheduling of the app thread that waits in xrWaitFrame. "default" leaves it alone; "realtime"
+# gives it a Mach time-constraint policy, so its sleep to each frame deadline wakes on time instead
+# of up to several ms late, and the frame cadence holds steady. The thread's previous policy comes back
+# when the session ends or this is set back to "default".
+pacing_thread = "default"
+
 # Out-of-process native-arm64 HARDWARE video encoder helper.
 # When the runtime dylib is loaded in-process by an x86_64/Rosetta host (for
 # example CrossOver's Wine host), VideoToolbox refuses it the hardware HEVC
