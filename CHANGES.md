@@ -74,6 +74,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- The Quest/Pico client renders into a swapchain 1.3 times the recommended size per axis, capped at the
+  runtime maximum, so streams up to the Quest 3 panel resolution are not downscaled into it. It also asks
+  the compositor for quality supersampling and sharpening through `XR_FB_composition_layer_settings` when
+  the runtime offers the extension.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.
