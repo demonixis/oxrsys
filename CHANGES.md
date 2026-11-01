@@ -108,6 +108,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed washed-out video on the Quest/Pico client. The decoded video is already sRGB-encoded, and the
+  client wrote it into a `GL_SRGB8_ALPHA8` swapchain, where GLES encodes it again on write. The blit shader
+  now decodes it to linear first.
 - Fixed the `adb` children the runtime forks (the Quest logcat clear and capture) running the parent's signal
   handlers if a signal arrived between `fork()` and `exec()`. In a multithreaded process the child is not safe to run
   arbitrary code in that window; `ctest` left crash reports from orphaned `oxrsys_runtime_tests` children behind. The
