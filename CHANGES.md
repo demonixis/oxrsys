@@ -105,6 +105,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated SwiftUI Home setup flows with first-launch runtime registration guidance, automatic USB reverse configuration when USB is selected, packaged-runtime manifest preference, and native ADB host-server protocol support before falling back to an external `adb` executable.
 - Updated documentation for the macOS-only runtime, dual host architectures, protocol v1.2,
   passthrough/MR, native ADB setup, simulator, and visionOS reprojection.
+- The Quest/Pico client keeps its decoder across stream reconfigurations that fit the size it was created
+  for, using MediaCodec adaptive playback sized for the connect-time stream, and applies the new layout with
+  the first frame of the new size. Before, every reconfiguration recreated the decoder and showed the shell
+  until the next keyframe decoded.
 
 ### Fixed
 

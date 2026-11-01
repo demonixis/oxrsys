@@ -2291,7 +2291,9 @@ void XrApp::ResetConnection(const char* reason)
         completedStreamConfigUpdate_ = {};
         hasCompletedStreamConfigUpdate_ = false;
         completedStreamConfigAccepted_ = false;
+        completedStreamConfigDecoderKept_ = false;
     }
+    hasFrameDeferredStreamConfig_ = false;
     streamConfigWorkerSequence_.store(0);
     streamConfigSequence_ = 0;
     latencySamples_ = {};
@@ -3118,18 +3120,27 @@ void XrApp::StreamConfigWorkerMain()
         }
 
         bool accepted = false;
+        bool decoderKept = false;
         {
             std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-            if (videoDecoder_)
+            decoderKept = videoDecoder_ && videoDecoder_->IsInitialized() &&
+                update.encodedWidth <= videoDecoder_->GetMaxWidth() &&
+                update.encodedHeight <= videoDecoder_->GetMaxHeight();
+            if (decoderKept)
+            {
+                accepted = true;
+            }
+            else if (videoDecoder_)
             {
                 const protocol::VideoCodec codec = activeVideoCodec_.load();
                 videoDecoder_->Shutdown();
-                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
-                if (accepted)
-                {
-                    decoderEncodedWidth_ = update.encodedWidth;
-                    decoderEncodedHeight_ = update.encodedHeight;
-                }
+                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, update.encodedWidth,
+                                                     update.encodedHeight, codec);
+            }
+            if (accepted)
+            {
+                decoderEncodedWidth_ = update.encodedWidth;
+                decoderEncodedHeight_ = update.encodedHeight;
             }
         }
 
@@ -3137,6 +3148,7 @@ void XrApp::StreamConfigWorkerMain()
             std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
             completedStreamConfigUpdate_ = update;
             completedStreamConfigAccepted_ = accepted;
+            completedStreamConfigDecoderKept_ = decoderKept;
             hasCompletedStreamConfigUpdate_ = true;
         }
     }
@@ -3146,6 +3158,7 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
 {
     protocol::StreamConfigUpdate update = {};
     bool accepted = false;
+    bool decoderKept = false;
     {
         std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
         if (!hasCompletedStreamConfigUpdate_)
@@ -3154,6 +3167,7 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         }
         update = completedStreamConfigUpdate_;
         accepted = completedStreamConfigAccepted_;
+        decoderKept = completedStreamConfigDecoderKept_;
         completedStreamConfigUpdate_ = {};
         completedStreamConfigAccepted_ = false;
         hasCompletedStreamConfigUpdate_ = false;
@@ -3184,6 +3198,52 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         return;
     }
 
+    if (decoderKept)
+    {
+        // Frames of the previous size are still on their way; switch when the first resized frame arrives.
+        frameDeferredStreamConfig_ = update;
+        frameDeferredStreamConfigSince_ = std::chrono::steady_clock::now();
+        hasFrameDeferredStreamConfig_ = true;
+    }
+    else
+    {
+        hasFrameDeferredStreamConfig_ = false;
+        ApplyStreamConfigParameters(update);
+        hasVideoTexture_ = false;
+        hasCurrentRenderPose_ = false;
+        presentedVideoFrame_ = {};
+        currentRenderPose_ = {};
+        videoContentUMin_ = 0.0f;
+        videoContentUMax_ = 1.0f;
+        videoContentVMin_ = 0.0f;
+        videoContentVMax_ = 1.0f;
+        lastVideoFrameTime_ = {};
+        lastFrameReceiveTimeNs_ = 0;
+        lastFrameSubmitTimeNs_ = 0;
+        lastFrameAcquireTimeNs_ = 0;
+        lastReportedAcquireTimeNs_ = 0;
+        skippedDecodedFrames_ = 0;
+        decodedFrameCount_ = 0;
+        nalUnitsReceived_ = 0;
+        pendingDecoderSubmitFailures_.store(0);
+    }
+    streamConfigSequence_.store(update.sequence);
+
+    SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
+    streamConfigWorkerSequence_.store(0);
+    RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
+
+    LOGI("Accepted stream config update seq=%u render=%ux%u encoded=%ux%u decoderKept=%d",
+         update.sequence,
+         update.renderWidth,
+         update.renderHeight,
+         update.encodedWidth,
+         update.encodedHeight,
+         decoderKept ? 1 : 0);
+}
+
+void XrApp::ApplyStreamConfigParameters(const protocol::StreamConfigUpdate& update)
+{
     videoWidth_ = update.renderWidth;
     videoHeight_ = update.renderHeight;
     decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(update.encodedWidth, 1u));
@@ -3223,33 +3283,8 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         foveationEyeHeightRatio_ = 1.0f;
     }
 
-    hasVideoTexture_ = false;
-    hasCurrentRenderPose_ = false;
-    presentedVideoFrame_ = {};
-    currentRenderPose_ = {};
-    videoContentUMin_ = 0.0f;
-    videoContentUMax_ = 1.0f;
-    videoContentVMin_ = 0.0f;
-    videoContentVMax_ = 1.0f;
-    lastVideoFrameTime_ = {};
-    lastFrameReceiveTimeNs_ = 0;
-    lastFrameSubmitTimeNs_ = 0;
-    lastFrameAcquireTimeNs_ = 0;
-    lastReportedAcquireTimeNs_ = 0;
-    skippedDecodedFrames_ = 0;
-    decodedFrameCount_ = 0;
-    nalUnitsReceived_ = 0;
-    pendingDecoderSubmitFailures_.store(0);
-    streamConfigSequence_.store(update.sequence);
-
-    SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
-    streamConfigWorkerSequence_.store(0);
-    RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
-
-    LOGI("Applied stream config update seq=%u render=%ux%u encoded=%ux%u ffe=%d upscaling=%d",
+    LOGI("Applied stream config update seq=%u encoded=%ux%u ffe=%d upscaling=%d",
          update.sequence,
-         update.renderWidth,
-         update.renderHeight,
          update.encodedWidth,
          update.encodedHeight,
          serverFoveatedEncodingEnabled_ ? 1 : 0,
@@ -3601,7 +3636,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
                  static_cast<uint32_t>(videoDecoder_->GetCodec()),
                  static_cast<uint32_t>(videoCodec));
         }
-        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, videoCodec))
+        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, decoderWidth, decoderHeight, videoCodec))
         {
             LOGE("Failed to initialize decoder for codec=%u (%s)",
                  codec, VideoCodecName(videoCodec));
@@ -4086,6 +4121,17 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                             static_cast<float>(cropBottom) / static_cast<float>(sampleHeight));
 
                         hasVideo = true;
+                        const bool frameHasDeferredSize = hasFrameDeferredStreamConfig_ &&
+                            static_cast<uint32_t>(cropRight - cropLeft) == frameDeferredStreamConfig_.encodedWidth &&
+                            static_cast<uint32_t>(cropBottom - cropTop) == frameDeferredStreamConfig_.encodedHeight;
+                        if (frameHasDeferredSize ||
+                            (hasFrameDeferredStreamConfig_ &&
+                             std::chrono::steady_clock::now() - frameDeferredStreamConfigSince_ >
+                                 std::chrono::milliseconds(500)))
+                        {
+                            hasFrameDeferredStreamConfig_ = false;
+                            ApplyStreamConfigParameters(frameDeferredStreamConfig_);
+                        }
                         hasVideoTexture_ = true;
                         lastVideoFrameTime_ = std::chrono::steady_clock::now();
                         presentedVideoFrame_.valid = true;

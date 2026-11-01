@@ -118,6 +118,7 @@ private:
     void StopStreamConfigWorker();
     void StreamConfigWorkerMain();
     void ApplyCompletedStreamConfigUpdate();
+    void ApplyStreamConfigParameters(const protocol::StreamConfigUpdate& update);
     void SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status);
     void SendLatencyReport();
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
@@ -340,6 +341,10 @@ private:
     protocol::StreamConfigUpdate completedStreamConfigUpdate_;
     bool hasCompletedStreamConfigUpdate_ = false;
     bool completedStreamConfigAccepted_ = false;
+    bool completedStreamConfigDecoderKept_ = false;
+    protocol::StreamConfigUpdate frameDeferredStreamConfig_ = {};
+    std::chrono::steady_clock::time_point frameDeferredStreamConfigSince_ = {};
+    bool hasFrameDeferredStreamConfig_ = false;
     std::thread streamConfigWorkerThread_;
     std::atomic<bool> streamConfigWorkerRunning_{false};
     std::atomic<uint32_t> streamConfigWorkerSequence_{0};
