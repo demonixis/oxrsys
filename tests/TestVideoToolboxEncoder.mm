@@ -356,6 +356,44 @@ TEST_CASE("VideoToolbox shutdown drains submitted frame-source ownership",
     [device release];
 }
 
+TEST_CASE("A frame superseded during its snapshot wait is not encoded",
+          "[video][encoder][videotoolbox]")
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+    VideoEncoder encoder;
+    REQUIRE(encoder.Initialize(128, 64, 60, 8, graphics,
+                               oxr::protocol::VideoCodec::H264));
+
+    FrameSource frame = {};
+    frame.left = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+    frame.right = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+    uint32_t nalCount = 0;
+    uint32_t callbacks = 0;
+    uint32_t supersededChecks = 0;
+    CHECK_FALSE(encoder.EncodeStereo(std::move(frame), 2'000'000,
+                                     [&](const uint8_t*, size_t, bool, int64_t) { ++nalCount; },
+                                     [&](const VideoEncoder::FrameMetrics&) { ++callbacks; },
+                                     [&] {
+                                         ++supersededChecks;
+                                         return true;
+                                     }));
+    CHECK(supersededChecks == 1);
+    CHECK(callbacks == 0);
+    CHECK(nalCount == 0);
+    // Replaced by a newer frame, not dropped by the encoder.
+    CHECK(encoder.GetDroppedFrameCount() == 0);
+    REQUIRE(encoder.Shutdown(std::chrono::seconds(5)));
+
+    [queue release];
+    [device release];
+}
+
 } // namespace
 
 TEST_CASE("VideoToolbox encodes Metal textures with every advertised codec",
