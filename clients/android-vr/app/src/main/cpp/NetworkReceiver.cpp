@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "NetworkReceiver.h"
+#include "UsbNetworkLink.h"
 #include <FecCodec.h>
 
 #include <android/log.h>
@@ -14,6 +15,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -128,33 +130,101 @@ bool NetworkReceiver::StartDiscovery(OnServerFoundCallback callback)
 void NetworkReceiver::DiscoveryThread(OnServerFoundCallback callback)
 {
     uint8_t buffer[sizeof(protocol::ServerAnnounce)];
+    int usbSocket = -1;
+    net_handle_t usbSocketNetwork = NETWORK_UNSPECIFIED;
 
     while (discovering_.load())
     {
-        // Set a timeout so we can check the running flag
-        timeval tv = {1, 0};
-        setsockopt(discoverySocket_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        // Use recvfrom() to capture the server's IP address
-        sockaddr_in senderAddr = {};
-        socklen_t addrLen = sizeof(senderAddr);
-        ssize_t received = recvfrom(discoverySocket_, buffer, sizeof(buffer), 0,
-                                     (sockaddr*)&senderAddr, &addrLen);
-        if (received >= (ssize_t)protocol::SERVER_ANNOUNCE_BASE_SIZE)
+        // The Mac beacons only to the limited broadcast address, which does not cross the USB
+        // network link, so ask the link's Mac address directly while the cable network is up.
+        const net_handle_t usbNetwork = usb_network::CurrentNetwork();
+        if (usbNetwork != usbSocketNetwork)
         {
-            protocol::ServerAnnounce hello = {};
-            memcpy(&hello, buffer, std::min<size_t>(static_cast<size_t>(received), sizeof(hello)));
-            if (hello.type == protocol::MessageType::ServerAnnounce)
+            if (usbSocket >= 0)
             {
-                char ipStr[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &senderAddr.sin_addr, ipStr, sizeof(ipStr));
-
-                LOGI("Server found: %s at %s (%ux%u @ %uHz)",
-                     hello.serverName, ipStr, hello.renderWidth,
-                     hello.renderHeight, hello.refreshRateHz);
-                callback(hello, ipStr);
+                close(usbSocket);
+                usbSocket = -1;
+            }
+            usbSocketNetwork = usbNetwork;
+            if (usbNetwork != NETWORK_UNSPECIFIED)
+            {
+                usbSocket = socket(AF_INET, SOCK_DGRAM, 0);
+                if (usbSocket >= 0 &&
+                    !usb_network::BindSocketForServer(usbSocket, usb_network::kServerAddress))
+                {
+                    close(usbSocket);
+                    usbSocket = -1;
+                }
             }
         }
+        if (usbSocket >= 0)
+        {
+            sockaddr_in serverAddr = {};
+            serverAddr.sin_family = AF_INET;
+            serverAddr.sin_port = htons(protocol::CONTROL_PORT);
+            inet_pton(AF_INET, usb_network::kServerAddress, &serverAddr.sin_addr);
+            const uint8_t request = static_cast<uint8_t>(protocol::MessageType::DiscoveryRequest);
+            sendto(usbSocket, &request, sizeof(request), 0,
+                   reinterpret_cast<const sockaddr*>(&serverAddr), sizeof(serverAddr));
+        }
+
+        // Wait up to a second so the running flag and the cable network are rechecked.
+        const int broadcastSocket = discoverySocket_;
+        if (broadcastSocket < 0)
+        {
+            break;
+        }
+        fd_set readable;
+        FD_ZERO(&readable);
+        FD_SET(broadcastSocket, &readable);
+        if (usbSocket >= 0)
+        {
+            FD_SET(usbSocket, &readable);
+        }
+        timeval tv = {1, 0};
+        if (select(std::max(broadcastSocket, usbSocket) + 1, &readable, nullptr, nullptr, &tv) <= 0)
+        {
+            continue;
+        }
+
+        for (const int socket : {usbSocket, broadcastSocket})
+        {
+            if (socket < 0 || !FD_ISSET(socket, &readable))
+            {
+                continue;
+            }
+            // Use recvfrom() to capture the server's IP address
+            sockaddr_in senderAddr = {};
+            socklen_t addrLen = sizeof(senderAddr);
+            ssize_t received = recvfrom(socket, buffer, sizeof(buffer), 0,
+                                        (sockaddr*)&senderAddr, &addrLen);
+            // While the cable network is up, connect only through it: the same Mac's Wi-Fi
+            // beacon would otherwise race the direct reply.
+            if (socket == broadcastSocket && usbSocket >= 0)
+            {
+                continue;
+            }
+            if (received >= (ssize_t)protocol::SERVER_ANNOUNCE_BASE_SIZE)
+            {
+                protocol::ServerAnnounce hello = {};
+                memcpy(&hello, buffer, std::min<size_t>(static_cast<size_t>(received), sizeof(hello)));
+                if (hello.type == protocol::MessageType::ServerAnnounce)
+                {
+                    char ipStr[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &senderAddr.sin_addr, ipStr, sizeof(ipStr));
+
+                    LOGI("Server found: %s at %s (%ux%u @ %uHz)",
+                         hello.serverName, ipStr, hello.renderWidth,
+                         hello.renderHeight, hello.refreshRateHz);
+                    callback(hello, ipStr);
+                }
+            }
+        }
+    }
+
+    if (usbSocket >= 0)
+    {
+        close(usbSocket);
     }
 }
 
@@ -162,12 +232,16 @@ bool NetworkReceiver::StartReceiving(const char* serverIp, uint16_t videoPort,
                                      OnNalUnitCallback callback,
                                      OnConnectionLostCallback connectionLostCallback)
 {
-    (void)serverIp;
-
     videoSocket_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (videoSocket_ < 0)
     {
         LOGE("Failed to create video socket");
+        return false;
+    }
+    if (!usb_network::BindSocketForServer(videoSocket_, serverIp))
+    {
+        close(videoSocket_);
+        videoSocket_ = -1;
         return false;
     }
 

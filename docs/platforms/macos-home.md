@@ -159,6 +159,16 @@ retry. On startup, Home performs this automatic reverse setup only when the pers
 already `usb_adb`; the default `auto` transport only refreshes readiness until the user selects USB
 or presses `Configure USB Reverse`.
 
+Selecting USB Net sets up the USB network link for the selected or single authorized device: it
+switches the headset to its CDC-NCM USB mode over ADB, waits up to two minutes for the macOS accessory
+prompt, configures the Mac service for the headset interface as `192.168.42.1/24` without a router,
+sets the headset to `192.168.42.2/24` without a gateway, and checks that the headset can ping the Mac
+over `usb0` and that the Mac's primary route did not change. The ping runs on the headset over ADB, so
+Home itself sends no local network traffic and needs no macOS Local Network permission. Home writes
+`streaming.transport = "usb_ncm"` only after that succeeds, and repeats the setup on startup when
+that transport is persisted. Readiness is refreshed from the IORegistry and the interface address. `Restore USB Mode` in the ADB section switches the headset back to its default USB mode.
+See [Quest](quest.md#usb-network-transport) for the client side.
+
 The Settings ADB section stores an ADB mode and optional custom `adb` executable path in SwiftUI Home
 `UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly, performs ADB
 authentication with a Home-managed host key, and configures reverse mappings without Android Studio,

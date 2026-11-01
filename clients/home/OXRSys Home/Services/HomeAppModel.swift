@@ -63,6 +63,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     @Published var isAdbInstallGuidancePresented = false
     @Published var isRuntimeSetupGuidancePresented = false
     @Published var isUsbSetupInProgress = false
+    @Published var usbNetworkStatus = QuestUsbNetworkStatus.unknown
+    @Published var isUsbNetworkSetupInProgress = false
     @Published var runtimeActivity = HomeRuntimeActivity.idle
     @Published private(set) var runtimeStatsHistory: [HomeRuntimeStreamingStats] = []
     @Published private(set) var activeLaunchedAppID: String?
@@ -88,6 +90,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private var latestUsbRefreshRequestID = 0
     private var latestUsbSetupRequestID = 0
     private var isUsbRefreshInProgress = false
+    private var latestUsbNetworkRequestID = 0
     private var pollTask: Task<Void, Never>?
     private var runtimeStatsStreamIdentity: RuntimeStatsStreamIdentity?
     private var hasPresentedRuntimeSetupGuidanceThisLaunch = false
@@ -184,6 +187,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 return .wifi
             case .usbAdb:
                 return .usbAdb
+            case .usbNcm:
+                return .usbNetwork
             case nil:
                 break
             }
@@ -193,6 +198,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             return .wifi
         case .usbAdb:
             return .usbAdb
+        case .usbNcm:
+            return .usbNetwork
         case .auto:
             return .usbAdb
         }
@@ -243,6 +250,18 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 isReady: false,
                 message: "USB reverse missing port\(missingPorts.contains(",") ? "s" : "") \(missingPorts).",
                 canConfigureUsb: true
+            )
+        case .usbNetwork:
+            if isUsbNetworkSetupInProgress {
+                return HomeTransportReadiness(
+                    isReady: false,
+                    message: "Setting up the USB network. If macOS asks to allow the accessory, click Allow."
+                )
+            }
+            return HomeTransportReadiness(
+                isReady: usbNetworkStatus.isReady,
+                message: usbNetworkStatus.message,
+                canConfigureUsb: !usbNetworkStatus.isReady
             )
         }
     }
@@ -313,10 +332,14 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     }
 
     private func configureUsbOnStartupIfNeeded() {
-        guard serverConfig.transport == .usbAdb else {
-            return
+        switch serverConfig.transport {
+        case .usbAdb:
+            startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: false)
+        case .usbNcm:
+            startUsbNetworkSetup(persistTransportOnSuccess: false)
+        case .auto, .wifi:
+            break
         }
-        startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: false)
     }
 
     private func nextUsbRequestIdentifier() -> Int {
@@ -430,6 +453,9 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         if !isUsbSetupInProgress {
             startUsbTransportRefresh(showCheckingStatus: force)
         }
+        if mainTransportSelection == .usbNetwork && !isUsbNetworkSetupInProgress {
+            startUsbNetworkRefresh()
+        }
     }
 
     func refreshQuestUsbDevices() {
@@ -440,10 +466,52 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         startUsbTransportSetup(requireSelectedDevice: true, persistTransportOnSuccess: mainTransportSelection == .usbAdb)
     }
 
+    func configureQuestUsbNetwork() {
+        startUsbNetworkSetup(persistTransportOnSuccess: mainTransportSelection == .usbNetwork)
+    }
+
+    func restoreQuestUsbMode() {
+        guard !isUsbNetworkSetupInProgress else {
+            return
+        }
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbNetworkRequestID = requestID
+        isUsbNetworkSetupInProgress = true
+        statusMessage = "Restoring the headset's default USB mode."
+
+        let customPath = effectiveCustomAdbPath
+        let requestedSerial = selectedQuestUsbSerial
+        Task { [weak self] in
+            let errorText = await Task.detached(priority: .userInitiated) { () -> String? in
+                do {
+                    let serial = try Self.usableQuestSerial(requested: requestedSerial, customAdbPath: customPath)
+                    try QuestUsbNetworkLink.restoreDefaultUsbMode(serial: serial, customAdbPath: customPath)
+                    return nil
+                } catch {
+                    return error.localizedDescription
+                }
+            }.value
+
+            guard let self, requestID == self.latestUsbNetworkRequestID else { return }
+            self.isUsbNetworkSetupInProgress = false
+            if let errorText {
+                self.errorMessage = "Failed to restore the default USB mode: \(errorText)"
+            } else {
+                self.statusMessage = "Restored the headset's default USB mode."
+            }
+            self.refreshTransportHealth(force: true)
+        }
+    }
+
     func setMainTransportSelection(_ selection: HomePrimaryTransport) {
         if selection == .usbAdb {
             mainTransportOverride = .usbAdb
             startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: true)
+            return
+        }
+        if selection == .usbNetwork {
+            mainTransportOverride = .usbNetwork
+            startUsbNetworkSetup(persistTransportOnSuccess: true)
             return
         }
 
@@ -664,6 +732,76 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             selectedQuestUsbReversePorts = result.reversePorts
             questUsbStatus = result.statusMessage
         }
+    }
+
+    private func startUsbNetworkRefresh() {
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbNetworkRequestID = requestID
+        Task { [weak self] in
+            let status = await Task.detached(priority: .utility) {
+                QuestUsbNetworkLink.status()
+            }.value
+
+            guard let self, requestID == self.latestUsbNetworkRequestID else { return }
+            self.usbNetworkStatus = status
+        }
+    }
+
+    private func startUsbNetworkSetup(persistTransportOnSuccess: Bool) {
+        guard !isUsbNetworkSetupInProgress else {
+            return
+        }
+        let requestID = nextUsbRequestIdentifier()
+        latestUsbNetworkRequestID = requestID
+        isUsbNetworkSetupInProgress = true
+        statusMessage = "Setting up the USB network."
+
+        let customPath = effectiveCustomAdbPath
+        let selectionIdentity = adbSelectionIdentity
+        let requestedSerial = selectedQuestUsbSerial
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> (QuestUsbNetworkStatus, Bool) in
+                do {
+                    let serial = try Self.usableQuestSerial(requested: requestedSerial, customAdbPath: customPath)
+                    return (try QuestUsbNetworkLink.setUp(serial: serial, customAdbPath: customPath), true)
+                } catch {
+                    return (
+                        QuestUsbNetworkStatus(interfaceName: nil, isReady: false, message: error.localizedDescription),
+                        false
+                    )
+                }
+            }.value
+
+            guard let self, requestID == self.latestUsbNetworkRequestID else { return }
+            self.isUsbNetworkSetupInProgress = false
+            guard self.adbSelectionIdentity == selectionIdentity else { return }
+            let (status, succeeded) = result
+            self.usbNetworkStatus = status
+            if succeeded {
+                if persistTransportOnSuccess {
+                    self.serverConfig.transport = .usbNcm
+                    self.saveStructuredConfig(statusMessage: "Selected USB network transport.")
+                } else {
+                    self.statusMessage = "Configured the Quest USB network."
+                }
+            } else {
+                if self.serverConfig.transport != .usbNcm {
+                    self.mainTransportOverride = nil
+                }
+                self.errorMessage = "Failed to set up the USB network: \(status.message)"
+            }
+        }
+    }
+
+    nonisolated private static func usableQuestSerial(requested: String?, customAdbPath: String?) throws -> String {
+        let usableDevices = try QuestUsbBridge.devices(customAdbPath: customAdbPath).filter(\.isUsable)
+        if let requested, usableDevices.contains(where: { $0.serial == requested }) {
+            return requested
+        }
+        guard usableDevices.count == 1, let serial = usableDevices.first?.serial else {
+            throw QuestUsbNetworkError.noHeadset
+        }
+        return serial
     }
 
     private func startUsbTransportSetup(requireSelectedDevice: Bool, persistTransportOnSuccess: Bool) {

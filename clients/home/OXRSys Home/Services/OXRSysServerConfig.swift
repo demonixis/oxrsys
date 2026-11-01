@@ -81,7 +81,7 @@ struct OXRSysServerConfig: Equatable {
     # Encode HEVC Main10 for capable H.265 clients. H.264 remains 8-bit.
     encoder_10bit = false
 
-    # Streaming transport: "auto", "wifi", or "usb_adb".
+    # Streaming transport: "auto", "wifi", "usb_adb", or "usb_ncm".
     transport = "auto"
 
     # Server-side foveated video encoding preset: "off", "light", "medium_plus", "medium", or "high".

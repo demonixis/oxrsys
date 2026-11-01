@@ -60,6 +60,7 @@ private:
     {
         WifiUdp,
         UsbAdbTcp,
+        UsbNetworkUdp, // WiFi UDP path over the USB network (CDC-NCM) link
     };
 
     enum class ConnectionState

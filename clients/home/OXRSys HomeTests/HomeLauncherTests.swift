@@ -539,6 +539,135 @@ final class HomeLauncherTests: XCTestCase {
         try expect(MacWifiBridge.parsePowerOutput("Wi-Fi Power (en0): Off") == false, "Expected WiFi off parsing")
     }
 
+    func testUsbNetworkTransportSelection() throws {
+        let parsed = OXRSysServerConfig.parse(from: """
+        [streaming]
+        transport = "usb_ncm"
+        """)
+        try expect(parsed.transport == .usbNcm, "Expected USB network transport parse")
+        try expect(
+            parsed.merged(into: OXRSysServerConfig.defaultText).contains("transport = \"usb_ncm\""),
+            "Expected USB network transport serialization"
+        )
+        try expect(HomePrimaryTransport.usbNetwork.configTransport == .usbNcm, "Expected USB network config mapping")
+
+        let activity = HomeRuntimeActivity.parse(Data("""
+        {
+          "state": "streaming",
+          "transport": "usb_ncm",
+          "device_type": "quest",
+          "client_name": "Quest"
+        }
+        """.utf8))
+        try expect(activity?.transport == .usbNcm, "Expected USB network activity transport")
+        try expect(activity?.stateDisplayName == "Streaming (USB Network)", "Expected USB network display state")
+    }
+
+    func testUsbNetworkMacConfigurationParsing() throws {
+        let serviceOrder = """
+        An asterisk (*) denotes that a network service is disabled.
+        (1) Wi-Fi
+        (Hardware Port: Wi-Fi, Device: en0)
+
+        (2) Quest 3
+        (Hardware Port: Quest 3, Device: en16)
+
+        (*) Old Quest
+        (Hardware Port: Old Quest, Device: en9)
+        """
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en16", serviceOrder: serviceOrder) == "Quest 3",
+            "Expected service lookup by device"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en9", serviceOrder: serviceOrder) == "Old Quest",
+            "Expected disabled service lookup"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en1", serviceOrder: serviceOrder) == nil,
+            "Expected missing service"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en1", serviceOrder: "(1) Thunderbolt\n(Hardware Port: Thunderbolt Bridge, Device: en10)") == nil,
+            "Expected device prefix not to match"
+        )
+
+        try expect(
+            QuestUsbNetworkLink.hardwarePort(forDevice: "en16", hardwarePorts: """
+            Hardware Port: Wi-Fi
+            Device: en0
+            Ethernet Address: aa:bb:cc:dd:ee:ff
+
+            Hardware Port: Quest 3
+            Device: en16
+            Ethernet Address: 32:8f:01:44:3f:4a
+            """) == "Quest 3",
+            "Expected hardware port lookup"
+        )
+
+        let configured = """
+        Manual Configuration
+        IP address: 192.168.42.1
+        Subnet mask: 255.255.255.0
+        Router: (null)
+        """
+        try expect(QuestUsbNetworkLink.serviceInfoIsConfigured(configured), "Expected configured service")
+        try expect(
+            !QuestUsbNetworkLink.serviceInfoIsConfigured(configured.replacingOccurrences(of: "(null)", with: "192.168.42.254")),
+            "Expected a router to need reconfiguration"
+        )
+        try expect(
+            !QuestUsbNetworkLink.serviceInfoIsConfigured("DHCP Configuration\nIP address: 169.254.10.2\nRouter: (null)"),
+            "Expected DHCP service to need reconfiguration"
+        )
+
+        let ifconfig = """
+        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+        \tinet 192.168.1.138 netmask 0xffffff00 broadcast 192.168.1.255
+        en16: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+        \tinet 192.168.42.1 netmask 0xffffff00 broadcast 192.168.42.255
+        """
+        try expect(
+            QuestUsbNetworkLink.interfaceUsingSubnet(ifconfig: ifconfig, except: "en16") == nil,
+            "Expected the link interface itself to be allowed"
+        )
+        try expect(
+            QuestUsbNetworkLink.interfaceUsingSubnet(ifconfig: ifconfig, except: "en17") == "en16",
+            "Expected another interface in the subnet to be reported"
+        )
+    }
+
+    func testUsbNetworkQuestConfigurationParsing() throws {
+        try expect(QuestUsbNetworkLink.questStaticConfigurationApplied("""
+        Ethernet IP configuration generated as:
+        usb0:
+        IP assignment: STATIC
+        Static configuration: IP address 192.168.42.2/24 Gateway  DNS servers: [ ] Domains
+        Proxy settings: NONE
+
+        Above configuration has been written to file.
+        """), "Expected applied static configuration")
+        try expect(
+            !QuestUsbNetworkLink.questStaticConfigurationApplied("cmd: Can't find service: ethernet"),
+            "Expected missing ethernet service to fail"
+        )
+        try expect(
+            !QuestUsbNetworkLink.questStaticConfigurationApplied("IP assignment: STATIC\nStatic configuration: IP address 10.86.13.37/29"),
+            "Expected a different static address to fail"
+        )
+        try expect(QuestUsbNetworkLink.questPingSucceeded("""
+        PING 192.168.42.1 (192.168.42.1) from 192.168.42.2 usb0: 56(84) bytes of data.
+        64 bytes from 192.168.42.1: icmp_seq=1 ttl=64 time=0.548 ms
+
+        --- 192.168.42.1 ping statistics ---
+        1 packets transmitted, 1 received, 0% packet loss, time 0ms
+        """), "Expected a ping reply to succeed")
+        try expect(
+            !QuestUsbNetworkLink.questPingSucceeded("1 packets transmitted, 0 received, 100% packet loss, time 0ms"),
+            "Expected a lost ping to fail"
+        )
+    }
+
     func testAdbStatusDisplay() throws {
         try expect(!HomeAdbStatus.missing.isAvailable, "Expected missing ADB to be unavailable")
         try expect(

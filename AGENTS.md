@@ -146,6 +146,10 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   state. Broadcast discovery and older clients remain unchanged.
 - Quest USB uses reconnecting ADB reverse TCP on ports `9944`, `9945`, `9946`, and reserved reliable
   spatial port `9948`. ADB reverse does not require an Android `UsbManager` permission dialog.
+- The Quest USB network transport (`usb_ncm`) is the WiFi UDP path over a CDC-NCM link with fixed
+  addresses: Mac `192.168.42.1/24` without a router, headset `192.168.42.2/24` without a gateway.
+  Neither side's default route may change, so the client binds every socket of that session to the
+  cable's Ethernet network.
 - Home first tries its native ADB host protocol on `127.0.0.1:5037`, then the configured external
   `adb` fallback. USB readiness and reverse setup stay asynchronous, request-scoped, bounded, and
   reject stale results after the mode, path, device serial, or transport changes.

@@ -34,7 +34,7 @@ The Quest USB path uses ADB reverse TCP on localhost ports:
 - Control TCP: `9946`
 - Spatial TCP: `9948`
 
-The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback.
+The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback. `usb_ncm` runs the WiFi UDP path only, for the USB network (CDC-NCM) link between the Mac at `192.168.42.1` and the headset at `192.168.42.2`.
 
 TCP payloads are framed with `TcpRecordHeader`, which contains the record magic, protocol version, record type, and payload size. Current TCP record types are:
 
@@ -59,6 +59,11 @@ WiFi is enabled and the runtime is in its broadcasting state, the runtime replie
 address and port with the same complete `ServerAnnounce` used by broadcast discovery. The request
 does not select a codec, mutate connection state, or replace `ClientConnect`. Clients must bound
 their retry count and receive timeout; no response means that direct discovery failed.
+
+The Quest client uses direct discovery for the USB network link, where the broadcast does not reach
+the headset: while the headset reports the cable's Ethernet network and the client is discovering,
+it sends one request per second to `192.168.42.1`, the same rate as the broadcast beacon, and stops
+when it connects or the network goes away.
 
 The handshake exposes:
 
