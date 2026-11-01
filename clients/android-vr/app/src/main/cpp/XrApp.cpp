@@ -1745,7 +1745,14 @@ bool XrApp::SetupActions()
     strncpy(actionInfo.localizedActionName, "Menu", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &menuAction_), "xrCreateAction(menu)");
 
-    XrPath bindingPaths[15];
+    actionInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    actionInfo.countSubactionPaths = 2;
+    actionInfo.subactionPaths = handPaths_;
+    strncpy(actionInfo.actionName, "haptic", XR_MAX_ACTION_NAME_SIZE);
+    strncpy(actionInfo.localizedActionName, "Haptic", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &hapticAction_), "xrCreateAction(haptic)");
+
+    XrPath bindingPaths[17];
     xrStringToPath(instance_, "/user/hand/left/input/grip/pose", &bindingPaths[0]);
     xrStringToPath(instance_, "/user/hand/right/input/grip/pose", &bindingPaths[1]);
     xrStringToPath(instance_, "/user/hand/left/input/aim/pose", &bindingPaths[2]);
@@ -1761,6 +1768,8 @@ bool XrApp::SetupActions()
     xrStringToPath(instance_, "/user/hand/left/input/y/click", &bindingPaths[12]);
     xrStringToPath(instance_, "/user/hand/right/input/b/click", &bindingPaths[13]);
     xrStringToPath(instance_, "/user/hand/left/input/menu/click", &bindingPaths[14]);
+    xrStringToPath(instance_, "/user/hand/left/output/haptic", &bindingPaths[15]);
+    xrStringToPath(instance_, "/user/hand/right/output/haptic", &bindingPaths[16]);
 
     XrActionSuggestedBinding bindingsWithAim[] = {
         {gripPoseAction_, bindingPaths[0]},
@@ -1778,6 +1787,8 @@ bool XrApp::SetupActions()
         {bButtonAction_, bindingPaths[12]},
         {bButtonAction_, bindingPaths[13]},
         {menuAction_, bindingPaths[14]},
+        {hapticAction_, bindingPaths[15]},
+        {hapticAction_, bindingPaths[16]},
     };
     XrActionSuggestedBinding bindingsWithoutAim[] = {
         {gripPoseAction_, bindingPaths[0]},
@@ -1793,6 +1804,8 @@ bool XrApp::SetupActions()
         {bButtonAction_, bindingPaths[12]},
         {bButtonAction_, bindingPaths[13]},
         {menuAction_, bindingPaths[14]},
+        {hapticAction_, bindingPaths[15]},
+        {hapticAction_, bindingPaths[16]},
     };
 
     const char* controllerProfiles[] = {
@@ -2945,6 +2958,53 @@ void XrApp::HandleControlPayload(const uint8_t* data, size_t size)
         memcpy(&update, data, sizeof(update));
         HandleStreamConfigUpdate(update);
     }
+    else if (type == protocol::ControlType::Haptics && size >= sizeof(protocol::HapticsCommand))
+    {
+        protocol::HapticsCommand command = {};
+        memcpy(&command, data, sizeof(command));
+        if (command.hand < 2)
+        {
+            std::lock_guard<std::mutex> lock(pendingHapticsMutex_);
+            pendingHaptics_[command.hand] = command;
+            hasPendingHaptics_[command.hand] = true;
+        }
+    }
+}
+
+void XrApp::ApplyPendingHaptics()
+{
+    std::array<protocol::HapticsCommand, 2> commands = {};
+    std::array<bool, 2> pending = {};
+    {
+        std::lock_guard<std::mutex> lock(pendingHapticsMutex_);
+        commands = pendingHaptics_;
+        pending = hasPendingHaptics_;
+        hasPendingHaptics_ = {};
+    }
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (!pending[hand])
+        {
+            continue;
+        }
+        XrHapticActionInfo actionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+        actionInfo.action = hapticAction_;
+        actionInfo.subactionPath = handPaths_[hand];
+        if (commands[hand].amplitude <= 0.0f)
+        {
+            xrStopHapticFeedback(session_, &actionInfo);
+            continue;
+        }
+        XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+        vibration.amplitude = std::min(commands[hand].amplitude, 1.0f);
+        vibration.duration = commands[hand].durationMs > 0.0f
+            ? static_cast<XrDuration>(commands[hand].durationMs * 1.0e6f)
+            : XR_MIN_HAPTIC_DURATION;
+        vibration.frequency = commands[hand].frequency > 0.0f
+            ? commands[hand].frequency
+            : XR_FREQUENCY_UNSPECIFIED;
+        xrApplyHapticFeedback(session_, &actionInfo, reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+    }
 }
 
 void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
@@ -3703,6 +3763,7 @@ void XrApp::RunFrame()
                      PathToString(instance_, rightProfile.interactionProfile).c_str(),
                      rightProfileResult);
             }
+            ApplyPendingHaptics();
         }
 
         // Locate views
