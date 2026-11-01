@@ -150,9 +150,10 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   addresses: Mac `192.168.42.1/24` without a router, headset `192.168.42.2/24` without a gateway.
   Neither side's default route may change, so the client binds every socket of that session to the
   cable's Ethernet network.
-- Home first tries its native ADB host protocol on `127.0.0.1:5037`, then the configured external
-  `adb` fallback. USB readiness and reverse setup stay asynchronous, request-scoped, bounded, and
-  reject stale results after the mode, path, device serial, or transport changes.
+- Home first tries its native USB ADB backend, then the ADB host protocol on `127.0.0.1:5037`, then
+  the configured external `adb` fallback. Reverse setup skips the native backend, because adbd drops
+  reverse mappings when their host connection closes. USB readiness and reverse setup stay
+  asynchronous, request-scoped, bounded, and reject stale results after the mode, path, device serial, or transport changes.
 - Quest TCP sends are bounded. Failed video sends clear stale dispatch state without blocking the
   encoder, callback, or OpenXR frame path.
 - The render-device preset fixes the OpenXR application swapchain size before a client connects.
