@@ -6,6 +6,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `render_device = "quest3_native"` (2064x2208 per eye), the Quest 3's own recommended render size,
+  also selectable in Home.
 - Added the USB network transport (`transport = "usb_ncm"`, USB Net in Home). Home switches the
   Quest's USB function to CDC-NCM over ADB, which macOS binds with its built-in driver, and gives the
   link fixed addresses (Mac `192.168.42.1`, headset `192.168.42.2`) without changing either side's
