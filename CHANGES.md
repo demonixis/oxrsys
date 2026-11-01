@@ -6,6 +6,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added the USB network transport (`transport = "usb_ncm"`, USB Net in Home). Home switches the
+  Quest's USB function to CDC-NCM over ADB, which macOS binds with its built-in driver, and gives the
+  link fixed addresses (Mac `192.168.42.1`, headset `192.168.42.2`) without changing either side's
+  default route or needing root. The Quest client finds the runtime with a direct `DiscoveryRequest`
+  over the cable, binds its sockets to the cable's Ethernet network so the headset can stay on WiFi,
+  and streams the WiFi UDP path without the 100 Mbps WiFi cap. On a Quest 3 over a USB 2 cable, a
+  64-byte UDP round trip next to a 150 Mbps stream measured 0.58 ms median and 1.4 ms p99, against
+  1.45 ms and 17.2 ms over ADB reverse TCP. Home's Restore USB Mode returns the default USB mode.
 - Added `pacing_thread = "realtime"` (`[streaming]`, default `"default"`): the thread that waits in
   `xrWaitFrame` gets a Mach time-constraint policy, so its sleep to each frame deadline wakes on time.
   At default priority that wake lands about 2.7 ms late on average and up to 6 ms (M5, 72 Hz), which

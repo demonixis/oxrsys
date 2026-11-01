@@ -257,6 +257,33 @@ The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIP
 
 USB TCP sends full encoded NAL records and render-pose records, so UDP FEC and NACK recovery are disabled on this path.
 
+## USB Network Transport
+
+The USB network transport streams the WiFi UDP path over the USB cable. Selecting USB Net in Home
+switches the headset's USB function to CDC-NCM over ADB (`svc usb setFunctions ncm`), which macOS
+binds with its built-in NCM driver; no driver, kext, or headset app is installed. Home then gives the
+link fixed addresses: the Mac service is set to `192.168.42.1/24` with no router through
+`networksetup`, and the headset's `usb0` to `192.168.42.2/24` with no gateway through
+`cmd ethernet set-ip-configuration`. Neither side changes its default route, so the headset stays on
+WiFi for everything else. No root privileges are needed.
+
+The runtime only beacons to the limited broadcast address, which does not cross the link. While the
+headset reports the cable's Ethernet network, the Quest client sends a one-byte `DiscoveryRequest` to
+`192.168.42.1:9946` every second and connects only through the reply, so a WiFi beacon from the same
+Mac cannot pull the session onto WiFi. Because the headset's default network stays WiFi, the client
+binds its discovery, control, video, and tracking sockets to the Ethernet network with
+`android_setsocknetwork`; unbound sockets would route to the Mac over WiFi and fail. The client sends
+`ClientConnect.maxBitrateMbps = 0` on this path, like USB ADB, so the server bitrate applies. The
+runtime reports these sessions as `usb_ncm`. UDP FEC stays on, and live resolution changes stay
+limited to USB ADB because they need a reliable control channel.
+
+macOS asks once whether to allow the headset's new USB configuration; the Mac must be unlocked to
+answer. A link that appears while the Mac is locked is ignored until the cable is reconnected. The
+headset's NCM mode drops the interfaces Quest Link uses; Restore USB Mode in Home, or reconnecting
+the cable, returns the default USB mode. When the link comes up, the headset can briefly show a "No
+internet connection" notice for the Ethernet network, which has no internet by design; WiFi stays the
+default network and the notice clears on its own.
+
 ## Current Status
 
 - Real `XR_EXT_hand_tracking` joints are fed from the Android client into the runtime.
