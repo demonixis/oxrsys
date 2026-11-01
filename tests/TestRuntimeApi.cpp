@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -452,6 +453,51 @@ public:
             }
             return received == static_cast<ssize_t>(buffer.size()) &&
                    buffer[0] == static_cast<uint8_t>(oxr::protocol::MessageType::ServerAnnounce);
+        }
+        return false;
+    }
+
+    bool ReadHaptics(oxr::protocol::HapticsCommand& command, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            pollfd descriptor = {controlSocket_, POLLIN, 0};
+            if (poll(&descriptor, 1, 10) <= 0)
+            {
+                continue;
+            }
+            std::array<uint8_t, 1024> payload = {};
+            size_t size = 0;
+            if (tcp_)
+            {
+                oxr::protocol::TcpRecordHeader header = {};
+                if (!ReadAll(&header, sizeof(header)) || header.payloadSize > payload.size() ||
+                    !ReadAll(payload.data(), header.payloadSize))
+                {
+                    return false;
+                }
+                if (header.type != oxr::protocol::TcpRecordType::Control)
+                {
+                    continue;
+                }
+                size = header.payloadSize;
+            }
+            else
+            {
+                const ssize_t received = recv(controlSocket_, payload.data(), payload.size(), 0);
+                if (received <= 0)
+                {
+                    continue;
+                }
+                size = static_cast<size_t>(received);
+            }
+            if (size >= sizeof(command) &&
+                payload[0] == static_cast<uint8_t>(oxr::protocol::ControlType::Haptics))
+            {
+                std::memcpy(&command, payload.data(), sizeof(command));
+                return true;
+            }
         }
         return false;
     }
@@ -3990,4 +4036,86 @@ TEST_CASE("RequestExitSession racing the first frame submission still reaches ST
         CHECK(xrEndSession(context.session) == XR_SUCCESS);
     }
     unsetenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US");
+}
+
+TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[1];
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    vibration.frequency = 160.0f;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 1);
+    CHECK_THAT(command.amplitude, WithinAbs(0.5f, 0.0001f));
+    CHECK_THAT(command.durationMs, WithinAbs(20.0f, 0.0001f));
+    CHECK_THAT(command.frequency, WithinAbs(160.0f, 0.0001f));
+
+    hapticActionInfo.subactionPath = XR_NULL_PATH;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    std::set<uint8_t> stoppedHands;
+    while (stoppedHands.size() < 2 && peer.ReadHaptics(command, std::chrono::seconds(2)))
+    {
+        if (command.amplitude == 0.0f)
+        {
+            stoppedHands.insert(command.hand);
+        }
+    }
+    CHECK(stoppedHands == std::set<uint8_t>{0, 1});
 }

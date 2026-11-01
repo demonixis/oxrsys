@@ -6,6 +6,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `render_device = "quest3_native"` (2064x2208 per eye), the Quest 3's own recommended render size,
+  also selectable in Home.
 - Added the USB network transport (`transport = "usb_ncm"`, USB Net in Home). Home switches the
   Quest's USB function to CDC-NCM over ADB, which macOS binds with its built-in driver, and gives the
   link fixed addresses (Mac `192.168.42.1`, headset `192.168.42.2`) without changing either side's
@@ -22,6 +24,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   passthrough cameras. Each alpha pixel is the mean of a 2x2 block of encoded pixels, and the client rebuilds
   an edge pixel's alpha from its premultiplied colour against the block's mean colour, so coloured edges keep
   the full resolution.
+- Added controller haptics. `xrApplyHapticFeedback` and `xrStopHapticFeedback` now send `HapticsCommand`
+  over the control channel, USB or WiFi, and the Quest/Pico client plays it through its own haptic output
+  action. Before, both calls succeeded without anything reaching the headset.
 - Added `pacing_thread = "realtime"` (`[streaming]`, default `"default"`): the thread that waits in
   `xrWaitFrame` gets a Mach time-constraint policy, so its sleep to each frame deadline wakes on time.
   At default priority that wake lands about 2.7 ms late on average and up to 6 ms (M5, 72 Hz), which
@@ -82,6 +87,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- The Quest/Pico client renders into a swapchain 1.3 times the recommended size per axis, capped at the
+  runtime maximum, so streams up to the Quest 3 panel resolution are not downscaled into it. It also asks
+  the compositor for quality supersampling and sharpening through `XR_FB_composition_layer_settings` when
+  the runtime offers the extension.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.

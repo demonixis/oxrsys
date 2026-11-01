@@ -112,6 +112,7 @@ private:
     void StopControlReceiver();
     void ControlReceiveThreadMain();
     void HandleControlPayload(const uint8_t* data, size_t size);
+    void ApplyPendingHaptics();
     void HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update);
     void StartStreamConfigWorker();
     void StopStreamConfigWorker();
@@ -167,6 +168,7 @@ private:
     bool foveationConfigurationAvailable_ = false;
     bool swapchainUpdateAvailable_ = false;
     bool displayRefreshRateAvailable_ = false;
+    bool compositionLayerSettingsAvailable_ = false;
     PFN_xrCreateFoveationProfileFB xrCreateFoveationProfileFB_ = nullptr;
     PFN_xrDestroyFoveationProfileFB xrDestroyFoveationProfileFB_ = nullptr;
     PFN_xrUpdateSwapchainFB xrUpdateSwapchainFB_ = nullptr;
@@ -198,6 +200,7 @@ private:
     XrAction aButtonAction_ = XR_NULL_HANDLE;
     XrAction bButtonAction_ = XR_NULL_HANDLE;
     XrAction menuAction_ = XR_NULL_HANDLE;
+    XrAction hapticAction_ = XR_NULL_HANDLE;
     XrSpace gripSpaces_[2] = {};     // [0]=left, [1]=right
     XrSpace aimSpaces_[2] = {};      // [0]=left, [1]=right
     XrPath handPaths_[2] = {};       // /user/hand/left, /user/hand/right
@@ -333,6 +336,9 @@ private:
     float foveationEyeHeightRatio_ = 1.0f;
     float decodedTexelWidth_ = 1.0f;
     float decodedTexelHeight_ = 1.0f;
+    std::mutex pendingHapticsMutex_;
+    std::array<protocol::HapticsCommand, 2> pendingHaptics_ = {};
+    std::array<bool, 2> hasPendingHaptics_ = {};
     std::mutex pendingStreamConfigMutex_;
     std::condition_variable pendingStreamConfigCv_;
     protocol::StreamConfigUpdate pendingStreamConfigUpdate_;

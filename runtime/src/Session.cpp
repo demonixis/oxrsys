@@ -1319,6 +1319,20 @@ bool Session::HasTrackingConnection() const
     return streamingServer_ != nullptr && streamingServer_->IsClientConnected();
 }
 
+void Session::SendHaptics(uint8_t hand, float amplitude, float durationMs, float frequency)
+{
+    if (!HasTrackingConnection())
+    {
+        return;
+    }
+    oxr::protocol::HapticsCommand command = {};
+    command.hand = hand;
+    command.amplitude = amplitude;
+    command.durationMs = durationMs;
+    command.frequency = frequency;
+    streamingServer_->SendHaptics(command);
+}
+
 XrResult Session::GetStageBounds(XrExtent2Df* bounds)
 {
     std::lock_guard<std::mutex> lock(stageBoundsMutex_);
