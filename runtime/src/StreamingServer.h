@@ -121,6 +121,7 @@ private:
         int64_t timestampNs = 0;
         oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
         bool alphaBlend = false;
+        bool packedAlpha = false;
         bool hasPose = false;
         float headPosition[3] = {};
         float headOrientation[4] = {0, 0, 0, 1};
@@ -219,6 +220,7 @@ private:
     uint32_t refreshRateHz_ = 90;
     std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic_bool tenBitEncodingActive_{false};
+    std::atomic_bool packedAlphaActive_{false};
     std::atomic_bool clientSupportsFoveatedEncoding_{false};
     std::atomic_bool clientSupportsStreamReconfigure_{false};
     std::atomic_bool clientSupportsMixedRealityPassthrough_{false};

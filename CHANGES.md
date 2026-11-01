@@ -14,6 +14,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   and streams the WiFi UDP path without the 100 Mbps WiFi cap. On a Quest 3 over a USB 2 cable, a
   64-byte UDP round trip next to a 150 Mbps stream measured 0.58 ms median and 1.4 ms p99, against
   1.45 ms and 17.2 ms over ADB reverse TCP. Home's Restore USB Mode returns the default USB mode.
+- Added packed passthrough alpha. When passthrough and `app_alpha_blend_passthrough` are enabled and the
+  Quest/Pico client advertises `CLIENT_CAPABILITY_MIXED_REALITY_ALPHA`, the runtime appends each eye's alpha
+  below the eyes at half the encoded eye's width and height, following foveated encoding, and marks the
+  frames `VIDEO_FLAG_PACKED_ALPHA`; the frame grows by a quarter. The client reads that alpha instead of
+  keying out near-black pixels, so black content stays opaque and semi-transparent content blends with the
+  passthrough cameras. Each alpha pixel is the mean of a 2x2 block of encoded pixels, and the client rebuilds
+  an edge pixel's alpha from its premultiplied colour against the block's mean colour, so coloured edges keep
+  the full resolution.
 - Added `pacing_thread = "realtime"` (`[streaming]`, default `"default"`): the thread that waits in
   `xrWaitFrame` gets a Mach time-constraint policy, so its sleep to each frame deadline wakes on time.
   At default priority that wake lands about 2.7 ms late on average and up to 6 ms (M5, 72 Hz), which
