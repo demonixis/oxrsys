@@ -4,6 +4,8 @@
 
 #include <openxr/openxr.h>
 #include "GraphicsTypes.h"
+#include "PacingThreadPolicy.h"
+#include "RuntimePlatform.h"
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -122,6 +124,12 @@ private:
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
                                      FrameSource& frameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
+    XrResult ValidateCylinderLayer(const XrCompositionLayerCylinderKHR& layer) const;
+    // Turns the quad and cylinder layers submitted after the projection layer
+    // into overlays drawn into each eye before encode. Never fails the frame:
+    // an overlay that cannot be placed this frame is skipped.
+    void AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t projectionLayerIndex,
+                             FrameSource& frameSource) const;
 
     uint64_t handle_ = 0;
     Instance* instance_;
@@ -167,6 +175,13 @@ private:
     // overshoot does not accumulate into phase drift / a slow beat against the panel.
     std::chrono::steady_clock::time_point nextFrameDeadline_{};
     std::chrono::nanoseconds pacingPeriod_{0};
+
+    // pacing_thread = "realtime": the app thread WaitFrame promoted, and its policy from before.
+    oxrsys::pacing_thread::Promoted pacingThread_;
+    oxrsys::runtime_platform::SavedThreadPolicy pacingThreadSaved_;
+    std::mutex pacingThreadMutex_;
+    void UpdatePacingThread(std::chrono::nanoseconds framePeriod);
+    void RestorePacingThreadLocked();
 
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;

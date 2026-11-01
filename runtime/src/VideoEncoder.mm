@@ -5,6 +5,7 @@
 #import "EncoderHelperClient.h"
 #import "EncoderPathPolicy.h"
 #import "EncoderSessionColor.h"
+#import "OverlayCompositor.h"
 #import "VideoTextureFormat.h"
 
 #import <CoreVideo/CoreVideo.h>
@@ -1714,9 +1715,10 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
 
     // Vulkan/MoltenVK snapshots are submitted from xrReleaseSwapchainImage on
-    // the application's queue, behind the application's own rendering, so the
-    // fence signals only when the application's GPU frame is done. Wait for
-    // those copies only on this encoder worker, never from Session::EndFrame().
+    // the application's queue (projection and overlay layers alike), behind the
+    // application's own rendering, so the fence signals only when the
+    // application's GPU frame is done. Wait for those copies only on this
+    // encoder worker, never from Session::EndFrame().
     //
     // The wait was min(frame period, 16.7 ms), so that a stalled GPU drops the
     // frame instead of accumulating latency. But then an application whose GPU
@@ -1735,12 +1737,12 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     // The long wait cannot pile up latency: frameQueue_ is latest-only
     // (StreamingFrameQueue::PushLatest), so while this worker waits, newer
     // frames replace one another in its single pending slot and the next one
-    // encoded is the newest. Both eyes share one deadline, so a stereo frame
-    // waits at most the one budget. A frame that is ready but whose successor
-    // has also finished meanwhile is stale and dropped, so the newer one is
-    // encoded next. A frame that is already done returns at once. The wait is
-    // still bounded, so a GPU that hangs or a swapchain being torn down lets
-    // the worker go: below about 10 fps the frame is dropped.
+    // encoded is the newest. The overlay layers and both eyes share one
+    // deadline, so a frame waits at most the one budget. A frame that is ready
+    // but whose successor has also finished meanwhile is stale and dropped, so
+    // the newer one is encoded next. A frame that is already done returns at
+    // once. The wait is still bounded, so a GPU that hangs or a swapchain being
+    // torn down lets the worker go: below about 10 fps the frame is dropped.
     const uint64_t snapshotWaitNs = oxrsys::SnapshotWaitNs(snapshotWait_, snapshotWaitSettings_);
     uint64_t snapshotWaitedNs = 0;
     const oxrsys::SnapshotWaitResult snapshotResult = oxrsys::WaitForFrameSnapshots(
@@ -1861,6 +1863,12 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     {
         EncodeWaitForFrameImage(cmdBuf, frameSource.right);
     }
+    for (const auto& overlay : frameSource.overlays)
+    {
+        EncodeWaitForFrameImage(cmdBuf, overlay.image);
+    }
+    const bool leftHasOverlay = oxrsys::video::OverlayCompositor::AnyVisibleTo(frameSource.overlays, 0);
+    const bool rightHasOverlay = stereo && oxrsys::video::OverlayCompositor::AnyVisibleTo(frameSource.overlays, 1);
 
     // Crop each eye out of its swapchain sub-rectangle (subImage.imageRect). UE packs both eyes
     // side-by-side in one swapchain, so without this both eyes would receive the full [L|R] frame.
@@ -1868,9 +1876,21 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     // (session start, or a resolution/foveation reconfigure) -- not on every single frame.
     {
         id<MTLDevice> cropDev = queue.device;
-        auto cropEye = [&](id<MTLTexture> tex, const FrameImageSource& src, void** cachedTexture) -> id<MTLTexture> {
-            if (tex == nil || !src.HasSourceRect()) return tex;
-            if (src.sourceX == 0 && src.sourceY == 0 &&
+        // An eye with a quad or cylinder over it is always copied, full rect if need be:
+        // the overlays are drawn into the copy, never into the application's image.
+        auto cropEye = [&](id<MTLTexture> tex, FrameImageSource src, void** cachedTexture,
+                           bool needsCopy) -> id<MTLTexture> {
+            if (tex == nil) return tex;
+            if (!src.HasSourceRect())
+            {
+                if (!needsCopy) return tex;
+                src.sourceX = 0;
+                src.sourceY = 0;
+                src.sourceWidth = (uint32_t)tex.width;
+                src.sourceHeight = (uint32_t)tex.height;
+            }
+            if (!needsCopy &&
+                src.sourceX == 0 && src.sourceY == 0 &&
                 src.sourceWidth == (uint32_t)tex.width &&
                 src.sourceHeight == (uint32_t)tex.height) return tex;
 
@@ -1911,19 +1931,38 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
             [cb endEncoding];
             return eye;
         };
-        leftTex = cropEye(leftTex, frameSource.left, &slot.leftCropTexture);
+        leftTex = cropEye(leftTex, frameSource.left, &slot.leftCropTexture, leftHasOverlay);
         if (leftTex == nil)
         {
             return dropAcquiredSlot("failed to crop left eye texture");
         }
         if (stereo)
         {
-            rightTex = cropEye(rightTex, frameSource.right, &slot.rightCropTexture);
+            rightTex = cropEye(rightTex, frameSource.right, &slot.rightCropTexture, rightHasOverlay);
             if (rightTex == nil)
             {
                 return dropAcquiredSlot("failed to crop right eye texture");
             }
         }
+    }
+
+    // Quad and cylinder layers, drawn into each eye from that eye's render pose and fov.
+    uint32_t overlaysDrawn = 0;
+    if (leftHasOverlay || rightHasOverlay)
+    {
+        if (overlayCompositor_ == nullptr)
+        {
+            overlayCompositor_ = std::make_shared<oxrsys::video::OverlayCompositor>();
+        }
+        const int leftDrawn = leftHasOverlay
+            ? overlayCompositor_->Draw((void*)cmdBuf, (void*)leftTex, 0, frameSource.overlays) : 0;
+        const int rightDrawn = rightHasOverlay
+            ? overlayCompositor_->Draw((void*)cmdBuf, (void*)rightTex, 1, frameSource.overlays) : 0;
+        if ((leftDrawn < 0 || rightDrawn < 0) && !overlayFailureLogged_.exchange(true))
+        {
+            spdlog::warn("VideoEncoder: overlay composition failed; streaming the eyes without their quad/cylinder layers");
+        }
+        overlaysDrawn = static_cast<uint32_t>(std::max(leftDrawn, 0) + std::max(rightDrawn, 0));
     }
 
     const auto leftCopyMode = oxrsys::video::SelectTextureCopyMode(
@@ -2174,6 +2213,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         }
 
         context->metrics.gpuCopyMs = ToMilliseconds(Clock::now() - context->encodeStart);
+        this->RecordOverlayGpuTime(overlaysDrawn,
+                                   (commandBuffer.GPUEndTime - commandBuffer.GPUStartTime) * 1000.0);
 
         // Preferred path: delegate the VideoToolbox encode to the native-arm64
         // helper, which is granted the hardware HEVC encoder. Composition into
@@ -2378,6 +2419,43 @@ void VideoEncoder::DestroySlots()
     }
 
     inFlightFrameCount_.store(0);
+}
+
+void VideoEncoder::RecordOverlayGpuTime(uint32_t overlaysDrawn, double gpuMs)
+{
+    std::lock_guard<std::mutex> lock(overlayStatsMutex_);
+    (overlaysDrawn > 0 ? overlayGpuMsWith_ : overlayGpuMsWithout_).push_back(gpuMs);
+    overlayLayerDraws_ += overlaysDrawn;
+    const auto now = std::chrono::steady_clock::now();
+    if (overlayGpuMsWith_.empty() && overlayStatsSeenOverlay_ == false)
+    {
+        // Nothing to report until an application has submitted an overlay once.
+        overlayGpuMsWithout_.clear();
+        overlayStatsLogged_ = now;
+        return;
+    }
+    overlayStatsSeenOverlay_ = true;
+    if (now - overlayStatsLogged_ < std::chrono::seconds(5))
+    {
+        return;
+    }
+    auto summarize = [](std::vector<double>& v, double& p50, double& p95) {
+        p50 = p95 = 0.0;
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        p50 = v[v.size() / 2];
+        p95 = v[std::min(v.size() - 1, (v.size() * 95) / 100)];
+    };
+    double withP50 = 0, withP95 = 0, withoutP50 = 0, withoutP95 = 0;
+    summarize(overlayGpuMsWith_, withP50, withP95);
+    summarize(overlayGpuMsWithout_, withoutP50, withoutP95);
+    spdlog::info("VideoEncoder: overlays: {} frames with ({} layer draws), {} without; encoder command buffer GPU p50/p95 {:.3f}/{:.3f} ms with, {:.3f}/{:.3f} ms without",
+                 overlayGpuMsWith_.size(), overlayLayerDraws_, overlayGpuMsWithout_.size(),
+                 withP50, withP95, withoutP50, withoutP95);
+    overlayGpuMsWith_.clear();
+    overlayGpuMsWithout_.clear();
+    overlayLayerDraws_ = 0;
+    overlayStatsLogged_ = now;
 }
 
 void VideoEncoder::ForceKeyframe()

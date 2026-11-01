@@ -6,6 +6,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `pacing_thread = "realtime"` (`[streaming]`, default `"default"`): the thread that waits in
+  `xrWaitFrame` gets a Mach time-constraint policy, so its sleep to each frame deadline wakes on time.
+  At default priority that wake lands about 2.7 ms late on average and up to 6 ms (M5, 72 Hz), which
+  puts 2.2-2.7 ms of jitter on the frame interval; with the policy it wakes within 0.1 ms.
+- Quad layers and `XR_KHR_composition_layer_cylinder` layers are now composited into each eye before
+  encode, so application menus, HUDs and panels reach the headset; before, quads were validated and
+  dropped, and cylinders failed the frame. Layers before the projection layer and other layer types are
+  not drawn yet.
 - Added config send_pacing_ms (default 0 = burst, as before) and send_pacing_keyframe_ms (0 = twice
   send_pacing_ms): the UDP datagrams of each encoded frame (data and FEC parity) are spread evenly
   over that window instead of reaching the socket as one burst, which an access point queue under
@@ -15,6 +23,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   failures, which were previously silent) and pacingLateMax. New tool oxrsys_pacing_probe measures
   a synthetic 90 fps stream on 127.0.0.1 (loopback, 50 Mbps, 4/8 ms windows: peak 1 ms rate p99
   684 -> 342 Mbps, about 27% of one core for the spin).
+- Added foveated_encoding_preset = "medium_plus": centre 0.50x0.45, edges 4x5, between medium
+  and light (2752x1216 encoded for 2160x2160 eyes, against 2560x1120 and 3456x1536). It is
+  announced as Medium with its own centre/edge parameters, which clients already read.
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit
@@ -94,6 +105,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed actions bound to a bare `.../input/trigger` or `.../input/squeeze` (an identifier with no
   component, which OpenXR defines as the component's default) reading 0 and never pressing: they now bind
   the analog `/value`. Apps that bind this way, such as the UEVR injector, had dead triggers and grips.
+- Fixed `StreamingServer::Stop` freeing the UDP video socket's descriptor while the video send
+  thread or the control thread could still be sending through it. Both copy the handle and send a
+  run of datagrams (a NAL unit's data and FEC parity, or a NACK's retransmits) through the copy, so
+  the rest of the run could reach a descriptor the kernel had already reused. Stop now releases the
+  socket where it used to close it, which still frees a sender blocked in `sendto()`, but keeps the
+  number (holding `/dev/null`) until those threads are joined, and closes it after. If `/dev/null`
+  cannot be put in its place, the socket stays open until the joins instead. The video socket also
+  gets a 100 ms send timeout, so no send can hold up the join indefinitely.
 - Fixed foveated encoding dropping every frame when an app renders its eye textures at a size
   other than the target eye size (for example The Lab at 1600x1777 for a 1512x1680 Quest 3 eye).
   The foveation kernel samples in normalized coordinates, so a source eye is now accepted when its
@@ -115,6 +134,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   `XR_ERROR_FEATURE_UNSUPPORTED` ("No swapchain could be acquired to render to!") because it
   requests `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT`. Metal swapchains now accept the bit and create
   those textures with `MTLTextureUsagePixelFormatView`.
+- Fixed a second WiFi client hijacking a live session: a `ClientConnect` from a different address
+  while a client is connected is now refused instead of taking the session over and
+  rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
+  view). The connected address can still reconnect, and UDP tracking from any other sender is
+  ignored.
 - Fixed H.264 streams on Quest holding about 16 frames (around 220 ms at 72 Hz) in the decoder before
   output. The Android VR client now sets the Qualcomm decode-order and low-latency MediaCodec keys,
   which brings H.264 decode on Quest 3 to about 11 ms.

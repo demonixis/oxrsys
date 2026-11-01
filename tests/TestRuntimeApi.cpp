@@ -16,13 +16,17 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -2036,6 +2040,54 @@ TEST_CASE("Suggest interaction profile bindings rejects unavailable extension-ga
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
+TEST_CASE("Suggest interaction profile bindings takes the Steam Frame profile only with its extension",
+          "[runtime][actions]")
+{
+    auto suggestFrameBindings = [](RuntimeSessionContext& context) -> XrResult
+    {
+
+        XrActionSet actionSet = XR_NULL_HANDLE;
+        XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+        std::strncpy(actionSetCreateInfo.actionSetName, "frame", XR_MAX_ACTION_SET_NAME_SIZE);
+        std::strncpy(actionSetCreateInfo.localizedActionSetName, "Frame", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+        XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+        XrAction buttonAction = XR_NULL_HANDLE;
+        XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        std::strncpy(actionCreateInfo.actionName, "button", XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(actionCreateInfo.localizedActionName, "Button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &buttonAction));
+
+        // The Frame's d-pad is its own buttons (dpad_up/click), not a trackpad's emulated dpad_up.
+        std::array<XrActionSuggestedBinding, 3> bindings = {{
+            {buttonAction, context.Path("/user/hand/left/input/dpad_up/click")},
+            {buttonAction, context.Path("/user/hand/right/input/x/click")},
+            {buttonAction, context.Path("/user/hand/left/input/bumper/click")},
+        }};
+        XrInteractionProfileSuggestedBinding suggestedBindings = {
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile =
+            context.Path("/interaction_profiles/valve/frame_controller_valve");
+        suggestedBindings.suggestedBindings = bindings.data();
+        suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+        const XrResult result = xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings);
+
+        XR_CHECK(xrDestroyAction(buttonAction));
+        XR_CHECK(xrDestroyActionSet(actionSet));
+        return result;
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        CHECK(suggestFrameBindings(context) == XR_ERROR_PATH_UNSUPPORTED);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, "XR_VALVE_frame_controller_interaction"});
+        CHECK(suggestFrameBindings(context) == XR_SUCCESS);
+    }
+}
+
 TEST_CASE("Suggest interaction profile bindings accepts hand interaction components when enabled",
           "[runtime][actions]")
 {
@@ -3007,6 +3059,69 @@ TEST_CASE("Frame API supports pipelined waits and discarded begin semantics", "[
     CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
 }
 
+// Reads whether a live thread has a Mach time-constraint policy. Returns false if the query failed.
+static bool QueryTimeConstraintPolicy(std::thread& thread, bool& timeConstraint)
+{
+    thread_time_constraint_policy_data_t policy{};
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t isDefault = FALSE;
+    const kern_return_t result =
+        thread_policy_get(pthread_mach_thread_np(thread.native_handle()), THREAD_TIME_CONSTRAINT_POLICY,
+                          reinterpret_cast<thread_policy_t>(&policy), &count, &isDefault);
+    timeConstraint = !isDefault;
+    return result == KERN_SUCCESS;
+}
+
+TEST_CASE("pacing_thread realtime is given back when the session is destroyed", "[runtime][frame][pacing]")
+{
+    RuntimeConfigRestore restoreConfig;
+    {
+        const std::filesystem::path path = RuntimeConfigPath();
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream file(path);
+        REQUIRE(file.is_open());
+        file << "[streaming]\n"
+             << "pacing_thread = \"realtime\"\n"
+             << "[logging]\n"
+             << "file_logging = false\n";
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    // The app's render thread waits one frame, then stays alive past the session so its policy can
+    // be read afterwards. Catch2 assertions stay on the test thread.
+    std::promise<XrResult> waited;
+    std::promise<void> release;
+    std::thread renderThread([&] {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        waited.set_value(xrWaitFrame(context.session, nullptr, &frameState));
+        release.get_future().wait();
+    });
+    const XrResult waitResult = waited.get_future().get();
+
+    bool realtimeWhileRunning = false;
+    const bool queriedWhileRunning = QueryTimeConstraintPolicy(renderThread, realtimeWhileRunning);
+
+    xrDestroySpace(context.localSpace);
+    context.localSpace = XR_NULL_HANDLE;
+    const XrResult destroyResult = xrDestroySession(context.session);
+    context.session = XR_NULL_HANDLE;
+
+    bool realtimeAfterSession = true;
+    const bool queriedAfterSession = QueryTimeConstraintPolicy(renderThread, realtimeAfterSession);
+
+    release.set_value();
+    renderThread.join();
+
+    CHECK(waitResult == XR_SUCCESS);
+    REQUIRE(queriedWhileRunning);
+    CHECK(realtimeWhileRunning);
+    CHECK(destroyResult == XR_SUCCESS);
+    REQUIRE(queriedAfterSession);
+    CHECK_FALSE(realtimeAfterSession);
+}
+
 TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][frame][layers]")
 {
     auto runProjectionCase =
@@ -3177,11 +3292,6 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
         layerCount = 1;
         expectedResult = XR_ERROR_LAYER_INVALID;
     }
-    SECTION("Projection followed by quad")
-    {
-        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-        expectedResult = XR_ERROR_LAYER_INVALID;
-    }
     SECTION("Two projection layers")
     {
         projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -3203,6 +3313,70 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     frameEndInfo.displayTime = frameState.predictedDisplayTime;
     frameEndInfo.layerCount = 1;
     XR_CHECK(xrEndFrame(context.session, &frameEndInfo));
+    XR_CHECK(xrDestroySwapchain(swapchain));
+}
+
+TEST_CASE("EndFrame composites a quad over the single projection layer it streams", "[runtime][frame][layers]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
+    uint32_t imageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = 0;
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+    XrCompositionLayerProjectionView firstViews[2] = {};
+    for (auto& view : firstViews)
+    {
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose.orientation.w = 1.0f;
+        view.fov = {-0.5f, 0.5f, 0.5f, -0.5f};
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect.extent = {16, 16};
+    }
+    XrCompositionLayerProjectionView secondViews[2] = {firstViews[0], firstViews[1]};
+    secondViews[0].pose.position.x = 1.0f;
+    secondViews[1].pose.position.x = 1.0f;
+    XrCompositionLayerProjection firstProjection = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    firstProjection.space = context.localSpace;
+    firstProjection.viewCount = 2;
+    firstProjection.views = firstViews;
+    XrCompositionLayerProjection secondProjection = firstProjection;
+    secondProjection.views = secondViews;
+
+    XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quadLayer.space = context.localSpace;
+    quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quadLayer.pose.orientation.w = 1.0f;
+    quadLayer.pose.position.z = -1.0f;
+    quadLayer.size = {1.0f, 1.0f};
+    quadLayer.subImage.swapchain = swapchain;
+    quadLayer.subImage.imageRect.extent = {16, 16};
+
+    // An overlay is placed with the poses of the projection layer whose images are
+    // streamed, so a frame never mixes one projection layer's poses with another's images.
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&firstProjection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&secondProjection),
+    };
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    frameEndInfo.layerCount = 3;
+    frameEndInfo.layers = layers;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_ERROR_LAYER_LIMIT_EXCEEDED);
+
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.layerCount = 2;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
     XR_CHECK(xrDestroySwapchain(swapchain));
 }
 
@@ -3282,6 +3456,75 @@ TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[r
             std::llabs(static_cast<int64_t>(frameState.predictedDisplayTime) -
                        static_cast<int64_t>(xrNow));
         CHECK(deltaNs < 5'000'000'000LL);
+    }
+}
+
+TEST_CASE("EndFrame takes a cylinder layer only when its extension is enabled", "[runtime][frame][layers]")
+{
+    auto runCylinderCase = [](RuntimeSessionContext& context, XrResult expectedResult)
+    {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+
+        const int64_t format = SelectColorSwapchainFormat(context.session);
+        XrSwapchain swapchain = CreateColorSwapchain(context.session, format);
+        uint32_t imageIndex = 0;
+        XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+        XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = 0;
+        XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+        XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+        XrCompositionLayerProjectionView projectionViews[2] = {};
+        for (auto& view : projectionViews)
+        {
+            view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            view.pose.orientation.w = 1.0f;
+            view.fov.angleLeft = -0.5f;
+            view.fov.angleRight = 0.5f;
+            view.fov.angleUp = 0.5f;
+            view.fov.angleDown = -0.5f;
+            view.subImage.swapchain = swapchain;
+            view.subImage.imageRect.extent = {16, 16};
+        }
+        XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projectionLayer.space = context.localSpace;
+        projectionLayer.viewCount = 2;
+        projectionLayer.views = projectionViews;
+
+        XrCompositionLayerCylinderKHR cylinderLayer = {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+        cylinderLayer.space = context.localSpace;
+        cylinderLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        cylinderLayer.pose.orientation.w = 1.0f;
+        cylinderLayer.pose.position.z = -1.0f;
+        cylinderLayer.radius = 1.0f;
+        cylinderLayer.centralAngle = 1.0f;
+        cylinderLayer.aspectRatio = 2.0f;
+        cylinderLayer.subImage.swapchain = swapchain;
+        cylinderLayer.subImage.imageRect.extent = {16, 16};
+
+        const XrCompositionLayerBaseHeader* layers[] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinderLayer),
+        };
+        XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+        frameEndInfo.displayTime = frameState.predictedDisplayTime;
+        frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        frameEndInfo.layerCount = 2;
+        frameEndInfo.layers = layers;
+
+        CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+        XR_CHECK(xrDestroySwapchain(swapchain));
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME});
+        runCylinderCase(context, XR_SUCCESS);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        runCylinderCase(context, XR_ERROR_LAYER_INVALID);
     }
 }
 

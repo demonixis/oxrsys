@@ -92,10 +92,11 @@ enum class SnapshotWaitResult
     Superseded,
 };
 
-// Waits for a frame's snapshots, both eyes against one deadline, so a stereo
-// frame waits at most budgetNs in total rather than budgetNs per eye. A frame
-// that is ready is then still dropped when isSuperseded says a newer one has
-// finished meanwhile, so the wait never leads to encoding stale content.
+// Waits for a frame's snapshots, its overlay layers and both eyes against one
+// deadline, so a frame waits at most budgetNs in total rather than budgetNs per
+// image. A frame that is ready is then still dropped when isSuperseded says a
+// newer one has finished meanwhile, so the wait never leads to encoding stale
+// content.
 // waitedNs is the time spent waiting; nowNs reads a nanosecond clock.
 template <typename NowNs>
 SnapshotWaitResult WaitForFrameSnapshots(const FrameSource& source, bool stereo, uint64_t budgetNs, NowNs nowNs,
@@ -103,12 +104,17 @@ SnapshotWaitResult WaitForFrameSnapshots(const FrameSource& source, bool stereo,
 {
     const uint64_t startNs = nowNs();
     const uint64_t deadlineNs = startNs + budgetNs;
-    bool ready = source.left.sync.WaitForHostReady(budgetNs);
-    if (ready && stereo)
+    // Each wait gets what the waits before it left of the budget.
+    const auto waitWithinBudget = [&](const FrameImageSource& image) {
+        const uint64_t waitStartNs = nowNs();
+        return image.sync.WaitForHostReady(waitStartNs < deadlineNs ? deadlineNs - waitStartNs : 0);
+    };
+    bool ready = true;
+    for (const auto& overlay : source.overlays)
     {
-        const uint64_t afterLeftNs = nowNs();
-        ready = source.right.sync.WaitForHostReady(afterLeftNs < deadlineNs ? deadlineNs - afterLeftNs : 0);
+        ready = ready && waitWithinBudget(overlay.image);
     }
+    ready = ready && waitWithinBudget(source.left) && (!stereo || waitWithinBudget(source.right));
     waitedNs = nowNs() - startNs;
     if (!ready)
     {

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <condition_variable>
@@ -23,6 +24,10 @@
 // Runtime-side client for the out-of-process native-arm64 hardware HEVC
 // encoder helper (see runtime/encoder_helper/README.md).
 class EncoderHelperClient;
+namespace oxrsys::video
+{
+class OverlayCompositor;
+}
 
 /**
  * Low-latency video encoder facade.
@@ -246,6 +251,18 @@ private:
     // in-process session (never a black screen).
     mutable std::mutex helperClientMutex_;
     std::shared_ptr<EncoderHelperClient> helperClient_;
+
+    // Quad/cylinder composition into the eye images (OverlayCompositor.mm), and
+    // the GPU cost of the encoder's command buffer with and without it.
+    std::shared_ptr<oxrsys::video::OverlayCompositor> overlayCompositor_;
+    std::atomic_bool overlayFailureLogged_{false};
+    void RecordOverlayGpuTime(uint32_t overlaysDrawn, double gpuMs);
+    std::mutex overlayStatsMutex_;
+    std::vector<double> overlayGpuMsWith_;
+    std::vector<double> overlayGpuMsWithout_;
+    uint64_t overlayLayerDraws_ = 0;
+    bool overlayStatsSeenOverlay_ = false;
+    std::chrono::steady_clock::time_point overlayStatsLogged_ = {};
     std::atomic<bool> useHelper_{false};
     std::mutex helperContextMutex_;
     std::unordered_map<uint64_t, void*> helperContexts_; // cookie -> EncodeFrameContext*

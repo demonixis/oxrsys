@@ -337,6 +337,22 @@ final class HomeLauncherTests: XCTestCase {
         try expect(merged.contains("anchors = true"), "Expected spatial anchor serialization")
     }
 
+    func testServerConfigMediumPlusFoveationRoundTrip() throws {
+        let original = """
+        [streaming]
+        foveated_encoding_preset = "medium_plus"
+        """
+        let parsed = OXRSysServerConfig.parse(from: original)
+        try expect(parsed.foveatedEncodingPreset == .mediumPlus, "Expected medium_plus FFE parse, not off")
+
+        let merged = parsed.merged(into: original)
+        try expect(merged.contains("foveated_encoding_preset = \"medium_plus\""), "Expected medium_plus FFE serialization")
+        try expect(!merged.contains("foveated_encoding_preset = \"off\""), "Expected medium_plus not to be saved as off")
+
+        let reparsed = OXRSysServerConfig.parse(from: merged)
+        try expect(reparsed.foveatedEncodingPreset == .mediumPlus, "Expected medium_plus FFE after save and reload")
+    }
+
     func testServerConfigDefaultSerialization() throws {
         let merged = OXRSysServerConfig().merged(into: """
         [general]

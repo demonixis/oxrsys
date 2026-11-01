@@ -262,6 +262,20 @@ client_sharpening = 0.8suffix
     CHECK(values.clientSharpening == 0.25f);
 }
 
+TEST_CASE("Config parser accepts the medium_plus foveated encoding preset", "[config]")
+{
+    std::istringstream plus(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_plus"
+)TOML");
+    CHECK(ParseConfigToml(plus).foveatedEncodingPreset == "medium_plus");
+    std::istringstream unknown(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_minus"
+)TOML");
+    CHECK(ParseConfigToml(unknown).foveatedEncodingPreset == "off");
+}
+
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")
 {
     // Default: the runtime decides from the measured hardware-encoder
@@ -352,6 +366,22 @@ TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[conf
     CHECK(values.bitrateMbps >= 1);
 
     Config::Get().Shutdown();
+}
+
+TEST_CASE("Config parser reads pacing_thread and falls back to default", "[config][pacing]")
+{
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"realtime\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "realtime");
+    }
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"fastest\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
+    {
+        std::istringstream input("[streaming]\nbitrate_mbps = 50\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
 }
 
 TEST_CASE("Config parser reads send pacing windows and clamps them", "[config][pacing]")

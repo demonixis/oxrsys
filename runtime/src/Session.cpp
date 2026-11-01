@@ -2,6 +2,7 @@
 
 #include "Session.h"
 #include "CompositionLayerAlpha.h"
+#include "CompositionOverlay.h"
 #include "Config.h"
 #include "Instance.h"
 #include "Runtime.h"
@@ -9,6 +10,7 @@
 #include "SwapchainCreateValidation.h"
 #include "Space.h"
 #include "InputManager.h"
+#include "RuntimePlatform.h"
 #include "StreamingServer.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -266,6 +268,10 @@ XrResult Session::EndSession()
     }
 
     running_ = false;
+    {
+        std::scoped_lock lock(pacingThreadMutex_);
+        RestorePacingThreadLocked();
+    }
 
     // Stop streaming so it can be restarted on next BeginSession
     streamingSnapshotDemand_->store(false, std::memory_order_release);
@@ -331,6 +337,10 @@ XrResult Session::Shutdown()
         std::scoped_lock lock(frameStateMutex_);
         frameBegun_ = false;
         waitedFrameCount_ = 0;
+    }
+    {
+        std::scoped_lock lock(pacingThreadMutex_);
+        RestorePacingThreadLocked();
     }
 
     if (inputManager_)
@@ -426,6 +436,49 @@ void Session::GetDebugUtilsLabels(std::vector<XrDebugUtilsLabelEXT>& labels, std
     }
 }
 
+// pacing_thread = "realtime": the sleep_until below runs on the app's render thread, and at default
+// priority macOS lets that wake land up to several ms after the deadline, which shows up as
+// frame-interval jitter. The policy belongs to the waiting thread: it is set on that thread's wait,
+// set again when the frame period changes, and the thread gets its previous policy back when
+// realtime pacing is switched off, another thread takes over the wait, or the session ends.
+void Session::UpdatePacingThread(std::chrono::nanoseconds framePeriod)
+{
+    const bool realtime = Config::Get().GetValues().pacingThread == "realtime";
+    const std::thread::id caller = std::this_thread::get_id();
+    std::scoped_lock lock(pacingThreadMutex_);
+    switch (oxrsys::pacing_thread::Decide(pacingThread_, realtime, caller, framePeriod))
+    {
+        case oxrsys::pacing_thread::Action::Keep:
+            return;
+        case oxrsys::pacing_thread::Action::Restore:
+            RestorePacingThreadLocked();
+            return;
+        case oxrsys::pacing_thread::Action::Move:
+            RestorePacingThreadLocked();
+            [[fallthrough]];
+        case oxrsys::pacing_thread::Action::Promote:
+            pacingThreadSaved_ = oxrsys::runtime_platform::SaveCurrentThreadPolicy();
+            [[fallthrough]];
+        case oxrsys::pacing_thread::Action::Retune:
+            break;
+    }
+    const bool ok = oxrsys::runtime_platform::SetCurrentThreadRealtime(framePeriod);
+    pacingThread_ = {caller, framePeriod};
+    spdlog::info("OXRSys: Session::WaitFrame pacing_thread=realtime period={}us applied={}",
+                 framePeriod.count() / 1000, ok);
+}
+
+void Session::RestorePacingThreadLocked()
+{
+    if (pacingThread_.thread == std::thread::id{})
+    {
+        return;
+    }
+    const bool ok = oxrsys::runtime_platform::RestoreThreadPolicy(pacingThreadSaved_);
+    pacingThread_ = {};
+    spdlog::info("OXRSys: Session pacing_thread previous policy restored={}", ok);
+}
+
 XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* frameState)
 {
     if (frameWaitInfo != nullptr && frameWaitInfo->type != XR_TYPE_FRAME_WAIT_INFO)
@@ -469,6 +522,7 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     // absorbed by the next and the cadence locks to the panel period with low
     // variance. targetFrameTime comes from the client-reported (negotiated) refresh.
     auto targetFrameTime = std::chrono::nanoseconds(1000000000ll / targetRefreshHz);
+    UpdatePacingThread(targetFrameTime);
     auto now = std::chrono::steady_clock::now();
 
     if (nextFrameDeadline_.time_since_epoch().count() == 0 || pacingPeriod_ != targetFrameTime)
@@ -627,6 +681,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
 
     FrameSource frameSource = {};
     bool hasProjectionLayer = false;
+    uint32_t projectionLayerIndex = 0;
 
     for (uint32_t i = 0; i < frameEndInfo->layerCount; i++)
     {
@@ -663,6 +718,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                     return result;
                 }
                 hasProjectionLayer = true;
+                projectionLayerIndex = i;
                 break;
             }
             case XR_TYPE_COMPOSITION_LAYER_QUAD:
@@ -672,16 +728,40 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
                 {
                     return result;
                 }
-                static std::atomic_bool loggedUnsupportedQuad{false};
-                if (!loggedUnsupportedQuad.exchange(true))
+                break;
+            }
+            case XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR:
+            {
+                if (!instance_->IsExtensionEnabled(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME))
                 {
-                    spdlog::warn("OXRSys: quad layer composition is unavailable");
+                    return XR_ERROR_LAYER_INVALID;
                 }
-                return XR_ERROR_LAYER_INVALID;
+                XrResult result = ValidateCylinderLayer(
+                    *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer));
+                if (result != XR_SUCCESS)
+                {
+                    return result;
+                }
+                break;
             }
             default:
                 return XR_ERROR_LAYER_INVALID;
         }
+    }
+
+    if (!hasProjectionLayer && frameEndInfo->layerCount > 0)
+    {
+        static std::atomic_bool loggedUnsupportedOverlayOnly{false};
+        if (!loggedUnsupportedOverlayOnly.exchange(true))
+        {
+            spdlog::warn("OXRSys: quad and cylinder layers are composited only over a projection layer");
+        }
+        return XR_ERROR_LAYER_INVALID;
+    }
+
+    if (hasProjectionLayer && frameSource.IsStereoValid())
+    {
+        AppendOverlayLayers(*frameEndInfo, projectionLayerIndex, frameSource);
     }
 
     frameSource.alphaBlend = oxrsys::runtime::IsAlphaFrameForStreaming(
@@ -858,6 +938,160 @@ XrResult Session::ValidateQuadLayer(const XrCompositionLayerQuad& layer) const
     }
 
     return ValidateSwapchainSubImage(layer.subImage);
+}
+
+XrResult Session::ValidateCylinderLayer(const XrCompositionLayerCylinderKHR& layer) const
+{
+    auto* space = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(layer.space));
+    if (space == nullptr || space->GetSession() != this)
+    {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    if (!IsValidPose(layer.pose))
+    {
+        return XR_ERROR_POSE_INVALID;
+    }
+    if (std::isnan(layer.radius) || layer.radius < 0.0f ||
+        !std::isfinite(layer.centralAngle) || layer.centralAngle < 0.0f ||
+        layer.centralAngle >= 2.0f * static_cast<float>(M_PI) ||
+        !std::isfinite(layer.aspectRatio) || layer.aspectRatio <= 0.0f)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+
+    return ValidateSwapchainSubImage(layer.subImage);
+}
+
+void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t projectionLayerIndex,
+                                  FrameSource& frameSource) const
+{
+    const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(
+        frameEndInfo.layers[projectionLayerIndex]);
+    auto* projectionSpace = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(projection.space));
+    if (projectionSpace == nullptr)
+    {
+        return;
+    }
+
+    static std::atomic_bool loggedUnderlay{false};
+    static std::atomic_bool loggedFirstOverlay{false};
+
+    for (uint32_t i = 0; i < frameEndInfo.layerCount; ++i)
+    {
+        const XrCompositionLayerBaseHeader* layer = frameEndInfo.layers[i];
+        const bool isQuad = layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD;
+        const bool isCylinder = layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR;
+        if (!isQuad && !isCylinder)
+        {
+            continue;
+        }
+        if (i < projectionLayerIndex)
+        {
+            // Behind the projection layer. With an opaque projection it is hidden,
+            // which is what the spec asks; under a source-alpha projection it would
+            // show through, and we do not composite underlays yet.
+            if (!loggedUnderlay.exchange(true))
+            {
+                spdlog::info("OXRSys: a quad/cylinder layer submitted before the projection layer is not drawn (underlays are not composited)");
+            }
+            continue;
+        }
+
+        FrameOverlayLayer overlay = {};
+        XrSpace layerSpaceHandle = XR_NULL_HANDLE;
+        XrPosef layerPose = {};
+        XrEyeVisibility eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        XrSwapchainSubImage subImage = {};
+        bool atInfinity = false;
+        if (isQuad)
+        {
+            const auto& quad = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            if (quad.size.width <= 0.0f || quad.size.height <= 0.0f)
+            {
+                continue;
+            }
+            overlay.shape = FrameOverlayLayer::Shape::Quad;
+            overlay.width = quad.size.width;
+            overlay.height = quad.size.height;
+            overlay.sourceAlpha = (quad.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+            overlay.unpremultipliedAlpha = (quad.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0;
+            layerSpaceHandle = quad.space;
+            layerPose = quad.pose;
+            eyeVisibility = quad.eyeVisibility;
+            subImage = quad.subImage;
+        }
+        else
+        {
+            const auto& cylinder = *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+            if (!oxrsys::runtime::IsDrawableCylinder(cylinder.radius, cylinder.centralAngle, cylinder.aspectRatio))
+            {
+                continue;
+            }
+            atInfinity = oxrsys::runtime::IsInfiniteCylinder(cylinder.radius);
+            overlay.shape = FrameOverlayLayer::Shape::Cylinder;
+            overlay.radius = atInfinity ? 1.0f : cylinder.radius;
+            overlay.centralAngle = cylinder.centralAngle;
+            overlay.height = oxrsys::runtime::CylinderHeight(overlay.radius, cylinder.centralAngle, cylinder.aspectRatio);
+            overlay.sourceAlpha = (cylinder.layerFlags & XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0;
+            overlay.unpremultipliedAlpha = (cylinder.layerFlags & XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT) != 0;
+            layerSpaceHandle = cylinder.space;
+            layerPose = cylinder.pose;
+            eyeVisibility = cylinder.eyeVisibility;
+            subImage = cylinder.subImage;
+        }
+
+        auto* layerSpace = Runtime::Get().FromHandle<Space>(reinterpret_cast<uint64_t>(layerSpaceHandle));
+        if (layerSpace == nullptr)
+        {
+            continue;
+        }
+        XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+        if (layerSpace->LocateSpace(projectionSpace, frameEndInfo.displayTime, &location) != XR_SUCCESS ||
+            (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0 ||
+            (location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) == 0)
+        {
+            continue;
+        }
+
+        auto* swapchain = Runtime::Get().FromHandle<Swapchain>(reinterpret_cast<uint64_t>(subImage.swapchain));
+        if (swapchain == nullptr)
+        {
+            continue;
+        }
+        overlay.image = swapchain->GetLastReleasedFrameImageSource(subImage.imageArrayIndex);
+        if (!overlay.image.IsValid())
+        {
+            continue;
+        }
+        overlay.image.sourceX = static_cast<uint32_t>(subImage.imageRect.offset.x);
+        overlay.image.sourceY = static_cast<uint32_t>(subImage.imageRect.offset.y);
+        overlay.image.sourceWidth = static_cast<uint32_t>(subImage.imageRect.extent.width);
+        overlay.image.sourceHeight = static_cast<uint32_t>(subImage.imageRect.extent.height);
+
+        switch (eyeVisibility)
+        {
+            case XR_EYE_VISIBILITY_LEFT: overlay.eyeMask = 1u; break;
+            case XR_EYE_VISIBILITY_RIGHT: overlay.eyeMask = 2u; break;
+            default: overlay.eyeMask = 3u; break;
+        }
+        for (uint32_t eye = 0; eye < 2; ++eye)
+        {
+            const XrCompositionLayerProjectionView& view = projection.views[eye];
+            const glm::mat4 clip = atInfinity
+                ? oxrsys::runtime::OverlayClipFromLayerAtInfinity(view.pose, view.fov, location.pose, layerPose)
+                : oxrsys::runtime::OverlayClipFromLayer(view.pose, view.fov, location.pose, layerPose);
+            std::memcpy(overlay.clipFromLayer[eye], &clip[0][0], sizeof(overlay.clipFromLayer[eye]));
+        }
+
+        if (!loggedFirstOverlay.exchange(true))
+        {
+            spdlog::info("OXRSys: compositing {} layer into the eye images ({}x{} m, image {}x{}, alpha={})",
+                         isQuad ? "quad" : "cylinder",
+                         isQuad ? overlay.width : overlay.radius * overlay.centralAngle, overlay.height,
+                         overlay.image.sourceWidth, overlay.image.sourceHeight, overlay.sourceAlpha);
+        }
+        frameSource.overlays.push_back(std::move(overlay));
+    }
 }
 
 bool Session::IsFrameLoopRunningState() const

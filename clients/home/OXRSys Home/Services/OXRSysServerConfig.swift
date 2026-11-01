@@ -84,7 +84,7 @@ struct OXRSysServerConfig: Equatable {
     # Streaming transport: "auto", "wifi", or "usb_adb".
     transport = "auto"
 
-    # Server-side foveated video encoding preset: "off", "light", "medium", or "high".
+    # Server-side foveated video encoding preset: "off", "light", "medium_plus", "medium", or "high".
     foveated_encoding_preset = "off"
 
     # Headset client foveation override: "auto", "off", "light", "medium", or "high".

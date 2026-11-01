@@ -92,6 +92,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
 - Metal swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those textures with
   `MTLTextureUsagePixelFormatView`; Godot's Metal driver renders through an sRGB/UNORM view of
   the swapchain texture.
+- The WiFi control thread admits one client at a time: a `ClientConnect` from a second address
+  while a client is connected is refused (logged at most every 5 s per address); the connected
+  address may always reconnect. `ClientAdmission.h` holds the pure decision and its tests.
 - Vulkan streaming snapshots released color images with application-dispatched Vulkan functions
   into bounded exportable images. Queue submission is non-blocking; fence waits belong to the
   encoder worker. Missing export support, exhausted slots, or wait failures drop the streaming frame

@@ -83,6 +83,7 @@ public:
     float GetFloatComponent(Hand hand, const std::string& componentPath) const;
     XrVector2f GetVector2fComponent(Hand hand, const std::string& componentPath) const;
     XrPosef GetPoseComponent(Hand hand, const std::string& componentPath) const;
+    bool GetFrameControllerComponent(Hand hand, const std::string& componentPath) const;
     bool GetBooleanComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
     float GetFloatComponentForProfile(Hand hand, const std::string& componentPath,
@@ -94,6 +95,9 @@ public:
     XrSpaceVelocity GetPoseVelocityForProfile(Hand hand, const std::string& componentPath,
                                              const std::string& profilePath) const;
     void SetStreamingClientName(const std::string& clientName);
+    // OXRSYS_FRAME_XBOX (read at construction); see ApplyFrameXboxLayout.
+    void SetFrameXboxLayout(bool on) { frameXboxLayout_ = on; }
+    static void ApplyFrameXboxLayout(uint32_t& buttons, float& leftGrip, float& rightGrip);
 
     // Conformance automation overrides
     void SetAutomationInteractionProfile(Hand hand, const std::string& interactionProfile, bool isActive);
@@ -109,6 +113,7 @@ public:
     }
 
 private:
+    bool frameXboxLayout_ = false;
     struct AutomationHandState
     {
         bool hasExplicitActivity = false;
@@ -156,6 +161,14 @@ private:
     XrVector2f leftThumbstick_ = {0.0f, 0.0f};
     XrVector2f rightThumbstick_ = {0.0f, 0.0f};
     uint32_t buttonState_ = 0;
+    // From the client's packet (Protocol.h ControllerProfile): which controller its own runtime bound, and
+    // the touch bits that go with it. Zero from a client that does not say.
+    uint32_t controllerProfile_ = 0;
+    uint32_t touchState_ = 0;
+    // The buttons and grips as the client sent them, before OXRSYS_FRAME_XBOX: the Frame profile's own bindings
+    // read these, so the Xbox layout reaches Touch bindings only.
+    uint32_t frameButtonState_ = 0;
+    std::array<float, 2> frameGripValue_ = {0.0f, 0.0f};
     std::array<bool, 2> streamingControllerActive_ = {false, false};
     std::string streamingClientName_;
     std::string streamingControllerProfile_;

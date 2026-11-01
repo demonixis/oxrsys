@@ -6,6 +6,7 @@
 #include "TrackingReceiver.h"
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <cstdlib>
 #include <cctype>
 #include <cmath>
 #include <initializer_list>
@@ -20,6 +21,7 @@ constexpr const char* kOculusTouchProfile = "/interaction_profiles/oculus/touch_
 constexpr const char* kTouchPlusPromotedProfile = "/interaction_profiles/meta/touch_plus_controller";
 constexpr const char* kSimpleControllerProfile = "/interaction_profiles/khr/simple_controller";
 constexpr const char* kHandInteractionProfile = "/interaction_profiles/ext/hand_interaction_ext";
+constexpr const char* kValveFrameProfile = "/interaction_profiles/valve/frame_controller_valve";
 
 size_t HandIndex(InputManager::Hand hand)
 {
@@ -193,7 +195,10 @@ XrSpaceVelocity ReadTrackedVelocity(bool linearValid, bool angularValid,
 
 } // namespace
 
-InputManager::InputManager() = default;
+InputManager::InputManager()
+    : frameXboxLayout_(std::getenv("OXRSYS_FRAME_XBOX") != nullptr)
+{
+}
 
 void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
 {
@@ -207,6 +212,8 @@ void InputManager::SetTrackingReceiver(TrackingReceiver* receiver)
         }
         streamingClientName_.clear();
         streamingControllerProfile_.clear();
+        controllerProfile_ = 0;
+        touchState_ = 0;
     }
 }
 
@@ -323,16 +330,27 @@ void InputManager::UpdateFromStreaming()
     }
 
     // Apply button/trigger states
-    buttonState_ = packet.buttonState;
+    uint32_t buttons = packet.buttonState;
+    float leftGrip = packet.leftGrip;
+    float rightGrip = packet.rightGrip;
+    if (frameXboxLayout_)
+    {
+        ApplyFrameXboxLayout(buttons, leftGrip, rightGrip);
+    }
+    buttonState_ = buttons;
+    frameButtonState_ = packet.buttonState;
+    frameGripValue_ = {packet.leftGrip, packet.rightGrip};
+    controllerProfile_ = packet.controllerProfile;
+    touchState_ = packet.touchState;
     leftTrigger_ = packet.leftTrigger;
     rightTrigger_ = packet.rightTrigger;
-    leftGripValue_ = packet.leftGrip;
-    rightGripValue_ = packet.rightGrip;
+    leftGripValue_ = leftGrip;
+    rightGripValue_ = rightGrip;
     leftThumbstick_ = {packet.leftThumbstick[0], packet.leftThumbstick[1]};
     rightThumbstick_ = {packet.rightThumbstick[0], packet.rightThumbstick[1]};
-    leftGrab_ = packet.leftGrip > 0.5f;
-    rightGrab_ = packet.rightGrip > 0.5f;
-    menuClick_ = (packet.buttonState & oxr::protocol::BUTTON_MENU) != 0;
+    leftGrab_ = leftGrip > 0.5f;
+    rightGrab_ = rightGrip > 0.5f;
+    menuClick_ = (buttons & oxr::protocol::BUTTON_MENU) != 0;
     streamingIpd_ = packet.ipd;
     streamingFov_[0] = packet.eyeFov[0];
     streamingFov_[1] = packet.eyeFov[1];
@@ -397,6 +415,35 @@ void InputManager::UpdateFromStreaming()
                       trackingReceiver_->GetPredictionHorizonMs());
         loggedOnce = true;
     }
+}
+
+// OXRSYS_FRAME_XBOX=1: lay the Frame's controllers out for an app that turns Touch into an Xbox pad (UEVR: right a =
+// A, left x = B, right b = X, left y = Y, squeeze = LB/RB, menu = Start). SteamVR's own Frame-to-Touch remap folds
+// right B, X and Y into one button and the d-pad into two, and drops the bumpers and the right menu; the Frame
+// client's per-input bits carry each one, so the Touch bits are rebuilt from those: each Frame letter lands on the
+// Xbox button of the same letter, the bumpers press the grips and the right menu is MENU. A packet without Frame bits
+// (another client, or nothing pressed) is left alone. Frame-profile bindings read the unmapped state
+// (frameButtonState_, frameGripValue_), so this never changes them. Sifu under UEVR, 2026-10-26.
+void InputManager::ApplyFrameXboxLayout(uint32_t& buttons, float& leftGrip, float& rightGrip)
+{
+    using namespace oxr::protocol;
+    constexpr uint32_t kFrameBits = BUTTON_FRAME_A | BUTTON_FRAME_B | BUTTON_FRAME_X | BUTTON_FRAME_Y |
+                                    BUTTON_FRAME_DPAD_UP | BUTTON_FRAME_DPAD_DOWN | BUTTON_FRAME_DPAD_LEFT |
+                                    BUTTON_FRAME_DPAD_RIGHT | BUTTON_FRAME_RIGHT_MENU | BUTTON_LEFT_BUMPER |
+                                    BUTTON_RIGHT_BUMPER;
+    if ((buttons & kFrameBits) == 0)
+    {
+        return;
+    }
+    uint32_t b = buttons & ~(BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_Y);
+    if (buttons & BUTTON_FRAME_A) b |= BUTTON_A;   // right a -> Xbox A
+    if (buttons & BUTTON_FRAME_B) b |= BUTTON_X;   // left x  -> Xbox B
+    if (buttons & BUTTON_FRAME_X) b |= BUTTON_B;   // right b -> Xbox X
+    if (buttons & BUTTON_FRAME_Y) b |= BUTTON_Y;   // left y  -> Xbox Y
+    if (buttons & BUTTON_FRAME_RIGHT_MENU) b |= BUTTON_MENU;
+    if (buttons & BUTTON_LEFT_BUMPER) leftGrip = 1.0f;
+    if (buttons & BUTTON_RIGHT_BUMPER) rightGrip = 1.0f;
+    buttons = b;
 }
 
 XrPosef InputManager::GetHeadPose() const
@@ -743,6 +790,13 @@ std::vector<std::string> InputManager::GetCurrentInteractionProfileCandidates(Ha
 
     if (IsControllerTrackingActive(hand))
     {
+        // The client knows what is in the hand better than its name does: the Steam Frame client reports the
+        // Frame's own profile when SteamVR bound it. Apps that do not know that profile get Touch from the
+        // compatibility list below, which is what SteamVR's own emulation gives them.
+        if (controllerProfile_ == oxr::protocol::CONTROLLER_PROFILE_VALVE_FRAME)
+        {
+            return {kValveFrameProfile};
+        }
         return {streamingControllerProfile_.empty() ? kOculusTouchProfile
                                                     : streamingControllerProfile_};
     }
@@ -775,7 +829,7 @@ std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) c
     if (IsControllerTrackingActive(hand))
     {
         if (currentProfile.find("/interaction_profiles/meta/") == 0 ||
-            currentProfile == kOculusTouchProfile)
+            currentProfile == kOculusTouchProfile || currentProfile == kValveFrameProfile)
         {
             AddProfileIfMissing(profiles, kOculusTouchProfile);
         }
@@ -817,6 +871,18 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     if (componentPath == "squeeze/click")
     {
         return GetGrabValue(hand) > 0.5f;
+    }
+    // The Frame's left d-pad under a non-Frame profile (UEVR binds it through its own profile JSON); only the Frame
+    // client sets these bits.
+    if (componentPath.starts_with("dpad_") && componentPath.ends_with("/click"))
+    {
+        using namespace oxr::protocol;
+        const uint32_t bit = componentPath == "dpad_up/click"      ? BUTTON_FRAME_DPAD_UP
+                             : componentPath == "dpad_down/click"  ? BUTTON_FRAME_DPAD_DOWN
+                             : componentPath == "dpad_left/click"  ? BUTTON_FRAME_DPAD_LEFT
+                             : componentPath == "dpad_right/click" ? BUTTON_FRAME_DPAD_RIGHT
+                                                                   : 0u;
+        return hand == Hand::Left && bit != 0 && (buttonState_ & bit) != 0;
     }
     // The oculus/touch profile has no squeeze/click or trigger/click component — grip and trigger
     // are analog-only (squeeze/value, trigger/value). Per the OpenXR spec, a boolean action bound
@@ -867,6 +933,43 @@ bool InputManager::GetButtonClick(Hand hand, const std::string& componentPath) c
     return false;
 }
 
+// The Steam Frame controller's inputs (XR_VALVE_frame_controller_interaction), from the client's per-input bits.
+// The right hand has A, B, X, Y and menu; the left a four-way d-pad and view; both a bumper.
+bool InputManager::GetFrameControllerComponent(Hand hand, const std::string& componentPath) const
+{
+    using namespace oxr::protocol;
+    const bool left = hand == Hand::Left;
+    const size_t slash = componentPath.find('/');
+    const std::string input = componentPath.substr(0, slash);
+    const std::string kind = slash == std::string::npos ? "" : componentPath.substr(slash + 1);
+    if (componentPath == "squeeze/value")
+    {
+        return frameGripValue_[HandIndex(hand)] > 0.5f;
+    }
+    if (kind != "click" && kind != "touch")
+    {
+        return GetButtonClick(hand, componentPath);   // the float threshold: trigger/value
+    }
+    const uint32_t bits = (kind == "touch") ? touchState_ : frameButtonState_;
+
+    uint32_t mask = 0;
+    if (!left && input == "a") mask = BUTTON_FRAME_A;
+    else if (!left && input == "b") mask = BUTTON_FRAME_B;
+    else if (!left && input == "x") mask = BUTTON_FRAME_X;
+    else if (!left && input == "y") mask = BUTTON_FRAME_Y;
+    else if (!left && input == "menu") mask = BUTTON_FRAME_RIGHT_MENU;
+    else if (left && input == "dpad_up") mask = BUTTON_FRAME_DPAD_UP;
+    else if (left && input == "dpad_down") mask = BUTTON_FRAME_DPAD_DOWN;
+    else if (left && input == "dpad_left") mask = BUTTON_FRAME_DPAD_LEFT;
+    else if (left && input == "dpad_right") mask = BUTTON_FRAME_DPAD_RIGHT;
+    else if (left && input == "view") mask = BUTTON_MENU;
+    else if (input == "bumper") mask = left ? BUTTON_LEFT_BUMPER : BUTTON_RIGHT_BUMPER;
+    else if (input == "squeeze") mask = left ? BUTTON_LEFT_GRIP : BUTTON_RIGHT_GRIP;
+    else if (input == "trigger") mask = left ? BUTTON_LEFT_TRIGGER : BUTTON_RIGHT_TRIGGER;
+    else if (input == "thumbstick") mask = left ? BUTTON_LEFT_THUMBSTICK : BUTTON_RIGHT_THUMBSTICK;
+    return (bits & mask) != 0;   // system, and an input on the wrong hand, read false
+}
+
 bool InputManager::GetBooleanComponent(Hand hand, const std::string& componentPath) const
 {
     return GetBooleanComponentForProfile(hand, componentPath, "");
@@ -897,6 +1000,11 @@ bool InputManager::GetBooleanComponentForProfile(Hand hand, const std::string& c
     if (!profilePath.empty() && IsHandInteractionComponent(componentPath))
     {
         return false;
+    }
+
+    if (profilePath == kValveFrameProfile)
+    {
+        return GetFrameControllerComponent(hand, componentPath);
     }
 
     return GetButtonClick(hand, componentPath);
@@ -947,7 +1055,7 @@ float InputManager::GetFloatComponentForProfile(Hand hand, const std::string& co
     }
     if (componentPath == "squeeze/value")
     {
-        return GetGrabValue(hand);
+        return profilePath == kValveFrameProfile ? frameGripValue_[HandIndex(hand)] : GetGrabValue(hand);
     }
     if (componentPath == "thumbstick/x")
     {

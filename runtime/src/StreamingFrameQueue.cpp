@@ -82,6 +82,13 @@ bool StreamingFrameQueue::HasFinishedPendingFrame() const
         }
         pending = pendingFrame_.source;
     }
+    for (const auto& overlay : pending.overlays)
+    {
+        if (!overlay.image.sync.WaitForHostReady(0))
+        {
+            return false;
+        }
+    }
     return pending.left.sync.WaitForHostReady(0) && pending.right.sync.WaitForHostReady(0);
 }
 

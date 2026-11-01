@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 enum class GraphicsApi
 {
@@ -129,11 +130,34 @@ struct FrameImageSource
     }
 };
 
+// A quad or cylinder composition layer, drawn into each eye's projection image
+// before encode (CompositionOverlay.h has the geometry, OverlayCompositor the draw).
+struct FrameOverlayLayer
+{
+    enum class Shape : uint32_t
+    {
+        Quad = 0,
+        Cylinder = 1,
+    };
+
+    Shape shape = Shape::Quad;
+    FrameImageSource image = {};      // the layer's swapchain snapshot + subImage rect
+    float clipFromLayer[2][16] = {};  // per eye, column-major, Metal clip space
+    uint32_t eyeMask = 0;             // bit 0 = left eye, bit 1 = right eye
+    float width = 0.0f;               // quad: metres
+    float height = 0.0f;              // quad and cylinder: metres
+    float radius = 0.0f;              // cylinder
+    float centralAngle = 0.0f;        // cylinder, radians
+    bool sourceAlpha = false;         // XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+    bool unpremultipliedAlpha = false; // XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT
+};
+
 struct FrameSource
 {
     FrameImageSource left = {};
     FrameImageSource right = {};
     bool alphaBlend = false;
+    std::vector<FrameOverlayLayer> overlays = {}; // back to front, all after the projection layer
 
     bool IsStereoValid() const
     {
@@ -145,5 +169,6 @@ struct FrameSource
         left.Reset();
         right.Reset();
         alphaBlend = false;
+        overlays.clear();
     }
 };

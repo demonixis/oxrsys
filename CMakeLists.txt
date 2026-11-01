@@ -170,6 +170,7 @@ set(OXRSYS_LOGCAT_TEST_ENV
 
 add_executable(oxrsys_runtime_tests
     tests/TestBoundedDrain.cpp
+    tests/TestClientAdmission.cpp
     tests/TestClientLiveness.cpp
     tests/TestConfig.cpp
     tests/TestEncoderHelperIpc.cpp
@@ -180,6 +181,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
+    tests/TestPacingThreadPolicy.cpp
     tests/TestPacketPacer.cpp
     tests/TestStreamingReconfigure.cpp
     tests/TestSnapshotLeasePool.cpp
@@ -189,6 +191,7 @@ add_executable(oxrsys_runtime_tests
     tests/TestVideoTextureFormat.cpp
     tests/TestVulkanDispatch.cpp
     tests/TestCompositionLayerAlpha.cpp
+    tests/TestCompositionOverlay.cpp
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
@@ -317,7 +320,9 @@ list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
 add_executable(oxrsys_videotoolbox_encoder_tests
     tests/TestVideoToolboxEncoder.mm
     tests/TestEncoderHelperClient.mm
+    tests/TestOverlayCompositor.mm
     runtime/src/VideoEncoder.mm
+    runtime/src/OverlayCompositor.mm
     runtime/src/EncoderHelperClient.mm
     runtime/src/EncoderPathPolicy.cpp
     runtime/src/Config.cpp
@@ -332,6 +337,7 @@ target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
 target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
     Catch2::Catch2WithMain
     spdlog::spdlog
+    glm::glm
     "-framework Metal"
     "-framework MetalPerformanceShaders"
     "-framework Foundation"

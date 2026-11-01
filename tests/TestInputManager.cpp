@@ -7,6 +7,7 @@
 #include "TrackingReceiver.h"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
 #include <limits>
@@ -704,6 +705,198 @@ TEST_CASE("InputManager — select follows trigger and squeeze follows grab", "[
                WithinAbs(0.20f, 0.001f));
     CHECK(im.GetButtonClick(InputManager::Hand::Left, "select/click"));
     CHECK_FALSE(im.GetButtonClick(InputManager::Hand::Left, "squeeze/click"));
+}
+
+TEST_CASE("InputManager — a Steam Frame client's controllers report the Frame profile and its inputs", "[input]")
+{
+    using namespace oxr::protocol;
+    constexpr const char* kFrame = "/interaction_profiles/valve/frame_controller_valve";
+    constexpr const char* kTouch = "/interaction_profiles/oculus/touch_controller";
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("FrameClient");
+
+    TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE | TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.controllerProfile = CONTROLLER_PROFILE_VALVE_FRAME;
+    // Right X pressed, left d-pad up pressed, right A touched; the client also sets the Touch bits
+    // SteamVR's remap gives them: X -> Touch B, d-pad up -> Touch Y.
+    packet.buttonState = BUTTON_FRAME_X | BUTTON_B | BUTTON_FRAME_DPAD_UP | BUTTON_Y | BUTTON_LEFT_BUMPER;
+    packet.touchState = BUTTON_FRAME_A | BUTTON_A;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
+    {
+        CHECK(im.GetCurrentInteractionProfile(hand) == kFrame);
+        const std::vector<std::string> profiles = im.GetActiveInteractionProfiles(hand);
+        REQUIRE(profiles.size() == 3);
+        CHECK(profiles[0] == kFrame);
+        CHECK(profiles[1] == kTouch);
+        CHECK(profiles[2] == "/interaction_profiles/khr/simple_controller");
+    }
+
+    const auto L = InputManager::Hand::Left;
+    const auto R = InputManager::Hand::Right;
+    // Frame bindings see each input on its own.
+    CHECK(im.GetBooleanComponentForProfile(R, "x/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(R, "b/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(R, "y/click", kFrame));
+    CHECK(im.GetBooleanComponentForProfile(L, "dpad_up/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "dpad_left/click", kFrame));
+    CHECK(im.GetBooleanComponentForProfile(L, "bumper/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(R, "bumper/click", kFrame));
+    CHECK(im.GetBooleanComponentForProfile(R, "a/touch", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(R, "a/click", kFrame));
+    // An input on the other hand's controller does not exist there.
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "x/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(R, "dpad_up/click", kFrame));
+    // Touch bindings see what SteamVR's emulation would give them.
+    CHECK(im.GetBooleanComponentForProfile(R, "b/click", kTouch));
+    CHECK(im.GetBooleanComponentForProfile(L, "y/click", kTouch));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "x/click", kTouch));
+}
+
+TEST_CASE("InputManager — OXRSYS_FRAME_XBOX puts each Frame letter on the same Xbox letter under Touch", "[input]")
+{
+    // UEVR turns Touch into an Xbox pad: right a = A, left x = B, right b = X, left y = Y, squeeze = LB/RB,
+    // menu = Start. With the layout on, pressing the Frame's B must reach the app as Touch left x (Xbox B), and so on.
+    using namespace oxr::protocol;
+    constexpr const char* kTouch = "/interaction_profiles/oculus/touch_controller";
+    InputManager im;
+    im.SetFrameXboxLayout(true);
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("FrameClient");
+    const auto L = InputManager::Hand::Left;
+    const auto R = InputManager::Hand::Right;
+
+    uint64_t t = 1'000'000'000;
+    auto send = [&](uint32_t buttons) {
+        TrackingPacket packet = {};
+        packet.timestampNs = (t += 11'000'000);
+        packet.headOrientation[3] = 1.0f;
+        packet.trackingFlags = TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE | TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+        packet.leftControllerRot[3] = 1.0f;
+        packet.rightControllerRot[3] = 1.0f;
+        packet.controllerProfile = CONTROLLER_PROFILE_VALVE_FRAME;
+        packet.buttonState = buttons;
+        receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+        im.Update(0.0f);
+    };
+    auto pressed = [&](InputManager::Hand hand, const char* path) {
+        return im.GetBooleanComponentForProfile(hand, path, kTouch);
+    };
+
+    // Frame B, with the Touch bit SteamVR's remap sets for it (B -> Touch B): the app must see left x only.
+    send(BUTTON_FRAME_B | BUTTON_B);
+    CHECK(pressed(L, "x/click"));
+    CHECK_FALSE(pressed(R, "b/click"));
+    CHECK_FALSE(pressed(R, "a/click"));
+    CHECK_FALSE(pressed(L, "y/click"));
+
+    // Frame X (SteamVR also sends Touch B): right b.
+    send(BUTTON_FRAME_X | BUTTON_B);
+    CHECK(pressed(R, "b/click"));
+    CHECK_FALSE(pressed(L, "x/click"));
+
+    // Frame Y (SteamVR sends Touch B): left y. Frame A: right a.
+    send(BUTTON_FRAME_Y | BUTTON_B);
+    CHECK(pressed(L, "y/click"));
+    CHECK_FALSE(pressed(R, "b/click"));
+    send(BUTTON_FRAME_A | BUTTON_A);
+    CHECK(pressed(R, "a/click"));
+
+    // The left bumper squeezes the left grip, the right menu is the menu, and the d-pad reads as itself.
+    send(BUTTON_LEFT_BUMPER | BUTTON_FRAME_RIGHT_MENU | BUTTON_FRAME_DPAD_LEFT | BUTTON_X);
+    CHECK(im.GetFloatComponent(L, "squeeze/value") == 1.0f);
+    CHECK(im.GetFloatComponent(R, "squeeze/value") == 0.0f);
+    CHECK(pressed(L, "menu/click"));
+    CHECK(pressed(L, "dpad_left/click"));
+    CHECK_FALSE(pressed(L, "dpad_up/click"));
+    CHECK_FALSE(pressed(R, "dpad_left/click"));
+    CHECK_FALSE(pressed(R, "a/click"));   // SteamVR's Touch X for the d-pad is gone, and nothing else is pressed
+    CHECK_FALSE(pressed(L, "x/click"));
+
+    // Off: SteamVR's meaning comes through untouched (Frame B -> Touch B).
+    im.SetFrameXboxLayout(false);
+    send(BUTTON_FRAME_B | BUTTON_B);
+    CHECK(pressed(R, "b/click"));
+    CHECK_FALSE(pressed(L, "x/click"));
+}
+
+TEST_CASE("InputManager — OXRSYS_FRAME_XBOX leaves native Frame inputs alone", "[input]")
+{
+    // The Xbox layout feeds Touch bindings only. A binding on the Frame's own profile reads the controller as sent.
+    using namespace oxr::protocol;
+    constexpr const char* kFrame = "/interaction_profiles/valve/frame_controller_valve";
+    constexpr const char* kTouch = "/interaction_profiles/oculus/touch_controller";
+    InputManager im;
+    im.SetFrameXboxLayout(true);
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("FrameClient");
+    const auto L = InputManager::Hand::Left;
+    const auto R = InputManager::Hand::Right;
+
+    TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE | TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.controllerProfile = CONTROLLER_PROFILE_VALVE_FRAME;
+    packet.buttonState = BUTTON_LEFT_BUMPER | BUTTON_FRAME_RIGHT_MENU;
+    packet.leftGrip = 0.25f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    // Native: the bumper is the bumper, the squeeze keeps its own value, and the right menu is not the left view.
+    CHECK(im.GetBooleanComponentForProfile(L, "bumper/click", kFrame));
+    CHECK(im.GetFloatComponentForProfile(L, "squeeze/value", kFrame) == 0.25f);
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "squeeze/value", kFrame));
+    CHECK(im.GetFloatComponentForProfile(R, "squeeze/value", kFrame) == 0.0f);
+    CHECK(im.GetBooleanComponentForProfile(R, "menu/click", kFrame));
+    CHECK_FALSE(im.GetBooleanComponentForProfile(L, "view/click", kFrame));
+
+    // Touch, laid out as Xbox: the bumper squeezes the grip and the right menu is the menu.
+    CHECK(im.GetFloatComponentForProfile(L, "squeeze/value", kTouch) == 1.0f);
+    CHECK(im.GetBooleanComponentForProfile(L, "squeeze/value", kTouch));
+    CHECK(im.GetFloatComponentForProfile(R, "squeeze/value", kTouch) == 0.0f);
+    CHECK(im.GetBooleanComponentForProfile(L, "menu/click", kTouch));
+}
+
+TEST_CASE("TrackingReceiver — a packet that stops before touchState carries no controller profile", "[input]")
+{
+    using namespace oxr::protocol;
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("FrameClient");
+
+    // A packet that carries controllerProfile but stops before the end of touchState is from a client with
+    // another layout. Whatever sits there must not select a profile.
+    TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.rightControllerRot[3] = 1.0f;
+    packet.controllerProfile = CONTROLLER_PROFILE_VALVE_FRAME;
+    packet.touchState = 0xffffffffu;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), offsetof(TrackingPacket, touchState));
+    im.Update(0.0f);
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right) == "/interaction_profiles/oculus/touch_controller");
+
+    packet.timestampNs += 11'000'000;   // a newer packet: the receiver drops one that is not
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+    CHECK(im.GetCurrentInteractionProfile(InputManager::Hand::Right) ==
+          "/interaction_profiles/valve/frame_controller_valve");
 }
 
 TEST_CASE("TrackingReceiver — predicted pose extrapolates recent motion", "[input]")

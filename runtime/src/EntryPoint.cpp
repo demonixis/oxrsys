@@ -212,6 +212,10 @@ struct ExtensionInfo
 
 #ifdef XR_USE_GRAPHICS_API_METAL
 static constexpr const char* UNITY_METAL_ENABLE_EXTENSION_ALIAS = "XR_KHRX2_metal_enable";
+// Newer than the OpenXR headers this builds against, so named here. Version 1 adds only an interaction profile.
+static constexpr const char* VALVE_FRAME_CONTROLLER_EXTENSION_NAME = "XR_VALVE_frame_controller_interaction";
+static constexpr uint32_t VALVE_FRAME_CONTROLLER_SPEC_VERSION = 1;
+static constexpr const char* VALVE_FRAME_CONTROLLER_PROFILE = "/interaction_profiles/valve/frame_controller_valve";
 static constexpr const char* UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS =
     "xrGetMetalGraphicsRequirementsKHRX2";
 #endif
@@ -244,10 +248,12 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
 #ifdef XR_USE_TIMESPEC
         {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME, XR_KHR_convert_timespec_time_SPEC_VERSION},
 #endif
+        {XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME, XR_KHR_composition_layer_cylinder_SPEC_VERSION},
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
         {XR_EXT_DEBUG_UTILS_EXTENSION_NAME, XR_EXT_debug_utils_SPEC_VERSION},
+        {VALVE_FRAME_CONTROLLER_EXTENSION_NAME, VALVE_FRAME_CONTROLLER_SPEC_VERSION},
 #ifdef XR_META_touch_controller_plus
         {XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME, XR_META_touch_controller_plus_SPEC_VERSION},
 #endif
@@ -1498,6 +1504,10 @@ static bool IsKnownInteractionProfilePath(const Instance* instance, const std::s
     {
         return instance->IsExtensionEnabled(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
     }
+    if (profilePath == VALVE_FRAME_CONTROLLER_PROFILE)
+    {
+        return instance->IsExtensionEnabled(VALVE_FRAME_CONTROLLER_EXTENSION_NAME);
+    }
 #ifdef XR_META_touch_controller_plus
     if (profilePath == "/interaction_profiles/meta/touch_controller_plus")
     {
@@ -2375,9 +2385,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
     for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
     {
         XrPath expectedTopLevelPath = TopLevelPathFromHand(hand);
+        // The fallback list's bindings add up, which is harmless while they all describe one Touch controller. An
+        // app with Frame bindings also suggests Touch ones, and there Touch B means Frame B, X or Y: read only the
+        // Frame bindings, as SteamVR does, so Frame X does not also fire whatever the app put on Touch B.
+        const bool frameBound = SelectCurrentInteractionProfileForInstance(sess->GetInstance(), inputManager, hand) ==
+                                VALVE_FRAME_CONTROLLER_PROFILE;
         for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
         {
-            if (profilePathString.empty())
+            if (profilePathString.empty() || (frameBound && profilePathString != VALVE_FRAME_CONTROLLER_PROFILE))
             {
                 continue;
             }
@@ -2727,6 +2742,10 @@ static std::string LocalizedInteractionProfileName(Session* session, XrPath sour
     {
         return "EXT Hand Interaction";
     }
+    if (profilePath == VALVE_FRAME_CONTROLLER_PROFILE)
+    {
+        return "Steam Frame Controller";
+    }
     return "Unknown Profile";
 }
 
@@ -2742,6 +2761,30 @@ static std::string LocalizedComponentName(XrPath sourcePath)
     if (component == "menu/click")
     {
         return "Menu";
+    }
+    if (component == "view/click")
+    {
+        return "View";
+    }
+    if (component == "bumper/click")
+    {
+        return "Bumper";
+    }
+    if (component == "dpad_up/click")
+    {
+        return "D-pad Up";
+    }
+    if (component == "dpad_down/click")
+    {
+        return "D-pad Down";
+    }
+    if (component == "dpad_left/click")
+    {
+        return "D-pad Left";
+    }
+    if (component == "dpad_right/click")
+    {
+        return "D-pad Right";
     }
     if (component == "grip/pose")
     {

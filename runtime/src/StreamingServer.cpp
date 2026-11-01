@@ -50,6 +50,11 @@ constexpr int64_t kStreamConfigAckTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::milliseconds(500)).count();
 constexpr uint32_t kStreamConfigMaxRetries = 2;
+// A refused ClientConnect is logged at most this often per address: the desktop
+// simulator retries every second when it auto-connects.
+constexpr int64_t kClientAdmissionLogIntervalNs =
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::seconds(5)).count();
 // Treat a connected client as gone if it sends no tracking for this long (abrupt UDP kill).
 constexpr int64_t kClientLivenessTimeoutNs =
     std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -82,7 +87,9 @@ oxr::protocol::FoveationPreset ParseFoveationPreset(const std::string& value)
     {
         return oxr::protocol::FoveationPreset::Light;
     }
-    if (value == "medium")
+    // medium_plus travels as Medium: clients read the centre/edge parameters the
+    // announce carries, and need only a non-Off preset.
+    if (value == "medium" || value == "medium_plus")
     {
         return oxr::protocol::FoveationPreset::Medium;
     }
@@ -91,6 +98,31 @@ oxr::protocol::FoveationPreset ParseFoveationPreset(const std::string& value)
         return oxr::protocol::FoveationPreset::High;
     }
     return oxr::protocol::FoveationPreset::Off;
+}
+
+// The parameters for a configured preset name. medium_plus is centre 0.50x0.45,
+// edges 4x5: 2752x1216 for 2160x2160 eyes, 17 % more pixels than medium. On the
+// M5 Pro low-latency encoder it measured +0.7 ms per frame over medium (sparse
+// bench, 2026-10-18); whether it holds 90 Hz live is not yet measured.
+oxr::protocol::FoveationPresetParameters FoveationParametersForConfig(const std::string& value)
+{
+    if (value == "medium_plus")
+    {
+        return oxr::protocol::MediumPlusParameters();
+    }
+    return oxr::protocol::ParametersForPreset(ParseFoveationPreset(value));
+}
+
+oxr::protocol::FoveationLayout ConfiguredFoveationLayout(uint32_t targetEyeWidth,
+                                                         uint32_t targetEyeHeight,
+                                                         oxr::protocol::FoveationPreset preset,
+                                                         const std::string& configPreset)
+{
+    return oxr::protocol::CalculateFoveationLayout(
+        targetEyeWidth, targetEyeHeight, preset,
+        preset == oxr::protocol::FoveationPreset::Off
+            ? oxr::protocol::ParametersForPreset(preset)
+            : FoveationParametersForConfig(configPreset));
 }
 
 oxr::protocol::ClientFoveationPreset ParseClientFoveationPreset(const std::string& value)
@@ -215,10 +247,11 @@ StreamLayout BuildStreamLayout(uint32_t renderWidth,
             unscaledFoveationTarget ? renderWidth : layout.scaledWidth;
         layout.foveatedTargetEyeHeight =
             unscaledFoveationTarget ? renderHeight : layout.scaledHeight;
-        layout.foveationLayout = oxr::protocol::CalculateFoveationLayout(
+        layout.foveationLayout = ConfiguredFoveationLayout(
             layout.foveatedTargetEyeWidth,
             layout.foveatedTargetEyeHeight,
-            layout.foveationPreset);
+            layout.foveationPreset,
+            config.foveatedEncodingPreset);
         if (unscaledFoveationTarget &&
             oxr::protocol::IsFoveatedEncodingLayoutUsable(
                 layout.foveationLayout, renderWidth, renderHeight))
@@ -689,6 +722,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     }
 
     oxrsys::runtime_socket::SetSendBuffer(videoSocket_, 4 * 1024 * 1024);
+    // Video sends are best effort and carry MSG_DONTWAIT; the timeout bounds any send that still
+    // blocks in the kernel, so Stop's join of the video send thread cannot wait on one forever.
+    oxrsys::runtime_socket::SetSendTimeout(videoSocket_, 0, 100 * 1000);
     {
         std::lock_guard<std::mutex> lock(packetDispatchState_->mutex);
         packetDispatchState_->videoSocket = videoSocket_;
@@ -785,7 +821,18 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
 
     oxrsys::runtime_socket::Close(broadcastSocket_);
     oxrsys::runtime_socket::Close(controlSocket_);
-    oxrsys::runtime_socket::Close(videoSocket_);
+    // The video send thread (render poses, NAL units and FEC parity) and the control thread
+    // (NACK retransmits) copy this handle under the dispatch mutex, then send a run of
+    // datagrams through the copy. Closing it here released a sender blocked in sendto(), which
+    // the joins below depend on, but freed the number while a run could still be using it. So
+    // the socket is released now and the number is kept, holding /dev/null, until the joins.
+    // If that fails, the socket stays open until the joins; the send timeout set in Start bounds
+    // a sender blocked in it.
+    if (!oxrsys::runtime_socket::RetireKeepingDescriptor(videoSocket_))
+    {
+        spdlog::warn("StreamingServer: could not release the video socket early; it stays open "
+                     "until its senders are joined");
+    }
 
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
@@ -798,6 +845,7 @@ bool StreamingServer::Stop(std::chrono::nanoseconds timeout)
     JoinWorkerThread(tcpVideoThread_, "USB video");
     JoinWorkerThread(tcpTrackingThread_, "USB tracking");
     JoinWorkerThread(tcpSpatialThread_, "USB spatial");
+    oxrsys::runtime_socket::Close(videoSocket_);
     frameQueue_.Clear();
     ClearVideoSendQueue();
 
@@ -890,9 +938,10 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
             ? ParseFoveationPreset(config.foveatedEncodingPreset)
             : oxr::protocol::FoveationPreset::Off;
     const oxr::protocol::FoveationLayout layout =
-        oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+        ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                 layoutState.foveatedTargetEyeHeight,
-                                                foveationPreset);
+                                                foveationPreset,
+                                                config.foveatedEncodingPreset);
 
     if (layoutState.foveatedEncodingActive)
     {
@@ -1653,15 +1702,46 @@ void StreamingServer::EncodeThread()
 void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& clientConnect,
                                           const sockaddr_in& clientAddr)
 {
+    char ipStr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+
+    // One client at a time. A ClientConnect from a second address while a client is
+    // streaming would take the session over and rebuild its encoder underneath it,
+    // and two tracking clocks interleaved in one TrackingReceiver make the rendered head
+    // pose jump. The connected address may always reconnect (a resent ClientConnect, or a
+    // restart on a new port before the liveness watchdog has noticed).
+    {
+        std::string connectedIp;
+        std::string connectedName;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex_);
+            connectedIp = clientIp_;
+            connectedName = clientName_;
+        }
+        const oxrsys::ClientAdmissionDecision admission = oxrsys::EvaluateClientAdmission(
+            clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
+            SteadyClockNowNs(), kClientAdmissionLogIntervalNs);
+        if (!admission.accept)
+        {
+            if (admission.log)
+            {
+                spdlog::warn("StreamingServer: refusing ClientConnect from {} while '{}' ({}) is "
+                             "connected; disconnect it first",
+                             ipStr, connectedName, connectedIp);
+            }
+            return;
+        }
+    }
+
     // A new client brings a new clock; drop the previous client's tracking history so its
     // last timestamp cannot shadow every packet of this one (see TrackingReceiver::ResetHistory).
+    // From here on only this address may send tracking.
     if (trackingReceiver_)
     {
         trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
     }
 
-    char ipStr[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
     std::string clientName(clientConnect.deviceName,
         BoundedStringLength(clientConnect.deviceName, sizeof(clientConnect.deviceName)));
 
@@ -1799,9 +1879,10 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         ? ParseFoveationPreset(config.foveatedEncodingPreset)
                         : oxr::protocol::FoveationPreset::Off;
                 const oxr::protocol::FoveationLayout layout =
-                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                             layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset);
+                                                            foveationPreset,
+                                                            config.foveatedEncodingPreset);
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
@@ -1884,10 +1965,12 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
-    // Same as HandleClientConnect: a new client brings a new clock.
+    // Same as HandleClientConnect: a new client brings a new clock. USB tracking arrives over
+    // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
         trackingReceiver_->ResetHistory();
+        trackingReceiver_->SetClientAddress(0);
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2025,9 +2108,10 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                         ? ParseFoveationPreset(config.foveatedEncodingPreset)
                         : oxr::protocol::FoveationPreset::Off;
                 const oxr::protocol::FoveationLayout layout =
-                    oxr::protocol::CalculateFoveationLayout(layoutState.foveatedTargetEyeWidth,
+                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
                                                             layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset);
+                                                            foveationPreset,
+                                                            config.foveatedEncodingPreset);
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
@@ -2137,6 +2221,7 @@ void StreamingServer::HandleClientDisconnect()
     if (trackingReceiver_ != nullptr)
     {
         trackingReceiver_->Reset();
+        trackingReceiver_->SetClientAddress(0);
     }
     InvalidateCallbackAccess();
 

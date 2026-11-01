@@ -285,6 +285,29 @@ TEST_CASE("Snapshot wait: a left eye that times out leaves the right eye unwaite
     CHECK(rightTimeouts.empty());
 }
 
+TEST_CASE("Snapshot wait: overlay layers share the eyes' deadline", "[snapshot-wait]")
+{
+    FakeClock clock;
+    std::vector<uint64_t> overlayTimeouts;
+    std::vector<uint64_t> leftTimeouts;
+    std::vector<uint64_t> rightTimeouts;
+    FrameSource frame = {};
+    FrameOverlayLayer overlay = {};
+    overlay.image = FakeFencedImage(clock, 50 * kMs, overlayTimeouts);
+    frame.overlays.push_back(overlay);
+    frame.left = FakeFencedImage(clock, 120 * kMs, leftTimeouts);
+    frame.right = FakeFencedImage(clock, 0, rightTimeouts);
+
+    uint64_t waitedNs = 0;
+    CHECK(WaitOnFakeClock(frame, clock, 100 * kMs, {}, waitedNs) == SnapshotWaitResult::TimedOut);
+    CHECK(waitedNs == 100 * kMs);
+    REQUIRE(overlayTimeouts.size() == 1);
+    CHECK(overlayTimeouts[0] == 100 * kMs);
+    REQUIRE(leftTimeouts.size() == 1);
+    CHECK(leftTimeouts[0] == 50 * kMs);
+    CHECK(rightTimeouts.empty());
+}
+
 TEST_CASE("Snapshot wait: a frame whose successor finished during the wait is not encoded", "[snapshot-wait]")
 {
     FakeClock clock;
@@ -341,4 +364,29 @@ TEST_CASE("Snapshot wait: a frame is still encoded when its successor has not fi
     queue.Clear();
     clock.nowNs = 0;
     CHECK(WaitOnFakeClock(older, clock, 100 * kMs, isSuperseded, waitedNs) == SnapshotWaitResult::Ready);
+}
+
+TEST_CASE("Snapshot wait: a successor whose overlay is still rendering has not finished", "[snapshot-wait]")
+{
+    FakeClock clock;
+    std::vector<uint64_t> timeouts;
+    StreamingFrameQueue queue;
+    queue.Start();
+
+    FrameSource older = {};
+    older.left = FakeFencedImage(clock, 40 * kMs, timeouts);
+    older.right = FakeFencedImage(clock, 40 * kMs, timeouts);
+    StreamingFrame newer = {};
+    newer.frameIndex = 2;
+    newer.source.left = FakeFencedImage(clock, 30 * kMs, timeouts);
+    newer.source.right = FakeFencedImage(clock, 30 * kMs, timeouts);
+    FrameOverlayLayer overlay = {};
+    overlay.image = FakeFencedImage(clock, 500 * kMs, timeouts);
+    newer.source.overlays.push_back(overlay);
+    queue.PushLatest(std::move(newer));
+
+    uint64_t waitedNs = 0;
+    const auto isSuperseded = [&] { return queue.HasFinishedPendingFrame(); };
+    CHECK(WaitOnFakeClock(older, clock, 100 * kMs, isSuperseded, waitedNs) == SnapshotWaitResult::Ready);
+    CHECK(clock.nowNs == 40 * kMs);
 }
