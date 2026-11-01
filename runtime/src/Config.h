@@ -19,7 +19,7 @@ struct ConfigValues
     uint32_t refreshRateHz = 72;    // Preferred headset refresh rate
     float resolutionScale = 0.75f;  // Encode resolution multiplier (0.25-1.0)
     float dynamicResolutionMinScale = 0.50f; // Lowest ABR full-mode encode scale
-    std::string renderDevice = "quest3"; // Per-eye render resolution target: "quest2", "quest3", "avp"
+    std::string renderDevice = "quest3"; // Per-eye render resolution target: "quest2", "quest3", "quest3_native", "avp"
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string videoCodec = "h265"; // "h265", "h264", "auto"
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"

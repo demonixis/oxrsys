@@ -6,6 +6,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `render_device = "quest3_native"` (2064x2208 per eye), the Quest 3's own recommended render size,
+  also selectable in Home.
 - Added the USB network transport (`transport = "usb_ncm"`, USB Net in Home). Home switches the
   Quest's USB function to CDC-NCM over ADB, which macOS binds with its built-in driver, and gives the
   link fixed addresses (Mac `192.168.42.1`, headset `192.168.42.2`) without changing either side's
@@ -78,6 +80,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   fall back to the standard rate control when the encoder does not offer it. On an M1 Pro (Apple Silicon)
   at 2272x1264, 72 fps, HEVC, the time from submitting a frame to receiving it encoded fell from about
   32 ms to about 11 ms; the standard rate control held each frame for about two frame periods.
+- The Quest/Pico client renders into a swapchain 1.3 times the recommended size per axis, capped at the
+  runtime maximum, so streams up to the Quest 3 panel resolution are not downscaled into it. It also asks
+  the compositor for quality supersampling and sharpening through `XR_FB_composition_layer_settings` when
+  the runtime offers the extension.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.

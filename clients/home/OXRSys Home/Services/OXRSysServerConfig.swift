@@ -60,9 +60,9 @@ struct OXRSysServerConfig: Equatable {
     # and a reliable USB TCP headset client supports live stream reconfiguration.
     dynamic_resolution_min_scale = 0.50
 
-    # Target headset for the per-eye render resolution: "quest2", "quest3", or "avp".
+    # Target headset for the per-eye render resolution: "quest2", "quest3", "quest3_native", or "avp".
     # Sets the resolution the runtime renders at (quest2=1440x1584, quest3=1512x1680,
-    # avp=3024x3360 per eye). Use resolution_scale to trim how much of it is streamed.
+    # quest3_native=2064x2208, the Quest 3's own recommended size, avp=3024x3360 per eye). Use resolution_scale to trim how much of it is streamed.
     render_device = "quest3"
 
     # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
