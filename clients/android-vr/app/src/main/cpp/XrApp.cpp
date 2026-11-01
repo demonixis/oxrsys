@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "XrApp.h"
+#include "UsbNetworkLink.h"
 
 #include <android/hardware_buffer.h>
 #include <android/log.h>
@@ -2307,6 +2308,12 @@ bool XrApp::OpenControlSocket(const char* serverIp)
         LOGE("Failed to create control socket");
         return false;
     }
+    if (!usb_network::BindSocketForServer(controlSocket_, serverIp))
+    {
+        close(controlSocket_);
+        controlSocket_ = -1;
+        return false;
+    }
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -2421,7 +2428,10 @@ void XrApp::CloseSpatialSocket()
 
 void XrApp::OnServerFound(const protocol::ServerAnnounce& server, const char* serverIp)
 {
-    ConfigureServerConnection(server, serverIp, TransportMode::WifiUdp);
+    ConfigureServerConnection(server, serverIp,
+                              usb_network::IsServerAddress(serverIp)
+                                  ? TransportMode::UsbNetworkUdp
+                                  : TransportMode::WifiUdp);
 }
 
 bool XrApp::TryStartUsbAdbTransport(bool logUnavailable)
@@ -2532,13 +2542,15 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     }
     shellStatusText_ = transportMode == TransportMode::UsbAdbTcp
         ? "Connecting USB"
+        : transportMode == TransportMode::UsbNetworkUdp
+        ? "Connecting USB network"
         : "Connecting WiFi";
 
     transportMode_ = transportMode;
     const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
 
     LOGI("Server discovered via %s: %s at %s (%ux%u @ %uHz, encoded %ux%u)",
-         usbAdb ? "USB ADB" : "WiFi",
+         usbAdb ? "USB ADB" : transportMode_ == TransportMode::UsbNetworkUdp ? "USB network" : "WiFi",
          server.serverName, serverIp, server.renderWidth, server.renderHeight,
          server.refreshRateHz, server.encodedWidth, server.encodedHeight);
 
@@ -2791,7 +2803,8 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.supportedCodecs =
         protocol::CLIENT_CODEC_CAPABILITY_H265 |
         protocol::CLIENT_CODEC_CAPABILITY_H264;
-    connect.maxBitrateMbps = usbAdb
+    // The WiFi cap protects shared wireless links; the USB network link is a dedicated cable.
+    connect.maxBitrateMbps = usbAdb || transportMode_ == TransportMode::UsbNetworkUdp
         ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
         : 100;
     connect.refreshRateHz = clientRefreshRateHz_;
