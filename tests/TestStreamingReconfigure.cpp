@@ -60,3 +60,16 @@ TEST_CASE("Reserved spatial TCP listener is optional without a spatial backend",
     CHECK_FALSE(UsbAdbTcpListenersReady(true, true, false, true, false));
     CHECK_FALSE(UsbAdbTcpListenersReady(true, true, true, false, true));
 }
+
+TEST_CASE("USB network clients are recognized by the link subnet", "[streaming][transport]")
+{
+    using oxrsys::streaming_transport::IsUsbNetworkClientAddress;
+
+    CHECK(IsUsbNetworkClientAddress("192.168.42.2"));
+    CHECK(IsUsbNetworkClientAddress("192.168.42.254"));
+    CHECK_FALSE(IsUsbNetworkClientAddress("192.168.43.2"));
+    CHECK_FALSE(IsUsbNetworkClientAddress("192.168.1.42"));
+    CHECK_FALSE(IsUsbNetworkClientAddress("127.0.0.1"));
+    CHECK_FALSE(IsUsbNetworkClientAddress(""));
+    CHECK_FALSE(IsUsbNetworkClientAddress("not-an-ip"));
+}

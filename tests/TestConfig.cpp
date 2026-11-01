@@ -344,6 +344,18 @@ client_foveation_preset = "auto"
     CHECK(values.clientFoveationPreset == "auto");
 }
 
+TEST_CASE("Config parser accepts the USB network transport", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+transport = "usb_ncm"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingTransport == "usb_ncm");
+}
+
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")
 {
     std::istringstream input(R"TOML(

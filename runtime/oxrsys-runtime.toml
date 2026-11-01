@@ -82,7 +82,8 @@ encoder_helper = "auto"
 encoder_helper_path = ""
 
 # Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
-# listeners, and "usb_adb" disables WiFi discovery fallback.
+# listeners, and "usb_adb" disables WiFi discovery fallback. "usb_ncm" streams over the
+# USB network (CDC-NCM) link that OXRSys Home sets up, using the WiFi UDP path.
 transport = "auto"
 
 # Server-side foveated video encoding preset: "off", "light", "medium", "medium_plus", or "high".

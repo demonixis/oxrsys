@@ -619,7 +619,8 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     refreshRateHz_ = config.refreshRateHz;
     targetRefreshRateHz_.store(refreshRateHz_);
     wifiEnabled_ = config.streamingTransport != "usb_adb";
-    usbAdbEnabled_ = config.streamingTransport != "wifi";
+    // usb_ncm runs the WiFi UDP path over the USB network link.
+    usbAdbEnabled_ = config.streamingTransport != "wifi" && config.streamingTransport != "usb_ncm";
     StreamLayout streamLayout = BuildStreamLayout(
         renderWidth, renderHeight, config.resolutionScale, config, graphicsContext_);
     {
@@ -1910,10 +1911,13 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         encoder_->ForceKeyframe();
                         frameIndex_ = 0;
                         encoderReady = true;
-                        spdlog::info("StreamingServer: Client connected via WiFi: {} ({}:{}) refresh={}Hz codec={} backend={}",
+                        const bool usbNetworkClient =
+                            oxrsys::streaming_transport::IsUsbNetworkClientAddress(clientIp_);
+                        spdlog::info("StreamingServer: Client connected via {}: {} ({}:{}) refresh={}Hz codec={} backend={}",
+                                      usbNetworkClient ? "USB network" : "WiFi",
                                       clientName, clientIp_, clientPort_, negotiatedRefresh,
                                       VideoCodecName(selectedCodec), backendCapabilities.backendName);
-                        RuntimeStatus::SetStreaming("wifi", clientName);
+                        RuntimeStatus::SetStreaming(usbNetworkClient ? "usb_ncm" : "wifi", clientName);
                         break;
                     }
                     spdlog::warn("StreamingServer: {} failed to initialize {}; trying fallback codec if available",
