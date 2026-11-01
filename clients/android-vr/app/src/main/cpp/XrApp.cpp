@@ -1086,6 +1086,7 @@ bool XrApp::CreateInstance(struct android_app* app)
     foveationConfigurationAvailable_ = hasExtension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
     swapchainUpdateAvailable_ = hasExtension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
     displayRefreshRateAvailable_ = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    compositionLayerSettingsAvailable_ = hasExtension(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     const bool metaTouchControllerPlusAvailable =
         hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     const bool picoControllerInteractionAvailable =
@@ -1117,6 +1118,10 @@ bool XrApp::CreateInstance(struct android_app* app)
     if (displayRefreshRateAvailable_)
     {
         extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    }
+    if (compositionLayerSettingsAvailable_)
+    {
+        extensions.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     }
     if (metaTouchControllerPlusAvailable)
     {
@@ -1271,9 +1276,17 @@ bool XrApp::CreateInstance(struct android_app* app)
                                            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                            2, &viewCount, viewConfigs_);
 
-        swapchainWidth_ = viewConfigs_[0].recommendedImageRectWidth;
-        swapchainHeight_ = viewConfigs_[0].recommendedImageRectHeight;
-        LOGI("View config: %ux%u per eye", swapchainWidth_, swapchainHeight_);
+        // The swapchain exists before a stream is negotiated. Supersampling the recommended size lets
+        // streams up to the Quest 3 panel (2064x2208, recommended 1680x1760) blit without a downscale,
+        // which aliases thin lines because the external video texture has no mipmaps.
+        constexpr float kSwapchainSupersample = 1.3f;
+        swapchainWidth_ = std::min(viewConfigs_[0].maxImageRectWidth,
+            static_cast<uint32_t>(viewConfigs_[0].recommendedImageRectWidth * kSwapchainSupersample + 0.5f));
+        swapchainHeight_ = std::min(viewConfigs_[0].maxImageRectHeight,
+            static_cast<uint32_t>(viewConfigs_[0].recommendedImageRectHeight * kSwapchainSupersample + 0.5f));
+        LOGI("View config: recommended %ux%u, swapchain %ux%u per eye",
+             viewConfigs_[0].recommendedImageRectWidth, viewConfigs_[0].recommendedImageRectHeight,
+             swapchainWidth_, swapchainHeight_);
     }
 
     return true;
@@ -3666,6 +3679,13 @@ void XrApp::RunFrame()
 
     // Build composition layers
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    XrCompositionLayerSettingsFB projectionLayerSettings = {XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
+    projectionLayerSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                         XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+    if (compositionLayerSettingsAvailable_)
+    {
+        projectionLayer.next = &projectionLayerSettings;
+    }
     XrCompositionLayerProjectionView projectionViews[2] = {
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
