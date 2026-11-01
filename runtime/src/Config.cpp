@@ -425,7 +425,7 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "render_device")
         {
             value = ParseString(value);
-            if (value == "quest2" || value == "quest3" || value == "avp")
+            if (value == "quest2" || value == "quest3" || value == "quest3_native" || value == "avp")
             {
                 values.renderDevice = value;
             }
@@ -771,6 +771,10 @@ EyeResolution DeviceBaseEyeResolution(const std::string& device)
     if (device == "quest2")
     {
         return {1440, 1584};
+    }
+    if (device == "quest3_native")
+    {
+        return {2064, 2208};
     }
     if (device == "avp")
     {

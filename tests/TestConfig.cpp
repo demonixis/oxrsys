@@ -262,6 +262,16 @@ client_sharpening = 0.8suffix
     CHECK(values.clientSharpening == 0.25f);
 }
 
+TEST_CASE("Config parser accepts the Quest 3 native render preset", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+render_device = "quest3_native"
+)TOML");
+
+    CHECK(ParseConfigToml(input).renderDevice == "quest3_native");
+}
+
 TEST_CASE("Config parser accepts the medium_plus foveated encoding preset", "[config]")
 {
     std::istringstream plus(R"TOML(
