@@ -115,6 +115,7 @@ public:
     // Diagnostics (and tests): pid of the live out-of-process encoder helper
     // frames are currently sent to, or -1 when they are encoded in-process.
     int EncoderHelperPid() const;
+    bool UsesLowLatencyRateControl() const { return lowLatencyRateControl_; }
     // Diagnostics (and tests): whether the in-process VideoToolbox session
     // Initialize() created is hardware-accelerated. A software session is fed a
     // video-range 4:2:0 conversion of each frame (EncoderSessionColor.h).
@@ -238,6 +239,7 @@ private:
     bool tenBit_ = false;
     bool forceSoftwareForTesting_ = false;
     bool inProcessSessionHardware_ = false;
+    bool lowLatencyRateControl_ = false;
 
     // Which process encodes, and why — decided once in Initialize() from an
     // actual VideoToolbox hardware-encoder query plus the encoder_helper

@@ -1023,6 +1023,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         nullptr,
         &compressionSession);
     const bool lowLatencyRateControl = status == noErr;
+    lowLatencyRateControl_ = lowLatencyRateControl;
     if (!lowLatencyRateControl)
     {
         spdlog::info("VideoEncoder: {} low-latency rate control unavailable ({}); using the standard rate control",

@@ -145,6 +145,24 @@ TEST_CASE("Explicit foveation parameters: medium_plus sits between medium and li
     CHECK(off.optimizedEyeHeight == 2160);
 }
 
+TEST_CASE("Stronger foveation levels encode fewer pixels", "[protocol][foveation]")
+{
+    const FoveationPresetParameters base = MediumPlusParameters();
+    CHECK(StrongerFoveationParameters(base, 0).centerSizeX == base.centerSizeX);
+
+    uint64_t previousPixels = UINT64_MAX;
+    for (uint32_t level = 0; level <= 4; ++level)
+    {
+        INFO("level " << level);
+        const FoveationLayout layout = CalculateFoveationLayout(
+            2064, 2208, FoveationPreset::Medium, StrongerFoveationParameters(base, level));
+        REQUIRE(IsFoveatedEncodingLayoutUsable(layout, 2064, 2208));
+        const uint64_t pixels = static_cast<uint64_t>(layout.optimizedEyeWidth) * layout.optimizedEyeHeight;
+        CHECK(pixels < previousPixels);
+        previousPixels = pixels;
+    }
+}
+
 TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", "[protocol][foveation]")
 {
     const FoveationPreset presets[] = {

@@ -53,6 +53,20 @@ inline FoveationPresetParameters ParametersForPreset(FoveationPreset preset)
     }
 }
 
+// Each level shrinks the full-resolution centre by 12% and compresses the edges one step further,
+// about 20% fewer encoded pixels per level for the medium presets.
+inline FoveationPresetParameters StrongerFoveationParameters(FoveationPresetParameters params, uint32_t level)
+{
+    for (uint32_t i = 0; i < level; ++i)
+    {
+        params.centerSizeX *= 0.88f;
+        params.centerSizeY *= 0.88f;
+        params.edgeRatioX += 1.0f;
+        params.edgeRatioY += 1.0f;
+    }
+    return params;
+}
+
 // "medium_plus" (config name only; it travels as FoveationPreset::Medium with
 // these parameters in the announce): medium's edge ratios with a larger centre,
 // between medium and light in encoded size.

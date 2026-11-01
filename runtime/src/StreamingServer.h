@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ClientAdmission.h"
+#include "EncodeBudget.h"
 
 #include <array>
 #include <atomic>
@@ -148,6 +149,7 @@ private:
         uint32_t foveatedTargetEyeHeight = 0;
         float activeResolutionScale = 0.75f;
         bool foveatedEncodingActive = false;
+        uint32_t foveationLevel = 0;
         uint32_t streamConfigSequence = 0;
     };
 
@@ -197,6 +199,8 @@ private:
     void UpdatePredictionHorizon();
     void TickPendingStreamConfigTimeout(int64_t nowNs);
     void MaybeRequestStreamReconfigure(float targetResolutionScale);
+    void MaybeAdjustFoveationForEncodeTime();
+    void SendStreamConfigRequest(float resolutionScale, uint32_t foveationLevel, int64_t nowNs);
     void ApplyPendingStreamConfigLocked(const oxr::protocol::StreamConfigUpdate& update);
     void ResetPendingStreamConfigLocked();
     StreamLayoutState GetStreamLayoutState() const;
@@ -248,6 +252,13 @@ private:
     std::string abrProfileName_ = "bitrate";
     std::atomic<uint32_t> pendingStreamConfigSequence_{0};
     std::atomic<float> pendingResolutionScale_{0.0f};
+    std::atomic<uint32_t> pendingFoveationLevel_{0};
+    static constexpr uint32_t MaxFoveationLevel = 4;
+    oxrsys::encode_budget::Controller encodeBudget_{MaxFoveationLevel}; // encode thread only
+    uint32_t lastEncodeBudgetWindow_ = 0;                                // encode thread only
+    std::atomic<double> encodeTimeAverageMs_{0.0};
+    std::atomic<uint32_t> encodeTimeWindow_{0};
+    std::atomic<int64_t> streamConfigAppliedNs_{0};
     std::mutex streamConfigMutex_;
     oxr::protocol::StreamConfigUpdate pendingStreamConfigUpdate_ = {};
     oxrsys::streaming_reconfigure::PendingState streamConfigPending_;
