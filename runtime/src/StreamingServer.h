@@ -224,6 +224,7 @@ private:
     std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic_bool tenBitEncodingActive_{false};
     std::atomic_bool clientSupportsFoveatedEncoding_{false};
+    std::atomic_bool clientSupportsFoveationEyeCenter_{false};
     std::atomic_bool clientSupportsStreamReconfigure_{false};
     std::atomic_bool clientSupportsMixedRealityPassthrough_{false};
     std::atomic_bool clientSupportsSpatialEntity_{false};

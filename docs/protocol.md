@@ -111,6 +111,13 @@ preferred codec is implemented by both sides. Android and shared Apple clients a
 H.265 support while keeping H.265 as their preferred codec. Each video packet/NAL header carries the
 selected `VideoCodec`, so the wire format does not need a codec-specific stream.
 
+`CLIENT_CAPABILITY_FOVEATION_EYE_CENTER` says the client decodes eye-centred foveation. When foveated
+encoding is active the runtime announces `SERVER_FEATURE_FOVEATION_EYE_CENTER`, and with both bits each
+eye's full-resolution region is centred on that eye's forward direction instead of the announced
+`foveationCenterShiftX/Y`. Each side derives the shift with `EyeCenterShifts` in `common/Foveation.h`
+from the eye's fov and the announced centre size: the runtime from the fov the app submits, the Quest
+client from its left eye's fov, mirrored for the right eye.
+
 `CLIENT_CAPABILITY_TEN_BIT_ENCODING` separately advertises HEVC Main10 decode support. The runtime
 uses Main10 only when this capability is present, `streaming.encoder_10bit` is enabled, and H.265 is
 the negotiated codec. H.264 and clients without the capability receive 8-bit video.

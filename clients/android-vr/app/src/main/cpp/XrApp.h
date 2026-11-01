@@ -169,6 +169,7 @@ private:
     bool swapchainUpdateAvailable_ = false;
     bool displayRefreshRateAvailable_ = false;
     bool compositionLayerSettingsAvailable_ = false;
+    bool serverFoveationEyeCentered_ = false;
     PFN_xrCreateFoveationProfileFB xrCreateFoveationProfileFB_ = nullptr;
     PFN_xrDestroyFoveationProfileFB xrDestroyFoveationProfileFB_ = nullptr;
     PFN_xrUpdateSwapchainFB xrUpdateSwapchainFB_ = nullptr;

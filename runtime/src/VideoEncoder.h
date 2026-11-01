@@ -63,6 +63,8 @@ public:
         float centerShiftY = 0.0f;
         float edgeRatioX = 1.0f;
         float edgeRatioY = 1.0f;
+        // Centre each eye's full-resolution region on its forward direction instead of centerShift.
+        bool eyeCentered = false;
     };
 
     struct BackendCapabilities

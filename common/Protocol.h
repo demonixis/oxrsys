@@ -113,6 +113,7 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_DEPTH_OCCLUSION = 0x00000080,
     SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
     SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
+    SERVER_FEATURE_FOVEATION_EYE_CENTER = 0x00000400, // foveation centres follow each eye's forward direction
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -128,6 +129,7 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SPATIAL_ENTITY = 0x00000100,
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
     CLIENT_CAPABILITY_TEN_BIT_ENCODING = 0x00000400, // client can decode HEVC Main10
+    CLIENT_CAPABILITY_FOVEATION_EYE_CENTER = 0x00000800, // client decodes eye-centred foveation
 };
 
 enum ClientCodecCapabilityFlags : uint32_t
