@@ -194,7 +194,7 @@ struct ContentView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 120)
+            .frame(width: 190)
 
             StatusPill(
                 title: readiness.isReady ? "Ready" : "Action needed",
@@ -210,11 +210,15 @@ struct ContentView: View {
 
             if readiness.canConfigureUsb {
                 Button {
-                    model.configureQuestUsbReverse()
+                    if model.mainTransportSelection == .usbNetwork {
+                        model.configureQuestUsbNetwork()
+                    } else {
+                        model.configureQuestUsbReverse()
+                    }
                 } label: {
                     Label("Configure", systemImage: "cable.connector")
                 }
-                .disabled(model.isUsbSetupInProgress)
+                .disabled(model.isUsbSetupInProgress || model.isUsbNetworkSetupInProgress)
             }
         }
         .frame(minWidth: 360, alignment: .leading)
@@ -496,6 +500,11 @@ struct ContentView: View {
                                   $0.serial == model.selectedQuestUsbSerial && $0.isUsable
                               }) ||
                               model.isUsbSetupInProgress)
+                    Button("Restore USB Mode") {
+                        model.restoreQuestUsbMode()
+                    }
+                    .help("Switch the headset from its USB network mode back to its default USB mode.")
+                    .disabled(model.isUsbNetworkSetupInProgress)
                     Spacer()
                 }
             }

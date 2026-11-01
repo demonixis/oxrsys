@@ -58,6 +58,7 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
     case auto
     case wifi
     case usbAdb = "usb_adb"
+    case usbNcm = "usb_ncm"
 
     var id: String { rawValue }
 
@@ -69,6 +70,8 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
             return "WiFi"
         case .usbAdb:
             return "USB ADB"
+        case .usbNcm:
+            return "USB Network"
         }
     }
 }
@@ -206,6 +209,7 @@ enum RuntimeActivityState: String {
 enum RuntimeActivityTransport: String {
     case wifi
     case usbAdb = "usb_adb"
+    case usbNcm = "usb_ncm"
 }
 
 enum RuntimeDeviceType: String {
@@ -448,6 +452,8 @@ struct HomeRuntimeActivity: Equatable {
             return "Streaming (WiFi)"
         case (.streaming, .usbAdb):
             return "Streaming (USB)"
+        case (.streaming, .usbNcm):
+            return "Streaming (USB Network)"
         case (.streaming, _):
             return "Streaming"
         case (.idle, _):
@@ -548,6 +554,7 @@ struct HomeRuntimeActivity: Equatable {
 enum HomePrimaryTransport: String, CaseIterable, Identifiable {
     case wifi
     case usbAdb
+    case usbNetwork
 
     var id: String { rawValue }
 
@@ -557,6 +564,8 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return "WiFi"
         case .usbAdb:
             return "USB"
+        case .usbNetwork:
+            return "USB Net"
         }
     }
 
@@ -566,6 +575,8 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return .wifi
         case .usbAdb:
             return .usbAdb
+        case .usbNetwork:
+            return .usbNcm
         }
     }
 }
@@ -782,6 +793,7 @@ enum AdbServerBridge {
     nonisolated private static var host: String { "127.0.0.1" }
     nonisolated private static var port: UInt16 { 5037 }
     nonisolated private static var socketTimeoutSeconds: Int { 1 }
+    nonisolated private static var shellTimeoutSeconds: Int { 10 }
 
     nonisolated static func isAvailable() -> Bool {
         (try? request("host:version", expectsPayload: true)) != nil
@@ -820,14 +832,42 @@ enum AdbServerBridge {
         return configuredPorts
     }
 
+    nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        let fileDescriptor = try connectedSocket(timeoutSeconds: shellTimeoutSeconds)
+        defer { close(fileDescriptor) }
+
+        try sendService("host:transport:\(serial)", to: fileDescriptor)
+        try sendService("shell:\(command)", to: fileDescriptor)
+        var output = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let readCount = Darwin.recv(fileDescriptor, &buffer, buffer.count, 0)
+            if readCount == 0 {
+                break
+            }
+            guard readCount > 0 else {
+                throw AdbServerProtocolError.unavailable
+            }
+            output.append(contentsOf: buffer[0..<readCount])
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
     nonisolated private static func request(_ service: String, expectsPayload: Bool) throws -> String {
+        let fileDescriptor = try connectedSocket(timeoutSeconds: socketTimeoutSeconds)
+        defer { close(fileDescriptor) }
+
+        try sendService(service, to: fileDescriptor)
+        return expectsPayload ? try readPayload(from: fileDescriptor) : ""
+    }
+
+    nonisolated private static func connectedSocket(timeoutSeconds: Int) throws -> Int32 {
         let fileDescriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard fileDescriptor >= 0 else {
             throw AdbServerProtocolError.unavailable
         }
-        defer { close(fileDescriptor) }
 
-        var timeout = timeval(tv_sec: socketTimeoutSeconds, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var noSigPipe: Int32 = 1
@@ -838,6 +878,7 @@ enum AdbServerBridge {
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            close(fileDescriptor)
             throw AdbServerProtocolError.unavailable
         }
 
@@ -847,9 +888,13 @@ enum AdbServerBridge {
             }
         }
         guard connected == 0 else {
+            close(fileDescriptor)
             throw AdbServerProtocolError.unavailable
         }
+        return fileDescriptor
+    }
 
+    nonisolated private static func sendService(_ service: String, to fileDescriptor: Int32) throws {
         let command = String(format: "%04x%@", service.utf8.count, service)
         try writeAll(Data(command.utf8), to: fileDescriptor)
 
@@ -861,8 +906,6 @@ enum AdbServerBridge {
         guard status == "OKAY" else {
             throw AdbServerProtocolError.protocolFailure("ADB server returned unexpected status \(status).")
         }
-
-        return expectsPayload ? try readPayload(from: fileDescriptor) : ""
     }
 
     nonisolated private static func writeAll(_ data: Data, to fileDescriptor: Int32) throws {
@@ -1024,6 +1067,11 @@ enum AdbUsbBridge {
             throw QuestUsbBridgeError.missingReversePorts(missingPorts)
         }
         return configuredPorts
+    }
+
+    nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        let (connection, _) = try connectedDevice(matching: serial)
+        return try connection.runService("shell:\(command)")
     }
 
     nonisolated private static func connectedDevice(
@@ -1911,6 +1959,19 @@ enum QuestUsbBridge {
         }
         let adb = try adbExecutablePath(customPath: customAdbPath)
         return parseReversePorts(try Shell.run(adb, ["-s", serial, "reverse", "--list"]))
+    }
+
+    nonisolated static func shell(_ command: String, serial: String, customAdbPath: String? = nil) throws -> String {
+        if cleanedCustomAdbPath(customAdbPath) == nil {
+            if let output = try? AdbUsbBridge.shell(command, serial: serial) {
+                return output
+            }
+            if let output = try? AdbServerBridge.shell(command, serial: serial) {
+                return output
+            }
+        }
+        let adb = try adbExecutablePath(customPath: customAdbPath)
+        return try Shell.run(adb, ["-s", serial, "shell", command])
     }
 
     nonisolated static func adbExecutablePath(customPath: String? = nil) throws -> String {
