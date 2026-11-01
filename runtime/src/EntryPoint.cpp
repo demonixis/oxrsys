@@ -2589,6 +2589,41 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
+// The hands a haptic call reaches: its subaction path, or every hand the action declares.
+static bool HapticsTargetsHand(const ActionState* action, XrPath subactionPath, const char* handPath)
+{
+    if (subactionPath != XR_NULL_PATH)
+    {
+        return Runtime::Get().GetPathString(subactionPath) == handPath;
+    }
+    const std::vector<XrPath>& subactionPaths = action->GetSubactionPaths();
+    if (subactionPaths.empty())
+    {
+        return true;
+    }
+    for (XrPath path : subactionPaths)
+    {
+        if (Runtime::Get().GetPathString(path) == handPath)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void SendHapticsToHands(Session* sess, const ActionState* action, XrPath subactionPath,
+                               float amplitude, float durationMs, float frequency)
+{
+    const char* handPaths[] = {"/user/hand/left", "/user/hand/right"};
+    for (uint8_t hand = 0; hand < 2; ++hand)
+    {
+        if (HapticsTargetsHand(action, subactionPath, handPaths[hand]))
+        {
+            sess->SendHaptics(hand, amplitude, durationMs, frequency);
+        }
+    }
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     XrSession session, const XrHapticActionInfo* hapticActionInfo,
     const XrHapticBaseHeader* hapticFeedback)
@@ -2626,6 +2661,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
         return XR_SESSION_NOT_FOCUSED;
     }
 
+    if (hapticFeedback->type == XR_TYPE_HAPTIC_VIBRATION)
+    {
+        const auto* vibration = reinterpret_cast<const XrHapticVibration*>(hapticFeedback);
+        const float durationMs = vibration->duration > 0 ? static_cast<float>(vibration->duration) / 1.0e6f : 0.0f;
+        const float frequency = vibration->frequency > 0.0f ? vibration->frequency : 0.0f;
+        SendHapticsToHands(sess, action, hapticActionInfo->subactionPath,
+                           std::clamp(vibration->amplitude, 0.0f, 1.0f), durationMs, frequency);
+    }
     return XR_SUCCESS;
 }
 
@@ -2665,6 +2708,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
         return XR_SESSION_NOT_FOCUSED;
     }
 
+    SendHapticsToHands(sess, action, hapticActionInfo->subactionPath, 0.0f, 0.0f, 0.0f);
     return XR_SUCCESS;
 }
 

@@ -83,6 +83,10 @@ public:
 
     // Check if a client is connected
     bool IsClientConnected() const { return state_.load() == State::Connected; }
+    bool SendHaptics(const oxr::protocol::HapticsCommand& command)
+    {
+        return SendControlPayload(&command, sizeof(command));
+    }
     State GetState() const { return state_.load(); }
     uint32_t GetTargetRefreshRateHz() const { return targetRefreshRateHz_.load(); }
 

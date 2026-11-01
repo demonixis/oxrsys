@@ -211,6 +211,11 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 - `StreamConfigUpdate`
 - `StreamConfigAck`
 
+`HapticsCommand` carries one hand's vibration from `xrApplyHapticFeedback`: amplitude 0-1, duration in
+milliseconds (0 = the headset's minimum) and frequency in Hz (0 = unspecified). An action applied without a
+subaction path sends one command per hand it declares. Amplitude 0 stops that hand, which is how
+`xrStopHapticFeedback` is forwarded.
+
 Latency reports allow the runtime to keep prediction bounded. The first 20 bytes are the historical
 base report: receive-to-submit, decode, compositor, and total client latency. Newer clients append
 displayed frame age, reprojected-frame count, stale-frame reuse count, render-pose fallback count,

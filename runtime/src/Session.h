@@ -71,6 +71,8 @@ public:
     XrResult DestroySpace(Space* space);
     XrResult GetStageBounds(XrExtent2Df* bounds);
     bool HasTrackingConnection() const;
+    // hand: 0 = left, 1 = right. Amplitude 0 stops the hand's vibration.
+    void SendHaptics(uint8_t hand, float amplitude, float durationMs, float frequency);
 
     // Input manager access
     InputManager& GetInputManager()
