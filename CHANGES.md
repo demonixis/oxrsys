@@ -74,6 +74,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- VideoToolbox sessions, in-process and in the encoder helper, now request low-latency rate control and
+  fall back to the standard rate control when the encoder does not offer it. On an M1 Pro (Apple Silicon)
+  at 2272x1264, 72 fps, HEVC, the time from submitting a frame to receiving it encoded fell from about
+  32 ms to about 11 ms; the standard rate control held each frame for about two frame periods.
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.
