@@ -122,6 +122,49 @@ final class HomeLauncherTests: XCTestCase {
         try expect(ports == Set([9944, 9945, 9946, 9948]), "Expected configured USB reverse ports")
     }
 
+    func testAdbPublicKeyEncoding() throws {
+        // Throwaway 2048-bit key; the expected value is `adb pubkey` output for the same key.
+        let pkcs1 = try XCTUnwrap(Data(base64Encoded: """
+        MIIBCgKCAQEArVT4GzUjhYRjDTEBZLGv/Buz7HCbTGSCE5C61r1P3hW4bZH7zgG5p1uwyIfJxdY+GVFDvYlEDLIfkLm1/hEH
+        qxtFfQ5fn6l4x91Vt1TdjvHVYK0t6dp7y2yuXvv2Nbp+kIs229gGxs8zUF0PPghw5QXPbpJBhbHc0q2Z+3Iuw9U7tu45oNHp
+        p6jmiJIjTlDK3o7Un/28U1JF3w5HdQytLywdmfQ0f9gQ8wmyDGlZdu+rKVRgCMoHv4kceYiE6MI8EydjHpvUPYHdtDEQOgK7
+        QrbNalIK9HmNRwZ8Ae75JS44cQoPzUbtsij6qK1GWcvwgy8Z8mrAU7ty5KjZXymbpQIDAQAB
+        """, options: .ignoreUnknownCharacters))
+        let spki = try XCTUnwrap(Data(base64Encoded: """
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArVT4GzUjhYRjDTEBZLGv/Buz7HCbTGSCE5C61r1P3hW4bZH7zgG5
+        p1uwyIfJxdY+GVFDvYlEDLIfkLm1/hEHqxtFfQ5fn6l4x91Vt1TdjvHVYK0t6dp7y2yuXvv2Nbp+kIs229gGxs8zUF0PPghw
+        5QXPbpJBhbHc0q2Z+3Iuw9U7tu45oNHpp6jmiJIjTlDK3o7Un/28U1JF3w5HdQytLywdmfQ0f9gQ8wmyDGlZdu+rKVRgCMoH
+        v4kceYiE6MI8EydjHpvUPYHdtDEQOgK7QrbNalIK9HmNRwZ8Ae75JS44cQoPzUbtsij6qK1GWcvwgy8Z8mrAU7ty5KjZXymb
+        pQIDAQAB
+        """, options: .ignoreUnknownCharacters))
+        let expected = """
+        QAAAANMrUDClmylf2ajkcrtTwGryGS+D8MtZRq2o+iiy7UbNDwpxOC4l+e4BfAZHjXn0ClJqzbZCuwI6EDG03YE91JseYycT
+        PMLohIh5HIm/B8oIYFQpq+92WWkMsgnzENh/NPSZHSwvrQx1Rw7fRVJTvP2f1I7eylBOI5KI5qin6dGgOe62O9XDLnL7ma3S
+        3LGFQZJuzwXlcAg+D11QM8/GBtjbNouQfro19vtermzLe9rpLa1g1fGO3VS3Vd3HeKmfXw59RRurBxH+tbmQH7IMRIm9Q1EZ
+        PtbFyYfIsFunuQHO+5FtuBXeT73WupATgmRMm3Dssxv8r7FkATENY4SFIzUb+FSt4hCCtgT5/dMEXwR+n+GDq428aV7lJjah
+        9w61sneGrBMtkWqGzlgkQUsqh3T2X8zZV4FDbK5iUv/N4akelcOh49+uElJV6apSZmdrULNeb7I8VCBqLCdgAPU/TMIBA7iD
+        Gm4L2yoJ3wTNMKR4gf5QEwFd2LEEvxmN2yhKG4bIReuLUUnZkr6DIOJtC0Uo0Asz7cF4faz0CcEDPl8IMc6C7mRhGjSALPBz
+        DUFwfh5rVJe0Fig2USdGqQriPrQHicqM9pKoJGwM4GqIiP7Xh/qk8Z/kfRgnC3SlNSv8nb2i6FxYhHh+blje5SYSQMuNJBIH
+        upLk/vkohwB95x4Bzar3lQEAAQA=
+        """.replacingOccurrences(of: "\n", with: "")
+
+        for key in [pkcs1, spki] {
+            let payload = try AdbPublicKeyEncoder.adbPublicKeyPayload(derPublicKey: key, comment: "test@host")
+            try expect(payload == Data("\(expected) test@host\0".utf8), "Expected the adb public key encoding")
+        }
+    }
+
+    func testNativeAdbInterfaceFilter() throws {
+        try expect(AdbUsbBridge.isAdbInterface(interfaceClass: 0xff, subclass: 0x42, interfaceProtocol: 0x01),
+                   "Expected the ADB interface to match")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: 0xff, subclass: 0x42, interfaceProtocol: 0x03),
+                   "Expected fastboot to be rejected")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: 0x02, subclass: 0x0d, interfaceProtocol: 0x00),
+                   "Expected the NCM control interface to be rejected")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: nil, subclass: 0x42, interfaceProtocol: 0x01),
+                   "Expected a missing class to be rejected")
+    }
+
     func testQuestUsbAdbCandidatePaths() throws {
         let candidates = QuestUsbBridge.adbCandidatePaths(
             environment: [
