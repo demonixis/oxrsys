@@ -116,6 +116,16 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed Home's native USB ADB backend, which never ran. Matching the vendor-specific ADB interface by
+  class, subclass, and protocol needs `idVendor` in the IOKit dictionary, so the lookup found nothing
+  and Home always fell back to the ADB server or an external `adb`. Home now filters interfaces itself.
+  Behind that, opening the interface crashed Home (the plug-in function table was passed as `this`),
+  the RSA public key was rejected for the PKCS#1 form Security exports, a `ReadPipeTO` timeout
+  (`kIOUSBTransactionTimeout`) ended the wait for the headset's authorization prompt, and devices were
+  named by USB location because current adbd banners omit `ro.serialno`; Home now uses the USB serial
+  number like `adb`. Reverse setup no longer uses the native backend: adbd drops reverse mappings
+  when their host connection closes, and Home does not hold one open to relay the headset's
+  connections, so reverse stays on the ADB server or external `adb`.
 - Fixed the `adb` children the runtime forks (the Quest logcat clear and capture) running the parent's signal
   handlers if a signal arrived between `fork()` and `exec()`. In a multithreaded process the child is not safe to run
   arbitrary code in that window; `ctest` left crash reports from orphaned `oxrsys_runtime_tests` children behind. The
