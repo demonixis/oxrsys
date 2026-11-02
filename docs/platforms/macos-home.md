@@ -170,11 +170,13 @@ that transport is persisted. Readiness is refreshed from the IORegistry and the 
 See [Quest](quest.md#usb-network-transport) for the client side.
 
 The Settings ADB section stores an ADB mode and optional custom `adb` executable path in SwiftUI Home
-`UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly, performs ADB
-authentication with a Home-managed host key, and configures reverse mappings without Android Studio,
-the Android SDK, Homebrew, or an `adb` executable. If the native USB path is unavailable, Home falls
-back to a running local ADB server on `127.0.0.1:5037`, then to SDK, Homebrew, and `PATH` executable
-candidates. `Custom` mode tries only the configured executable path; `Auto Detect` pre-fills that
+`UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly and performs ADB
+authentication with a Home-managed host key, so it lists devices without Android Studio, the Android
+SDK, Homebrew, or an `adb` executable; the first connection asks the headset to allow the
+`OXRSys@<host>` key. If the native USB path is unavailable, Home falls back to a running local ADB
+server on `127.0.0.1:5037`, then to SDK, Homebrew, and `PATH` executable candidates. Reverse mappings
+always use the ADB server or the external `adb`: adbd drops them when their host connection closes,
+and Home does not keep a native connection open to relay the headset's connections. `Custom` mode tries only the configured executable path; `Auto Detect` pre-fills that
 path from the detected external `adb` executable when one is available. If the selected custom path
 is empty or invalid, Home reports that path and does not silently fall back to Internal mode.
 
@@ -315,4 +317,4 @@ The runtime reloads config file changes opportunistically:
   and `encoder_helper_path` apply when streaming or the encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
-The Settings ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the native USB ADB protocol, the local ADB server protocol, or `adb reverse --list` fallback. USB refresh/setup results are request-scoped so stale results after ADB mode, path, selected device, or transport changes are ignored. If a periodic refresh cannot read reverse mappings for the same still-authorized device, Home preserves previously verified reverse ports instead of flipping the main readiness pill to not ready. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.
+The Settings ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the local ADB server protocol or `adb reverse --list` fallback. USB refresh/setup results are request-scoped so stale results after ADB mode, path, selected device, or transport changes are ignored. If a periodic refresh cannot read reverse mappings for the same still-authorized device, Home preserves previously verified reverse ports instead of flipping the main readiness pill to not ready. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.
