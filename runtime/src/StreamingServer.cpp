@@ -1277,9 +1277,11 @@ void StreamingServer::TcpTrackingThread()
             {
                 break;
             }
+            // Only the USB ADB session owner may send tracking, as UDP tracking is limited
+            // to the admitted WiFi address.
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
                 payload.size() >= oxr::protocol::TRACKING_PACKET_BASE_SIZE &&
-                trackingReceiver_ != nullptr)
+                trackingReceiver_ != nullptr && clientUsesUsbAdb_.load())
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
             }
@@ -1721,14 +1723,16 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     {
         std::string connectedIp;
         std::string connectedName;
+        oxrsys::ClientAdmissionDecision admission;
         {
             std::lock_guard<std::mutex> lock(clientMutex_);
             connectedIp = clientIp_;
             connectedName = clientName_;
+            admission = oxrsys::EvaluateClientAdmission(
+                clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
+                SteadyClockNowNs(), kClientAdmissionLogIntervalNs, clientUsesUsbAdb_.load(),
+                /*candidateUsesUsbAdb=*/false);
         }
-        const oxrsys::ClientAdmissionDecision admission = oxrsys::EvaluateClientAdmission(
-            clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
-            SteadyClockNowNs(), kClientAdmissionLogIntervalNs);
         if (!admission.accept)
         {
             if (admission.log)
@@ -1986,6 +1990,33 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
+    // Same one-client rule as HandleClientConnect: a USB client may not take over a WiFi
+    // session. A USB client owning the session may reconnect.
+    {
+        std::string connectedIp;
+        std::string connectedName;
+        oxrsys::ClientAdmissionDecision admission;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex_);
+            connectedIp = clientIp_;
+            connectedName = clientName_;
+            admission = oxrsys::EvaluateClientAdmission(
+                clientAdmission_, state_.load() == State::Connected, connectedIp, "USB ADB",
+                SteadyClockNowNs(), kClientAdmissionLogIntervalNs, clientUsesUsbAdb_.load(),
+                /*candidateUsesUsbAdb=*/true);
+        }
+        if (!admission.accept)
+        {
+            if (admission.log)
+            {
+                spdlog::warn("StreamingServer: refusing USB ADB ClientConnect while '{}' ({}) is "
+                             "connected; disconnect it first",
+                             connectedName, connectedIp);
+            }
+            return;
+        }
+    }
+
     // Same as HandleClientConnect: a new client brings a new clock. USB tracking arrives over
     // TCP, so no UDP sender is the client.
     if (trackingReceiver_)

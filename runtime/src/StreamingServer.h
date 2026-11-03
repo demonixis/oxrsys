@@ -187,8 +187,8 @@ private:
     void CheckClientLiveness(int64_t nowNs);
     std::atomic<uint64_t> lastTrackingCountSeen_{0};
     std::atomic<int64_t> lastClientActivityNs_{0};
-    // Control-thread only: which address was last refused a ClientConnect and when
-    // that was last logged (see ClientAdmission.h).
+    // Guarded by clientMutex_ (WiFi control and USB control threads): which address was
+    // last refused a ClientConnect and when that was last logged (see ClientAdmission.h).
     oxrsys::ClientAdmissionState clientAdmission_;
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);

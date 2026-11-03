@@ -185,6 +185,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
   view). The connected address can still reconnect, and UDP tracking from any other sender is
   ignored.
+- Fixed the desktop simulator taking over a USB ADB session over loopback: admission now compares
+  the transport as well as the address, a USB `ClientConnect` is refused while a WiFi client is
+  connected, and USB TCP tracking is used only while the USB client owns the session.
 - Fixed H.264 streams on Quest holding about 16 frames (around 220 ms at 72 Hz) in the decoder before
   output. The Android VR client now sets the Qualcomm decode-order and low-latency MediaCodec keys,
   which brings H.264 decode on Quest 3 to about 11 ms.
