@@ -14,6 +14,7 @@
 #include <ctime>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 
 class Instance;
@@ -148,6 +149,7 @@ private:
     // xrRequestExitSession. Lock order: stateTransitionMutex_ before frameStateMutex_.
     std::mutex stateTransitionMutex_;
     int endFrameAdvanceDelayUs_ = 0; // test seam, see Session constructor
+    int sendHapticsDelayUs_ = 0; // test seam, see Session constructor
     mutable std::mutex debugUtilsMutex_;
     std::mutex stageBoundsMutex_;
     XrExtent2Df stageBounds_ = {};
@@ -155,6 +157,10 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<StreamingServer> streamingServer_;
+    // Frame, space and haptics calls hold this shared for their short, non-blocking use of
+    // streamingServer_. EndSession and Shutdown hold it exclusively only to take the server out,
+    // then stop and destroy it on their own thread, so no frame call ever waits on Stop().
+    mutable std::shared_mutex streamingServerMutex_;
     std::shared_ptr<std::atomic_bool> streamingSnapshotDemand_ =
         std::make_shared<std::atomic_bool>(false);
 
@@ -192,5 +198,6 @@ private:
     // Streaming state
     bool streamingStarted_ = false;
     void StartStreamingIfNeeded();
+    // Caller holds streamingServerMutex_ shared.
     void CheckStreamingConnection();
 };

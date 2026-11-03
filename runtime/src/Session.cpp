@@ -22,6 +22,7 @@
 #include <ctime>
 #include <exception>
 #include <numeric>
+#include <shared_mutex>
 #include <thread>
 #include <utility>
 
@@ -124,6 +125,11 @@ Session::Session(Instance* instance, void* metalDevice, void* metalCommandQueue)
     {
         endFrameAdvanceDelayUs_ = std::atoi(delay);
     }
+    // Test seam: holds SendHaptics on the live server, so the EndSession race test is deterministic.
+    if (const char* delay = std::getenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US"))
+    {
+        sendHapticsDelayUs_ = std::atoi(delay);
+    }
     monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
 
@@ -147,6 +153,11 @@ Session::Session(Instance* instance, const GraphicsContext& graphicsContext)
     if (const char* delay = std::getenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US"))
     {
         endFrameAdvanceDelayUs_ = std::atoi(delay);
+    }
+    // Test seam: holds SendHaptics on the live server, so the EndSession race test is deterministic.
+    if (const char* delay = std::getenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US"))
+    {
+        sendHapticsDelayUs_ = std::atoi(delay);
     }
     monoStartNs_ = MonotonicNowNs();
     lastFrameTime_ = startTime_;
@@ -271,17 +282,26 @@ XrResult Session::EndSession()
         RestorePacingThreadLocked();
     }
 
-    // Stop streaming so it can be restarted on next BeginSession
-    streamingSnapshotDemand_->store(false, std::memory_order_release);
-    if (streamingServer_)
+    // Stop streaming so it can be restarted on next BeginSession. Frame and space calls may still
+    // be running on other threads: take the server away from them first, then stop it here.
+    std::unique_ptr<StreamingServer> streamingServer;
     {
-        if (!streamingServer_->Stop())
+        std::unique_lock streamingLock(streamingServerMutex_);
+        streamingServer = std::move(streamingServer_);
+    }
+    streamingSnapshotDemand_->store(false, std::memory_order_release);
+    if (streamingServer)
+    {
+        // Stop() destroys the tracking receiver the input manager reads.
+        inputManager_->SetTrackingReceiver(nullptr);
+        if (!streamingServer->Stop())
         {
+            std::unique_lock streamingLock(streamingServerMutex_);
+            streamingServer_ = std::move(streamingServer);
             return XR_ERROR_RUNTIME_FAILURE;
         }
-        streamingServer_.reset();
+        streamingServer.reset();
         streamingStarted_ = false;
-        inputManager_->SetTrackingReceiver(nullptr);
         spdlog::info("OXRSys: Streaming server stopped for session end");
     }
 
@@ -346,16 +366,23 @@ XrResult Session::Shutdown()
         inputManager_->SetTrackingReceiver(nullptr);
     }
 
-    streamingSnapshotDemand_->store(false, std::memory_order_release);
-    if (streamingServer_)
+    std::unique_ptr<StreamingServer> streamingServer;
     {
-        if (!streamingServer_->Stop())
+        std::unique_lock streamingLock(streamingServerMutex_);
+        streamingServer = std::move(streamingServer_);
+    }
+    streamingSnapshotDemand_->store(false, std::memory_order_release);
+    if (streamingServer)
+    {
+        if (!streamingServer->Stop())
         {
             // Keep the server, encoder, swapchains and public session handle
             // alive. xrDestroySession/Instance can retry after callbacks exit.
+            std::unique_lock streamingLock(streamingServerMutex_);
+            streamingServer_ = std::move(streamingServer);
             return XR_ERROR_RUNTIME_FAILURE;
         }
-        streamingServer_.reset();
+        streamingServer.reset();
         streamingStarted_ = false;
     }
 
@@ -500,6 +527,7 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
         }
     }
 
+    std::shared_lock streamingLock(streamingServerMutex_);
     streamingSnapshotDemand_->store(
         streamingServer_ != nullptr && streamingServer_->IsClientConnected(),
         std::memory_order_release);
@@ -509,6 +537,7 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     {
         targetRefreshHz = std::max(streamingServer_->GetTargetRefreshRateHz(), 1u);
     }
+    streamingLock.unlock();
 
     // Frame pacing: self-correcting absolute-deadline grid at the negotiated display
     // period. The previous scheme slept for (period - elapsed) and then re-anchored
@@ -782,6 +811,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
     }
 
     // Send to connected headset client if streaming
+    std::shared_lock streamingLock(streamingServerMutex_);
     CheckStreamingConnection();
     if (streamingServer_ && streamingServer_->IsClientConnected())
     {
@@ -816,6 +846,7 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
             lastLogTime = Clock::now();
         }
     }
+    streamingLock.unlock();
 
     {
         std::scoped_lock lock(frameStateMutex_);
@@ -1328,12 +1359,14 @@ XrResult Session::DestroySwapchain(Swapchain* swapchain)
 
 bool Session::HasTrackingConnection() const
 {
+    std::shared_lock streamingLock(streamingServerMutex_);
     return streamingServer_ != nullptr && streamingServer_->IsClientConnected();
 }
 
 void Session::SendHaptics(uint8_t hand, float amplitude, float durationMs, float frequency)
 {
-    if (!HasTrackingConnection())
+    std::shared_lock streamingLock(streamingServerMutex_);
+    if (streamingServer_ == nullptr || !streamingServer_->IsClientConnected())
     {
         return;
     }
@@ -1342,6 +1375,10 @@ void Session::SendHaptics(uint8_t hand, float amplitude, float durationMs, float
     command.amplitude = amplitude;
     command.durationMs = durationMs;
     command.frequency = frequency;
+    if (sendHapticsDelayUs_ > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::microseconds(sendHapticsDelayUs_));
+    }
     streamingServer_->SendHaptics(command);
 }
 
@@ -1446,8 +1483,8 @@ void Session::StartStreamingIfNeeded()
         return;
     }
 
-    streamingServer_ = std::make_unique<StreamingServer>();
-    streamingServer_->SetGraphicsContext(graphicsContext_);
+    auto streamingServer = std::make_unique<StreamingServer>();
+    streamingServer->SetGraphicsContext(graphicsContext_);
 
     // Per-eye render resolution for the configured render_device — this must match the
     // recommendedImageRect the app renders into (see RenderBaseEyeResolution), otherwise the
@@ -1457,15 +1494,16 @@ void Session::StartStreamingIfNeeded()
     RenderBaseEyeResolution(width, height);
     uint32_t refreshHz = 90;
 
-    if (streamingServer_->Start(width, height, refreshHz))
+    if (streamingServer->Start(width, height, refreshHz))
     {
+        std::unique_lock streamingLock(streamingServerMutex_);
+        streamingServer_ = std::move(streamingServer);
         streamingStarted_ = true;
         spdlog::info("OXRSys: Streaming server started, waiting for headset connection...");
     }
     else
     {
         spdlog::warn("OXRSys: Failed to start streaming server (non-fatal, simulator mode only)");
-        streamingServer_.reset();
     }
 }
 

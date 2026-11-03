@@ -4089,6 +4089,136 @@ TEST_CASE("Distinct swapchains can be created and destroyed concurrently",
 // session state, so without one lock around both transition paths an exit request landing in that
 // window could emit STOPPING and then be overwritten back to SYNCHRONIZED, leaving xrEndSession to
 // fail with XR_ERROR_SESSION_NOT_STOPPING. Every interleaving must still reach STOPPING and end.
+TEST_CASE("EndSession waits for a haptics call still using the streaming server",
+          "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    // Hold every haptics send on the live server for 300 ms, and end the session inside that window,
+    // so the call is always still using the server when xrEndSession stops it.
+    setenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US", "300000", 1);
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    unsetenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US");
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[1];
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    vibration.frequency = 160.0f;
+
+    // Wait until the client is connected and a haptics command reaches it.
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+
+    XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+    auto drainStates = [&]() {
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+    };
+    drainStates();
+    REQUIRE(lastState == XR_SESSION_STATE_FOCUSED);
+
+    // A second app thread sends haptics; it passes the FOCUSED check and is held on the live server.
+    vibration.amplitude = 0.75f;
+    std::atomic<bool> hapticsStarted{false};
+    std::atomic<bool> hapticsReturned{false};
+    XrResult hapticsResult = XR_ERROR_RUNTIME_FAILURE;
+    std::thread hapticsThread([&] {
+        hapticsStarted.store(true, std::memory_order_release);
+        hapticsResult = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                              reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        hapticsReturned.store(true, std::memory_order_release);
+    });
+    while (!hapticsStarted.load(std::memory_order_acquire))
+    {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Meanwhile the render thread exits and ends the session while the haptics call is in flight.
+    XR_CHECK(xrRequestExitSession(context.session));
+    for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        drainStates();
+    }
+    const bool reachedStopping = lastState == XR_SESSION_STATE_STOPPING;
+    const bool hapticsReturnedBeforeEnd = hapticsReturned.load(std::memory_order_acquire);
+    const XrResult endResult = reachedStopping ? xrEndSession(context.session) : XR_ERROR_SESSION_NOT_STOPPING;
+    hapticsThread.join();
+    REQUIRE(reachedStopping);
+    REQUIRE_FALSE(hapticsReturnedBeforeEnd);
+    CHECK(endResult == XR_SUCCESS);
+    CHECK(hapticsResult == XR_SUCCESS);
+
+    // The server was stopped only after the in-flight call finished with it, so the command arrived.
+    REQUIRE(peer.ReadHaptics(command, std::chrono::seconds(2)));
+    CHECK(command.hand == 1);
+    CHECK_THAT(command.amplitude, WithinAbs(0.75f, 0.0001f));
+}
+
 TEST_CASE("RequestExitSession racing the first frame submission still reaches STOPPING", "[runtime][loader]")
 {
     // Hold the frame-driven READY -> SYNCHRONIZED step for 2 ms after its branch is chosen, and send the
