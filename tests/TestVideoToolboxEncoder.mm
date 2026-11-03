@@ -3,9 +3,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "CompositionOverlay.h"
 #include "EncoderSessionColor.h"
+#include "OpenXRPlatform.h"
+#include "Swapchain.h"
 #include "VideoEncoder.h"
 #include "VuiColorTestSupport.h"
+#include "VulkanDispatch.h"
 
 #import <CoreMedia/CoreMedia.h>
 #import <Metal/Metal.h>
@@ -13,9 +17,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -692,6 +698,129 @@ TEST_CASE("Packed alpha appends each eye's alpha below the eyes",
 
     CHECK(leftAlpha < 16);
     CHECK(rightAlpha > 239);
+
+    [queue release];
+    [device release];
+}
+
+// The runtime defines this in EntryPoint.cpp; the Vulkan swapchain code links against it.
+VulkanDispatch gVulkanDispatch;
+
+TEST_CASE("A quad drawn before the headset connects is composited once it connects",
+          "[video][encoder][videotoolbox][overlay]")
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+
+    // The application draws its menu once into a dynamic swapchain, before any
+    // headset is connected, and then submits that image with every frame.
+    auto demand = std::make_shared<std::atomic_bool>(false);
+    XrSwapchainCreateInfo createInfo = {XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = MTLPixelFormatBGRA8Unorm;
+    createInfo.sampleCount = 1;
+    createInfo.width = 16;
+    createInfo.height = 16;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+    Swapchain menu(graphics, &createInfo);
+    REQUIRE(menu.InitializationResult() == XR_SUCCESS);
+    REQUIRE(menu.GetImageCount() > 1);
+    menu.SetStreamingSnapshotDemand(demand);
+
+    uint32_t index = 0;
+    REQUIRE(menu.AcquireImage(nullptr, &index) == XR_SUCCESS);
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = XR_INFINITE_DURATION;
+    REQUIRE(menu.WaitImage(&waitInfo) == XR_SUCCESS);
+    std::vector<XrSwapchainImageMetalKHR> images(menu.GetImageCount(), {XR_TYPE_SWAPCHAIN_IMAGE_METAL_KHR});
+    uint32_t imageCount = 0;
+    REQUIRE(menu.EnumerateImages(static_cast<uint32_t>(images.size()), &imageCount,
+                                 reinterpret_cast<XrSwapchainImageBaseHeader*>(images.data())) == XR_SUCCESS);
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)images[index].texture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+    id<MTLCommandBuffer> drawMenu = [queue commandBuffer];
+    [[drawMenu renderCommandEncoderWithDescriptor:pass] endEncoding];
+    [drawMenu commit];
+    REQUIRE(menu.ReleaseImage(nullptr) == XR_SUCCESS);
+
+    // Every xrEndFrame looks the overlay up this way. With no headset connected
+    // it takes no snapshot.
+    menu.SnapshotLastReleasedImageIfMissing();
+    CHECK_FALSE(menu.GetLastReleasedFrameImageSource(0).IsValid());
+
+    // The headset connects. The release took no snapshot, so the lookup takes it
+    // now, and later frames reuse it instead of taking another staging slot.
+    demand->store(true);
+    menu.SnapshotLastReleasedImageIfMissing();
+    const FrameImageSource menuImage = menu.GetLastReleasedFrameImageSource(0);
+    REQUIRE(menuImage.IsValid());
+    CHECK(menuImage.sync.kind == FrameSyncKind::MetalSharedEvent);
+    CHECK(menuImage.sync.IsValid());
+    menu.SnapshotLastReleasedImageIfMissing();
+    CHECK(menu.GetLastReleasedFrameImageSource(0).sync.waitValue == menuImage.sync.waitValue);
+
+    // The headset sees the menu drawn before it connected: a 1 m quad 1 m ahead,
+    // under a 45 degree half-fov, covers the middle half of the left eye only.
+    std::mutex mutex;
+    std::vector<std::vector<uint8_t>> nals;
+    VideoEncoder encoder;
+    REQUIRE(encoder.Initialize(128, 64, 60, 8, graphics, oxr::protocol::VideoCodec::H264));
+
+    const float halfFov = static_cast<float>(M_PI_4);
+    XrPosef eyePose = {};
+    eyePose.orientation.w = 1.0f;
+    XrPosef quadPose = eyePose;
+    quadPose.position.z = -1.0f;
+    const glm::mat4 clip = oxrsys::runtime::OverlayClipFromLayer(
+        eyePose, XrFovf{-halfFov, halfFov, halfFov, -halfFov}, eyePose, quadPose);
+    FrameOverlayLayer quad = {};
+    quad.shape = FrameOverlayLayer::Shape::Quad;
+    quad.image = menuImage;
+    quad.eyeMask = 1u;
+    quad.width = 1.0f;
+    quad.height = 1.0f;
+    std::memcpy(quad.clipFromLayer[0], &clip[0][0], sizeof(quad.clipFromLayer[0]));
+
+    FrameSource frame = {};
+    frame.left = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm, 0xff000000u);
+    frame.right = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm, 0xff000000u);
+    frame.overlays.push_back(std::move(quad));
+    encoder.ForceKeyframe();
+    REQUIRE(encoder.EncodeStereo(
+        std::move(frame),
+        1'000'000,
+        [&](const uint8_t* data, size_t size, bool, int64_t) {
+            std::lock_guard<std::mutex> lock(mutex);
+            nals.emplace_back(data, data + size);
+        },
+        [](const VideoEncoder::FrameMetrics&) {}));
+    encoder.FlushPendingFrames();
+    REQUIRE(encoder.Shutdown(std::chrono::seconds(5)));
+
+    std::lock_guard<std::mutex> lock(mutex);
+    CVPixelBufferRef decoded = DecodeH264Keyframe(nals);
+    REQUIRE(decoded != nullptr);
+    CVPixelBufferLockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(decoded));
+    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(decoded);
+    const uint8_t leftMiddle = base[32 * bytesPerRow + 32 * 4 + 1];
+    const uint8_t leftCorner = base[4 * bytesPerRow + 4 * 4 + 1];
+    const uint8_t rightMiddle = base[32 * bytesPerRow + 96 * 4 + 1];
+    CVPixelBufferUnlockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferRelease(decoded);
+
+    CHECK(leftMiddle > 239);
+    CHECK(leftCorner < 16);
+    CHECK(rightMiddle < 16);
 
     [queue release];
     [device release];

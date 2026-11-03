@@ -1870,7 +1870,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
 
     // Vulkan/MoltenVK snapshots are submitted from xrReleaseSwapchainImage on
-    // the application's queue (projection and overlay layers alike), behind the
+    // the application's queue (projection and overlay layers alike, and from
+    // xrEndFrame for an overlay whose release took none), behind the
     // application's own rendering, so the fence signals only when the
     // application's GPU frame is done. Wait for those copies only on this
     // encoder worker, never from Session::EndFrame().

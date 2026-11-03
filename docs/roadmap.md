@@ -2,7 +2,7 @@
 
 ## Runtime correctness
 
-- [ ] Support quad layers and multiple projection layers.
+- [ ] Composite frames without a projection layer, layers below the projection layer, and multiple projection layers.
 - [ ] Clear the remote image when an application submits an empty frame.
 - [ ] Align poses and velocities to the requested `XrTime` using the same tracking samples.
 - [ ] Invalidate head and controller poses when tracking becomes stale or unavailable.
