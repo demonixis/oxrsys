@@ -79,8 +79,8 @@ cmake -B build_cts -G Ninja \
 cmake --build build_cts --target openxr_cts_run
 ```
 
-The CTS sub-build receives the resolved `metal` and `metallib` paths. As of March 17, 2026, the
-pinned local baseline is 63 passed, 36 skipped, and 0 failed. Record a new date and exact counts
+The CTS sub-build receives the resolved `metal` and `metallib` paths. As of November 3, 2026, the
+pinned local baseline is 63 passed, 35 skipped, and 1 failed: `XR_KHR_convert_timespec_time/Invalid times`. Record a new date and exact counts
 whenever the pin or result changes.
 
 ## Physical Qualification

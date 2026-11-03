@@ -10,8 +10,8 @@ The desktop user interface is the native SwiftUI OXRSys Home app. AppKit may be 
 platform-scoped adapters for capabilities SwiftUI does not expose directly, such as `NSOpenPanel`,
 `NSWorkspace`, cursor/input handling, and `MTKView` integration.
 
-As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed,
-36 skipped, and 0 failed.
+As of November 3, 2026, the pinned non-interactive OpenXR-CTS baseline locally is 63 passed,
+35 skipped, and 1 failed (`XR_KHR_convert_timespec_time/Invalid times`).
 
 ## Repository Rules
 

@@ -1217,6 +1217,60 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
     XR_CHECK(xrDestroySpace(spaces[0]));
 }
 
+// Spaces of one reference space type move together, so their relative velocity is known and zero
+// even without a tracking connection, which leaves the head's own velocity unknown. The CTS locates
+// VIEW spaces in a VIEW space this way ("space velocities valid inputs").
+TEST_CASE("Spaces of one reference space type have a known zero relative velocity", "[runtime][spaces]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<XrSpace, 2> viewSpaces = {};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[0]));
+    createInfo.poseInReferenceSpace.position = {0.1f, -0.2f, 0.3f};
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.70710678f, 0.0f, 0.70710678f};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[1]));
+
+    const auto checkAtRest = [](XrSpaceVelocityFlags flags, const XrVector3f& linear, const XrVector3f& angular) {
+        CHECK(flags == (XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT));
+        CHECK(linear.x == 0.0f);
+        CHECK(linear.y == 0.0f);
+        CHECK(linear.z == 0.0f);
+        CHECK(angular.x == 0.0f);
+        CHECK(angular.y == 0.0f);
+        CHECK(angular.z == 0.0f);
+    };
+
+    std::array<XrSpaceLocationData, 2> locationData = {};
+    std::array<XrSpaceVelocityData, 2> velocityData = {};
+    XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
+    velocities.velocityCount = static_cast<uint32_t>(velocityData.size());
+    velocities.velocities = velocityData.data();
+    XrSpaceLocations locations = {XR_TYPE_SPACE_LOCATIONS, &velocities};
+    locations.locationCount = static_cast<uint32_t>(locationData.size());
+    locations.locations = locationData.data();
+    XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
+    locateInfo.baseSpace = viewSpaces[1];
+    locateInfo.time = 1;
+    locateInfo.spaceCount = static_cast<uint32_t>(viewSpaces.size());
+    locateInfo.spaces = viewSpaces.data();
+    XR_CHECK(xrLocateSpaces(context.session, &locateInfo, &locations));
+    for (const XrSpaceVelocityData& data : velocityData)
+    {
+        checkAtRest(data.velocityFlags, data.linearVelocity, data.angularVelocity);
+    }
+
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
+    XR_CHECK(xrLocateSpace(viewSpaces[1], viewSpaces[0], locateInfo.time, &location));
+    checkAtRest(velocity.velocityFlags, velocity.linearVelocity, velocity.angularVelocity);
+
+    XR_CHECK(xrDestroySpace(viewSpaces[1]));
+    XR_CHECK(xrDestroySpace(viewSpaces[0]));
+}
+
 TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runtime][tracking][loopback]")
 {
     const bool tcp = GENERATE(false, true);
@@ -1609,6 +1663,29 @@ TEST_CASE("RequestExitSession reaches STOPPING without a frame loop", "[runtime]
     states = drainStates();
     REQUIRE_FALSE(states.empty());
     CHECK(states.back() == XR_SESSION_STATE_EXITING);
+}
+
+// The session runs until xrEndSession, STOPPING included. An exit request before the first frame
+// queues SYNCHRONIZED and STOPPING at once, so an app that handles one event per frame, as the CTS
+// does, submits a frame for SYNCHRONIZED after the session has reached STOPPING.
+TEST_CASE("Frame calls keep working in STOPPING until xrEndSession", "[runtime][frame]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XR_CHECK(xrRequestExitSession(context.session));
+
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_SUCCESS);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_SUCCESS);
+    XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endInfo.displayTime = frameState.predictedDisplayTime;
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+
+    // The frame does not move the session out of STOPPING, so it ends; after that it no longer runs.
+    XR_CHECK(xrEndSession(context.session));
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_ERROR_SESSION_NOT_RUNNING);
 }
 
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
