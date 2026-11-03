@@ -3976,9 +3976,12 @@ void XrApp::RunFrame()
         projectionLayer.space = appSpace_;
         if (submitPassthroughLayer)
         {
-            projectionLayer.layerFlags =
-                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            // Packed-alpha video is premultiplied; the shell and black-key paths keep the unpremultiplied blend.
+            if (!renderedVideo || !streamHasPackedAlpha_.load())
+            {
+                projectionLayer.layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            }
         }
         projectionLayer.viewCount = 2;
         projectionLayer.views = projectionViews;
