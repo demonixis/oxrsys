@@ -774,7 +774,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
             guard let self, requestID == self.latestUsbNetworkRequestID else { return }
             self.isUsbNetworkSetupInProgress = false
-            guard self.adbSelectionIdentity == selectionIdentity else { return }
+            guard self.adbSelectionIdentity == selectionIdentity,
+                  self.mainTransportSelection == .usbNetwork else { return }
             let (status, succeeded) = result
             self.usbNetworkStatus = status
             if succeeded {
