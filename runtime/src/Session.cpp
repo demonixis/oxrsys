@@ -8,6 +8,7 @@
 #include "Runtime.h"
 #include "Swapchain.h"
 #include "SwapchainCreateValidation.h"
+#include "TimespecConversion.h"
 #include "Space.h"
 #include "InputManager.h"
 #include "RuntimePlatform.h"
@@ -191,19 +192,16 @@ XrTime Session::GetCurrentTime() const
             .count());
 }
 
-XrTime Session::TimespecToXrTime(const struct timespec& ts) const
+XrResult Session::TimespecToXrTime(const struct timespec& ts, XrTime& time) const
 {
-    const int64_t monoNs = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
     // XrTime == steady_clock::now() - startTime_, and CLOCK_MONOTONIC advances in
     // lockstep with steady_clock (both real-time ns), so XrTime == monoNs - monoStartNs_.
-    return static_cast<XrTime>(monoNs - monoStartNs_);
+    return oxrsys::MonotonicTimespecToXrTime(ts, monoStartNs_, time);
 }
 
-void Session::XrTimeToTimespec(XrTime time, struct timespec& ts) const
+XrResult Session::XrTimeToTimespec(XrTime time, struct timespec& ts) const
 {
-    const int64_t monoNs = static_cast<int64_t>(time) + monoStartNs_;
-    ts.tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
-    ts.tv_nsec = static_cast<long>(monoNs % 1000000000LL);
+    return oxrsys::XrTimeToMonotonicTimespec(time, monoStartNs_, ts);
 }
 
 void Session::TransitionState(XrSessionState newState)

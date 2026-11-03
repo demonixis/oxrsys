@@ -19,6 +19,7 @@
 #include "HandTracker.h"
 #include "Config.h"
 #include "RuntimeStatus.h"
+#include "TimespecConversion.h"
 #include "VulkanDispatch.h"
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
@@ -586,6 +587,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrEnumerateApiLayerProperties(
     return XR_SUCCESS;
 }
 
+#ifdef XR_USE_TIMESPEC
+static int64_t MonotonicFallbackEpochNs();
+#endif
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     const XrInstanceCreateInfo* createInfo, XrInstance* instance)
 {
@@ -649,6 +654,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     }
 
     gInstance = std::make_unique<Instance>(createInfo->applicationInfo.apiVersion, enabledExtensions);
+#ifdef XR_USE_TIMESPEC
+    MonotonicFallbackEpochNs();
+#endif
     RuntimeStatus::SetApplicationName(createInfo->applicationInfo.applicationName);
     *instance = reinterpret_cast<XrInstance>(gInstance->GetHandle());
     return XR_SUCCESS;
@@ -3772,7 +3780,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // ============================================================================
 // XR_KHR_convert_timespec_time — CLOCK_MONOTONIC timespec <-> XrTime. The
 // session owns the exact time base (monoStartNs_); before a session exists we
-// fall back to a process-global monotonic epoch so conversions never hard-fail.
+// fall back to a process-global monotonic epoch, first sampled when an instance
+// is created so timespecs the application reads afterwards map to valid XrTimes.
 // ============================================================================
 static int64_t MonotonicFallbackEpochNs()
 {
@@ -3794,23 +3803,16 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
     {
         return XR_ERROR_HANDLE_INVALID;
     }
-    if (timespecTime == nullptr || time == nullptr ||
-        timespecTime->tv_nsec < 0 || timespecTime->tv_nsec >= 1000000000L)
+    if (timespecTime == nullptr || time == nullptr)
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
     if (Session* sess = inst->GetSession())
     {
-        *time = sess->TimespecToXrTime(*timespecTime);
+        return sess->TimespecToXrTime(*timespecTime, *time);
     }
-    else
-    {
-        const int64_t monoNs =
-            static_cast<int64_t>(timespecTime->tv_sec) * 1000000000LL + timespecTime->tv_nsec;
-        *time = static_cast<XrTime>(monoNs - MonotonicFallbackEpochNs());
-    }
-    return XR_SUCCESS;
+    return oxrsys::MonotonicTimespecToXrTime(*timespecTime, MonotonicFallbackEpochNs(), *time);
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
@@ -3828,15 +3830,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
 
     if (Session* sess = inst->GetSession())
     {
-        sess->XrTimeToTimespec(time, *timespecTime);
+        return sess->XrTimeToTimespec(time, *timespecTime);
     }
-    else
-    {
-        const int64_t monoNs = static_cast<int64_t>(time) + MonotonicFallbackEpochNs();
-        timespecTime->tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
-        timespecTime->tv_nsec = static_cast<long>(monoNs % 1000000000LL);
-    }
-    return XR_SUCCESS;
+    return oxrsys::XrTimeToMonotonicTimespec(time, MonotonicFallbackEpochNs(), *timespecTime);
 }
 #endif
 
