@@ -1742,8 +1742,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     // From here on only this address may send tracking.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -1988,8 +1988,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2251,8 +2251,8 @@ void StreamingServer::HandleClientDisconnect()
     }
     if (trackingReceiver_ != nullptr)
     {
-        trackingReceiver_->Reset();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->Reset();
     }
     InvalidateCallbackAccess();
 
