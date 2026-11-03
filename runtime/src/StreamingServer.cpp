@@ -1098,14 +1098,10 @@ bool StreamingServer::StartUsbTcpListeners()
 
 void StreamingServer::SendUsbDisconnectBestEffort()
 {
-    SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
+    std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+    if (oxrsys::runtime_socket::IsValid(tcpControlClientSocket_))
     {
-        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-        controlSocket = tcpControlClientSocket_;
-    }
-    if (oxrsys::runtime_socket::IsValid(controlSocket))
-    {
-        SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
+        SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
     }
 }
 
@@ -1746,8 +1742,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     // From here on only this address may send tracking.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -1894,8 +1890,10 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -1990,8 +1988,8 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
     // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2136,8 +2134,10 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -2251,8 +2251,8 @@ void StreamingServer::HandleClientDisconnect()
     }
     if (trackingReceiver_ != nullptr)
     {
-        trackingReceiver_->Reset();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->Reset();
     }
     InvalidateCallbackAccess();
 
@@ -2445,13 +2445,12 @@ bool StreamingServer::SendControlPayload(const void* payload, size_t payloadSize
 
     if (clientUsesUsbAdb_.load())
     {
-        SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
-        {
-            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            controlSocket = tcpControlClientSocket_;
-        }
-        return oxrsys::runtime_socket::IsValid(controlSocket) &&
-               SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Control,
+        // Haptics come from the application thread while TcpControlThread and VideoSendThread
+        // send stream config updates: one lock across the record keeps it whole and keeps the
+        // descriptor open until it is written.
+        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+        return oxrsys::runtime_socket::IsValid(tcpControlClientSocket_) &&
+               SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Control,
                              payload, payloadSize);
     }
 
@@ -3057,7 +3056,7 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec, &pacer);
+                    nal.isKeyframe, frame.alphaBlend, frame.packedAlpha, frame.timestampNs, frame.codec, &pacer);
     }
 
     if (pacer.Flushed())
@@ -3163,7 +3162,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
-                                  bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                                  bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
                                   oxr::protocol::VideoCodec codec,
                                   oxrsys::streaming::PacketPacer* pacer)
 {
@@ -3207,7 +3206,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3284,7 +3283,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3343,7 +3342,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
             }
-            if (packedAlphaActive_.load())
+            if (packedAlpha)
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
             }
