@@ -1098,14 +1098,10 @@ bool StreamingServer::StartUsbTcpListeners()
 
 void StreamingServer::SendUsbDisconnectBestEffort()
 {
-    SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
+    std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+    if (oxrsys::runtime_socket::IsValid(tcpControlClientSocket_))
     {
-        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-        controlSocket = tcpControlClientSocket_;
-    }
-    if (oxrsys::runtime_socket::IsValid(controlSocket))
-    {
-        SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
+        SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
     }
 }
 
@@ -2449,13 +2445,12 @@ bool StreamingServer::SendControlPayload(const void* payload, size_t payloadSize
 
     if (clientUsesUsbAdb_.load())
     {
-        SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
-        {
-            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            controlSocket = tcpControlClientSocket_;
-        }
-        return oxrsys::runtime_socket::IsValid(controlSocket) &&
-               SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Control,
+        // Haptics come from the application thread while TcpControlThread and VideoSendThread
+        // send stream config updates: one lock across the record keeps it whole and keeps the
+        // descriptor open until it is written.
+        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+        return oxrsys::runtime_socket::IsValid(tcpControlClientSocket_) &&
+               SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Control,
                              payload, payloadSize);
     }
 
