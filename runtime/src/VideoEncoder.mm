@@ -1127,7 +1127,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
                      VideoCodecName(codec_), status);
         [encoderSpec removeObjectForKey:(NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl];
         status = VTCompressionSessionCreate(
-            kCFAllocatorDefault, width, height, VideoToolboxCodecType(codec_),
+            kCFAllocatorDefault, width, frameHeight_, VideoToolboxCodecType(codec_),
             (__bridge CFDictionaryRef)encoderSpec, nullptr, kCFAllocatorDefault,
             CompressionOutputCallback, nullptr, &compressionSession);
     }
