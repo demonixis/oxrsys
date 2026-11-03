@@ -185,6 +185,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
   view). The connected address can still reconnect, and UDP tracking from any other sender is
   ignored.
+- Fixed a refused Quest or Pico headset ending the live session when it gave up waiting for video:
+  a WiFi `ServerDisconnect` is now honoured only from the connected WiFi client, and a USB ADB
+  `Disconnect` record only while the USB client owns the session.
 - Fixed the desktop simulator taking over a USB ADB session over loopback: admission now compares
   the transport as well as the address, a USB `ClientConnect` is refused while a WiFi client is
   connected, and USB TCP tracking is used only while the USB client owns the session.

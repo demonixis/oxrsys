@@ -73,4 +73,17 @@ inline ClientAdmissionDecision EvaluateClientAdmission(ClientAdmissionState& sta
     return decision;
 }
 
+// A WiFi ServerDisconnect ends the session only when it comes from the admitted WiFi
+// client. A refused headset that times out waiting for video sends ServerDisconnect on
+// its way back to discovery; honouring it from any source would let that headset end the
+// connected client's session, and would let a WiFi peer end a USB ADB session.
+inline bool ShouldHonorWifiDisconnect(bool clientConnected,
+                                      bool clientUsesUsbAdb,
+                                      const std::string& connectedIp,
+                                      const std::string& sourceIp)
+{
+    return clientConnected && !clientUsesUsbAdb && !connectedIp.empty() &&
+           connectedIp == sourceIp;
+}
+
 } // namespace oxrsys
