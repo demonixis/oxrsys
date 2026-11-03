@@ -197,13 +197,18 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 
 - headset pose
 - headset linear and angular velocity when the client can provide it
-- left and right controller poses
+- left and right controller grip and aim poses (aim falls back to grip when it is unset)
 - controller grip and aim linear and angular velocities when the client can provide them
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
 - STAGE bounds when the client can provide them
 - the controller profile the client's own runtime reports, and capacitive touch state
+
+The aim poses and every later field are appended after `TRACKING_PACKET_BASE_SIZE`. The runtime
+accepts any packet of at least that size and zero-fills the fields it does not carry. It clears a
+velocity or STAGE-bounds valid flag when the packet ends before that field, and it keeps
+`controllerProfile` and `touchState` only from a packet that reaches the end of `touchState`.
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
