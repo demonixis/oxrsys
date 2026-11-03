@@ -992,6 +992,10 @@ enum AdbUsbProtocolError: LocalizedError {
 }
 
 enum AdbUsbBridge {
+    // USBInterfaceOpen claims the interface exclusively: a native connection opened while another
+    // Home worker holds one would fail over to the ADB server or external adb, so take turns.
+    nonisolated private static let connectionLock = NSLock()
+
     nonisolated static func isAvailable() -> Bool {
         guard let services = try? matchingServices() else {
             return false
@@ -1005,6 +1009,8 @@ enum AdbUsbBridge {
     }
 
     nonisolated static func devices() throws -> [QuestUsbDevice] {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let services = try matchingServices()
         guard !services.isEmpty else {
             throw AdbUsbProtocolError.noDevice
@@ -1050,6 +1056,8 @@ enum AdbUsbBridge {
     }
 
     nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let (connection, _) = try connectedDevice(matching: serial)
         return try connection.runService("shell:\(command)")
     }
