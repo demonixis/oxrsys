@@ -1098,15 +1098,12 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // unconditional is what made a Rosetta host silently get the ~27-40ms/frame
     // software HEVC encoder; now that path is entered knowingly, logged, and
     // (when the helper covers the codec) only as the fallback behind it.
-    // Low-latency rate control returns each frame about one encode time after submission instead
-    // of buffering it for about two frame periods. Encoders that do not offer it get the plain session.
-    NSMutableDictionary* encoderSpec = [NSMutableDictionary dictionaryWithDictionary:@{
+    NSDictionary* encoderSpec = @{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder:
             forceSoftware ? @NO : @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder:
             hardwareInProcess ? @YES : @NO,
-        (NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl: @YES,
-    }];
+    };
 
     VTCompressionSessionRef compressionSession = nullptr;
     OSStatus status = VTCompressionSessionCreate(
@@ -1120,17 +1117,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
         CompressionOutputCallback,
         nullptr,
         &compressionSession);
-    const bool lowLatencyRateControl = status == noErr;
-    if (!lowLatencyRateControl)
-    {
-        spdlog::info("VideoEncoder: {} low-latency rate control unavailable ({}); using the standard rate control",
-                     VideoCodecName(codec_), status);
-        [encoderSpec removeObjectForKey:(NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl];
-        status = VTCompressionSessionCreate(
-            kCFAllocatorDefault, width, height, VideoToolboxCodecType(codec_),
-            (__bridge CFDictionaryRef)encoderSpec, nullptr, kCFAllocatorDefault,
-            CompressionOutputCallback, nullptr, &compressionSession);
-    }
     if (status != noErr && hardwareInProcess)
     {
         // The query promised a hardware encoder and the create still refused it.
@@ -1204,10 +1190,6 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     else
     {
         spdlog::info("VideoEncoder: Using 'balanced' preset");
-    }
-    if (lowLatencyRateControl)
-    {
-        spdlog::info("VideoEncoder: {} low-latency rate control enabled", VideoCodecName(codec_));
     }
 
     int avgBitrate = bitrateMbps * 1000000;
