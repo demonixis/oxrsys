@@ -21,6 +21,7 @@
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
+#include "StreamingFoveationSnapshot.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
 
@@ -149,6 +150,7 @@ private:
         uint32_t foveatedTargetEyeHeight = 0;
         float activeResolutionScale = 0.75f;
         bool foveatedEncodingActive = false;
+        oxrsys::streaming_foveation::Snapshot foveation;
         uint32_t streamConfigSequence = 0;
     };
 
