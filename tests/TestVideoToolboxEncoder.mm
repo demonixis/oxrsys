@@ -627,6 +627,104 @@ CVPixelBufferRef DecodeH264Keyframe(const std::vector<std::vector<uint8_t>>& nal
 
 } // namespace
 
+TEST_CASE("Eye-centred foveation centres each eye's sharp region on its own forward direction",
+          "[video][encoder][videotoolbox][foveation]")
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+
+    std::mutex mutex;
+    std::vector<std::vector<uint8_t>> nals;
+
+    const bool eyeCentered = GENERATE(false, true);
+    CAPTURE(eyeCentered);
+    VideoEncoder encoder;
+    VideoEncoder::FoveationSettings settings = {};
+    settings.enabled = true;
+    settings.targetEyeWidth = 64;
+    settings.targetEyeHeight = 64;
+    settings.eyeWidthRatio = 1.0f;
+    settings.eyeHeightRatio = 1.0f;
+    settings.centerSizeX = 0.5f;
+    settings.centerSizeY = 0.5f;
+    settings.edgeRatioX = 2.0f;
+    settings.edgeRatioY = 2.0f;
+    settings.eyeCentered = eyeCentered;
+    encoder.SetFoveationSettings(settings);
+    REQUIRE(encoder.Initialize(128, 64, 60, 8, graphics, oxr::protocol::VideoCodec::H264));
+
+    // A column ramp shows which source column lands in each encoded column.
+    FrameSource frame = {};
+    frame.left = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+    frame.right = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm);
+    std::vector<uint32_t> ramp(64 * 64);
+    for (uint32_t y = 0; y < 64; ++y)
+    {
+        for (uint32_t x = 0; x < 64; ++x)
+        {
+            const uint32_t grey = 4 * x;
+            ramp[y * 64 + x] = 0xff000000u | (grey << 16) | (grey << 8) | grey;
+        }
+    }
+    for (FrameImageSource* eye : {&frame.left, &frame.right})
+    {
+        [(__bridge id<MTLTexture>)eye->image.get() replaceRegion:MTLRegionMake2D(0, 0, 64, 64)
+                                                     mipmapLevel:0
+                                                       withBytes:ramp.data()
+                                                     bytesPerRow:64 * sizeof(uint32_t)];
+    }
+    // Each Quest eye sees further outwards than inwards, mirrored between the eyes.
+    const float leftFov[4] = {-0.869f, 0.662f, 0.785f, -0.785f};
+    const float rightFov[4] = {-0.662f, 0.869f, 0.785f, -0.785f};
+    std::copy(std::begin(leftFov), std::end(leftFov), frame.left.fov);
+    std::copy(std::begin(rightFov), std::end(rightFov), frame.right.fov);
+
+    encoder.ForceKeyframe();
+    REQUIRE(encoder.EncodeStereo(
+        std::move(frame),
+        1'000'000,
+        [&](const uint8_t* data, size_t size, bool, int64_t) {
+            std::lock_guard<std::mutex> lock(mutex);
+            nals.emplace_back(data, data + size);
+        },
+        [](const VideoEncoder::FrameMetrics&) {}));
+    encoder.FlushPendingFrames();
+    REQUIRE(encoder.Shutdown(std::chrono::seconds(5)));
+
+    std::lock_guard<std::mutex> lock(mutex);
+    CVPixelBufferRef decoded = DecodeH264Keyframe(nals);
+    REQUIRE(decoded != nullptr);
+    CVPixelBufferLockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(decoded));
+    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(decoded);
+    // The source column at the centre of each encoded eye.
+    const int leftCentre = base[32 * bytesPerRow + 32 * 4 + 1];
+    const int rightCentre = base[32 * bytesPerRow + 96 * 4 + 1];
+    CVPixelBufferUnlockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferRelease(decoded);
+    CAPTURE(leftCentre, rightCentre);
+
+    if (eyeCentered)
+    {
+        // The left eye looks right of its image centre and the right eye left of it, by mirrored
+        // shifts, so each encoded centre samples a source column further towards the nose.
+        CHECK(leftCentre > 128 + 8);
+        CHECK(rightCentre < 128 - 8);
+        CHECK(std::abs((leftCentre - 128) + (rightCentre - 128)) < 12);
+    }
+    else
+    {
+        CHECK(std::abs(leftCentre - rightCentre) < 8);
+    }
+
+    [queue release];
+    [device release];
+}
+
 TEST_CASE("Packed alpha appends each eye's alpha below the eyes",
           "[video][encoder][videotoolbox][passthrough]")
 {
