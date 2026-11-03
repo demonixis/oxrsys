@@ -1610,6 +1610,29 @@ TEST_CASE("RequestExitSession reaches STOPPING without a frame loop", "[runtime]
     CHECK(states.back() == XR_SESSION_STATE_EXITING);
 }
 
+// The session runs until xrEndSession, STOPPING included. An exit request before the first frame
+// queues SYNCHRONIZED and STOPPING at once, so an app that handles one event per frame, as the CTS
+// does, submits a frame for SYNCHRONIZED after the session has reached STOPPING.
+TEST_CASE("Frame calls keep working in STOPPING until xrEndSession", "[runtime][frame]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XR_CHECK(xrRequestExitSession(context.session));
+
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_SUCCESS);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_SUCCESS);
+    XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endInfo.displayTime = frameState.predictedDisplayTime;
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+
+    // The frame does not move the session out of STOPPING, so it ends; after that it no longer runs.
+    XR_CHECK(xrEndSession(context.session));
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_ERROR_SESSION_NOT_RUNNING);
+}
+
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
 {
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};

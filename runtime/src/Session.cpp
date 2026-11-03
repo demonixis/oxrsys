@@ -1100,7 +1100,9 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
 
 bool Session::IsFrameLoopRunningState() const
 {
-    return running_ && state_ != XR_SESSION_STATE_STOPPING;
+    // The session runs from xrBeginSession until xrEndSession, STOPPING included: the app keeps
+    // calling the frame functions until it has polled STOPPING.
+    return running_;
 }
 
 XrResult Session::LocateViews(const XrViewLocateInfo* viewLocateInfo, XrViewState* viewState,
