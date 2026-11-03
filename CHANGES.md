@@ -25,8 +25,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   puts 2.2-2.7 ms of jitter on the frame interval; with the policy it wakes within 0.1 ms.
 - Quad layers and `XR_KHR_composition_layer_cylinder` layers are now composited into each eye before
   encode, so application menus, HUDs and panels reach the headset; before, quads were validated and
-  dropped, and cylinders failed the frame. Layers before the projection layer and other layer types are
-  not drawn yet.
+  dropped, and cylinders failed the frame. They are drawn over the frame's first projection layer, the
+  only one streamed; layers before it and later projection layers are accepted but not drawn, and a
+  frame without a projection layer is accepted but not streamed.
 - Added config send_pacing_ms (default 0 = burst, as before) and send_pacing_keyframe_ms (0 = twice
   send_pacing_ms): the UDP datagrams of each encoded frame (data and FEC parity) are spread evenly
   over that window instead of reaching the socket as one burst, which an access point queue under

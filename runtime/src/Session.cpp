@@ -695,17 +695,24 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         {
             case XR_TYPE_COMPOSITION_LAYER_PROJECTION:
             {
+                const auto& projectionLayer =
+                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer);
                 if (hasProjectionLayer)
                 {
+                    FrameSource unstreamedSource = {};
+                    XrResult result = ValidateProjectionLayer(projectionLayer, unstreamedSource);
+                    if (result != XR_SUCCESS)
+                    {
+                        return result;
+                    }
                     static std::atomic_bool loggedUnsupportedProjections{false};
                     if (!loggedUnsupportedProjections.exchange(true))
                     {
-                        spdlog::warn("OXRSys: multiple projection layer composition is unavailable");
+                        spdlog::warn("OXRSys: multiple projection layer composition is unavailable; "
+                                     "only the first projection layer is streamed");
                     }
-                    return XR_ERROR_LAYER_LIMIT_EXCEEDED;
+                    break;
                 }
-                const auto& projectionLayer =
-                    *reinterpret_cast<const XrCompositionLayerProjection*>(layer);
                 if (oxrsys::runtime::IsSourceAlphaProjectionLayerForStreaming(
                         projectionLayer.layerFlags, passthroughEnabled))
                 {
@@ -754,9 +761,9 @@ XrResult Session::EndFrame(const XrFrameEndInfo* frameEndInfo)
         static std::atomic_bool loggedUnsupportedOverlayOnly{false};
         if (!loggedUnsupportedOverlayOnly.exchange(true))
         {
-            spdlog::warn("OXRSys: quad and cylinder layers are composited only over a projection layer");
+            spdlog::warn("OXRSys: quad and cylinder layers are composited only over a projection layer; "
+                         "a frame without one is not streamed");
         }
-        return XR_ERROR_LAYER_INVALID;
     }
 
     if (hasProjectionLayer && frameSource.IsStereoValid())

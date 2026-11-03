@@ -3294,7 +3294,7 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
         XR_ERROR_VALIDATION_FAILURE);
 }
 
-TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][frame][layers]")
+TEST_CASE("EndFrame accepts valid frames it streams only in part", "[runtime][frame][layers]")
 {
     RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
     XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
@@ -3319,6 +3319,11 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     projectionLayer.viewCount = 2;
     projectionLayer.views = projectionViews;
 
+    XrCompositionLayerProjectionView invalidViews[2] = {projectionViews[0], projectionViews[1]};
+    invalidViews[0].pose.orientation.w = 0.0f;
+    XrCompositionLayerProjection invalidProjectionLayer = projectionLayer;
+    invalidProjectionLayer.views = invalidViews;
+
     XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
     quadLayer.space = context.localSpace;
     quadLayer.pose.orientation.w = 1.0f;
@@ -3326,22 +3331,51 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     quadLayer.subImage.swapchain = swapchain;
     quadLayer.subImage.imageRect.extent = {16, 16};
 
-    const XrCompositionLayerBaseHeader* layers[] = {
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
-    };
-    XrResult expectedResult = XR_ERROR_LAYER_LIMIT_EXCEEDED;
-    uint32_t layerCount = 2;
+    const auto* projection = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+    const auto* quad = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
+    std::vector<const XrCompositionLayerBaseHeader*> layers = {projection, projection};
+    XrResult expectedResult = XR_SUCCESS;
     SECTION("Quad only")
     {
-        layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-        layerCount = 1;
-        expectedResult = XR_ERROR_LAYER_INVALID;
+        layers = {quad};
     }
     SECTION("Two projection layers")
     {
         projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     }
+    SECTION("XR_MIN_COMPOSITION_LAYERS_SUPPORTED projection layers")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED, projection);
+    }
+    SECTION("XR_MIN_COMPOSITION_LAYERS_SUPPORTED quad layers")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED, quad);
+    }
+    SECTION("More layers than supported")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED + 1, quad);
+        expectedResult = XR_ERROR_LAYER_LIMIT_EXCEEDED;
+    }
+    SECTION("A projection layer after the streamed one is still validated")
+    {
+        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&invalidProjectionLayer);
+        expectedResult = XR_ERROR_POSE_INVALID;
+    }
+
+    auto drainStates = [&]() {
+        std::vector<XrSessionState> states;
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                states.push_back(reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state);
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+        return states;
+    };
+    drainStates();
 
     XrFrameState frameState = {XR_TYPE_FRAME_STATE};
     XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
@@ -3349,15 +3383,24 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
     frameEndInfo.displayTime = frameState.predictedDisplayTime;
     frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    frameEndInfo.layerCount = layerCount;
-    frameEndInfo.layers = layers;
+    frameEndInfo.layerCount = static_cast<uint32_t>(layers.size());
+    frameEndInfo.layers = layers.data();
     CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+    if (expectedResult == XR_SUCCESS)
+    {
+        // An accepted frame advances the session like any other, so an application that waits
+        // for VISIBLE behind a quad-only loading screen gets there.
+        const std::vector<XrSessionState> states = drainStates();
+        REQUIRE_FALSE(states.empty());
+        CHECK(states.back() == XR_SESSION_STATE_SYNCHRONIZED);
+    }
 
     XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
     XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
-    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+    layers = {projection};
     frameEndInfo.displayTime = frameState.predictedDisplayTime;
     frameEndInfo.layerCount = 1;
+    frameEndInfo.layers = layers.data();
     XR_CHECK(xrEndFrame(context.session, &frameEndInfo));
     XR_CHECK(xrDestroySwapchain(swapchain));
 }
@@ -3401,8 +3444,8 @@ TEST_CASE("EndFrame composites a quad over the single projection layer it stream
     quadLayer.subImage.swapchain = swapchain;
     quadLayer.subImage.imageRect.extent = {16, 16};
 
-    // An overlay is placed with the poses of the projection layer whose images are
-    // streamed, so a frame never mixes one projection layer's poses with another's images.
+    // Only the first projection layer is streamed, and an overlay is placed with its poses,
+    // so a frame never mixes one projection layer's poses with another's images.
     const XrCompositionLayerBaseHeader* layers[] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&firstProjection),
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer),
@@ -3416,7 +3459,7 @@ TEST_CASE("EndFrame composites a quad over the single projection layer it stream
     frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     frameEndInfo.layerCount = 3;
     frameEndInfo.layers = layers;
-    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_ERROR_LAYER_LIMIT_EXCEEDED);
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
 
     XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
     XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
