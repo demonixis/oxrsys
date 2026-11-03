@@ -3976,9 +3976,12 @@ void XrApp::RunFrame()
         projectionLayer.space = appSpace_;
         if (submitPassthroughLayer)
         {
-            projectionLayer.layerFlags =
-                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            // Packed-alpha video is premultiplied; the shell and black-key paths keep the unpremultiplied blend.
+            if (!renderedVideo || !streamHasPackedAlpha_.load())
+            {
+                projectionLayer.layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            }
         }
         projectionLayer.viewCount = 2;
         projectionLayer.views = projectionViews;
@@ -4187,9 +4190,14 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                         videoContentHeight_ = static_cast<uint32_t>(cropBottom - cropTop);
 
                         hasVideo = true;
+                        // The update's encodedHeight is the eyes only; packed alpha rows sit below them.
+                        const uint32_t deferredFrameHeight = streamHasPackedAlpha_.load()
+                            ? frameDeferredStreamConfig_.encodedHeight +
+                                  protocol::PackedAlphaRows(frameDeferredStreamConfig_.encodedHeight)
+                            : frameDeferredStreamConfig_.encodedHeight;
                         const bool frameHasDeferredSize = hasFrameDeferredStreamConfig_ &&
                             static_cast<uint32_t>(cropRight - cropLeft) == frameDeferredStreamConfig_.encodedWidth &&
-                            static_cast<uint32_t>(cropBottom - cropTop) == frameDeferredStreamConfig_.encodedHeight;
+                            static_cast<uint32_t>(cropBottom - cropTop) == deferredFrameHeight;
                         if (frameHasDeferredSize ||
                             (hasFrameDeferredStreamConfig_ &&
                              std::chrono::steady_clock::now() - frameDeferredStreamConfigSince_ >

@@ -10,6 +10,8 @@ import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
@@ -29,11 +31,14 @@ public class NativeActivity extends android.app.NativeActivity
 {
     private static final String TAG = "OXRSys-NativeActivity";
     private static final String ACTION_USB_PERMISSION = "net.demonixis.oxrsys.android.USB_PERMISSION";
+    // OXRSys Home's fixed headset address on the USB network link (UsbNetworkLink.h).
+    private static final String USB_NETWORK_HEADSET_ADDRESS = "192.168.42.2";
 
     private UsbManager usbManager;
     private PendingIntent usbPermissionIntent;
     private boolean usbReceiverRegistered = false;
     private ConnectivityManager connectivityManager;
+    private Network usbNetwork; // Only touched on the network callback thread.
 
     static
     {
@@ -52,17 +57,36 @@ public class NativeActivity extends android.app.NativeActivity
         new ConnectivityManager.NetworkCallback()
     {
         @Override
-        public void onAvailable(Network network)
+        public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties)
         {
-            Log.i(TAG, "USB network available: " + network);
-            nativeSetUsbNetwork(network.getNetworkHandle());
+            // The request matches any Ethernet network, such as a USB Ethernet adapter on the LAN;
+            // only the cable link carries the headset's fixed address.
+            boolean isUsbLink = false;
+            for (LinkAddress address : linkProperties.getLinkAddresses())
+            {
+                isUsbLink |= USB_NETWORK_HEADSET_ADDRESS.equals(address.getAddress().getHostAddress());
+            }
+            if (isUsbLink && !network.equals(usbNetwork))
+            {
+                Log.i(TAG, "USB network available: " + network);
+                usbNetwork = network;
+                nativeSetUsbNetwork(network.getNetworkHandle());
+            }
+            else if (!isUsbLink && network.equals(usbNetwork))
+            {
+                onLost(network);
+            }
         }
 
         @Override
         public void onLost(Network network)
         {
-            Log.i(TAG, "USB network lost: " + network);
-            nativeSetUsbNetwork(0);
+            if (network.equals(usbNetwork))
+            {
+                Log.i(TAG, "USB network lost: " + network);
+                usbNetwork = null;
+                nativeSetUsbNetwork(0);
+            }
         }
     };
 
