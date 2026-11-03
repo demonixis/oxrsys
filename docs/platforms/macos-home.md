@@ -310,8 +310,10 @@ The runtime reloads config file changes opportunistically:
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails
+- `foveated_encoding_preset` applies at the next OpenXR session, or with a live `abr_mode = "full"`
+  resolution change; a client reconnect keeps the preset the stream started with
 - `bitrate_mbps`, `resolution_scale`, `dynamic_resolution_min_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
-  `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`,
+  `client_foveation_preset`, `client_upscaling`,
   `client_reprojection`, `abr_mode`, `passthrough_enabled`,
   `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, `headset_audio`, `encoder_helper`,
   and `encoder_helper_path` apply when streaming or the encoder/client connection is recreated

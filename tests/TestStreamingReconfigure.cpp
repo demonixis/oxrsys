@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "StreamingFoveationSnapshot.h"
 #include "StreamingReconfigure.h"
 #include "StreamingTransportPolicy.h"
 
@@ -83,4 +84,41 @@ TEST_CASE("USB network clients are recognized by the link subnet", "[streaming][
     CHECK_FALSE(IsUsbNetworkClientAddress("127.0.0.1"));
     CHECK_FALSE(IsUsbNetworkClientAddress(""));
     CHECK_FALSE(IsUsbNetworkClientAddress("not-an-ip"));
+}
+
+TEST_CASE("Stream foveation snapshot keeps the preset its encoded size was built for", "[streaming][foveation]")
+{
+    using namespace oxr::protocol;
+    using oxrsys::streaming_foveation::TakeSnapshot;
+
+    // Quest 3 eyes at Start with medium_plus: it travels as Medium with its own
+    // parameters, and the encoded size comes from those parameters.
+    const FoveationLayout mediumPlus =
+        CalculateFoveationLayout(1512, 1680, FoveationPreset::Medium, MediumPlusParameters());
+    const auto snapshot = TakeSnapshot(true, FoveationPreset::Medium, mediumPlus);
+    CHECK(snapshot.preset == FoveationPreset::Medium);
+    CHECK(snapshot.layout.optimizedEyeWidth == mediumPlus.optimizedEyeWidth);
+    CHECK(snapshot.layout.optimizedEyeHeight == mediumPlus.optimizedEyeHeight);
+    CHECK(snapshot.layout.eyeWidthRatio == mediumPlus.eyeWidthRatio);
+    CHECK(snapshot.layout.eyeHeightRatio == mediumPlus.eyeHeightRatio);
+    CHECK(snapshot.layout.parameters.centerSizeX == mediumPlus.parameters.centerSizeX);
+    CHECK(snapshot.layout.parameters.centerSizeY == mediumPlus.parameters.centerSizeY);
+    CHECK(snapshot.layout.parameters.edgeRatioX == mediumPlus.parameters.edgeRatioX);
+    CHECK(snapshot.layout.parameters.edgeRatioY == mediumPlus.parameters.edgeRatioY);
+
+    // Re-deriving from the preset enum would announce medium's parameters
+    // against medium_plus dimensions.
+    const FoveationLayout medium = CalculateFoveationLayout(1512, 1680, FoveationPreset::Medium);
+    CHECK(medium.optimizedEyeHeight != snapshot.layout.optimizedEyeHeight);
+
+    // An inactive stream announces and encodes Off at the target eye size, so
+    // the encoder never sees enabled foveation with Off parameters.
+    const FoveationLayout light = CalculateFoveationLayout(1512, 1680, FoveationPreset::Light);
+    const auto inactive = TakeSnapshot(false, FoveationPreset::Light, light);
+    CHECK(inactive.preset == FoveationPreset::Off);
+    CHECK(inactive.layout.preset == FoveationPreset::Off);
+    CHECK(inactive.layout.optimizedEyeWidth == 1512);
+    CHECK(inactive.layout.optimizedEyeHeight == 1680);
+    CHECK(inactive.layout.parameters.edgeRatioX == 1.0f);
+    CHECK(inactive.layout.parameters.edgeRatioY == 1.0f);
 }

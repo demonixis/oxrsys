@@ -633,6 +633,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
         streamLayout_.foveatedTargetEyeWidth = streamLayout.foveatedTargetEyeWidth;
         streamLayout_.foveatedTargetEyeHeight = streamLayout.foveatedTargetEyeHeight;
         streamLayout_.foveatedEncodingActive = streamLayout.foveatedEncodingActive;
+        streamLayout_.foveation = oxrsys::streaming_foveation::TakeSnapshot(
+            streamLayout.foveatedEncodingActive, streamLayout.foveationPreset,
+            streamLayout.foveationLayout);
         streamLayout_.streamConfigSequence = 0;
     }
     clientFoveatedEncodingActive_.store(false);
@@ -935,15 +938,8 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
     strncpy(announce.serverName, "OXRSys Runtime", sizeof(announce.serverName) - 1);
 
     const ConfigValues config = Config::Get().GetValues();
-    const oxr::protocol::FoveationPreset foveationPreset =
-        layoutState.foveatedEncodingActive
-            ? ParseFoveationPreset(config.foveatedEncodingPreset)
-            : oxr::protocol::FoveationPreset::Off;
-    const oxr::protocol::FoveationLayout layout =
-        ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                layoutState.foveatedTargetEyeHeight,
-                                                foveationPreset,
-                                                config.foveatedEncodingPreset);
+    const oxr::protocol::FoveationPreset foveationPreset = layoutState.foveation.preset;
+    const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
 
     if (layoutState.foveatedEncodingActive)
     {
@@ -1899,15 +1895,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                     abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
                 }
                 const StreamLayoutState layoutState = GetStreamLayoutState();
-                const oxr::protocol::FoveationPreset foveationPreset =
-                    layoutState.foveatedEncodingActive
-                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                        : oxr::protocol::FoveationPreset::Off;
-                const oxr::protocol::FoveationLayout layout =
-                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                            layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset,
-                                                            config.foveatedEncodingPreset);
+                const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
@@ -2170,15 +2158,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                     abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
                 }
                 const StreamLayoutState layoutState = GetStreamLayoutState();
-                const oxr::protocol::FoveationPreset foveationPreset =
-                    layoutState.foveatedEncodingActive
-                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                        : oxr::protocol::FoveationPreset::Off;
-                const oxr::protocol::FoveationLayout layout =
-                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                            layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset,
-                                                            config.foveatedEncodingPreset);
+                const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
@@ -2767,6 +2747,8 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
         streamLayout_.foveatedTargetEyeWidth = layout.foveatedTargetEyeWidth;
         streamLayout_.foveatedTargetEyeHeight = layout.foveatedTargetEyeHeight;
         streamLayout_.foveatedEncodingActive = layout.foveatedEncodingActive;
+        streamLayout_.foveation = oxrsys::streaming_foveation::TakeSnapshot(
+            layout.foveatedEncodingActive, layout.foveationPreset, layout.foveationLayout);
         streamLayout_.streamConfigSequence = update.sequence;
     }
     clientFoveatedEncodingActive_.store(useFoveatedEncoding);
