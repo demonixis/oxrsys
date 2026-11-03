@@ -170,6 +170,7 @@ set(OXRSYS_LOGCAT_TEST_ENV
 
 add_executable(oxrsys_runtime_tests
     tests/TestBoundedDrain.cpp
+    tests/TestClientAdmission.cpp
     tests/TestClientLiveness.cpp
     tests/TestConfig.cpp
     tests/TestEncoderHelperIpc.cpp
@@ -180,16 +181,22 @@ add_executable(oxrsys_runtime_tests
     tests/TestRuntimePlatform.cpp
     tests/TestStreamingAbr.cpp
     tests/TestStreamingFrameQueue.cpp
+    tests/TestPacingThreadPolicy.cpp
+    tests/TestPacketPacer.cpp
     tests/TestStreamingReconfigure.cpp
     tests/TestSnapshotLeasePool.cpp
+    tests/TestSnapshotWaitPolicy.cpp
     tests/TestSwapchainCreateValidation.cpp
+    tests/TestTimespecConversion.cpp
     tests/TestVideoCodecSelection.cpp
     tests/TestVideoTextureFormat.cpp
     tests/TestVulkanDispatch.cpp
     tests/TestCompositionLayerAlpha.cpp
+    tests/TestCompositionOverlay.cpp
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp
+    tests/TestQuestFoveation.cpp
     clients/android-vr/app/src/main/cpp/QuestPassthroughAlphaPolicy.cpp
     clients/android-vr/app/src/main/cpp/QuestShellInteraction.cpp
     runtime/src/InputManager.cpp
@@ -198,6 +205,7 @@ add_executable(oxrsys_runtime_tests
     runtime/src/RuntimePlatform.cpp
     runtime/src/RuntimeSockets.cpp
     runtime/src/StreamingFrameQueue.cpp
+    runtime/src/PacketPacer.cpp
     runtime/src/VideoCodecSelection.cpp
     runtime/src/EncoderPathPolicy.cpp
     runtime/src/VulkanDispatch.cpp
@@ -314,11 +322,17 @@ list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_runtime_api_tests)
 add_executable(oxrsys_videotoolbox_encoder_tests
     tests/TestVideoToolboxEncoder.mm
     tests/TestEncoderHelperClient.mm
+    tests/TestOverlayCompositor.mm
     runtime/src/VideoEncoder.mm
+    runtime/src/OverlayCompositor.mm
     runtime/src/EncoderHelperClient.mm
     runtime/src/EncoderPathPolicy.cpp
     runtime/src/Config.cpp
     runtime/src/RuntimePlatform.cpp
+    runtime/src/Runtime.cpp
+    runtime/src/SwapchainCommon.cpp
+    runtime/src/SwapchainMetal.mm
+    runtime/src/SwapchainVulkan.cpp
 )
 target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
     runtime/src
@@ -329,6 +343,8 @@ target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
 target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
     Catch2::Catch2WithMain
     spdlog::spdlog
+    glm::glm
+    OXRSYS::VulkanHeaders
     "-framework Metal"
     "-framework MetalPerformanceShaders"
     "-framework Foundation"
@@ -339,6 +355,7 @@ target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
 )
 target_compile_definitions(oxrsys_videotoolbox_encoder_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
+    XR_USE_GRAPHICS_API_VULKAN
     OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
     OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
     OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
@@ -355,6 +372,19 @@ set_tests_properties(oxrsys_videotoolbox_encoder_tests PROPERTIES
     TIMEOUT 60
 )
 list(APPEND OXRSYS_RUNTIME_TEST_TARGETS oxrsys_videotoolbox_encoder_tests)
+
+# Packet pacing probe (not a test): a synthetic 90 fps stream packetised like
+# StreamingServer::SendNalUnit, paced by PacketPacer, sent to a receiver on
+# 127.0.0.1 only. Prints burst length, packet spacing, peak 1 ms rate and the
+# latency the pacing adds. See tools/PacingProbe.cpp.
+add_executable(oxrsys_pacing_probe
+    tools/PacingProbe.cpp
+    runtime/src/PacketPacer.cpp
+)
+target_include_directories(oxrsys_pacing_probe PRIVATE
+    runtime/src
+    common
+)
 
 add_dependencies(oxrsys_runtime_sync_compile_commands
     ${OXRSYS_RUNTIME_TEST_TARGETS}

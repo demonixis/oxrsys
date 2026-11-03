@@ -11,6 +11,8 @@
 // the build's own helper). Each case SKIPs when the helper cannot come up on a
 // hardware encoder here — an Intel machine cannot execute it, and a VM runner
 // may expose no hardware encoder — because then there is no helper to test.
+// On Apple Silicon, where this process itself gets a hardware encoder for the
+// codec, a helper that does not come up on one FAILs instead.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -22,6 +24,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurface.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include <atomic>
 #include <chrono>
@@ -30,6 +33,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
@@ -128,6 +132,35 @@ struct Collected
     }
 };
 
+// On Apple Silicon, this process under Rosetta included, the helper runs
+// natively and asks VideoToolbox for nothing more than a RequireHardware=YES
+// session. If this process gets one for the codec, so must the helper.
+bool HelperMustComeUp(EncoderHelperClient::Codec codec)
+{
+    int arm64 = 0;
+    size_t size = sizeof(arm64);
+    if (sysctlbyname("hw.optional.arm64", &arm64, &size, nullptr, 0) != 0 || arm64 != 1)
+    {
+        return false;
+    }
+    NSDictionary* spec = @{
+        (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: @YES,
+        (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @YES,
+    };
+    VTCompressionSessionRef session = nullptr;
+    const OSStatus status = VTCompressionSessionCreate(
+        kCFAllocatorDefault, kWidth, kHeight,
+        codec == EncoderHelperClient::Codec::H264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC,
+        (__bridge CFDictionaryRef)spec, nullptr, kCFAllocatorDefault, nullptr, nullptr, &session);
+    if (status != noErr || session == nullptr)
+    {
+        return false;
+    }
+    VTCompressionSessionInvalidate(session);
+    CFRelease(session);
+    return true;
+}
+
 bool StartOrSkip(EncoderHelperClient& client, Surfaces& surfaces,
                  const EncoderHelperClient::Config& config, Collected& collected,
                  EncoderHelperClient::OnFrameDone onFrameDone = nullptr)
@@ -147,13 +180,19 @@ bool StartOrSkip(EncoderHelperClient& client, Surfaces& surfaces,
             collected.changed.notify_all();
         };
     }
-    return client.Start(
+    const bool started = client.Start(
         config, surfaces.surfaces.data(), surfaces.surfaces.size(),
         [&collected](uint64_t, const uint8_t* data, size_t size, bool, int64_t) {
             std::lock_guard<std::mutex> lock(collected.mutex);
             collected.nals.emplace_back(data, data + size);
         },
         std::move(onFrameDone));
+    if (!started && HelperMustComeUp(config.codec))
+    {
+        FAIL("encoder helper did not come up on a hardware encoder although this process gets "
+             "one for the codec on Apple Silicon");
+    }
+    return started;
 }
 
 } // namespace

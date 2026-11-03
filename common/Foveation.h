@@ -53,14 +53,50 @@ inline FoveationPresetParameters ParametersForPreset(FoveationPreset preset)
     }
 }
 
+// "medium_plus" (config name only; it travels as FoveationPreset::Medium with
+// these parameters in the announce): medium's edge ratios with a larger centre,
+// between medium and light in encoded size.
+inline FoveationPresetParameters MediumPlusParameters()
+{
+    return {0.50f, 0.45f, 0.0f, 0.0f, 4.0f, 5.0f};
+}
+
+// The centre shift that puts an eye's full-resolution region on its forward direction. An asymmetric
+// eye frustum (each Quest eye sees further outwards than inwards) has its forward direction off the image
+// centre. tanNear and tanFar are the tangents of the half-angles towards the axis start (left or up) and
+// end (right or down); the result is clamped to the shift's [-1, 1] range.
+inline float EyeCenterShift(float tanNear, float tanFar, float centerSize)
+{
+    const float span = tanNear + tanFar;
+    if (!(span > 0.0f) || !(centerSize < 1.0f))
+    {
+        return 0.0f;
+    }
+    const float forward = tanNear / span;
+    return std::clamp((2.0f * forward - 1.0f) / (1.0f - centerSize), -1.0f, 1.0f);
+}
+
+// Shifts for one eye from its OpenXR fov angles (radians): angleLeft and angleDown are negative.
+inline void EyeCenterShifts(float angleLeft, float angleRight, float angleUp, float angleDown,
+                            float centerSizeX, float centerSizeY, float& shiftX, float& shiftY)
+{
+    shiftX = EyeCenterShift(std::tan(-angleLeft), std::tan(angleRight), centerSizeX);
+    shiftY = EyeCenterShift(std::tan(angleUp), std::tan(-angleDown), centerSizeY);
+}
+
 inline uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
     return alignment == 0 ? value : ((value + alignment - 1u) / alignment) * alignment;
 }
 
+// The layout for explicit parameters. The wire carries the aligned parameters
+// (StreamConfig foveationCenterSize*/EdgeRatio*), so a config preset whose
+// parameters differ from ParametersForPreset(preset) still decodes on clients
+// that read them; preset only has to be non-Off.
 inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
                                                 uint32_t targetEyeHeight,
                                                 FoveationPreset preset,
+                                                FoveationPresetParameters params,
                                                 uint32_t alignment = 32)
 {
     FoveationLayout layout = {};
@@ -70,7 +106,6 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.optimizedEyeWidth = targetEyeWidth;
     layout.optimizedEyeHeight = targetEyeHeight;
 
-    FoveationPresetParameters params = ParametersForPreset(preset);
     if (preset == FoveationPreset::Off ||
         targetEyeWidth == 0 ||
         targetEyeHeight == 0 ||
@@ -129,6 +164,15 @@ inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
     layout.eyeHeightRatio = optimizedH / static_cast<float>(std::max(layout.optimizedEyeHeight, 1u));
     layout.parameters = params;
     return layout;
+}
+
+inline FoveationLayout CalculateFoveationLayout(uint32_t targetEyeWidth,
+                                                uint32_t targetEyeHeight,
+                                                FoveationPreset preset,
+                                                uint32_t alignment = 32)
+{
+    return CalculateFoveationLayout(targetEyeWidth, targetEyeHeight, preset,
+                                    ParametersForPreset(preset), alignment);
 }
 
 inline bool IsFoveatedEncodingLayoutUsable(const FoveationLayout& layout,

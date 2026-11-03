@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "XrApp.h"
+#include "UsbNetworkLink.h"
 
 #include <android/hardware_buffer.h>
 #include <android/log.h>
@@ -121,55 +122,49 @@ uniform vec2 uFoveationEyeSizeRatio;
 uniform int uReprojectionWarpEnabled;
 uniform vec2 uReprojectionWarpOffset;
 uniform int uPassthroughAlphaEnabled;
+uniform int uPackedAlphaEnabled;
+uniform vec2 uAlphaOrigin;
+uniform vec2 uContentTexelSize;
+uniform vec2 uAlphaTileSize;
 
-float compressAxis(float eyeUv, float centerSize, float centerShift, float edgeRatio) {
+// Closed-form inverse of the server's AADT compress_axis warp, the same solution as the visionOS
+// client's decompressAxis: linear in the center, the stable small root of a quadratic on each
+// edge. Also returns the inverse's local slope so neighbor taps a few texels away can be placed
+// linearly. CPU copy for the host tests: QuestFoveation.h; change both together.
+float decompressAxisAndSlope(float targetUv, float centerSize, float centerShift,
+                             float edgeRatio, out float invSlope) {
     float c0 = (1.0 - centerSize) * 0.5;
     float c1 = (edgeRatio - 1.0) * c0 * (centerShift + 1.0) / edgeRatio;
     float c2 = (edgeRatio - 1.0) * centerSize + 1.0;
     float loBound = c0 * (centerShift + 1.0) / c2;
     float hiBound = c0 * (centerShift - 1.0) / c2 + 1.0;
-    float center = eyeUv * c2 / edgeRatio + c1;
-    float d2 = eyeUv * c2;
-    float d3 = (eyeUv - 1.0) * c2 + 1.0;
-    float g1 = loBound > 0.0 ? eyeUv / loBound : 1.0;
-    float g2 = (1.0 - hiBound) > 0.0 ? (1.0 - eyeUv) / (1.0 - hiBound) : 1.0;
-    float leftEdge = g1 * center + (1.0 - g1) * d2;
-    float rightEdge = g2 * center + (1.0 - g2) * d3;
-    if (eyeUv < loBound) {
-        return leftEdge;
-    }
-    if (eyeUv > hiBound) {
-        return rightEdge;
-    }
-    return center;
-}
+    float tLo = loBound * c2 / edgeRatio + c1;
+    float tHi = hiBound * c2 / edgeRatio + c1;
 
-// Binary search inverse of compressAxis. Also returns the warp's local derivative
-// (via one extra cheap finite-difference eval) so callers sampling a few texels away
-// from targetUv can place those neighbor taps with a linear extrapolation instead of
-// re-running the full 10-iteration search -- the warp is smooth, so this is accurate
-// to well within a texel for the tiny offsets used by the upscale sharpen kernel.
-float decompressAxisAndSlope(float targetUv, float centerSize, float centerShift,
-                              float edgeRatio, out float invSlope) {
-    float lo = 0.0;
-    float hi = 1.0;
-    float mid = 0.5;
-    for (int i = 0; i < 10; ++i) {
-        mid = (lo + hi) * 0.5;
-        float mapped = compressAxis(mid, centerSize, centerShift, edgeRatio);
-        if (mapped < targetUv) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+    float eyeUv;
+    float slope;
+    if (targetUv < tLo && loBound > 0.0) {
+        // Left edge: t = a*u^2 + b*u with a < 0, b > 0; small root through (0, 0).
+        float a = (c2 / loBound) * (1.0 / edgeRatio - 1.0);
+        float b = c1 / loBound + c2;
+        eyeUv = 2.0 * targetUv / (b + sqrt(max(b * b + 4.0 * a * targetUv, 0.0)));
+        slope = 2.0 * a * eyeUv + b;
+    } else if (targetUv > tHi && hiBound < 1.0) {
+        // Right edge: with v = 1-u, t-1 = a*v^2 + b*v with a > 0, b < 0; small root through
+        // (t=1, v=0).
+        float w = 1.0 - hiBound;
+        float a = (c2 / w) * (1.0 - 1.0 / edgeRatio);
+        float b = (c2 / edgeRatio + c1 - 1.0) / w - c2;
+        float d = max(b * b - 4.0 * a * (1.0 - targetUv), 0.0);
+        float v = 2.0 * (1.0 - targetUv) / (-b + sqrt(d));
+        eyeUv = 1.0 - v;
+        slope = -(2.0 * a * v + b);
+    } else {
+        eyeUv = (targetUv - c1) * edgeRatio / c2;
+        slope = c2 / edgeRatio;
     }
-    mid = (lo + hi) * 0.5;
-    const float eps = 0.001;
-    float fPlus = compressAxis(min(mid + eps, 1.0), centerSize, centerShift, edgeRatio);
-    float fMinus = compressAxis(max(mid - eps, 0.0), centerSize, centerShift, edgeRatio);
-    float slope = (fPlus - fMinus) / (2.0 * eps);
     invSlope = abs(slope) > 0.0001 ? 1.0 / slope : 1.0;
-    return mid;
+    return eyeUv;
 }
 
 float luma(vec3 color) {
@@ -188,6 +183,48 @@ vec3 sampleSource(vec2 uv) {
     return texture(uTexture, clampSourceUv(uv)).rgb;
 }
 
+float samplePackedAlpha(vec2 texel) {
+    texel = clamp(texel, vec2(0.0), vec2(uAlphaTileSize.x - 1.0, uAlphaTileSize.y * 2.0 - 1.0));
+    float lowerHalf = step(uAlphaTileSize.y, texel.y);
+    vec2 packedTexel = texel + vec2(uAlphaTileSize.x, -uAlphaTileSize.y) * lowerHalf;
+    return texture(uTexture, uAlphaOrigin + (packedTexel + 0.5) * uContentTexelSize).r;
+}
+
+float bilinearPackedAlpha(vec2 encodedUv, vec2 grid) {
+    vec2 position = clamp(encodedUv * grid, vec2(0.5), grid - 0.5);
+    float lowerHalf = step(uAlphaTileSize.y, position.y);
+    vec2 packedPosition = position + vec2(uAlphaTileSize.x, -uAlphaTileSize.y) * lowerHalf;
+    return texture(uTexture, uAlphaOrigin + packedPosition * uContentTexelSize).r;
+}
+
+vec3 srgbToLinear(vec3 color) {
+    return mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), color));
+}
+
+// Each alpha texel is the mean alpha of a 2x2 block of encoded pixels. Premultiplied colour is content
+// colour times alpha, and a stroke is one colour across so small a block, so a pixel's alpha is the
+// block's alpha scaled by the pixel's brightness over the block's mean brightness. Black content has no
+// brightness to compare and keeps the interpolated alpha.
+float reconstructedPackedAlpha(vec2 encodedUv, vec3 color) {
+    vec2 grid = vec2(uAlphaTileSize.x, uAlphaTileSize.y * 2.0);
+    float coarseAlpha = bilinearPackedAlpha(encodedUv, grid);
+    if (coarseAlpha < 0.016 || coarseAlpha > 0.984) {
+        return coarseAlpha;
+    }
+    vec2 block = clamp(floor(encodedUv * grid), vec2(0.0), grid - 1.0);
+    vec2 encodedPixel = 0.5 / grid;
+    float blockLuma = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec2 pixel = block * 2.0 + vec2(float(i & 1), float(i >> 1)) + 0.5;
+        blockLuma += luma(srgbToLinear(sampleSource(mix(uEyeSourceMin, uEyeSourceMax, pixel * encodedPixel))));
+    }
+    blockLuma *= 0.25;
+    if (blockLuma < 0.002) {
+        return coarseAlpha;
+    }
+    return clamp(samplePackedAlpha(block) * luma(srgbToLinear(color)) / blockLuma, 0.0, 1.0);
+}
+
 void main() {
     vec2 eyeUv = clamp(vUV, vec2(0.0), vec2(1.0));
     if (uReprojectionWarpEnabled != 0) {
@@ -197,7 +234,7 @@ void main() {
                       vec2(0.0), vec2(1.0));
     }
 
-    // Expensive iterative de-foveation warp: evaluated once, at the center sample only.
+    // De-foveation warp: evaluated once, at the center sample only.
     vec2 corrected;
     vec2 invSlope;
     if (uFoveatedEncodingEnabled != 0) {
@@ -218,10 +255,11 @@ void main() {
     vec2 sourceRange = uEyeSourceMax - uEyeSourceMin;
     vec2 sourceUv = clampSourceUv(mix(uEyeSourceMin, uEyeSourceMax, corrected));
     vec3 color = sampleSource(sourceUv);
+    vec3 decodedColor = color;
 
     if (uClientUpscalingEnabled != 0) {
         vec2 stepUv = max(uLogicalTexelSize, vec2(0.00001));
-        // Linearized neighbor placement -- no extra binary searches.
+        // Linearized neighbor placement from the inverse slope -- no extra inverse evaluations.
         vec2 sourceStep = stepUv * invSlope * sourceRange;
         vec3 left = sampleSource(sourceUv - vec2(sourceStep.x, 0.0));
         vec3 right = sampleSource(sourceUv + vec2(sourceStep.x, 0.0));
@@ -234,10 +272,17 @@ void main() {
         }
     }
     float alpha = 1.0;
-    if (uPassthroughAlphaEnabled != 0) {
+    if (uPassthroughAlphaEnabled != 0 && uPackedAlphaEnabled != 0) {
+        alpha = reconstructedPackedAlpha(corrected, decodedColor);
+        // Premultiplied colour never exceeds alpha, which recovers detail finer than the alpha grid.
+        vec3 linearColor = srgbToLinear(decodedColor);
+        alpha = max(alpha, max(max(linearColor.r, linearColor.g), linearColor.b));
+    } else if (uPassthroughAlphaEnabled != 0) {
         float maxChannel = max(max(color.r, color.g), color.b);
         alpha = smoothstep(0.02, 0.10, maxChannel);
     }
+    // The swapchain is GL_SRGB8_ALPHA8, so GLES encodes on write; the decoded video is already sRGB-encoded.
+    color = mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), color));
     fragColor = vec4(color, alpha);
 }
 )";
@@ -1095,6 +1140,7 @@ bool XrApp::CreateInstance(struct android_app* app)
     foveationConfigurationAvailable_ = hasExtension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME);
     swapchainUpdateAvailable_ = hasExtension(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME);
     displayRefreshRateAvailable_ = hasExtension(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    compositionLayerSettingsAvailable_ = hasExtension(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     const bool metaTouchControllerPlusAvailable =
         hasExtension(XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME);
     const bool picoControllerInteractionAvailable =
@@ -1126,6 +1172,10 @@ bool XrApp::CreateInstance(struct android_app* app)
     if (displayRefreshRateAvailable_)
     {
         extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    }
+    if (compositionLayerSettingsAvailable_)
+    {
+        extensions.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     }
     if (metaTouchControllerPlusAvailable)
     {
@@ -1280,9 +1330,17 @@ bool XrApp::CreateInstance(struct android_app* app)
                                            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                                            2, &viewCount, viewConfigs_);
 
-        swapchainWidth_ = viewConfigs_[0].recommendedImageRectWidth;
-        swapchainHeight_ = viewConfigs_[0].recommendedImageRectHeight;
-        LOGI("View config: %ux%u per eye", swapchainWidth_, swapchainHeight_);
+        // The swapchain exists before a stream is negotiated. Supersampling the recommended size lets
+        // streams up to the Quest 3 panel (2064x2208, recommended 1680x1760) blit without a downscale,
+        // which aliases thin lines because the external video texture has no mipmaps.
+        constexpr float kSwapchainSupersample = 1.3f;
+        swapchainWidth_ = std::min(viewConfigs_[0].maxImageRectWidth,
+            static_cast<uint32_t>(viewConfigs_[0].recommendedImageRectWidth * kSwapchainSupersample + 0.5f));
+        swapchainHeight_ = std::min(viewConfigs_[0].maxImageRectHeight,
+            static_cast<uint32_t>(viewConfigs_[0].recommendedImageRectHeight * kSwapchainSupersample + 0.5f));
+        LOGI("View config: recommended %ux%u, swapchain %ux%u per eye",
+             viewConfigs_[0].recommendedImageRectWidth, viewConfigs_[0].recommendedImageRectHeight,
+             swapchainWidth_, swapchainHeight_);
     }
 
     return true;
@@ -1754,7 +1812,14 @@ bool XrApp::SetupActions()
     strncpy(actionInfo.localizedActionName, "Menu", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
     XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &menuAction_), "xrCreateAction(menu)");
 
-    XrPath bindingPaths[15];
+    actionInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    actionInfo.countSubactionPaths = 2;
+    actionInfo.subactionPaths = handPaths_;
+    strncpy(actionInfo.actionName, "haptic", XR_MAX_ACTION_NAME_SIZE);
+    strncpy(actionInfo.localizedActionName, "Haptic", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet_, &actionInfo, &hapticAction_), "xrCreateAction(haptic)");
+
+    XrPath bindingPaths[17];
     xrStringToPath(instance_, "/user/hand/left/input/grip/pose", &bindingPaths[0]);
     xrStringToPath(instance_, "/user/hand/right/input/grip/pose", &bindingPaths[1]);
     xrStringToPath(instance_, "/user/hand/left/input/aim/pose", &bindingPaths[2]);
@@ -1770,6 +1835,8 @@ bool XrApp::SetupActions()
     xrStringToPath(instance_, "/user/hand/left/input/y/click", &bindingPaths[12]);
     xrStringToPath(instance_, "/user/hand/right/input/b/click", &bindingPaths[13]);
     xrStringToPath(instance_, "/user/hand/left/input/menu/click", &bindingPaths[14]);
+    xrStringToPath(instance_, "/user/hand/left/output/haptic", &bindingPaths[15]);
+    xrStringToPath(instance_, "/user/hand/right/output/haptic", &bindingPaths[16]);
 
     XrActionSuggestedBinding bindingsWithAim[] = {
         {gripPoseAction_, bindingPaths[0]},
@@ -1787,6 +1854,8 @@ bool XrApp::SetupActions()
         {bButtonAction_, bindingPaths[12]},
         {bButtonAction_, bindingPaths[13]},
         {menuAction_, bindingPaths[14]},
+        {hapticAction_, bindingPaths[15]},
+        {hapticAction_, bindingPaths[16]},
     };
     XrActionSuggestedBinding bindingsWithoutAim[] = {
         {gripPoseAction_, bindingPaths[0]},
@@ -1802,6 +1871,8 @@ bool XrApp::SetupActions()
         {bButtonAction_, bindingPaths[12]},
         {bButtonAction_, bindingPaths[13]},
         {menuAction_, bindingPaths[14]},
+        {hapticAction_, bindingPaths[15]},
+        {hapticAction_, bindingPaths[16]},
     };
 
     const char* controllerProfiles[] = {
@@ -1952,6 +2023,10 @@ bool XrApp::CreateSwapchains()
         glGetUniformLocation(blitProgram_, "uReprojectionWarpOffset");
     blitPassthroughAlphaEnabledUniform_ =
         glGetUniformLocation(blitProgram_, "uPassthroughAlphaEnabled");
+    blitPackedAlphaEnabledUniform_ = glGetUniformLocation(blitProgram_, "uPackedAlphaEnabled");
+    blitAlphaOriginUniform_ = glGetUniformLocation(blitProgram_, "uAlphaOrigin");
+    blitContentTexelSizeUniform_ = glGetUniformLocation(blitProgram_, "uContentTexelSize");
+    blitAlphaTileSizeUniform_ = glGetUniformLocation(blitProgram_, "uAlphaTileSize");
 
     glUseProgram(blitProgram_);
     glUniform1i(blitTextureUniform_, 0);
@@ -2235,6 +2310,7 @@ void XrApp::ResetConnection(const char* reason)
     videoContentVMin_ = 0.0f;
     videoContentVMax_ = 1.0f;
     serverFoveatedEncodingEnabled_ = false;
+    serverFoveationEyeCentered_ = false;
     clientUpscalingEnabled_ = false;
     serverMixedRealityPassthroughEnabled_ = false;
     hasObservedProtocolAlphaFrame_ = false;
@@ -2274,7 +2350,9 @@ void XrApp::ResetConnection(const char* reason)
         completedStreamConfigUpdate_ = {};
         hasCompletedStreamConfigUpdate_ = false;
         completedStreamConfigAccepted_ = false;
+        completedStreamConfigDecoderKept_ = false;
     }
+    hasFrameDeferredStreamConfig_ = false;
     streamConfigWorkerSequence_.store(0);
     streamConfigSequence_ = 0;
     latencySamples_ = {};
@@ -2305,6 +2383,12 @@ bool XrApp::OpenControlSocket(const char* serverIp)
     if (controlSocket_ < 0)
     {
         LOGE("Failed to create control socket");
+        return false;
+    }
+    if (!usb_network::BindSocketForServer(controlSocket_, serverIp))
+    {
+        close(controlSocket_);
+        controlSocket_ = -1;
         return false;
     }
 
@@ -2421,7 +2505,10 @@ void XrApp::CloseSpatialSocket()
 
 void XrApp::OnServerFound(const protocol::ServerAnnounce& server, const char* serverIp)
 {
-    ConfigureServerConnection(server, serverIp, TransportMode::WifiUdp);
+    ConfigureServerConnection(server, serverIp,
+                              usb_network::IsServerAddress(serverIp)
+                                  ? TransportMode::UsbNetworkUdp
+                                  : TransportMode::WifiUdp);
 }
 
 bool XrApp::TryStartUsbAdbTransport(bool logUnavailable)
@@ -2532,13 +2619,15 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     }
     shellStatusText_ = transportMode == TransportMode::UsbAdbTcp
         ? "Connecting USB"
+        : transportMode == TransportMode::UsbNetworkUdp
+        ? "Connecting USB network"
         : "Connecting WiFi";
 
     transportMode_ = transportMode;
     const bool usbAdb = transportMode_ == TransportMode::UsbAdbTcp;
 
     LOGI("Server discovered via %s: %s at %s (%ux%u @ %uHz, encoded %ux%u)",
-         usbAdb ? "USB ADB" : "WiFi",
+         usbAdb ? "USB ADB" : transportMode_ == TransportMode::UsbNetworkUdp ? "USB network" : "WiFi",
          server.serverName, serverIp, server.renderWidth, server.renderHeight,
          server.refreshRateHz, server.encodedWidth, server.encodedHeight);
 
@@ -2555,6 +2644,8 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     serverFoveatedEncodingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_FOVEATED_ENCODING) != 0 &&
         server.foveatedEncodingPreset != protocol::FoveationPreset::Off;
+    serverFoveationEyeCentered_ =
+        (server.serverFeatures & protocol::SERVER_FEATURE_FOVEATION_EYE_CENTER) != 0;
     clientUpscalingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
         server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
@@ -2791,12 +2882,14 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.supportedCodecs =
         protocol::CLIENT_CODEC_CAPABILITY_H265 |
         protocol::CLIENT_CODEC_CAPABILITY_H264;
-    connect.maxBitrateMbps = usbAdb
+    // The WiFi cap protects shared wireless links; the USB network link is a dedicated cable.
+    connect.maxBitrateMbps = usbAdb || transportMode_ == TransportMode::UsbNetworkUdp
         ? protocol::CLIENT_MAX_BITRATE_USE_SERVER_CONFIG
         : 100;
     connect.refreshRateHz = clientRefreshRateHz_;
     connect.clientCapabilities =
         protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
+        protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER |
         protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING |
         protocol::CLIENT_CAPABILITY_STREAM_RECONFIGURE;
     if (foveationAvailable_ && foveationConfigurationAvailable_ && swapchainUpdateAvailable_)
@@ -2805,7 +2898,8 @@ void XrApp::SendClientConnect(const char* serverIp)
     }
     if (CanUseShellPassthrough())
     {
-        connect.clientCapabilities |= protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH;
+        connect.clientCapabilities |= protocol::CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH |
+            protocol::CLIENT_CAPABILITY_MIXED_REALITY_ALPHA;
     }
     connect.audioSampleRateHz = 48000;
     strncpy(connect.deviceName, headsetSystemName_, sizeof(connect.deviceName) - 1);
@@ -2942,6 +3036,53 @@ void XrApp::HandleControlPayload(const uint8_t* data, size_t size)
         memcpy(&update, data, sizeof(update));
         HandleStreamConfigUpdate(update);
     }
+    else if (type == protocol::ControlType::Haptics && size >= sizeof(protocol::HapticsCommand))
+    {
+        protocol::HapticsCommand command = {};
+        memcpy(&command, data, sizeof(command));
+        if (command.hand < 2)
+        {
+            std::lock_guard<std::mutex> lock(pendingHapticsMutex_);
+            pendingHaptics_[command.hand] = command;
+            hasPendingHaptics_[command.hand] = true;
+        }
+    }
+}
+
+void XrApp::ApplyPendingHaptics()
+{
+    std::array<protocol::HapticsCommand, 2> commands = {};
+    std::array<bool, 2> pending = {};
+    {
+        std::lock_guard<std::mutex> lock(pendingHapticsMutex_);
+        commands = pendingHaptics_;
+        pending = hasPendingHaptics_;
+        hasPendingHaptics_ = {};
+    }
+    for (int hand = 0; hand < 2; ++hand)
+    {
+        if (!pending[hand])
+        {
+            continue;
+        }
+        XrHapticActionInfo actionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+        actionInfo.action = hapticAction_;
+        actionInfo.subactionPath = handPaths_[hand];
+        if (commands[hand].amplitude <= 0.0f)
+        {
+            xrStopHapticFeedback(session_, &actionInfo);
+            continue;
+        }
+        XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+        vibration.amplitude = std::min(commands[hand].amplitude, 1.0f);
+        vibration.duration = commands[hand].durationMs > 0.0f
+            ? static_cast<XrDuration>(commands[hand].durationMs * 1.0e6f)
+            : XR_MIN_HAPTIC_DURATION;
+        vibration.frequency = commands[hand].frequency > 0.0f
+            ? commands[hand].frequency
+            : XR_FREQUENCY_UNSPECIFIED;
+        xrApplyHapticFeedback(session_, &actionInfo, reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+    }
 }
 
 void XrApp::HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update)
@@ -3042,18 +3183,27 @@ void XrApp::StreamConfigWorkerMain()
         }
 
         bool accepted = false;
+        bool decoderKept = false;
         {
             std::lock_guard<std::mutex> decoderLock(videoDecoderMutex_);
-            if (videoDecoder_)
+            decoderKept = videoDecoder_ && videoDecoder_->IsInitialized() &&
+                update.encodedWidth <= videoDecoder_->GetMaxWidth() &&
+                update.encodedHeight <= videoDecoder_->GetMaxHeight();
+            if (decoderKept)
+            {
+                accepted = true;
+            }
+            else if (videoDecoder_)
             {
                 const protocol::VideoCodec codec = activeVideoCodec_.load();
                 videoDecoder_->Shutdown();
-                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, codec);
-                if (accepted)
-                {
-                    decoderEncodedWidth_ = update.encodedWidth;
-                    decoderEncodedHeight_ = update.encodedHeight;
-                }
+                accepted = videoDecoder_->Initialize(update.encodedWidth, update.encodedHeight, update.encodedWidth,
+                                                     update.encodedHeight, codec);
+            }
+            if (accepted)
+            {
+                decoderEncodedWidth_ = update.encodedWidth;
+                decoderEncodedHeight_ = update.encodedHeight;
             }
         }
 
@@ -3061,6 +3211,7 @@ void XrApp::StreamConfigWorkerMain()
             std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
             completedStreamConfigUpdate_ = update;
             completedStreamConfigAccepted_ = accepted;
+            completedStreamConfigDecoderKept_ = decoderKept;
             hasCompletedStreamConfigUpdate_ = true;
         }
     }
@@ -3070,6 +3221,7 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
 {
     protocol::StreamConfigUpdate update = {};
     bool accepted = false;
+    bool decoderKept = false;
     {
         std::lock_guard<std::mutex> completedLock(completedStreamConfigMutex_);
         if (!hasCompletedStreamConfigUpdate_)
@@ -3078,6 +3230,7 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         }
         update = completedStreamConfigUpdate_;
         accepted = completedStreamConfigAccepted_;
+        decoderKept = completedStreamConfigDecoderKept_;
         completedStreamConfigUpdate_ = {};
         completedStreamConfigAccepted_ = false;
         hasCompletedStreamConfigUpdate_ = false;
@@ -3108,6 +3261,52 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         return;
     }
 
+    if (decoderKept)
+    {
+        // Frames of the previous size are still on their way; switch when the first resized frame arrives.
+        frameDeferredStreamConfig_ = update;
+        frameDeferredStreamConfigSince_ = std::chrono::steady_clock::now();
+        hasFrameDeferredStreamConfig_ = true;
+    }
+    else
+    {
+        hasFrameDeferredStreamConfig_ = false;
+        ApplyStreamConfigParameters(update);
+        hasVideoTexture_ = false;
+        hasCurrentRenderPose_ = false;
+        presentedVideoFrame_ = {};
+        currentRenderPose_ = {};
+        videoContentUMin_ = 0.0f;
+        videoContentUMax_ = 1.0f;
+        videoContentVMin_ = 0.0f;
+        videoContentVMax_ = 1.0f;
+        lastVideoFrameTime_ = {};
+        lastFrameReceiveTimeNs_ = 0;
+        lastFrameSubmitTimeNs_ = 0;
+        lastFrameAcquireTimeNs_ = 0;
+        lastReportedAcquireTimeNs_ = 0;
+        skippedDecodedFrames_ = 0;
+        decodedFrameCount_ = 0;
+        nalUnitsReceived_ = 0;
+        pendingDecoderSubmitFailures_.store(0);
+    }
+    streamConfigSequence_.store(update.sequence);
+
+    SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
+    streamConfigWorkerSequence_.store(0);
+    RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
+
+    LOGI("Accepted stream config update seq=%u render=%ux%u encoded=%ux%u decoderKept=%d",
+         update.sequence,
+         update.renderWidth,
+         update.renderHeight,
+         update.encodedWidth,
+         update.encodedHeight,
+         decoderKept ? 1 : 0);
+}
+
+void XrApp::ApplyStreamConfigParameters(const protocol::StreamConfigUpdate& update)
+{
     videoWidth_ = update.renderWidth;
     videoHeight_ = update.renderHeight;
     decodedTexelWidth_ = 1.0f / static_cast<float>(std::max(update.encodedWidth, 1u));
@@ -3147,33 +3346,8 @@ void XrApp::ApplyCompletedStreamConfigUpdate()
         foveationEyeHeightRatio_ = 1.0f;
     }
 
-    hasVideoTexture_ = false;
-    hasCurrentRenderPose_ = false;
-    presentedVideoFrame_ = {};
-    currentRenderPose_ = {};
-    videoContentUMin_ = 0.0f;
-    videoContentUMax_ = 1.0f;
-    videoContentVMin_ = 0.0f;
-    videoContentVMax_ = 1.0f;
-    lastVideoFrameTime_ = {};
-    lastFrameReceiveTimeNs_ = 0;
-    lastFrameSubmitTimeNs_ = 0;
-    lastFrameAcquireTimeNs_ = 0;
-    lastReportedAcquireTimeNs_ = 0;
-    skippedDecodedFrames_ = 0;
-    decodedFrameCount_ = 0;
-    nalUnitsReceived_ = 0;
-    pendingDecoderSubmitFailures_.store(0);
-    streamConfigSequence_.store(update.sequence);
-
-    SendStreamConfigAck(update, protocol::STREAM_CONFIG_ACK_OK);
-    streamConfigWorkerSequence_.store(0);
-    RequestKeyframe(protocol::KEYFRAME_REASON_STREAM_RECOVERY, update.sequence);
-
-    LOGI("Applied stream config update seq=%u render=%ux%u encoded=%ux%u ffe=%d upscaling=%d",
+    LOGI("Applied stream config update seq=%u encoded=%ux%u ffe=%d upscaling=%d",
          update.sequence,
-         update.renderWidth,
-         update.renderHeight,
          update.encodedWidth,
          update.encodedHeight,
          serverFoveatedEncodingEnabled_ ? 1 : 0,
@@ -3525,7 +3699,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
                  static_cast<uint32_t>(videoDecoder_->GetCodec()),
                  static_cast<uint32_t>(videoCodec));
         }
-        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, videoCodec))
+        if (!videoDecoder_->Initialize(decoderWidth, decoderHeight, decoderWidth, decoderHeight, videoCodec))
         {
             LOGE("Failed to initialize decoder for codec=%u (%s)",
                  codec, VideoCodecName(videoCodec));
@@ -3537,6 +3711,7 @@ void XrApp::OnNalUnitReceived(const uint8_t* data, size_t size,
     if (videoDecoder_ && videoDecoder_->IsInitialized())
     {
         const bool alphaBlend = (flags & protocol::VIDEO_FLAG_ALPHA_BLEND) != 0;
+        streamHasPackedAlpha_.store((flags & protocol::VIDEO_FLAG_PACKED_ALPHA) != 0);
         bool submitted = videoDecoder_->SubmitNalUnit(
             data, size, timestampNs / 1000, receiveTimeNs, alphaBlend);
         if (!submitted)
@@ -3663,6 +3838,13 @@ void XrApp::RunFrame()
 
     // Build composition layers
     XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    XrCompositionLayerSettingsFB projectionLayerSettings = {XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
+    projectionLayerSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                         XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB;
+    if (compositionLayerSettingsAvailable_)
+    {
+        projectionLayer.next = &projectionLayerSettings;
+    }
     XrCompositionLayerProjectionView projectionViews[2] = {
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
         {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}
@@ -3700,6 +3882,7 @@ void XrApp::RunFrame()
                      PathToString(instance_, rightProfile.interactionProfile).c_str(),
                      rightProfileResult);
             }
+            ApplyPendingHaptics();
         }
 
         // Locate views
@@ -3793,9 +3976,12 @@ void XrApp::RunFrame()
         projectionLayer.space = appSpace_;
         if (submitPassthroughLayer)
         {
-            projectionLayer.layerFlags =
-                XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT |
-                XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            // Packed-alpha video is premultiplied; the shell and black-key paths keep the unpremultiplied blend.
+            if (!renderedVideo || !streamHasPackedAlpha_.load())
+            {
+                projectionLayer.layerFlags |= XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            }
         }
         projectionLayer.viewCount = 2;
         projectionLayer.views = projectionViews;
@@ -4000,8 +4186,26 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                             static_cast<float>(cropTop) / static_cast<float>(sampleHeight));
                         videoContentVMax_ = ClampNormalized(
                             static_cast<float>(cropBottom) / static_cast<float>(sampleHeight));
+                        videoContentWidth_ = static_cast<uint32_t>(cropRight - cropLeft);
+                        videoContentHeight_ = static_cast<uint32_t>(cropBottom - cropTop);
 
                         hasVideo = true;
+                        // The update's encodedHeight is the eyes only; packed alpha rows sit below them.
+                        const uint32_t deferredFrameHeight = streamHasPackedAlpha_.load()
+                            ? frameDeferredStreamConfig_.encodedHeight +
+                                  protocol::PackedAlphaRows(frameDeferredStreamConfig_.encodedHeight)
+                            : frameDeferredStreamConfig_.encodedHeight;
+                        const bool frameHasDeferredSize = hasFrameDeferredStreamConfig_ &&
+                            static_cast<uint32_t>(cropRight - cropLeft) == frameDeferredStreamConfig_.encodedWidth &&
+                            static_cast<uint32_t>(cropBottom - cropTop) == deferredFrameHeight;
+                        if (frameHasDeferredSize ||
+                            (hasFrameDeferredStreamConfig_ &&
+                             std::chrono::steady_clock::now() - frameDeferredStreamConfigSince_ >
+                                 std::chrono::milliseconds(500)))
+                        {
+                            hasFrameDeferredStreamConfig_ = false;
+                            ApplyStreamConfigParameters(frameDeferredStreamConfig_);
+                        }
                         hasVideoTexture_ = true;
                         lastVideoFrameTime_ = std::chrono::steady_clock::now();
                         presentedVideoFrame_.valid = true;
@@ -4194,18 +4398,43 @@ void XrApp::BlitVideoToSwapchain(int eye)
     float uMin = (eye == 0) ? contentUMin : contentMidU;
     float uMax = (eye == 0) ? contentMidU : contentUMax;
 
+    const bool packedAlpha = streamHasPackedAlpha_.load() && videoContentWidth_ > 0 && videoContentHeight_ > 0;
+    const uint32_t eyeHeight = packedAlpha ? protocol::PackedAlphaEyeHeight(videoContentHeight_) : videoContentHeight_;
+    const float contentTexelU = videoContentWidth_ > 0
+        ? (contentUMax - contentUMin) / static_cast<float>(videoContentWidth_) : decodedTexelWidth_;
+    const float contentTexelV = videoContentHeight_ > 0
+        ? (contentVMax - contentVMin) / static_cast<float>(videoContentHeight_) : decodedTexelHeight_;
+    const float eyeVMax = packedAlpha ? contentVMin + contentTexelV * static_cast<float>(eyeHeight) : contentVMax;
+    const uint32_t alphaTileWidth = std::max(videoContentWidth_ / 4u, 1u);
+
     glUseProgram(blitProgram_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, videoTexture_);
     glUniform2f(blitEyeSourceMinUniform_, uMin, contentVMin);
-    glUniform2f(blitEyeSourceMaxUniform_, uMax, contentVMax);
+    glUniform2f(blitEyeSourceMaxUniform_, uMax, eyeVMax);
     glUniform2f(blitLogicalTexelSizeUniform_, decodedTexelWidth_ * 2.0f, decodedTexelHeight_);
+    glUniform1i(blitPackedAlphaEnabledUniform_, packedAlpha ? 1 : 0);
+    glUniform2f(blitAlphaOriginUniform_,
+                contentUMin + contentTexelU * static_cast<float>(eye * 2u * alphaTileWidth), eyeVMax);
+    glUniform2f(blitContentTexelSizeUniform_, contentTexelU, contentTexelV);
+    glUniform2f(blitAlphaTileSizeUniform_, static_cast<float>(alphaTileWidth),
+                static_cast<float>(videoContentHeight_ - eyeHeight));
     glUniform1i(blitFoveatedEncodingEnabledUniform_, serverFoveatedEncodingEnabled_ ? 1 : 0);
     glUniform1i(blitClientUpscalingEnabledUniform_, clientUpscalingEnabled_ ? 1 : 0);
     glUniform2f(blitFoveationCenterSizeUniform_,
                 foveationCenterSizeX_, foveationCenterSizeY_);
-    glUniform2f(blitFoveationCenterShiftUniform_,
-                foveationCenterShiftX_, foveationCenterShiftY_);
+    float centerShiftX = foveationCenterShiftX_;
+    float centerShiftY = foveationCenterShiftY_;
+    if (serverFoveationEyeCentered_)
+    {
+        // The runtime renders the right eye with the left eye's fov mirrored, which is what it centres on.
+        const XrFovf& fov = views_[0].fov;
+        const float angleLeft = eye == 0 ? fov.angleLeft : -fov.angleRight;
+        const float angleRight = eye == 0 ? fov.angleRight : -fov.angleLeft;
+        protocol::EyeCenterShifts(angleLeft, angleRight, fov.angleUp, fov.angleDown,
+                                  foveationCenterSizeX_, foveationCenterSizeY_, centerShiftX, centerShiftY);
+    }
+    glUniform2f(blitFoveationCenterShiftUniform_, centerShiftX, centerShiftY);
     glUniform2f(blitFoveationEdgeRatioUniform_,
                 foveationEdgeRatioX_, foveationEdgeRatioY_);
     glUniform2f(blitFoveationEyeSizeRatioUniform_,

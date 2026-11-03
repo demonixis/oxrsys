@@ -10,8 +10,8 @@ The desktop user interface is the native SwiftUI OXRSys Home app. AppKit may be 
 platform-scoped adapters for capabilities SwiftUI does not expose directly, such as `NSOpenPanel`,
 `NSWorkspace`, cursor/input handling, and `MTKView` integration.
 
-As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 63 passed,
-36 skipped, and 0 failed.
+As of November 3, 2026, the pinned non-interactive OpenXR-CTS baseline is green locally: 64 passed,
+35 skipped, and 0 failed.
 
 ## Repository Rules
 
@@ -76,6 +76,9 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   application-provided dispatch path. Vulkan v1 may fall back only to an already-loaded process
   `vkGetInstanceProcAddr` through `dlsym(RTLD_DEFAULT, ...)`.
 - `Session::EndFrame()` must remain non-blocking.
+- Session-state transitions driven by frame submission and by `xrRequestExitSession` share one
+  short-held mutex. A session that never ran a frame loop goes straight to `STOPPING` on an exit
+  request.
 - Encoded-frame dispatch is bounded and latest-frame-oriented. Replacing a pending frame must
   release its `FrameSource` resources; backpressure must never run in VideoToolbox callbacks or
   `Session::EndFrame()`.
@@ -84,6 +87,14 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   be reused safely.
 - Metal swapchains accept `XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT`; applications such as Blender blit
   their rendered view into the runtime-owned texture before releasing it.
+- Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those images with
+  `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`; Godot renders through an sRGB view of UNORM images.
+- Metal swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those textures with
+  `MTLTextureUsagePixelFormatView`; Godot's Metal driver renders through an sRGB/UNORM view of
+  the swapchain texture.
+- The WiFi control thread admits one client at a time: a `ClientConnect` from a second address
+  while a client is connected is refused (logged at most every 5 s per address); the connected
+  address may always reconnect. `ClientAdmission.h` holds the pure decision and its tests.
 - Vulkan streaming snapshots released color images with application-dispatched Vulkan functions
   into bounded exportable images. Queue submission is non-blocking; fence waits belong to the
   encoder worker. Missing export support, exhausted slots, or wait failures drop the streaming frame
@@ -135,9 +146,14 @@ As of March 17, 2026, the pinned non-interactive OpenXR-CTS baseline is green lo
   state. Broadcast discovery and older clients remain unchanged.
 - Quest USB uses reconnecting ADB reverse TCP on ports `9944`, `9945`, `9946`, and reserved reliable
   spatial port `9948`. ADB reverse does not require an Android `UsbManager` permission dialog.
-- Home first tries its native ADB host protocol on `127.0.0.1:5037`, then the configured external
-  `adb` fallback. USB readiness and reverse setup stay asynchronous, request-scoped, bounded, and
-  reject stale results after the mode, path, device serial, or transport changes.
+- The Quest USB network transport (`usb_ncm`) is the WiFi UDP path over a CDC-NCM link with fixed
+  addresses: Mac `192.168.42.1/24` without a router, headset `192.168.42.2/24` without a gateway.
+  Neither side's default route may change, so the client binds every socket of that session to the
+  cable's Ethernet network.
+- Home first tries its native USB ADB backend, then the ADB host protocol on `127.0.0.1:5037`, then
+  the configured external `adb` fallback. Reverse setup skips the native backend, because adbd drops
+  reverse mappings when their host connection closes. USB readiness and reverse setup stay
+  asynchronous, request-scoped, bounded, and reject stale results after the mode, path, device serial, or transport changes.
 - Quest TCP sends are bounded. Failed video sends clear stale dispatch state without blocking the
   encoder, callback, or OpenXR frame path.
 - The render-device preset fixes the OpenXR application swapchain size before a client connects.

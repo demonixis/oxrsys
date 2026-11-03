@@ -139,6 +139,31 @@ occlusion_mode = "magic"
     CHECK(values.encoderHelperPath == "/opt/oxrsys/oxrsys-encoder-helper");
 }
 
+TEST_CASE("Config parser accepts render presets alongside floor calibration", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+render_device = "avp"
+stage_height_offset_m = -0.25
+keyframe_interval_sec = 4
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+    CHECK(values.renderDevice == "avp");
+    CHECK(values.stageHeightOffsetM == -0.25f);
+    CHECK(values.keyframeIntervalSec == 4);
+
+    std::istringstream invalid(R"TOML(
+[streaming]
+render_device = "unknown"
+stage_height_offset_m = 1.5
+)TOML");
+
+    const ConfigValues preserved = ParseConfigToml(invalid, values);
+    CHECK(preserved.renderDevice == "avp");
+    CHECK(preserved.stageHeightOffsetM == -0.25f);
+}
+
 TEST_CASE("Config parser accepts signed numbers exponents and inline numeric comments", "[config]")
 {
     std::istringstream input(R"TOML(
@@ -160,6 +185,27 @@ client_sharpening = -0.0 # off
     CHECK(values.dynamicResolutionMinScale == 0.55f);
     CHECK(values.keyframeIntervalSec == 4);
     CHECK(values.clientSharpening == 0.0f);
+}
+
+TEST_CASE("Floor calibration uses strict numeric parsing", "[config]")
+{
+    for (const char* value : {"-1", "+1", "-2.5e-1 # floor offset"})
+    {
+        CAPTURE(value);
+        std::istringstream input(std::string("stage_height_offset_m = ") + value);
+        const float expected = std::string(value) == "-1" ? -1.0f :
+                               std::string(value) == "+1" ? 1.0f : -0.25f;
+        CHECK(ParseConfigToml(input).stageHeightOffsetM == expected);
+    }
+
+    for (const char* value : {"", "nope", "0.5meters", "0.5 0.6", "nan", "inf",
+                             "1e40", "1e-50", "-1.01", "1.01"})
+    {
+        CAPTURE(value);
+        std::istringstream input(std::string("stage_height_offset_m = -0.25\n"
+                                            "stage_height_offset_m = ") + value);
+        CHECK(ParseConfigToml(input).stageHeightOffsetM == -0.25f);
+    }
 }
 
 TEST_CASE("Config parser preserves defaults for malformed numeric input", "[config]")
@@ -214,6 +260,30 @@ client_sharpening = 0.8suffix
     CHECK(values.dynamicResolutionMinScale == 0.45f);
     CHECK(values.keyframeIntervalSec == 3);
     CHECK(values.clientSharpening == 0.25f);
+}
+
+TEST_CASE("Config parser accepts the Quest 3 native render preset", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+render_device = "quest3_native"
+)TOML");
+
+    CHECK(ParseConfigToml(input).renderDevice == "quest3_native");
+}
+
+TEST_CASE("Config parser accepts the medium_plus foveated encoding preset", "[config]")
+{
+    std::istringstream plus(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_plus"
+)TOML");
+    CHECK(ParseConfigToml(plus).foveatedEncodingPreset == "medium_plus");
+    std::istringstream unknown(R"TOML(
+[streaming]
+foveated_encoding_preset = "medium_minus"
+)TOML");
+    CHECK(ParseConfigToml(unknown).foveatedEncodingPreset == "off");
 }
 
 TEST_CASE("Config parser keeps encoder_helper tri-state with an automatic default", "[config]")
@@ -284,6 +354,18 @@ client_foveation_preset = "auto"
     CHECK(values.clientFoveationPreset == "auto");
 }
 
+TEST_CASE("Config parser accepts the USB network transport", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+transport = "usb_ncm"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingTransport == "usb_ncm");
+}
+
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")
 {
     std::istringstream input(R"TOML(
@@ -306,4 +388,57 @@ TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[conf
     CHECK(values.bitrateMbps >= 1);
 
     Config::Get().Shutdown();
+}
+
+TEST_CASE("Config parser reads pacing_thread and falls back to default", "[config][pacing]")
+{
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"realtime\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "realtime");
+    }
+    {
+        std::istringstream input("[streaming]\npacing_thread = \"fastest\"\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
+    {
+        std::istringstream input("[streaming]\nbitrate_mbps = 50\n");
+        CHECK(ParseConfigToml(input).pacingThread == "default");
+    }
+}
+
+TEST_CASE("Config parser reads send pacing windows and clamps them", "[config][pacing]")
+{
+    {
+        std::istringstream input("[streaming]\nsend_pacing_ms = 3.5\nsend_pacing_keyframe_ms = 8\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 3.5f);
+        CHECK(values.sendPacingKeyframeMs == 8.0f);
+    }
+    {
+        std::istringstream input("[streaming]\nsend_pacing_ms = 99\nsend_pacing_keyframe_ms = -4\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 10.0f);
+        CHECK(values.sendPacingKeyframeMs == 0.0f);
+    }
+    {
+        std::istringstream input("[streaming]\nbitrate_mbps = 50\n");
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 0.0f); // default: burst, as before
+        CHECK(values.sendPacingKeyframeMs == 0.0f);
+    }
+}
+
+TEST_CASE("Send pacing preserves valid settings after malformed numbers", "[config][pacing]")
+{
+    for (const char* value : {"", "nope", "3.5ms", "3.5 4", "nan", "inf", "1e40"})
+    {
+        CAPTURE(value);
+        std::istringstream input(std::string(
+            "send_pacing_ms = +3.5e0 # window\n"
+            "send_pacing_keyframe_ms = 8 # keyframe window\n"
+            "send_pacing_ms = ") + value + "\nsend_pacing_keyframe_ms = " + value);
+        const ConfigValues values = ParseConfigToml(input);
+        CHECK(values.sendPacingMs == 3.5f);
+        CHECK(values.sendPacingKeyframeMs == 8.0f);
+    }
 }

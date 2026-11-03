@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <condition_variable>
@@ -17,11 +18,16 @@
 #include "GraphicsTypes.h"
 #include "BoundedDrain.h"
 #include "EncoderPathPolicy.h"
+#include "SnapshotWaitPolicy.h"
 #include <Protocol.h>
 
 // Runtime-side client for the out-of-process native-arm64 hardware HEVC
 // encoder helper (see runtime/encoder_helper/README.md).
 class EncoderHelperClient;
+namespace oxrsys::video
+{
+class OverlayCompositor;
+}
 
 /**
  * Low-latency video encoder facade.
@@ -57,6 +63,8 @@ public:
         float centerShiftY = 0.0f;
         float edgeRatioX = 1.0f;
         float edgeRatioY = 1.0f;
+        // Centre each eye's full-resolution region on its forward direction instead of centerShift.
+        bool eyeCentered = false;
     };
 
     struct BackendCapabilities
@@ -106,6 +114,9 @@ public:
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
+    // Applies before Initialize(): appends oxr::protocol::PackedAlphaRows rows of eye alpha below the eyes.
+    void SetPackedAlpha(bool enabled) { packedAlpha_ = enabled; }
+    bool UsesPackedAlpha() const { return packedAlpha_; }
     // Diagnostics (and tests): pid of the live out-of-process encoder helper
     // frames are currently sent to, or -1 when they are encoded in-process.
     int EncoderHelperPid() const;
@@ -132,8 +143,11 @@ public:
 
     // Encode two backend-native texture/image sources side-by-side (left eye | right eye)
     // The combined image has double the width of a single eye
+    // isSuperseded is asked once the snapshots are ready; when it returns true a newer frame has
+    // finished meanwhile, and this one is not encoded and EncodeStereo returns false.
     bool EncodeStereo(FrameSource frameSource, int64_t timestampNs, OnNalUnitCallback callback,
-                      OnFrameEncodedCallback frameCallback = {});
+                      OnFrameEncodedCallback frameCallback = {},
+                      std::function<bool()> isSuperseded = {});
 
     // Force a keyframe on the next encode
     void ForceKeyframe();
@@ -151,6 +165,8 @@ public:
     uint32_t GetInFlightFrameCount() const { return inFlightFrameCount_.load(); }
 
 private:
+    bool EncodeAlphaPack(void* commandBuffer, void* leftTexture, void* rightTexture, void* outputTexture,
+                         bool stereo, bool eyesSideBySide);
     struct BufferSlot
     {
         void* pixelBuffer = nullptr;      // CVPixelBufferRef
@@ -165,7 +181,8 @@ private:
 
     bool EncodeInternal(FrameSource frameSource, bool stereo,
                         int64_t timestampNs, OnNalUnitCallback callback,
-                        OnFrameEncodedCallback frameCallback);
+                        OnFrameEncodedCallback frameCallback,
+                        const std::function<bool()>& isSuperseded);
     bool AcquireSlot(size_t& outSlotIndex);
     void ReleaseSlot(size_t slotIndex);
     void DestroySlots();
@@ -211,6 +228,7 @@ private:
         void* copySampler = nullptr;       // id<MTLSamplerState>
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        void* alphaPackPipeline = nullptr; // id<MTLComputePipelineState>
         // Software sessions only: BGRA -> video-range 4:2:0 before encode.
         void* videoRangeTransfer = nullptr; // VTPixelTransferSessionRef
         void* videoRangePool = nullptr;     // CVPixelBufferPoolRef
@@ -219,13 +237,15 @@ private:
     GraphicsContext graphicsContext_ = {};
     VideoToolboxState videoToolbox_ = {};
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
-    uint32_t height_ = 0;
+    uint32_t height_ = 0;      // Eye height
+    uint32_t frameHeight_ = 0; // Encoded height: height_ plus any packed alpha rows
     uint32_t eyeWidth_ = 0;   // Single eye width (width_/2 for stereo)
     uint32_t fps_ = 90;
     uint32_t bitrateMbps_ = 50;
     oxr::protocol::VideoCodec codec_ = oxr::protocol::VideoCodec::H265;
     FoveationSettings foveationSettings_ = {};
     bool tenBit_ = false;
+    bool packedAlpha_ = false;
     bool forceSoftwareForTesting_ = false;
     bool inProcessSessionHardware_ = false;
 
@@ -241,6 +261,18 @@ private:
     // in-process session (never a black screen).
     mutable std::mutex helperClientMutex_;
     std::shared_ptr<EncoderHelperClient> helperClient_;
+
+    // Quad/cylinder composition into the eye images (OverlayCompositor.mm), and
+    // the GPU cost of the encoder's command buffer with and without it.
+    std::shared_ptr<oxrsys::video::OverlayCompositor> overlayCompositor_;
+    std::atomic_bool overlayFailureLogged_{false};
+    void RecordOverlayGpuTime(uint32_t overlaysDrawn, double gpuMs);
+    std::mutex overlayStatsMutex_;
+    std::vector<double> overlayGpuMsWith_;
+    std::vector<double> overlayGpuMsWithout_;
+    uint64_t overlayLayerDraws_ = 0;
+    bool overlayStatsSeenOverlay_ = false;
+    std::chrono::steady_clock::time_point overlayStatsLogged_ = {};
     std::atomic<bool> useHelper_{false};
     std::mutex helperContextMutex_;
     std::unordered_map<uint64_t, void*> helperContexts_; // cookie -> EncodeFrameContext*
@@ -251,6 +283,13 @@ private:
     uint32_t frameCount_ = 0;
     std::atomic<bool> forceKeyframe_{false};
     std::atomic<bool> shuttingDown_{false};
+    // The snapshot wait's mode (short while frames arrive on time, long after a few late ones in a row); touched only
+    // by the encoder worker in EncodeInternal, reset in Initialize.
+    oxrsys::SnapshotWaitSettings snapshotWaitSettings_{};
+    oxrsys::SnapshotWaitState snapshotWait_{};
+    uint64_t snapshotWaitSwitches_ = 0;
+    uint64_t snapshotWaitSwitchesLogged_ = 0;
+    std::chrono::steady_clock::time_point snapshotWaitLastLog_ = {};
     std::atomic<bool> foveationValidationWarningLogged_{false};
     std::atomic<bool> videoRangeConversionWarningLogged_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};

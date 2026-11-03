@@ -65,6 +65,7 @@ add_library(oxrsys_android SHARED
     VideoDecoder.cpp
     NetworkReceiver.cpp
     TrackingSender.cpp
+    UsbNetworkLink.cpp
 )
 
 target_include_directories(oxrsys_android PRIVATE

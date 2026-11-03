@@ -10,18 +10,24 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <arpa/inet.h>
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -95,6 +101,40 @@ std::filesystem::path RuntimeConfigPath()
     return std::filesystem::path(home) /
            "Library/Application Support/OXRSys/oxrsys-runtime.toml";
 }
+
+// WriteRuntimeConfig replaces the user's real runtime config; a test that calls it holds one of these, which puts the
+// file back (or removes it, if there was none) when the test ends, failed REQUIREs included.
+class RuntimeConfigRestore
+{
+public:
+    RuntimeConfigRestore() : path_(RuntimeConfigPath())
+    {
+        std::ifstream file(path_, std::ios::binary);
+        if (file.is_open())
+        {
+            existed_ = true;
+            saved_.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+    }
+    ~RuntimeConfigRestore()
+    {
+        std::error_code ignored;
+        if (!existed_)
+        {
+            std::filesystem::remove(path_, ignored);
+            return;
+        }
+        std::ofstream file(path_, std::ios::binary | std::ios::trunc);
+        file << saved_;
+    }
+    RuntimeConfigRestore(const RuntimeConfigRestore&) = delete;
+    RuntimeConfigRestore& operator=(const RuntimeConfigRestore&) = delete;
+
+private:
+    std::filesystem::path path_;
+    std::string saved_;
+    bool existed_ = false;
+};
 
 void WriteRuntimeConfig(bool passthroughEnabled, bool appAlphaBlendPassthrough = false)
 {
@@ -417,6 +457,52 @@ public:
         return false;
     }
 
+    bool ReadHaptics(oxr::protocol::HapticsCommand& command, std::chrono::milliseconds timeout)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            pollfd descriptor = {controlSocket_, POLLIN, 0};
+            if (poll(&descriptor, 1, 10) <= 0)
+            {
+                continue;
+            }
+            std::array<uint8_t, 1024> payload = {};
+            size_t size = 0;
+            if (tcp_)
+            {
+                oxr::protocol::TcpRecordHeader header = {};
+                if (!ReadAll(&header, sizeof(header)) || header.magic != oxr::protocol::TCP_RECORD_MAGIC ||
+                    header.version != oxr::protocol::TCP_RECORD_VERSION || header.payloadSize > payload.size() ||
+                    !ReadAll(payload.data(), header.payloadSize))
+                {
+                    return false;
+                }
+                if (header.type != oxr::protocol::TcpRecordType::Control)
+                {
+                    continue;
+                }
+                size = header.payloadSize;
+            }
+            else
+            {
+                const ssize_t received = recv(controlSocket_, payload.data(), payload.size(), 0);
+                if (received <= 0)
+                {
+                    continue;
+                }
+                size = static_cast<size_t>(received);
+            }
+            if (size >= sizeof(command) &&
+                payload[0] == static_cast<uint8_t>(oxr::protocol::ControlType::Haptics))
+            {
+                std::memcpy(&command, payload.data(), sizeof(command));
+                return true;
+            }
+        }
+        return false;
+    }
+
 private:
     int OpenSocket(uint16_t port)
     {
@@ -608,6 +694,7 @@ TEST_CASE("Instance view and blend APIs reject missing output pointers", "[runti
 
 TEST_CASE("Alpha blend modes are stable for an instance after config reload", "[runtime][passthrough]")
 {
+    RuntimeConfigRestore restoreConfig;
     WriteRuntimeConfig(true, true);
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
@@ -646,6 +733,7 @@ TEST_CASE("Alpha blend modes are stable for an instance after config reload", "[
 
 TEST_CASE("Passthrough underlay alone does not advertise alpha blend", "[runtime][passthrough]")
 {
+    RuntimeConfigRestore restoreConfig;
     WriteRuntimeConfig(true, false);
 
     XrInstanceCreateInfo createInfo = {XR_TYPE_INSTANCE_CREATE_INFO};
@@ -1129,6 +1217,60 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
     XR_CHECK(xrDestroySpace(spaces[0]));
 }
 
+// Spaces of one reference space type move together, so their relative velocity is known and zero
+// even without a tracking connection, which leaves the head's own velocity unknown. The CTS locates
+// VIEW spaces in a VIEW space this way ("space velocities valid inputs").
+TEST_CASE("Spaces of one reference space type have a known zero relative velocity", "[runtime][spaces]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<XrSpace, 2> viewSpaces = {};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[0]));
+    createInfo.poseInReferenceSpace.position = {0.1f, -0.2f, 0.3f};
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.70710678f, 0.0f, 0.70710678f};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[1]));
+
+    const auto checkAtRest = [](XrSpaceVelocityFlags flags, const XrVector3f& linear, const XrVector3f& angular) {
+        CHECK(flags == (XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT));
+        CHECK(linear.x == 0.0f);
+        CHECK(linear.y == 0.0f);
+        CHECK(linear.z == 0.0f);
+        CHECK(angular.x == 0.0f);
+        CHECK(angular.y == 0.0f);
+        CHECK(angular.z == 0.0f);
+    };
+
+    std::array<XrSpaceLocationData, 2> locationData = {};
+    std::array<XrSpaceVelocityData, 2> velocityData = {};
+    XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
+    velocities.velocityCount = static_cast<uint32_t>(velocityData.size());
+    velocities.velocities = velocityData.data();
+    XrSpaceLocations locations = {XR_TYPE_SPACE_LOCATIONS, &velocities};
+    locations.locationCount = static_cast<uint32_t>(locationData.size());
+    locations.locations = locationData.data();
+    XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
+    locateInfo.baseSpace = viewSpaces[1];
+    locateInfo.time = 1;
+    locateInfo.spaceCount = static_cast<uint32_t>(viewSpaces.size());
+    locateInfo.spaces = viewSpaces.data();
+    XR_CHECK(xrLocateSpaces(context.session, &locateInfo, &locations));
+    for (const XrSpaceVelocityData& data : velocityData)
+    {
+        checkAtRest(data.velocityFlags, data.linearVelocity, data.angularVelocity);
+    }
+
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
+    XR_CHECK(xrLocateSpace(viewSpaces[1], viewSpaces[0], locateInfo.time, &location));
+    checkAtRest(velocity.velocityFlags, velocity.linearVelocity, velocity.angularVelocity);
+
+    XR_CHECK(xrDestroySpace(viewSpaces[1]));
+    XR_CHECK(xrDestroySpace(viewSpaces[0]));
+}
+
 TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runtime][tracking][loopback]")
 {
     const bool tcp = GENERATE(false, true);
@@ -1141,6 +1283,10 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     XrSpace viewSpace = XR_NULL_HANDLE;
     XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpace));
 
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+    XrSpace stageSpace = XR_NULL_HANDLE;
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &stageSpace));
+
     XrExtent2Df bounds = {123.0f, 456.0f};
     CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
           XR_SPACE_BOUNDS_UNAVAILABLE);
@@ -1148,7 +1294,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     CHECK(bounds.height == 0.0f);
     XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
     XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
-    XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, 1, &location));
+    XR_CHECK(xrLocateSpace(viewSpace, stageSpace, 1, &location));
     CHECK(velocity.velocityFlags == 0);
     CHECK(CountStageChanges(context) == 0);
 
@@ -1174,7 +1320,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
 
     auto readTracking = [&] {
         sampleTime = PumpTrackingFrame(context.session);
-        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
         boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
     };
     auto waitForPacket = [&](size_t size, auto matches) {
@@ -1202,7 +1348,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     CHECK_THAT(velocity.angularVelocity.z, WithinAbs(-0.75f, 0.0001f));
     CHECK(CountStageChanges(context) == 1);
 
-    std::array<XrSpace, 2> spaces = {viewSpace, context.localSpace};
+    std::array<XrSpace, 2> spaces = {viewSpace, stageSpace};
     std::array<XrSpaceLocationData, 2> locationData = {};
     std::array<XrSpaceVelocityData, 2> velocityData = {};
     XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
@@ -1212,7 +1358,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     locations.locationCount = static_cast<uint32_t>(locationData.size());
     locations.locations = locationData.data();
     XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
-    locateInfo.baseSpace = context.localSpace;
+    locateInfo.baseSpace = stageSpace;
     locateInfo.time = sampleTime;
     locateInfo.spaceCount = static_cast<uint32_t>(spaces.size());
     locateInfo.spaces = spaces.data();
@@ -1221,7 +1367,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     {
         XrSpaceVelocity singleVelocity = {XR_TYPE_SPACE_VELOCITY};
         XrSpaceLocation singleLocation = {XR_TYPE_SPACE_LOCATION, &singleVelocity};
-        XR_CHECK(xrLocateSpace(spaces[i], context.localSpace, sampleTime, &singleLocation));
+        XR_CHECK(xrLocateSpace(spaces[i], stageSpace, sampleTime, &singleLocation));
         CHECK(velocityData[i].velocityFlags == singleVelocity.velocityFlags);
         CHECK(velocityData[i].linearVelocity.x == singleVelocity.linearVelocity.x);
         CHECK(velocityData[i].linearVelocity.y == singleVelocity.linearVelocity.y);
@@ -1279,7 +1425,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
     do
     {
         boundsResult = xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds);
-        XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+        XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while ((boundsResult != XR_SPACE_BOUNDS_UNAVAILABLE || velocity.velocityFlags != 0) &&
              std::chrono::steady_clock::now() < deadline);
@@ -1295,7 +1441,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
         {
             peer.SendTracking(packet, sizeof(packet));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            XR_CHECK(xrLocateSpace(viewSpace, context.localSpace, sampleTime, &location));
+            XR_CHECK(xrLocateSpace(viewSpace, stageSpace, sampleTime, &location));
             CHECK(velocity.velocityFlags == 0);
             CHECK(xrGetReferenceSpaceBoundsRect(context.session, XR_REFERENCE_SPACE_TYPE_STAGE, &bounds) ==
                   XR_SPACE_BOUNDS_UNAVAILABLE);
@@ -1303,6 +1449,7 @@ TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runt
         CHECK(CountStageChanges(context) == 0);
     }
 
+    XR_CHECK(xrDestroySpace(stageSpace));
     XR_CHECK(xrDestroySpace(viewSpace));
 }
 
@@ -1484,6 +1631,61 @@ TEST_CASE("BeginSession rejects unsupported view configuration types", "[runtime
     XrSessionBeginInfo beginInfo = {XR_TYPE_SESSION_BEGIN_INFO};
     beginInfo.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO;
     CHECK(xrBeginSession(context.session, &beginInfo) == XR_ERROR_VIEW_CONFIGURATION_TYPE_UNSUPPORTED);
+}
+
+// OpenComposite (Arizona Sunshine) begins a session, then requests exit and only pumps events,
+// never running a frame. Exit must still reach STOPPING, or the app waits out its timeout.
+TEST_CASE("RequestExitSession reaches STOPPING without a frame loop", "[runtime][loader]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    auto drainStates = [&]() {
+        std::vector<XrSessionState> states;
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                states.push_back(reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state);
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+        return states;
+    };
+
+    drainStates();
+    XR_CHECK(xrRequestExitSession(context.session));
+    std::vector<XrSessionState> states = drainStates();
+    REQUIRE_FALSE(states.empty());
+    CHECK(states.back() == XR_SESSION_STATE_STOPPING);
+
+    XR_CHECK(xrEndSession(context.session));
+    states = drainStates();
+    REQUIRE_FALSE(states.empty());
+    CHECK(states.back() == XR_SESSION_STATE_EXITING);
+}
+
+// The session runs until xrEndSession, STOPPING included. An exit request before the first frame
+// queues SYNCHRONIZED and STOPPING at once, so an app that handles one event per frame, as the CTS
+// does, submits a frame for SYNCHRONIZED after the session has reached STOPPING.
+TEST_CASE("Frame calls keep working in STOPPING until xrEndSession", "[runtime][frame]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XR_CHECK(xrRequestExitSession(context.session));
+
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_SUCCESS);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_SUCCESS);
+    XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endInfo.displayTime = frameState.predictedDisplayTime;
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+
+    // The frame does not move the session out of STOPPING, so it ends; after that it no longer runs.
+    XR_CHECK(xrEndSession(context.session));
+    CHECK(xrWaitFrame(context.session, nullptr, &frameState) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrBeginFrame(context.session, nullptr) == XR_ERROR_SESSION_NOT_RUNNING);
+    CHECK(xrEndFrame(context.session, &endInfo) == XR_ERROR_SESSION_NOT_RUNNING);
 }
 
 TEST_CASE("DestroySession tolerates active frame loop resources", "[runtime][loader]")
@@ -1962,6 +2164,54 @@ TEST_CASE("Suggest interaction profile bindings rejects unavailable extension-ga
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
+TEST_CASE("Suggest interaction profile bindings takes the Steam Frame profile only with its extension",
+          "[runtime][actions]")
+{
+    auto suggestFrameBindings = [](RuntimeSessionContext& context) -> XrResult
+    {
+
+        XrActionSet actionSet = XR_NULL_HANDLE;
+        XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+        std::strncpy(actionSetCreateInfo.actionSetName, "frame", XR_MAX_ACTION_SET_NAME_SIZE);
+        std::strncpy(actionSetCreateInfo.localizedActionSetName, "Frame", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+        XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+        XrAction buttonAction = XR_NULL_HANDLE;
+        XrActionCreateInfo actionCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        actionCreateInfo.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        std::strncpy(actionCreateInfo.actionName, "button", XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(actionCreateInfo.localizedActionName, "Button", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &actionCreateInfo, &buttonAction));
+
+        // The Frame's d-pad is its own buttons (dpad_up/click), not a trackpad's emulated dpad_up.
+        std::array<XrActionSuggestedBinding, 3> bindings = {{
+            {buttonAction, context.Path("/user/hand/left/input/dpad_up/click")},
+            {buttonAction, context.Path("/user/hand/right/input/x/click")},
+            {buttonAction, context.Path("/user/hand/left/input/bumper/click")},
+        }};
+        XrInteractionProfileSuggestedBinding suggestedBindings = {
+            XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggestedBindings.interactionProfile =
+            context.Path("/interaction_profiles/valve/frame_controller_valve");
+        suggestedBindings.suggestedBindings = bindings.data();
+        suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+        const XrResult result = xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings);
+
+        XR_CHECK(xrDestroyAction(buttonAction));
+        XR_CHECK(xrDestroyActionSet(actionSet));
+        return result;
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        CHECK(suggestFrameBindings(context) == XR_ERROR_PATH_UNSUPPORTED);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, "XR_VALVE_frame_controller_interaction"});
+        CHECK(suggestFrameBindings(context) == XR_SUCCESS);
+    }
+}
+
 TEST_CASE("Suggest interaction profile bindings accepts hand interaction components when enabled",
           "[runtime][actions]")
 {
@@ -2216,6 +2466,86 @@ TEST_CASE("Quest Touch profile reports float and vector inputs", "[runtime][acti
 
     XR_CHECK(xrDestroyAction(triggerAction));
     XR_CHECK(xrDestroyAction(thumbstickAction));
+    XR_CHECK(xrDestroyActionSet(actionSet));
+}
+
+TEST_CASE("Quest Touch profile binds bare trigger and squeeze paths to their values", "[runtime][actions]")
+{
+    RuntimeSessionContext context({
+        XR_KHR_METAL_ENABLE_EXTENSION_NAME,
+        XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME,
+    });
+
+    XrPath leftHandPath = context.Path("/user/hand/left");
+    XrPath touchControllerPath = context.Path("/interaction_profiles/oculus/touch_controller");
+    XrPath bareTriggerPath = context.Path("/user/hand/left/input/trigger");
+    XrPath bareSqueezePath = context.Path("/user/hand/left/input/squeeze");
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "bare", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Bare", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    auto createAction = [&](XrActionType type, const char* name) {
+        XrAction action = XR_NULL_HANDLE;
+        XrActionCreateInfo createInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        createInfo.actionType = type;
+        createInfo.countSubactionPaths = 1;
+        createInfo.subactionPaths = &leftHandPath;
+        std::strncpy(createInfo.actionName, name, XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(createInfo.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &createInfo, &action));
+        return action;
+    };
+    XrAction triggerAction = createAction(XR_ACTION_TYPE_FLOAT_INPUT, "trigger");
+    XrAction squeezeAction = createAction(XR_ACTION_TYPE_FLOAT_INPUT, "squeeze");
+
+    std::array<XrActionSuggestedBinding, 2> bindings = {{
+        {triggerAction, bareTriggerPath},
+        {squeezeAction, bareSqueezePath},
+    }};
+    XrInteractionProfileSuggestedBinding suggestedBindings = {
+        XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = touchControllerPath;
+    suggestedBindings.suggestedBindings = bindings.data();
+    suggestedBindings.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    XR_CHECK(context.setInputDeviceActiveEXT(context.session, touchControllerPath, leftHandPath, XR_TRUE));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/trigger/value"), 0.7f));
+    XR_CHECK(context.setInputDeviceStateFloatEXT(context.session, leftHandPath,
+                                                 context.Path("/input/squeeze/value"), 0.8f));
+
+    XrActiveActionSet activeActionSet = {};
+    activeActionSet.actionSet = actionSet;
+    XrActionsSyncInfo syncInfo = {XR_TYPE_ACTIONS_SYNC_INFO};
+    syncInfo.countActiveActionSets = 1;
+    syncInfo.activeActionSets = &activeActionSet;
+    XR_CHECK(xrSyncActions(context.session, &syncInfo));
+
+    XrActionStateGetInfo getInfo = {XR_TYPE_ACTION_STATE_GET_INFO};
+    getInfo.subactionPath = leftHandPath;
+    XrActionStateFloat floatState = {XR_TYPE_ACTION_STATE_FLOAT};
+
+    getInfo.action = triggerAction;
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &floatState));
+    CHECK(floatState.isActive == XR_TRUE);
+    CHECK_THAT(floatState.currentState, WithinAbs(0.7f, 0.001f));
+
+    getInfo.action = squeezeAction;
+    XR_CHECK(xrGetActionStateFloat(context.session, &getInfo, &floatState));
+    CHECK(floatState.isActive == XR_TRUE);
+    CHECK_THAT(floatState.currentState, WithinAbs(0.8f, 0.001f));
+
+    XR_CHECK(xrDestroyAction(triggerAction));
+    XR_CHECK(xrDestroyAction(squeezeAction));
     XR_CHECK(xrDestroyActionSet(actionSet));
 }
 
@@ -2853,6 +3183,69 @@ TEST_CASE("Frame API supports pipelined waits and discarded begin semantics", "[
     CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
 }
 
+// Reads whether a live thread has a Mach time-constraint policy. Returns false if the query failed.
+static bool QueryTimeConstraintPolicy(std::thread& thread, bool& timeConstraint)
+{
+    thread_time_constraint_policy_data_t policy{};
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t isDefault = FALSE;
+    const kern_return_t result =
+        thread_policy_get(pthread_mach_thread_np(thread.native_handle()), THREAD_TIME_CONSTRAINT_POLICY,
+                          reinterpret_cast<thread_policy_t>(&policy), &count, &isDefault);
+    timeConstraint = !isDefault;
+    return result == KERN_SUCCESS;
+}
+
+TEST_CASE("pacing_thread realtime is given back when the session is destroyed", "[runtime][frame][pacing]")
+{
+    RuntimeConfigRestore restoreConfig;
+    {
+        const std::filesystem::path path = RuntimeConfigPath();
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream file(path);
+        REQUIRE(file.is_open());
+        file << "[streaming]\n"
+             << "pacing_thread = \"realtime\"\n"
+             << "[logging]\n"
+             << "file_logging = false\n";
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    // The app's render thread waits one frame, then stays alive past the session so its policy can
+    // be read afterwards. Catch2 assertions stay on the test thread.
+    std::promise<XrResult> waited;
+    std::promise<void> release;
+    std::thread renderThread([&] {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        waited.set_value(xrWaitFrame(context.session, nullptr, &frameState));
+        release.get_future().wait();
+    });
+    const XrResult waitResult = waited.get_future().get();
+
+    bool realtimeWhileRunning = false;
+    const bool queriedWhileRunning = QueryTimeConstraintPolicy(renderThread, realtimeWhileRunning);
+
+    xrDestroySpace(context.localSpace);
+    context.localSpace = XR_NULL_HANDLE;
+    const XrResult destroyResult = xrDestroySession(context.session);
+    context.session = XR_NULL_HANDLE;
+
+    bool realtimeAfterSession = true;
+    const bool queriedAfterSession = QueryTimeConstraintPolicy(renderThread, realtimeAfterSession);
+
+    release.set_value();
+    renderThread.join();
+
+    CHECK(waitResult == XR_SUCCESS);
+    REQUIRE(queriedWhileRunning);
+    CHECK(realtimeWhileRunning);
+    CHECK(destroyResult == XR_SUCCESS);
+    REQUIRE(queriedAfterSession);
+    CHECK_FALSE(realtimeAfterSession);
+}
+
 TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][frame][layers]")
 {
     auto runProjectionCase =
@@ -2979,7 +3372,7 @@ TEST_CASE("EndFrame rejects invalid projection and quad layers", "[runtime][fram
         XR_ERROR_VALIDATION_FAILURE);
 }
 
-TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][frame][layers]")
+TEST_CASE("EndFrame accepts valid frames it streams only in part", "[runtime][frame][layers]")
 {
     RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
     XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
@@ -3004,6 +3397,11 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     projectionLayer.viewCount = 2;
     projectionLayer.views = projectionViews;
 
+    XrCompositionLayerProjectionView invalidViews[2] = {projectionViews[0], projectionViews[1]};
+    invalidViews[0].pose.orientation.w = 0.0f;
+    XrCompositionLayerProjection invalidProjectionLayer = projectionLayer;
+    invalidProjectionLayer.views = invalidViews;
+
     XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
     quadLayer.space = context.localSpace;
     quadLayer.pose.orientation.w = 1.0f;
@@ -3011,27 +3409,51 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     quadLayer.subImage.swapchain = swapchain;
     quadLayer.subImage.imageRect.extent = {16, 16};
 
-    const XrCompositionLayerBaseHeader* layers[] = {
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
-        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
-    };
-    XrResult expectedResult = XR_ERROR_LAYER_LIMIT_EXCEEDED;
-    uint32_t layerCount = 2;
+    const auto* projection = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+    const auto* quad = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
+    std::vector<const XrCompositionLayerBaseHeader*> layers = {projection, projection};
+    XrResult expectedResult = XR_SUCCESS;
     SECTION("Quad only")
     {
-        layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-        layerCount = 1;
-        expectedResult = XR_ERROR_LAYER_INVALID;
-    }
-    SECTION("Projection followed by quad")
-    {
-        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer);
-        expectedResult = XR_ERROR_LAYER_INVALID;
+        layers = {quad};
     }
     SECTION("Two projection layers")
     {
         projectionLayer.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     }
+    SECTION("XR_MIN_COMPOSITION_LAYERS_SUPPORTED projection layers")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED, projection);
+    }
+    SECTION("XR_MIN_COMPOSITION_LAYERS_SUPPORTED quad layers")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED, quad);
+    }
+    SECTION("More layers than supported")
+    {
+        layers.assign(XR_MIN_COMPOSITION_LAYERS_SUPPORTED + 1, quad);
+        expectedResult = XR_ERROR_LAYER_LIMIT_EXCEEDED;
+    }
+    SECTION("A projection layer after the streamed one is still validated")
+    {
+        layers[1] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&invalidProjectionLayer);
+        expectedResult = XR_ERROR_POSE_INVALID;
+    }
+
+    auto drainStates = [&]() {
+        std::vector<XrSessionState> states;
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                states.push_back(reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state);
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+        return states;
+    };
+    drainStates();
 
     XrFrameState frameState = {XR_TYPE_FRAME_STATE};
     XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
@@ -3039,16 +3461,89 @@ TEST_CASE("EndFrame rejects composition paths without a compositor", "[runtime][
     XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
     frameEndInfo.displayTime = frameState.predictedDisplayTime;
     frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    frameEndInfo.layerCount = layerCount;
-    frameEndInfo.layers = layers;
+    frameEndInfo.layerCount = static_cast<uint32_t>(layers.size());
+    frameEndInfo.layers = layers.data();
     CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+    if (expectedResult == XR_SUCCESS)
+    {
+        // An accepted frame advances the session like any other, so an application that waits
+        // for VISIBLE behind a quad-only loading screen gets there.
+        const std::vector<XrSessionState> states = drainStates();
+        REQUIRE_FALSE(states.empty());
+        CHECK(states.back() == XR_SESSION_STATE_SYNCHRONIZED);
+    }
 
     XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
     XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
-    layers[0] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer);
+    layers = {projection};
     frameEndInfo.displayTime = frameState.predictedDisplayTime;
     frameEndInfo.layerCount = 1;
+    frameEndInfo.layers = layers.data();
     XR_CHECK(xrEndFrame(context.session, &frameEndInfo));
+    XR_CHECK(xrDestroySwapchain(swapchain));
+}
+
+TEST_CASE("EndFrame composites a quad over the single projection layer it streams", "[runtime][frame][layers]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrSwapchain swapchain = CreateColorSwapchain(context.session, SelectColorSwapchainFormat(context.session));
+    uint32_t imageIndex = 0;
+    XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+    XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitInfo.timeout = 0;
+    XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+    XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+    XrCompositionLayerProjectionView firstViews[2] = {};
+    for (auto& view : firstViews)
+    {
+        view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+        view.pose.orientation.w = 1.0f;
+        view.fov = {-0.5f, 0.5f, 0.5f, -0.5f};
+        view.subImage.swapchain = swapchain;
+        view.subImage.imageRect.extent = {16, 16};
+    }
+    XrCompositionLayerProjectionView secondViews[2] = {firstViews[0], firstViews[1]};
+    secondViews[0].pose.position.x = 1.0f;
+    secondViews[1].pose.position.x = 1.0f;
+    XrCompositionLayerProjection firstProjection = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+    firstProjection.space = context.localSpace;
+    firstProjection.viewCount = 2;
+    firstProjection.views = firstViews;
+    XrCompositionLayerProjection secondProjection = firstProjection;
+    secondProjection.views = secondViews;
+
+    XrCompositionLayerQuad quadLayer = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    quadLayer.space = context.localSpace;
+    quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quadLayer.pose.orientation.w = 1.0f;
+    quadLayer.pose.position.z = -1.0f;
+    quadLayer.size = {1.0f, 1.0f};
+    quadLayer.subImage.swapchain = swapchain;
+    quadLayer.subImage.imageRect.extent = {16, 16};
+
+    // Only the first projection layer is streamed, and an overlay is placed with its poses,
+    // so a frame never mixes one projection layer's poses with another's images.
+    const XrCompositionLayerBaseHeader* layers[] = {
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&firstProjection),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer),
+        reinterpret_cast<const XrCompositionLayerBaseHeader*>(&secondProjection),
+    };
+    XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    frameEndInfo.layerCount = 3;
+    frameEndInfo.layers = layers;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
+
+    XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+    XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+    frameEndInfo.displayTime = frameState.predictedDisplayTime;
+    frameEndInfo.layerCount = 2;
+    CHECK(xrEndFrame(context.session, &frameEndInfo) == XR_SUCCESS);
     XR_CHECK(xrDestroySwapchain(swapchain));
 }
 
@@ -3085,6 +3580,11 @@ TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[r
         badTimespec.tv_nsec = -1;
         CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
               XR_ERROR_VALIDATION_FAILURE);
+
+        // A valid XrTime is strictly positive (CTS "Invalid times").
+        struct timespec invalidOut{};
+        CHECK(convertTimeToTimespec(instance, XrTime(0), &invalidOut) == XR_ERROR_TIME_INVALID);
+        CHECK(convertTimeToTimespec(instance, XrTime(-1), &invalidOut) == XR_ERROR_TIME_INVALID);
 
         struct timespec now{};
         REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
@@ -3128,6 +3628,75 @@ TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[r
             std::llabs(static_cast<int64_t>(frameState.predictedDisplayTime) -
                        static_cast<int64_t>(xrNow));
         CHECK(deltaNs < 5'000'000'000LL);
+    }
+}
+
+TEST_CASE("EndFrame takes a cylinder layer only when its extension is enabled", "[runtime][frame][layers]")
+{
+    auto runCylinderCase = [](RuntimeSessionContext& context, XrResult expectedResult)
+    {
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_BEGIN_FRAME_CHECK(xrBeginFrame(context.session, nullptr));
+
+        const int64_t format = SelectColorSwapchainFormat(context.session);
+        XrSwapchain swapchain = CreateColorSwapchain(context.session, format);
+        uint32_t imageIndex = 0;
+        XR_CHECK(xrAcquireSwapchainImage(swapchain, nullptr, &imageIndex));
+        XrSwapchainImageWaitInfo waitInfo = {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitInfo.timeout = 0;
+        XR_CHECK(xrWaitSwapchainImage(swapchain, &waitInfo));
+        XR_CHECK(xrReleaseSwapchainImage(swapchain, nullptr));
+
+        XrCompositionLayerProjectionView projectionViews[2] = {};
+        for (auto& view : projectionViews)
+        {
+            view.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            view.pose.orientation.w = 1.0f;
+            view.fov.angleLeft = -0.5f;
+            view.fov.angleRight = 0.5f;
+            view.fov.angleUp = 0.5f;
+            view.fov.angleDown = -0.5f;
+            view.subImage.swapchain = swapchain;
+            view.subImage.imageRect.extent = {16, 16};
+        }
+        XrCompositionLayerProjection projectionLayer = {XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+        projectionLayer.space = context.localSpace;
+        projectionLayer.viewCount = 2;
+        projectionLayer.views = projectionViews;
+
+        XrCompositionLayerCylinderKHR cylinderLayer = {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+        cylinderLayer.space = context.localSpace;
+        cylinderLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        cylinderLayer.pose.orientation.w = 1.0f;
+        cylinderLayer.pose.position.z = -1.0f;
+        cylinderLayer.radius = 1.0f;
+        cylinderLayer.centralAngle = 1.0f;
+        cylinderLayer.aspectRatio = 2.0f;
+        cylinderLayer.subImage.swapchain = swapchain;
+        cylinderLayer.subImage.imageRect.extent = {16, 16};
+
+        const XrCompositionLayerBaseHeader* layers[] = {
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projectionLayer),
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&cylinderLayer),
+        };
+        XrFrameEndInfo frameEndInfo = {XR_TYPE_FRAME_END_INFO};
+        frameEndInfo.displayTime = frameState.predictedDisplayTime;
+        frameEndInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        frameEndInfo.layerCount = 2;
+        frameEndInfo.layers = layers;
+
+        CHECK(xrEndFrame(context.session, &frameEndInfo) == expectedResult);
+        XR_CHECK(xrDestroySwapchain(swapchain));
+    };
+
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME});
+        runCylinderCase(context, XR_SUCCESS);
+    }
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+        runCylinderCase(context, XR_ERROR_LAYER_INVALID);
     }
 }
 
@@ -3424,10 +3993,17 @@ TEST_CASE("Swapchain creation validates supported flags and compatible usage",
 
     swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
     createInfo.createFlags = 0;
-    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
-    CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain) ==
-          XR_ERROR_FEATURE_UNSUPPORTED);
-    CHECK(swapchain == XR_NULL_HANDLE);
+    // Godot's Metal driver renders through an sRGB/UNORM view of the swapchain texture.
+    createInfo.format = 71; // MTLPixelFormatRGBA8Unorm_sRGB, Godot 4 Metal's first match.
+    createInfo.arraySize = 2;
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                            XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    XR_CHECK(xrCreateSwapchain(context.session, &createInfo, &swapchain));
+    REQUIRE(swapchain != XR_NULL_HANDLE);
+    XR_CHECK(xrDestroySwapchain(swapchain));
+    createInfo.format = 70;
+    createInfo.arraySize = 1;
 
     swapchain = reinterpret_cast<XrSwapchain>(static_cast<uintptr_t>(0x1));
     createInfo.createFlags = 0;
@@ -3507,4 +4083,512 @@ TEST_CASE("Distinct swapchains can be created and destroyed concurrently",
     {
         CHECK(result == XR_SUCCESS);
     }
+}
+
+// xrRequestExitSession racing the first xrEndFrame: EndFrame clears frameBegun_ and then advances the
+// session state, so without one lock around both transition paths an exit request landing in that
+// window could emit STOPPING and then be overwritten back to SYNCHRONIZED, leaving xrEndSession to
+// fail with XR_ERROR_SESSION_NOT_STOPPING. Every interleaving must still reach STOPPING and end.
+TEST_CASE("EndSession waits for a haptics call still using the streaming server",
+          "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    // Hold every haptics send on the live server for 300 ms, and end the session inside that window,
+    // so the call is always still using the server when xrEndSession stops it.
+    setenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US", "300000", 1);
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    unsetenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US");
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[1];
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    vibration.frequency = 160.0f;
+
+    // Wait until the client is connected and a haptics command reaches it.
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+
+    XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+    auto drainStates = [&]() {
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+    };
+    drainStates();
+    REQUIRE(lastState == XR_SESSION_STATE_FOCUSED);
+
+    // A second app thread sends haptics; it passes the FOCUSED check and is held on the live server.
+    vibration.amplitude = 0.75f;
+    std::atomic<bool> hapticsStarted{false};
+    std::atomic<bool> hapticsReturned{false};
+    XrResult hapticsResult = XR_ERROR_RUNTIME_FAILURE;
+    std::thread hapticsThread([&] {
+        hapticsStarted.store(true, std::memory_order_release);
+        hapticsResult = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                              reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        hapticsReturned.store(true, std::memory_order_release);
+    });
+    while (!hapticsStarted.load(std::memory_order_acquire))
+    {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Meanwhile the render thread exits and ends the session while the haptics call is in flight.
+    XR_CHECK(xrRequestExitSession(context.session));
+    for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        drainStates();
+    }
+    const bool reachedStopping = lastState == XR_SESSION_STATE_STOPPING;
+    const bool hapticsReturnedBeforeEnd = hapticsReturned.load(std::memory_order_acquire);
+    const XrResult endResult = reachedStopping ? xrEndSession(context.session) : XR_ERROR_SESSION_NOT_STOPPING;
+    hapticsThread.join();
+    REQUIRE(reachedStopping);
+    REQUIRE_FALSE(hapticsReturnedBeforeEnd);
+    CHECK(endResult == XR_SUCCESS);
+    CHECK(hapticsResult == XR_SUCCESS);
+
+    // The server was stopped only after the in-flight call finished with it, so the command arrived.
+    REQUIRE(peer.ReadHaptics(command, std::chrono::seconds(2)));
+    CHECK(command.hand == 1);
+    CHECK_THAT(command.amplitude, WithinAbs(0.75f, 0.0001f));
+}
+
+TEST_CASE("RequestExitSession racing the first frame submission still reaches STOPPING", "[runtime][loader]")
+{
+    // Hold the frame-driven READY -> SYNCHRONIZED step for 2 ms after its branch is chosen, and send the
+    // exit request 1 ms into that window, so the bad interleaving happens every time.
+    setenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US", "2000", 1);
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+        XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+        bool sawStopping = false;
+        bool regressed = false;
+        auto drainStates = [&]() {
+            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+            while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+            {
+                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+                    regressed = regressed || (sawStopping && lastState != XR_SESSION_STATE_STOPPING);
+                    sawStopping = sawStopping || lastState == XR_SESSION_STATE_STOPPING;
+                }
+                event = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
+        };
+        drainStates();
+
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_CHECK(xrBeginFrame(context.session, nullptr));
+        XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+        endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        endInfo.displayTime = frameState.predictedDisplayTime;
+
+        std::atomic<bool> go{false};
+        XrResult exitResult = XR_ERROR_RUNTIME_FAILURE;
+        std::thread exiter([&] {
+            while (!go.load(std::memory_order_acquire))
+            {
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            exitResult = xrRequestExitSession(context.session);
+        });
+        go.store(true, std::memory_order_release);
+        CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+        exiter.join();
+        CHECK(exitResult == XR_SUCCESS);
+
+        // An app ends the session as soon as it sees STOPPING. If the race emitted STOPPING, the state
+        // must not have regressed after it, and xrEndSession must succeed right away.
+        sawStopping = false;
+        regressed = false;
+        drainStates();
+        if (sawStopping)
+        {
+            CHECK_FALSE(regressed);
+            CHECK(xrEndSession(context.session) == XR_SUCCESS);
+            continue;
+        }
+        // Otherwise the exit request landed after the transition: a rendering session advances one
+        // state per frame, so keep the loop running until STOPPING, then end.
+        for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
+        {
+            XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+            XR_CHECK(xrBeginFrame(context.session, nullptr));
+            endInfo.displayTime = frameState.predictedDisplayTime;
+            XR_CHECK(xrEndFrame(context.session, &endInfo));
+            drainStates();
+        }
+        REQUIRE(lastState == XR_SESSION_STATE_STOPPING);
+        CHECK(xrEndSession(context.session) == XR_SUCCESS);
+    }
+    unsetenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US");
+}
+
+// Haptics are sent from the application's threads while the runtime also writes stream config records,
+// so every USB control record must reach the client whole.
+TEST_CASE("Concurrent haptic feedback keeps USB control records whole", "[runtime][actions][haptics][loopback]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(true);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[0];
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        if (xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                  reinterpret_cast<XrHapticBaseHeader*>(&vibration)) == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+
+    constexpr int kAppliesPerHand = 1000;
+    std::atomic_int failedApplies{0};
+    auto applyFromThread = [&](XrPath hand) {
+        XrHapticActionInfo info = {XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = hapticAction;
+        info.subactionPath = hand;
+        for (int i = 0; i < kAppliesPerHand; ++i)
+        {
+            if (xrApplyHapticFeedback(context.session, &info,
+                                      reinterpret_cast<const XrHapticBaseHeader*>(&vibration)) != XR_SUCCESS)
+            {
+                failedApplies.fetch_add(1);
+            }
+        }
+    };
+    std::thread left(applyFromThread, handPaths[0]);
+    std::thread right(applyFromThread, handPaths[1]);
+
+    // ReadHaptics refuses a record whose header is not a record header, which is what a header and a
+    // payload interleaved from two threads produce.
+    int commands = 0;
+    while (peer.ReadHaptics(command, std::chrono::milliseconds(500)))
+    {
+        ++commands;
+    }
+    left.join();
+    right.join();
+    CHECK(failedApplies.load() == 0);
+    CHECK(commands >= 2 * kAppliesPerHand);
+}
+
+TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[1];
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    vibration.frequency = 160.0f;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 1);
+    CHECK_THAT(command.amplitude, WithinAbs(0.5f, 0.0001f));
+    CHECK_THAT(command.durationMs, WithinAbs(20.0f, 0.0001f));
+    CHECK_THAT(command.frequency, WithinAbs(160.0f, 0.0001f));
+
+    hapticActionInfo.subactionPath = XR_NULL_PATH;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    std::set<uint8_t> stoppedHands;
+    while (stoppedHands.size() < 2 && peer.ReadHaptics(command, std::chrono::seconds(2)))
+    {
+        if (command.amplitude == 0.0f)
+        {
+            stoppedHands.insert(command.hand);
+        }
+    }
+    CHECK(stoppedHands == std::set<uint8_t>{0, 1});
+}
+
+// Unreal Engine and OpenComposite create one vibration action per hand without subaction paths and pass
+// XR_NULL_PATH, so each call must reach the hand its action is bound to and no other.
+TEST_CASE("Haptic feedback reaches only the hands its action is bound to", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    auto createHapticAction = [&](const char* name, uint32_t countSubactionPaths) {
+        XrAction action = XR_NULL_HANDLE;
+        XrActionCreateInfo createInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        createInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        createInfo.countSubactionPaths = countSubactionPaths;
+        createInfo.subactionPaths = handPaths;
+        std::strncpy(createInfo.actionName, name, XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(createInfo.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &createInfo, &action));
+        return action;
+    };
+    const XrAction leftAction = createHapticAction("left_haptic", 0);
+    const XrAction rightAction = createHapticAction("right_haptic", 0);
+    // Declares both hands, but is bound only to the left one.
+    const XrAction leftBoundAction = createHapticAction("left_bound_haptic", 2);
+
+    XrActionSuggestedBinding bindings[] = {
+        {leftAction, context.Path("/user/hand/left/output/haptic")},
+        {rightAction, context.Path("/user/hand/right/output/haptic")},
+        {leftBoundAction, context.Path("/user/hand/left/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 3;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = leftAction;
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 0);
+
+    // The hands of the commands that arrive until the peer is quiet for 200 ms; command keeps the last one.
+    auto readHands = [&] {
+        std::vector<uint8_t> hands;
+        while (peer.ReadHaptics(command, std::chrono::milliseconds(200)))
+        {
+            hands.push_back(command.hand);
+        }
+        return hands;
+    };
+    // Applies repeated while waiting may still be in flight; all of them are for the left hand.
+    for (uint8_t hand : readHands())
+    {
+        CHECK(hand == 0);
+    }
+
+    hapticActionInfo.action = rightAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    CHECK(command.amplitude == 0.0f);
+    hapticActionInfo.action = leftAction;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    CHECK(command.amplitude == 0.0f);
+
+    hapticActionInfo.action = leftBoundAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    hapticActionInfo.subactionPath = handPaths[1];
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands().empty());
 }

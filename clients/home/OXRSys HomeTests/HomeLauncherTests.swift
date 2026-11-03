@@ -122,6 +122,49 @@ final class HomeLauncherTests: XCTestCase {
         try expect(ports == Set([9944, 9945, 9946, 9948]), "Expected configured USB reverse ports")
     }
 
+    func testAdbPublicKeyEncoding() throws {
+        // Throwaway 2048-bit key; the expected value is `adb pubkey` output for the same key.
+        let pkcs1 = try XCTUnwrap(Data(base64Encoded: """
+        MIIBCgKCAQEArVT4GzUjhYRjDTEBZLGv/Buz7HCbTGSCE5C61r1P3hW4bZH7zgG5p1uwyIfJxdY+GVFDvYlEDLIfkLm1/hEH
+        qxtFfQ5fn6l4x91Vt1TdjvHVYK0t6dp7y2yuXvv2Nbp+kIs229gGxs8zUF0PPghw5QXPbpJBhbHc0q2Z+3Iuw9U7tu45oNHp
+        p6jmiJIjTlDK3o7Un/28U1JF3w5HdQytLywdmfQ0f9gQ8wmyDGlZdu+rKVRgCMoHv4kceYiE6MI8EydjHpvUPYHdtDEQOgK7
+        QrbNalIK9HmNRwZ8Ae75JS44cQoPzUbtsij6qK1GWcvwgy8Z8mrAU7ty5KjZXymbpQIDAQAB
+        """, options: .ignoreUnknownCharacters))
+        let spki = try XCTUnwrap(Data(base64Encoded: """
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArVT4GzUjhYRjDTEBZLGv/Buz7HCbTGSCE5C61r1P3hW4bZH7zgG5
+        p1uwyIfJxdY+GVFDvYlEDLIfkLm1/hEHqxtFfQ5fn6l4x91Vt1TdjvHVYK0t6dp7y2yuXvv2Nbp+kIs229gGxs8zUF0PPghw
+        5QXPbpJBhbHc0q2Z+3Iuw9U7tu45oNHpp6jmiJIjTlDK3o7Un/28U1JF3w5HdQytLywdmfQ0f9gQ8wmyDGlZdu+rKVRgCMoH
+        v4kceYiE6MI8EydjHpvUPYHdtDEQOgK7QrbNalIK9HmNRwZ8Ae75JS44cQoPzUbtsij6qK1GWcvwgy8Z8mrAU7ty5KjZXymb
+        pQIDAQAB
+        """, options: .ignoreUnknownCharacters))
+        let expected = """
+        QAAAANMrUDClmylf2ajkcrtTwGryGS+D8MtZRq2o+iiy7UbNDwpxOC4l+e4BfAZHjXn0ClJqzbZCuwI6EDG03YE91JseYycT
+        PMLohIh5HIm/B8oIYFQpq+92WWkMsgnzENh/NPSZHSwvrQx1Rw7fRVJTvP2f1I7eylBOI5KI5qin6dGgOe62O9XDLnL7ma3S
+        3LGFQZJuzwXlcAg+D11QM8/GBtjbNouQfro19vtermzLe9rpLa1g1fGO3VS3Vd3HeKmfXw59RRurBxH+tbmQH7IMRIm9Q1EZ
+        PtbFyYfIsFunuQHO+5FtuBXeT73WupATgmRMm3Dssxv8r7FkATENY4SFIzUb+FSt4hCCtgT5/dMEXwR+n+GDq428aV7lJjah
+        9w61sneGrBMtkWqGzlgkQUsqh3T2X8zZV4FDbK5iUv/N4akelcOh49+uElJV6apSZmdrULNeb7I8VCBqLCdgAPU/TMIBA7iD
+        Gm4L2yoJ3wTNMKR4gf5QEwFd2LEEvxmN2yhKG4bIReuLUUnZkr6DIOJtC0Uo0Asz7cF4faz0CcEDPl8IMc6C7mRhGjSALPBz
+        DUFwfh5rVJe0Fig2USdGqQriPrQHicqM9pKoJGwM4GqIiP7Xh/qk8Z/kfRgnC3SlNSv8nb2i6FxYhHh+blje5SYSQMuNJBIH
+        upLk/vkohwB95x4Bzar3lQEAAQA=
+        """.replacingOccurrences(of: "\n", with: "")
+
+        for key in [pkcs1, spki] {
+            let payload = try AdbPublicKeyEncoder.adbPublicKeyPayload(derPublicKey: key, comment: "test@host")
+            try expect(payload == Data("\(expected) test@host\0".utf8), "Expected the adb public key encoding")
+        }
+    }
+
+    func testNativeAdbInterfaceFilter() throws {
+        try expect(AdbUsbBridge.isAdbInterface(interfaceClass: 0xff, subclass: 0x42, interfaceProtocol: 0x01),
+                   "Expected the ADB interface to match")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: 0xff, subclass: 0x42, interfaceProtocol: 0x03),
+                   "Expected fastboot to be rejected")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: 0x02, subclass: 0x0d, interfaceProtocol: 0x00),
+                   "Expected the NCM control interface to be rejected")
+        try expect(!AdbUsbBridge.isAdbInterface(interfaceClass: nil, subclass: 0x42, interfaceProtocol: 0x01),
+                   "Expected a missing class to be rejected")
+    }
+
     func testQuestUsbAdbCandidatePaths() throws {
         let candidates = QuestUsbBridge.adbCandidatePaths(
             environment: [
@@ -337,6 +380,22 @@ final class HomeLauncherTests: XCTestCase {
         try expect(merged.contains("anchors = true"), "Expected spatial anchor serialization")
     }
 
+    func testServerConfigMediumPlusFoveationRoundTrip() throws {
+        let original = """
+        [streaming]
+        foveated_encoding_preset = "medium_plus"
+        """
+        let parsed = OXRSysServerConfig.parse(from: original)
+        try expect(parsed.foveatedEncodingPreset == .mediumPlus, "Expected medium_plus FFE parse, not off")
+
+        let merged = parsed.merged(into: original)
+        try expect(merged.contains("foveated_encoding_preset = \"medium_plus\""), "Expected medium_plus FFE serialization")
+        try expect(!merged.contains("foveated_encoding_preset = \"off\""), "Expected medium_plus not to be saved as off")
+
+        let reparsed = OXRSysServerConfig.parse(from: merged)
+        try expect(reparsed.foveatedEncodingPreset == .mediumPlus, "Expected medium_plus FFE after save and reload")
+    }
+
     func testServerConfigDefaultSerialization() throws {
         let merged = OXRSysServerConfig().merged(into: """
         [general]
@@ -523,15 +582,158 @@ final class HomeLauncherTests: XCTestCase {
         try expect(MacWifiBridge.parsePowerOutput("Wi-Fi Power (en0): Off") == false, "Expected WiFi off parsing")
     }
 
+    func testUsbNetworkTransportSelection() throws {
+        let parsed = OXRSysServerConfig.parse(from: """
+        [streaming]
+        transport = "usb_ncm"
+        """)
+        try expect(parsed.transport == .usbNcm, "Expected USB network transport parse")
+        try expect(
+            parsed.merged(into: OXRSysServerConfig.defaultText).contains("transport = \"usb_ncm\""),
+            "Expected USB network transport serialization"
+        )
+        try expect(HomePrimaryTransport.usbNetwork.configTransport == .usbNcm, "Expected USB network config mapping")
+
+        let activity = HomeRuntimeActivity.parse(Data("""
+        {
+          "state": "streaming",
+          "transport": "usb_ncm",
+          "device_type": "quest",
+          "client_name": "Quest"
+        }
+        """.utf8))
+        try expect(activity?.transport == .usbNcm, "Expected USB network activity transport")
+        try expect(activity?.stateDisplayName == "Streaming (USB Network)", "Expected USB network display state")
+    }
+
+    func testUsbNetworkMacConfigurationParsing() throws {
+        let serviceOrder = """
+        An asterisk (*) denotes that a network service is disabled.
+        (1) Wi-Fi
+        (Hardware Port: Wi-Fi, Device: en0)
+
+        (2) Quest 3
+        (Hardware Port: Quest 3, Device: en16)
+
+        (*) Old Quest
+        (Hardware Port: Old Quest, Device: en9)
+        """
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en16", serviceOrder: serviceOrder) == "Quest 3",
+            "Expected service lookup by device"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en9", serviceOrder: serviceOrder) == "Old Quest",
+            "Expected disabled service lookup"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en1", serviceOrder: serviceOrder) == nil,
+            "Expected missing service"
+        )
+        try expect(
+            QuestUsbNetworkLink.serviceName(forDevice: "en1", serviceOrder: "(1) Thunderbolt\n(Hardware Port: Thunderbolt Bridge, Device: en10)") == nil,
+            "Expected device prefix not to match"
+        )
+
+        try expect(
+            QuestUsbNetworkLink.hardwarePort(forDevice: "en16", hardwarePorts: """
+            Hardware Port: Wi-Fi
+            Device: en0
+            Ethernet Address: aa:bb:cc:dd:ee:ff
+
+            Hardware Port: Quest 3
+            Device: en16
+            Ethernet Address: 32:8f:01:44:3f:4a
+            """) == "Quest 3",
+            "Expected hardware port lookup"
+        )
+
+        let configured = """
+        Manual Configuration
+        IP address: 192.168.42.1
+        Subnet mask: 255.255.255.0
+        Router: (null)
+        """
+        try expect(QuestUsbNetworkLink.serviceInfoIsConfigured(configured), "Expected configured service")
+        try expect(
+            !QuestUsbNetworkLink.serviceInfoIsConfigured(configured.replacingOccurrences(of: "(null)", with: "192.168.42.254")),
+            "Expected a router to need reconfiguration"
+        )
+        try expect(
+            !QuestUsbNetworkLink.serviceInfoIsConfigured("DHCP Configuration\nIP address: 169.254.10.2\nRouter: (null)"),
+            "Expected DHCP service to need reconfiguration"
+        )
+
+        let ifconfig = """
+        en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+        \tinet 192.168.1.138 netmask 0xffffff00 broadcast 192.168.1.255
+        en16: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+        \tinet 192.168.42.1 netmask 0xffffff00 broadcast 192.168.42.255
+        """
+        try expect(
+            QuestUsbNetworkLink.interfaceUsingSubnet(ifconfig: ifconfig, except: "en16") == nil,
+            "Expected the link interface itself to be allowed"
+        )
+        try expect(
+            QuestUsbNetworkLink.interfaceUsingSubnet(ifconfig: ifconfig, except: "en17") == "en16",
+            "Expected another interface in the subnet to be reported"
+        )
+    }
+
+    func testUsbNetworkQuestConfigurationParsing() throws {
+        try expect(QuestUsbNetworkLink.questStaticConfigurationApplied("""
+        Ethernet IP configuration generated as:
+        usb0:
+        IP assignment: STATIC
+        Static configuration: IP address 192.168.42.2/24 Gateway  DNS servers: [ ] Domains
+        Proxy settings: NONE
+
+        Above configuration has been written to file.
+        """), "Expected applied static configuration")
+        try expect(
+            !QuestUsbNetworkLink.questStaticConfigurationApplied("cmd: Can't find service: ethernet"),
+            "Expected missing ethernet service to fail"
+        )
+        try expect(
+            !QuestUsbNetworkLink.questStaticConfigurationApplied("IP assignment: STATIC\nStatic configuration: IP address 10.86.13.37/29"),
+            "Expected a different static address to fail"
+        )
+        try expect(QuestUsbNetworkLink.questPingSucceeded("""
+        PING 192.168.42.1 (192.168.42.1) from 192.168.42.2 usb0: 56(84) bytes of data.
+        64 bytes from 192.168.42.1: icmp_seq=1 ttl=64 time=0.548 ms
+
+        --- 192.168.42.1 ping statistics ---
+        1 packets transmitted, 1 received, 0% packet loss, time 0ms
+        """), "Expected a ping reply to succeed")
+        try expect(
+            !QuestUsbNetworkLink.questPingSucceeded("1 packets transmitted, 0 received, 100% packet loss, time 0ms"),
+            "Expected a lost ping to fail"
+        )
+    }
+
     func testAdbStatusDisplay() throws {
         try expect(!HomeAdbStatus.missing.isAvailable, "Expected missing ADB to be unavailable")
         try expect(
             HomeAdbStatus.available(at: "/opt/homebrew/bin/adb").isAvailable,
             "Expected detected ADB to be available"
         )
+        let adbNotFound = QuestUsbBridgeError.adbNotFound.errorDescription ?? ""
+        for message in [HomeAdbStatus.missing.message, HomeAdbStatus.nativeUsb.message, HomeAdbInstallGuidance.message, adbNotFound] {
+            try expect(
+                message.contains("USB Net") && message.contains("USB reverse") &&
+                    message.contains("ADB server") && message.contains("adb"),
+                "Expected native USB ADB to cover USB Net and USB reverse to need an ADB server or adb"
+            )
+        }
         try expect(
-            HomeAdbInstallGuidance.message.contains("Android SDK are not required"),
-            "Expected SDK-free USB setup guidance"
+            !adbNotFound.contains("optional") && !adbNotFound.contains("No native USB ADB headset") &&
+                !HomeAdbStatus.missing.message.contains("fallback"),
+            "Expected adb not to be offered as an optional fallback for USB reverse"
+        )
+        try expect(
+            HomeAdbInstallGuidance.message.contains("brew install --cask android-platform-tools") &&
+                HomeAdbInstallGuidance.homebrewURL.absoluteString.hasSuffix("/cask/android-platform-tools"),
+            "Expected the Homebrew guidance to install adb"
         )
     }
 

@@ -4,6 +4,8 @@
 
 #include <openxr/openxr.h>
 #include "GraphicsTypes.h"
+#include "PacingThreadPolicy.h"
+#include "RuntimePlatform.h"
 #include <memory>
 #include <vector>
 #include <chrono>
@@ -12,6 +14,7 @@
 #include <ctime>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 
 class Instance;
@@ -69,6 +72,8 @@ public:
     XrResult DestroySpace(Space* space);
     XrResult GetStageBounds(XrExtent2Df* bounds);
     bool HasTrackingConnection() const;
+    // hand: 0 = left, 1 = right. Amplitude 0 stops the hand's vibration.
+    void SendHaptics(uint8_t hand, float amplitude, float durationMs, float frequency);
 
     // Input manager access
     InputManager& GetInputManager()
@@ -99,8 +104,9 @@ public:
     // XR_KHR_convert_timespec_time helpers. CLOCK_MONOTONIC is captured at the
     // same instant startTime_ is set (monoStartNs_), so XrTime == mono_ns -
     // monoStartNs_ and the mapping is a pure offset consistent with GetCurrentTime().
-    XrTime TimespecToXrTime(const struct timespec& ts) const;
-    void XrTimeToTimespec(XrTime time, struct timespec& ts) const;
+    // Both return XR_ERROR_TIME_INVALID for times that are not a positive XrTime.
+    XrResult TimespecToXrTime(const struct timespec& ts, XrTime& time) const;
+    XrResult XrTimeToTimespec(XrTime time, struct timespec& ts) const;
     void BeginDebugUtilsLabelRegion(const XrDebugUtilsLabelEXT& labelInfo);
     void EndDebugUtilsLabelRegion();
     void InsertDebugUtilsLabel(const XrDebugUtilsLabelEXT& labelInfo);
@@ -115,12 +121,19 @@ private:
 
     void TransitionState(XrSessionState newState);
     void AdvanceSessionStateAfterFrameSubmission();
+    void DelayFrameTransitionForTest() const;
     bool IsFrameLoopRunningState() const;
     bool OwnsSwapchain(const Swapchain* swapchain) const;
     XrResult ValidateSwapchainSubImage(const XrSwapchainSubImage& subImage) const;
     XrResult ValidateProjectionLayer(const XrCompositionLayerProjection& layer,
                                      FrameSource& frameSource) const;
     XrResult ValidateQuadLayer(const XrCompositionLayerQuad& layer) const;
+    XrResult ValidateCylinderLayer(const XrCompositionLayerCylinderKHR& layer) const;
+    // Turns the quad and cylinder layers submitted after the projection layer
+    // into overlays drawn into each eye before encode. Never fails the frame:
+    // an overlay that cannot be placed this frame is skipped.
+    void AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t projectionLayerIndex,
+                             FrameSource& frameSource) const;
 
     uint64_t handle_ = 0;
     Instance* instance_;
@@ -132,6 +145,11 @@ private:
     bool frameBegun_ = false;
     uint32_t waitedFrameCount_ = 0;
     mutable std::mutex frameStateMutex_;
+    // Serializes session-state transitions driven by the frame loop with those driven by
+    // xrRequestExitSession. Lock order: stateTransitionMutex_ before frameStateMutex_.
+    std::mutex stateTransitionMutex_;
+    int endFrameAdvanceDelayUs_ = 0; // test seam, see Session constructor
+    int sendHapticsDelayUs_ = 0; // test seam, see Session constructor
     mutable std::mutex debugUtilsMutex_;
     std::mutex stageBoundsMutex_;
     XrExtent2Df stageBounds_ = {};
@@ -139,6 +157,10 @@ private:
 
     std::unique_ptr<InputManager> inputManager_;
     std::unique_ptr<StreamingServer> streamingServer_;
+    // Frame, space and haptics calls hold this shared for their short, non-blocking use of
+    // streamingServer_. EndSession and Shutdown hold it exclusively only to take the server out,
+    // then stop and destroy it on their own thread, so no frame call ever waits on Stop().
+    mutable std::shared_mutex streamingServerMutex_;
     std::shared_ptr<std::atomic_bool> streamingSnapshotDemand_ =
         std::make_shared<std::atomic_bool>(false);
 
@@ -157,11 +179,25 @@ private:
     int64_t monoStartNs_ = 0;
     std::chrono::steady_clock::time_point lastFrameTime_;
 
+    // Self-correcting absolute-deadline frame-pacing grid (see WaitFrame). Anchors
+    // each frame to a fixed cadence at the negotiated display period so sleep
+    // overshoot does not accumulate into phase drift / a slow beat against the panel.
+    std::chrono::steady_clock::time_point nextFrameDeadline_{};
+    std::chrono::nanoseconds pacingPeriod_{0};
+
+    // pacing_thread = "realtime": the app thread WaitFrame promoted, and its policy from before.
+    oxrsys::pacing_thread::Promoted pacingThread_;
+    oxrsys::runtime_platform::SavedThreadPolicy pacingThreadSaved_;
+    std::mutex pacingThreadMutex_;
+    void UpdatePacingThread(std::chrono::nanoseconds framePeriod);
+    void RestorePacingThreadLocked();
+
     std::vector<DebugUtilsLabelState> debugUtilsLabelRegions_;
     std::optional<DebugUtilsLabelState> debugUtilsInsertedLabel_;
 
     // Streaming state
     bool streamingStarted_ = false;
     void StartStreamingIfNeeded();
+    // Caller holds streamingServerMutex_ shared.
     void CheckStreamingConnection();
 };

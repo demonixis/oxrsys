@@ -56,10 +56,14 @@ releasing only the local shell GL resources. It does not by itself expose OpenXR
 environment modes to desktop apps. Apps can opt into streamed alpha passthrough only when the
 advanced `streaming.app_alpha_blend_passthrough = true` setting is enabled before the OpenXR instance
 is created; normal VR apps should leave it disabled so dark reflections and black content stay
-opaque. Alpha-capable frames are marked in the video stream. Until a real alpha or depth transport
-exists, the Quest shader only applies black-key alpha when an explicit compatibility/debug path
-allows it; the default path uses protocol alpha flags and never treats ordinary dark pixels as
-transparent.
+opaque. Alpha-capable frames are marked in the video stream. The client advertises
+`CLIENT_CAPABILITY_MIXED_REALITY_ALPHA` with passthrough, and the runtime then appends each eye's
+alpha below the eyes (`VIDEO_FLAG_PACKED_ALPHA`), which the blit shader reads as the layer alpha. Packed
+alpha has half the encoded resolution; at partly transparent edges the shader scales it by each pixel's
+premultiplied colour against its 2x2 block, so coloured edges stay sharp.
+Without packed alpha, the Quest shader only applies black-key alpha when an explicit
+compatibility/debug path allows it; the default path uses protocol alpha flags and never treats
+ordinary dark pixels as transparent.
 
 This support is negotiated, not hardcoded by model name. The client advertises
 `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` only after the headset OpenXR runtime exposes
@@ -235,10 +239,10 @@ Confirm:
 ## USB ADB Transport
 
 The USB path is optimized for sideloaded Quest development. The macOS SwiftUI Home app can detect an
-authorized Quest directly through the headset USB ADB interface, complete ADB authentication with a
-Home-managed host key, and configure reverse mappings without Android Studio, the Android SDK, or an
-`adb` executable. If the native path is unavailable, Home falls back to a running local ADB server on
-`127.0.0.1:5037` or an `adb` executable. Selecting USB in Home automatically checks and configures
+authorized Quest directly through the headset USB ADB interface and complete ADB authentication with
+a Home-managed host key without Android Studio, the Android SDK, or an `adb` executable. Reverse
+mappings always use a running ADB server on `127.0.0.1:5037` or an `adb` executable, because adbd
+drops them when their host connection closes. Selecting USB in Home automatically checks and configures
 the reverse mappings for the selected or single authorized device. The equivalent manual fallback
 commands are:
 
@@ -256,6 +260,33 @@ The Quest client sends `ClientConnect.maxBitrateMbps = 0` on USB ADB, so USB qua
 The runtime configures accepted USB TCP sockets with `TCP_NODELAY`, `SO_NOSIGPIPE` where available, and a bounded send timeout. Encoded video is handed to a bounded sender queue before TCP writes, so socket backpressure cannot run inside the VideoToolbox callback. If a TCP video send fails or times out, the runtime disables the stale TCP video dispatch path and the Android client can reconnect through its existing retry loop. The client also keeps USB tracking TCP sends best-effort/non-blocking so tracking backpressure does not stall the XR frame.
 
 USB TCP sends full encoded NAL records and render-pose records, so UDP FEC and NACK recovery are disabled on this path.
+
+## USB Network Transport
+
+The USB network transport streams the WiFi UDP path over the USB cable. Selecting USB Net in Home
+switches the headset's USB function to CDC-NCM over ADB (`svc usb setFunctions ncm`), which macOS
+binds with its built-in NCM driver; no driver, kext, or headset app is installed. Home then gives the
+link fixed addresses: the Mac service is set to `192.168.42.1/24` with no router through
+`networksetup`, and the headset's `usb0` to `192.168.42.2/24` with no gateway through
+`cmd ethernet set-ip-configuration`. Neither side changes its default route, so the headset stays on
+WiFi for everything else. No root privileges are needed.
+
+The runtime only beacons to the limited broadcast address, which does not cross the link. While the
+headset reports the cable's Ethernet network, the Quest client sends a one-byte `DiscoveryRequest` to
+`192.168.42.1:9946` every second and connects only through the reply, so a WiFi beacon from the same
+Mac cannot pull the session onto WiFi. Because the headset's default network stays WiFi, the client
+binds its discovery, control, video, and tracking sockets to the Ethernet network with
+`android_setsocknetwork`; unbound sockets would route to the Mac over WiFi and fail. The client sends
+`ClientConnect.maxBitrateMbps = 0` on this path, like USB ADB, so the server bitrate applies. The
+runtime reports these sessions as `usb_ncm`. UDP FEC stays on, and live resolution changes stay
+limited to USB ADB because they need a reliable control channel.
+
+macOS asks once whether to allow the headset's new USB configuration; the Mac must be unlocked to
+answer. A link that appears while the Mac is locked is ignored until the cable is reconnected. The
+headset's NCM mode drops the interfaces Quest Link uses; Restore USB Mode in Home, or reconnecting
+the cable, returns the default USB mode. When the link comes up, the headset can briefly show a "No
+internet connection" notice for the Ethernet network, which has no internet by design; WiFi stays the
+default network and the notice clears on its own.
 
 ## Current Status
 

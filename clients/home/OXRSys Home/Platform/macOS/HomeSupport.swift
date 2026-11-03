@@ -38,6 +38,7 @@ enum VideoCodecSetting: String, CaseIterable, Identifiable {
 enum RenderDeviceSetting: String, CaseIterable, Identifiable {
     case quest2
     case quest3
+    case quest3Native = "quest3_native"
     case avp
 
     var id: String { rawValue }
@@ -48,6 +49,8 @@ enum RenderDeviceSetting: String, CaseIterable, Identifiable {
             return "Quest 2 (1440×1584)"
         case .quest3:
             return "Quest 3 (1512×1680)"
+        case .quest3Native:
+            return "Quest 3 native (2064×2208)"
         case .avp:
             return "Vision Pro (3024×3360)"
         }
@@ -58,6 +61,7 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
     case auto
     case wifi
     case usbAdb = "usb_adb"
+    case usbNcm = "usb_ncm"
 
     var id: String { rawValue }
 
@@ -69,6 +73,8 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
             return "WiFi"
         case .usbAdb:
             return "USB ADB"
+        case .usbNcm:
+            return "USB Network"
         }
     }
 }
@@ -76,6 +82,7 @@ enum StreamingTransportSetting: String, CaseIterable, Identifiable {
 enum FoveationPresetSetting: String, CaseIterable, Identifiable {
     case off
     case light
+    case mediumPlus = "medium_plus"
     case medium
     case high
 
@@ -87,6 +94,8 @@ enum FoveationPresetSetting: String, CaseIterable, Identifiable {
             return "Off"
         case .light:
             return "Light"
+        case .mediumPlus:
+            return "Medium Plus"
         case .medium:
             return "Medium"
         case .high:
@@ -203,6 +212,7 @@ enum RuntimeActivityState: String {
 enum RuntimeActivityTransport: String {
     case wifi
     case usbAdb = "usb_adb"
+    case usbNcm = "usb_ncm"
 }
 
 enum RuntimeDeviceType: String {
@@ -445,6 +455,8 @@ struct HomeRuntimeActivity: Equatable {
             return "Streaming (WiFi)"
         case (.streaming, .usbAdb):
             return "Streaming (USB)"
+        case (.streaming, .usbNcm):
+            return "Streaming (USB Network)"
         case (.streaming, _):
             return "Streaming"
         case (.idle, _):
@@ -545,6 +557,7 @@ struct HomeRuntimeActivity: Equatable {
 enum HomePrimaryTransport: String, CaseIterable, Identifiable {
     case wifi
     case usbAdb
+    case usbNetwork
 
     var id: String { rawValue }
 
@@ -554,6 +567,8 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return "WiFi"
         case .usbAdb:
             return "USB"
+        case .usbNetwork:
+            return "USB Net"
         }
     }
 
@@ -563,6 +578,8 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return .wifi
         case .usbAdb:
             return .usbAdb
+        case .usbNetwork:
+            return .usbNcm
         }
     }
 }
@@ -693,7 +710,7 @@ struct HomeAdbStatus: Equatable, Sendable {
     nonisolated static var missing: HomeAdbStatus {
         HomeAdbStatus(
             executablePath: nil,
-            message: "Connect a USB debugging-enabled headset, or configure an external ADB fallback."
+            message: "No USB debugging headset, ADB server or adb was found. Connect a headset with USB debugging for device listing and USB Net; USB reverse also needs a running ADB server or an adb executable."
         )
     }
 
@@ -728,7 +745,7 @@ struct HomeAdbStatus: Equatable, Sendable {
     nonisolated static var nativeUsb: HomeAdbStatus {
         HomeAdbStatus(
             executablePath: "adb-usb://native",
-            message: "Native USB ADB is available; Android SDK tools are not required."
+            message: "Native USB ADB is available for device listing and USB Net. USB reverse needs a running ADB server or an adb executable."
         )
     }
 }
@@ -736,14 +753,12 @@ struct HomeAdbStatus: Equatable, Sendable {
 enum HomeAdbInstallGuidance {
     static let title = "USB debugging setup is required"
     static let message = """
-    USB streaming can configure the ADB reverse tunnel directly through the headset USB connection. Android Studio and the Android SDK are not required.
+    Enable developer mode and USB debugging on the headset, connect it over USB, then accept the computer authorization prompt inside the headset. Home then lists the headset and can set up USB Net without Android Studio, the Android SDK, or adb.
 
-    Enable developer mode and USB debugging on the headset, connect it over USB, then accept the computer authorization prompt inside the headset.
-
-    External adb remains optional for diagnostics. With Homebrew, run:
-    brew install adb-enhanced
+    USB reverse streaming needs a running ADB server or an adb executable. With Homebrew, run:
+    brew install --cask android-platform-tools
     """
-    static let homebrewURL = URL(string: "https://formulae.brew.sh/formula/adb-enhanced#default")!
+    static let homebrewURL = URL(string: "https://formulae.brew.sh/cask/android-platform-tools")!
 }
 
 struct QuestUsbDevice: Identifiable, Equatable, Sendable {
@@ -779,6 +794,7 @@ enum AdbServerBridge {
     nonisolated private static var host: String { "127.0.0.1" }
     nonisolated private static var port: UInt16 { 5037 }
     nonisolated private static var socketTimeoutSeconds: Int { 1 }
+    nonisolated private static var shellTimeoutSeconds: Int { 10 }
 
     nonisolated static func isAvailable() -> Bool {
         (try? request("host:version", expectsPayload: true)) != nil
@@ -817,14 +833,42 @@ enum AdbServerBridge {
         return configuredPorts
     }
 
+    nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        let fileDescriptor = try connectedSocket(timeoutSeconds: shellTimeoutSeconds)
+        defer { close(fileDescriptor) }
+
+        try sendService("host:transport:\(serial)", to: fileDescriptor)
+        try sendService("shell:\(command)", to: fileDescriptor)
+        var output = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let readCount = Darwin.recv(fileDescriptor, &buffer, buffer.count, 0)
+            if readCount == 0 {
+                break
+            }
+            guard readCount > 0 else {
+                throw AdbServerProtocolError.unavailable
+            }
+            output.append(contentsOf: buffer[0..<readCount])
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
     nonisolated private static func request(_ service: String, expectsPayload: Bool) throws -> String {
+        let fileDescriptor = try connectedSocket(timeoutSeconds: socketTimeoutSeconds)
+        defer { close(fileDescriptor) }
+
+        try sendService(service, to: fileDescriptor)
+        return expectsPayload ? try readPayload(from: fileDescriptor) : ""
+    }
+
+    nonisolated private static func connectedSocket(timeoutSeconds: Int) throws -> Int32 {
         let fileDescriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard fileDescriptor >= 0 else {
             throw AdbServerProtocolError.unavailable
         }
-        defer { close(fileDescriptor) }
 
-        var timeout = timeval(tv_sec: socketTimeoutSeconds, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fileDescriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fileDescriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var noSigPipe: Int32 = 1
@@ -835,6 +879,7 @@ enum AdbServerBridge {
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = port.bigEndian
         guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+            close(fileDescriptor)
             throw AdbServerProtocolError.unavailable
         }
 
@@ -844,9 +889,13 @@ enum AdbServerBridge {
             }
         }
         guard connected == 0 else {
+            close(fileDescriptor)
             throw AdbServerProtocolError.unavailable
         }
+        return fileDescriptor
+    }
 
+    nonisolated private static func sendService(_ service: String, to fileDescriptor: Int32) throws {
         let command = String(format: "%04x%@", service.utf8.count, service)
         try writeAll(Data(command.utf8), to: fileDescriptor)
 
@@ -858,8 +907,6 @@ enum AdbServerBridge {
         guard status == "OKAY" else {
             throw AdbServerProtocolError.protocolFailure("ADB server returned unexpected status \(status).")
         }
-
-        return expectsPayload ? try readPayload(from: fileDescriptor) : ""
     }
 
     nonisolated private static func writeAll(_ data: Data, to fileDescriptor: Int32) throws {
@@ -943,6 +990,10 @@ enum AdbUsbProtocolError: LocalizedError {
 }
 
 enum AdbUsbBridge {
+    // USBInterfaceOpen claims the interface exclusively: a native connection opened while another
+    // Home worker holds one would fail over to the ADB server or external adb, so take turns.
+    nonisolated private static let connectionLock = NSLock()
+
     nonisolated static func isAvailable() -> Bool {
         guard let services = try? matchingServices() else {
             return false
@@ -956,6 +1007,8 @@ enum AdbUsbBridge {
     }
 
     nonisolated static func devices() throws -> [QuestUsbDevice] {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let services = try matchingServices()
         guard !services.isEmpty else {
             throw AdbUsbProtocolError.noDevice
@@ -975,7 +1028,7 @@ enum AdbUsbBridge {
                     let banner = try connection.connect()
                     devices.append(
                         QuestUsbDevice(
-                            serial: banner.serial ?? connection.locationIdentifier,
+                            serial: connection.serial(banner: banner),
                             state: "device",
                             details: banner.details(locationIdentifier: connection.locationIdentifier)
                         )
@@ -983,7 +1036,7 @@ enum AdbUsbBridge {
                 } catch AdbUsbProtocolError.authorizationRequired {
                     devices.append(
                         QuestUsbDevice(
-                            serial: connection.locationIdentifier,
+                            serial: connection.serial(banner: nil),
                             state: "unauthorized",
                             details: "USB debugging authorization pending"
                         )
@@ -1000,27 +1053,11 @@ enum AdbUsbBridge {
         throw lastError ?? AdbUsbProtocolError.noDevice
     }
 
-    nonisolated static func reverseMappings(for serial: String) throws -> Set<Int> {
+    nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let (connection, _) = try connectedDevice(matching: serial)
-        return QuestUsbBridge.parseReversePorts(try connection.runService("reverse:list-forward"))
-    }
-
-    @discardableResult
-    nonisolated static func configureReverse(for serial: String) throws -> Set<Int> {
-        let (connection, _) = try connectedDevice(matching: serial)
-        for port in QuestUsbBridge.reversePorts {
-            _ = try? connection.runService("reverse:killforward:tcp:\(port)")
-        }
-        for port in QuestUsbBridge.reversePorts {
-            _ = try connection.runService("reverse:forward:tcp:\(port);tcp:\(port)")
-        }
-
-        let configuredPorts = QuestUsbBridge.parseReversePorts(try connection.runService("reverse:list-forward"))
-        let missingPorts = QuestUsbBridge.reversePorts.filter { !configuredPorts.contains($0) }
-        if !missingPorts.isEmpty {
-            throw QuestUsbBridgeError.missingReversePorts(missingPorts)
-        }
-        return configuredPorts
+        return try connection.runService("shell:\(command)")
     }
 
     nonisolated private static func connectedDevice(
@@ -1041,7 +1078,7 @@ enum AdbUsbBridge {
             do {
                 let connection = try AdbUsbConnection(service: service)
                 let banner = try connection.connect()
-                let serial = banner.serial ?? connection.locationIdentifier
+                let serial = connection.serial(banner: banner)
                 if serial == requestedSerial || connection.locationIdentifier == requestedSerial {
                     return (connection, banner)
                 }
@@ -1062,11 +1099,8 @@ enum AdbUsbBridge {
         guard let matching = IOServiceMatching(kIOUSBInterfaceClassName) else {
             throw AdbUsbProtocolError.usbFailure("Unable to create a USB interface matching dictionary.")
         }
-        let dictionary = matching as NSMutableDictionary
-        dictionary[kUSBInterfaceClass] = NSNumber(value: 0xff)
-        dictionary[kUSBInterfaceSubClass] = NSNumber(value: 0x42)
-        dictionary[kUSBInterfaceProtocol] = NSNumber(value: 0x01)
-
+        // IOKit ignores class, subclass, and protocol keys for the vendor-specific class unless the
+        // dictionary also names idVendor, so match every interface and filter here instead.
         var iterator: io_iterator_t = 0
         let result = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
         guard result == kIOReturnSuccess else {
@@ -1082,9 +1116,26 @@ enum AdbUsbBridge {
             if service == 0 {
                 break
             }
-            services.append(service)
+            if isAdbInterface(
+                interfaceClass: registryInteger(service, key: kUSBInterfaceClass),
+                subclass: registryInteger(service, key: kUSBInterfaceSubClass),
+                interfaceProtocol: registryInteger(service, key: kUSBInterfaceProtocol)
+            ) {
+                services.append(service)
+            } else {
+                IOObjectRelease(service)
+            }
         }
         return services
+    }
+
+    nonisolated static func isAdbInterface(interfaceClass: Int?, subclass: Int?, interfaceProtocol: Int?) -> Bool {
+        interfaceClass == 0xff && subclass == 0x42 && interfaceProtocol == 0x01
+    }
+
+    nonisolated private static func registryInteger(_ service: io_service_t, key: String) -> Int? {
+        let value = IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)
+        return (value?.takeRetainedValue() as? NSNumber)?.intValue
     }
 }
 
@@ -1140,12 +1191,17 @@ nonisolated final class AdbUsbConnection {
         0x83, 0x40, 0x36, 0xd6, 0x9f, 0xab, 0x90, 0xf6
     )
 
+    // kIOUSBTransactionTimeout, which ReadPipeTO returns when its timeout expires; the IOKit macro
+    // is not imported into Swift.
+    nonisolated private static var usbTransactionTimeout: IOReturn { IOReturn(bitPattern: 0xe000_4051) }
     nonisolated private static var connectTimeoutMilliseconds: UInt32 { 1_000 }
     nonisolated private static var authorizationTimeoutSeconds: TimeInterval { 20 }
     nonisolated private static var serviceTimeoutMilliseconds: UInt32 { 5_000 }
     nonisolated private static var maxPayloadBytes: UInt32 { 1_048_576 }
 
     let locationIdentifier: String
+    /// The USB device's serial number string, which adb reports as the serial.
+    let usbSerialNumber: String?
 
     private let handle: UnsafeMutablePointer<UnsafeMutablePointer<IOUSBInterfaceInterface300>?>
     private let table: UnsafeMutablePointer<IOUSBInterfaceInterface300>
@@ -1165,16 +1221,17 @@ nonisolated final class AdbUsbConnection {
             &plugin,
             &score
         )
-        guard pluginResult == kIOReturnSuccess, let pluginInterface = plugin?.pointee else {
+        // COM-style plug-in methods take the plug-in handle, not its function table, as `this`.
+        guard pluginResult == kIOReturnSuccess, let plugin, let pluginTable = plugin.pointee else {
             throw AdbUsbProtocolError.usbFailure("Unable to open the native USB ADB plug-in: \(Self.formatIOReturn(pluginResult)).")
         }
         defer {
-            _ = pluginInterface.pointee.Release(pluginInterface)
+            _ = pluginTable.pointee.Release(plugin)
         }
 
         var rawInterface: LPVOID?
-        let queryResult = pluginInterface.pointee.QueryInterface(
-            pluginInterface,
+        let queryResult = pluginTable.pointee.QueryInterface(
+            plugin,
             CFUUIDGetUUIDBytes(Self.usbInterfaceInterfaceID300),
             &rawInterface
         )
@@ -1193,6 +1250,14 @@ nonisolated final class AdbUsbConnection {
         var locationID: UInt32 = 0
         _ = table.pointee.GetLocationID(handle, &locationID)
         self.locationIdentifier = String(format: "usb-%08x", locationID)
+        // Current adbd banners omit ro.serialno, so read the device descriptor's serial like adb does.
+        self.usbSerialNumber = IORegistryEntrySearchCFProperty(
+            service,
+            kIOServicePlane,
+            kUSBSerialNumberString as CFString,
+            kCFAllocatorDefault,
+            IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)
+        ) as? String
 
         let openResult = table.pointee.USBInterfaceOpen(handle)
         guard openResult == kIOReturnSuccess else {
@@ -1213,6 +1278,10 @@ nonisolated final class AdbUsbConnection {
 
     deinit {
         close()
+    }
+
+    func serial(banner: AdbUsbBanner?) -> String {
+        banner?.serial ?? usbSerialNumber ?? locationIdentifier
     }
 
     func close() {
@@ -1345,7 +1414,7 @@ nonisolated final class AdbUsbConnection {
                     timeoutMilliseconds
                 )
             }
-            if ioResult == kIOReturnTimeout {
+            if ioResult == kIOReturnTimeout || ioResult == Self.usbTransactionTimeout {
                 throw AdbUsbProtocolError.timeout
             }
             guard ioResult == kIOReturnSuccess else {
@@ -1651,7 +1720,7 @@ nonisolated enum AdbPublicKeyEncoder {
         let sequence = try reader.readElement(expectedTag: 0x30)
         var sequenceReader = DERReader(bytes: sequence)
         if sequenceReader.peekTag() == 0x02 {
-            return try parsePKCS1PublicKey(sequence)
+            return try parsePKCS1PublicKey([UInt8](data))
         }
 
         _ = try sequenceReader.readElement(expectedTag: 0x30)
@@ -1874,10 +1943,9 @@ enum QuestUsbBridge {
 
     @discardableResult
     nonisolated static func configureReverse(for serial: String, customAdbPath: String? = nil) throws -> Set<Int> {
+        // Native USB ADB is skipped for reverse: adbd drops reverse mappings when their host connection
+        // closes, and Home does not keep one open to relay the headset's connections.
         if cleanedCustomAdbPath(customAdbPath) == nil {
-            if let configuredPorts = try? AdbUsbBridge.configureReverse(for: serial) {
-                return configuredPorts
-            }
             if let configuredPorts = try? AdbServerBridge.configureReverse(for: serial) {
                 return configuredPorts
             }
@@ -1899,15 +1967,25 @@ enum QuestUsbBridge {
 
     nonisolated static func reverseMappings(for serial: String, customAdbPath: String? = nil) throws -> Set<Int> {
         if cleanedCustomAdbPath(customAdbPath) == nil {
-            if let ports = try? AdbUsbBridge.reverseMappings(for: serial) {
-                return ports
-            }
             if let ports = try? AdbServerBridge.reverseMappings(for: serial) {
                 return ports
             }
         }
         let adb = try adbExecutablePath(customPath: customAdbPath)
         return parseReversePorts(try Shell.run(adb, ["-s", serial, "reverse", "--list"]))
+    }
+
+    nonisolated static func shell(_ command: String, serial: String, customAdbPath: String? = nil) throws -> String {
+        if cleanedCustomAdbPath(customAdbPath) == nil {
+            if let output = try? AdbUsbBridge.shell(command, serial: serial) {
+                return output
+            }
+            if let output = try? AdbServerBridge.shell(command, serial: serial) {
+                return output
+            }
+        }
+        let adb = try adbExecutablePath(customPath: customAdbPath)
+        return try Shell.run(adb, ["-s", serial, "shell", command])
     }
 
     nonisolated static func adbExecutablePath(customPath: String? = nil) throws -> String {
@@ -2045,7 +2123,7 @@ enum QuestUsbBridgeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .adbNotFound:
-            return "No native USB ADB headset was available, no ADB server was available on 127.0.0.1:5037, and adb was not found from OXRSys Home. Connect a developer-mode headset over USB and accept USB debugging, or configure an optional adb fallback."
+            return "No ADB server was available on 127.0.0.1:5037 and adb was not found from OXRSys Home. Native USB ADB lists a connected, authorized headset and sets up USB Net without them, but USB reverse needs one of them: install adb, or select a custom adb in Settings."
         case let .invalidCustomAdb(path):
             return "Custom adb path is invalid: \(path). Select an executable adb that passes `adb version`, or clear the custom path to auto-detect."
         case let .missingReversePorts(ports):

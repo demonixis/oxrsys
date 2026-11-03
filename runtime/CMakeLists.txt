@@ -20,12 +20,14 @@ add_library(oxrsys_runtime SHARED
     src/InputManager.cpp
     src/HandTracker.cpp
     src/StreamingServer.cpp
+    src/PacketPacer.cpp
     src/TrackingReceiver.cpp
     src/VulkanDispatch.cpp
     src/SwapchainCommon.cpp
     src/SwapchainVulkan.cpp
     src/SwapchainMetal.mm
     src/VideoEncoder.mm
+    src/OverlayCompositor.mm
     src/EncoderHelperClient.mm
     src/EncoderPathPolicy.cpp
 )

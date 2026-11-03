@@ -23,6 +23,16 @@ constexpr XrSwapchainUsageFlags SupportedUsageFlags(GraphicsApi api)
         // Metal blit destinations do not require an MTLTextureUsage flag. Blender
         // copies its rendered view into the OpenXR texture and declares that use.
         flags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        // Godot's Metal driver renders through a view of the swapchain texture with the
+        // sibling sRGB/UNORM pixel format. SwapchainMetal maps this to
+        // MTLTextureUsagePixelFormatView.
+        flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+    }
+    if (api == GraphicsApi::Vulkan)
+    {
+        // Godot creates UNORM swapchain images and renders through an sRGB view of them.
+        // SwapchainVulkan maps this to VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT.
+        flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
     }
     return flags;
 }
@@ -76,6 +86,12 @@ constexpr XrResult ValidateCreateInfo(GraphicsApi api,
         // The native backends create an attachment usage matching the format;
         // accepting the opposite attachment bit would promise capabilities the
         // returned MTLTexture/VkImage does not have.
+        return XR_ERROR_FEATURE_UNSUPPORTED;
+    }
+    if (isDepth && (createInfo.usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0)
+    {
+        // Mutable format exists for UNORM color images viewed as sRGB; depth formats
+        // have no compatible view format the runtime could offer.
         return XR_ERROR_FEATURE_UNSUPPORTED;
     }
     return XR_SUCCESS;

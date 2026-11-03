@@ -113,6 +113,7 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_DEPTH_OCCLUSION = 0x00000080,
     SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
     SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
+    SERVER_FEATURE_FOVEATION_EYE_CENTER = 0x00000400, // foveation centres follow each eye's forward direction
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -128,6 +129,7 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SPATIAL_ENTITY = 0x00000100,
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
     CLIENT_CAPABILITY_TEN_BIT_ENCODING = 0x00000400, // client can decode HEVC Main10
+    CLIENT_CAPABILITY_FOVEATION_EYE_CENTER = 0x00000800, // client decodes eye-centred foveation
 };
 
 enum ClientCodecCapabilityFlags : uint32_t
@@ -258,7 +260,21 @@ enum VideoFlags : uint8_t
     VIDEO_FLAG_FEC = 0x10,     // Forward Error Correction parity packet
     VIDEO_FLAG_RENDER_POSE = 0x20, // Payload contains the server's render pose for this frame
     VIDEO_FLAG_ALPHA_BLEND = 0x40, // App submitted alpha-blend environment or source-alpha projection layer
+    VIDEO_FLAG_PACKED_ALPHA = 0x80, // Rows below the eyes carry each eye's alpha at PackedAlphaRows height
 };
+
+// Packed alpha (CLIENT_CAPABILITY_MIXED_REALITY_ALPHA): the encoded frame is the eyes followed by
+// PackedAlphaRows(eyeHeight) rows holding each eye's alpha as grey, at half the eye's width and height.
+// Each eye's alpha is split into its top and bottom halves, placed side by side in that eye's columns.
+constexpr uint32_t PackedAlphaRows(uint32_t eyeHeight)
+{
+    return (eyeHeight + 3) / 4;
+}
+
+constexpr uint32_t PackedAlphaEyeHeight(uint32_t frameHeight)
+{
+    return frameHeight * 4 / 5;
+}
 
 struct AudioPacketHeader
 {
@@ -342,6 +358,21 @@ struct TrackingPacket
     float leftControllerAimAngularVelocity[3];
     float rightControllerAimLinearVelocity[3];
     float rightControllerAimAngularVelocity[3];
+
+    // The controller the client's own runtime reports (see ControllerProfile). 0 = unknown, and the
+    // profile is picked from the client name as before. TrackingReceiver keeps it only from a packet
+    // that reaches the end of touchState.
+    uint32_t controllerProfile;
+    // Capacitive touch, one bit per input in the ButtonFlags layout (a set BUTTON_A bit = A is touched).
+    // Valid only with a known controllerProfile.
+    uint32_t touchState;
+};
+
+enum ControllerProfile : uint32_t
+{
+    CONTROLLER_PROFILE_UNKNOWN = 0,
+    // /interaction_profiles/valve/frame_controller_valve (XR_VALVE_frame_controller_interaction)
+    CONTROLLER_PROFILE_VALVE_FRAME = 1,
 };
 
 constexpr size_t TRACKING_PACKET_BASE_SIZE = offsetof(TrackingPacket, leftControllerAimPos);
@@ -359,6 +390,21 @@ enum ButtonFlags : uint32_t
     BUTTON_RIGHT_TRIGGER = 0x0100,
     BUTTON_LEFT_GRIP = 0x0200,
     BUTTON_RIGHT_GRIP = 0x0400,
+    // Steam Frame controllers (controllerProfile == CONTROLLER_PROFILE_VALVE_FRAME): the right hand has
+    // A, B, X and Y and a menu button, the left a four-way d-pad and a view button (sent as BUTTON_MENU).
+    // These bits carry each input on its own. The A/B/X/Y bits above keep the Oculus Touch meaning that
+    // SteamVR's own Frame-to-Touch remap gives: A = A, B = B|X|Y, X = d-pad down, Y = the other three.
+    BUTTON_FRAME_A = 0x0800,
+    BUTTON_FRAME_B = 0x1000,
+    BUTTON_FRAME_X = 0x2000,
+    BUTTON_FRAME_Y = 0x4000,
+    BUTTON_FRAME_DPAD_UP = 0x8000,
+    BUTTON_FRAME_DPAD_DOWN = 0x10000,
+    BUTTON_FRAME_DPAD_LEFT = 0x20000,
+    BUTTON_FRAME_DPAD_RIGHT = 0x40000,
+    BUTTON_FRAME_RIGHT_MENU = 0x80000,
+    BUTTON_LEFT_BUMPER = 0x100000,
+    BUTTON_RIGHT_BUMPER = 0x200000,
 };
 
 enum TrackingFlags : uint32_t

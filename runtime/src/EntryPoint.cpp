@@ -19,6 +19,7 @@
 #include "HandTracker.h"
 #include "Config.h"
 #include "RuntimeStatus.h"
+#include "TimespecConversion.h"
 #include "VulkanDispatch.h"
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
@@ -212,6 +213,10 @@ struct ExtensionInfo
 
 #ifdef XR_USE_GRAPHICS_API_METAL
 static constexpr const char* UNITY_METAL_ENABLE_EXTENSION_ALIAS = "XR_KHRX2_metal_enable";
+// Newer than the OpenXR headers this builds against, so named here. Version 1 adds only an interaction profile.
+static constexpr const char* VALVE_FRAME_CONTROLLER_EXTENSION_NAME = "XR_VALVE_frame_controller_interaction";
+static constexpr uint32_t VALVE_FRAME_CONTROLLER_SPEC_VERSION = 1;
+static constexpr const char* VALVE_FRAME_CONTROLLER_PROFILE = "/interaction_profiles/valve/frame_controller_valve";
 static constexpr const char* UNITY_METAL_GRAPHICS_REQUIREMENTS_FUNCTION_ALIAS =
     "xrGetMetalGraphicsRequirementsKHRX2";
 #endif
@@ -244,10 +249,12 @@ static std::vector<ExtensionInfo> GetSupportedExtensionInfos()
 #ifdef XR_USE_TIMESPEC
         {XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME, XR_KHR_convert_timespec_time_SPEC_VERSION},
 #endif
+        {XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME, XR_KHR_composition_layer_cylinder_SPEC_VERSION},
         {XR_EXT_HAND_TRACKING_EXTENSION_NAME, XR_EXT_hand_tracking_SPEC_VERSION},
         {XR_EXT_CONFORMANCE_AUTOMATION_EXTENSION_NAME, XR_EXT_conformance_automation_SPEC_VERSION},
         {XR_EXT_HAND_INTERACTION_EXTENSION_NAME, XR_EXT_hand_interaction_SPEC_VERSION},
         {XR_EXT_DEBUG_UTILS_EXTENSION_NAME, XR_EXT_debug_utils_SPEC_VERSION},
+        {VALVE_FRAME_CONTROLLER_EXTENSION_NAME, VALVE_FRAME_CONTROLLER_SPEC_VERSION},
 #ifdef XR_META_touch_controller_plus
         {XR_META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME, XR_META_touch_controller_plus_SPEC_VERSION},
 #endif
@@ -580,6 +587,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrEnumerateApiLayerProperties(
     return XR_SUCCESS;
 }
 
+#ifdef XR_USE_TIMESPEC
+static int64_t MonotonicFallbackEpochNs();
+#endif
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     const XrInstanceCreateInfo* createInfo, XrInstance* instance)
 {
@@ -643,6 +654,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     }
 
     gInstance = std::make_unique<Instance>(createInfo->applicationInfo.apiVersion, enabledExtensions);
+#ifdef XR_USE_TIMESPEC
+    MonotonicFallbackEpochNs();
+#endif
     RuntimeStatus::SetApplicationName(createInfo->applicationInfo.applicationName);
     *instance = reinterpret_cast<XrInstance>(gInstance->GetHandle());
     return XR_SUCCESS;
@@ -1498,6 +1512,10 @@ static bool IsKnownInteractionProfilePath(const Instance* instance, const std::s
     {
         return instance->IsExtensionEnabled(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
     }
+    if (profilePath == VALVE_FRAME_CONTROLLER_PROFILE)
+    {
+        return instance->IsExtensionEnabled(VALVE_FRAME_CONTROLLER_EXTENSION_NAME);
+    }
 #ifdef XR_META_touch_controller_plus
     if (profilePath == "/interaction_profiles/meta/touch_controller_plus")
     {
@@ -1914,7 +1932,15 @@ static std::string ComponentFromBindingPath(const std::string& path)
     auto inputPos = path.find("/input/");
     if (inputPos != std::string::npos)
     {
-        return path.substr(inputPos + 7); // skip "/input/"
+        std::string component = path.substr(inputPos + 7); // skip "/input/"
+        // A binding to an identifier alone (.../input/trigger) means the component's default. The
+        // controllers here have only an analog value for trigger and squeeze, so bind that; boolean
+        // actions threshold it like the explicit /value path.
+        if (component == "trigger" || component == "squeeze")
+        {
+            component += "/value";
+        }
+        return component;
     }
     return "";
 }
@@ -2367,9 +2393,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrSyncActions(
     for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
     {
         XrPath expectedTopLevelPath = TopLevelPathFromHand(hand);
+        // The fallback list's bindings add up, which is harmless while they all describe one Touch controller. An
+        // app with Frame bindings also suggests Touch ones, and there Touch B means Frame B, X or Y: read only the
+        // Frame bindings, as SteamVR does, so Frame X does not also fire whatever the app put on Touch B.
+        const bool frameBound = SelectCurrentInteractionProfileForInstance(sess->GetInstance(), inputManager, hand) ==
+                                VALVE_FRAME_CONTROLLER_PROFILE;
         for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
         {
-            if (profilePathString.empty())
+            if (profilePathString.empty() || (frameBound && profilePathString != VALVE_FRAME_CONTROLLER_PROFILE))
             {
                 continue;
             }
@@ -2566,6 +2597,59 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
+// The hands a haptic call reaches: those whose /output/haptic the action is bound to in the hand's active
+// interaction profiles, narrowed to its subaction path or, without one, to the hands the action declares, if any.
+static bool HapticsTargetsHand(const InputManager& inputManager, const ActionState* action, XrPath subactionPath,
+                               InputManager::Hand hand)
+{
+    const XrPath handPath = TopLevelPathFromHand(hand);
+    if (subactionPath != XR_NULL_PATH && subactionPath != handPath)
+    {
+        return false;
+    }
+    const std::vector<XrPath>& subactionPaths = action->GetSubactionPaths();
+    if (subactionPath == XR_NULL_PATH && !subactionPaths.empty() &&
+        std::find(subactionPaths.begin(), subactionPaths.end(), handPath) == subactionPaths.end())
+    {
+        return false;
+    }
+    for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
+    {
+        if (profilePathString.empty())
+        {
+            continue;
+        }
+        XrPath profilePath = XR_NULL_PATH;
+        Runtime::Get().StringToPath(profilePathString.c_str(), &profilePath);
+        auto profileIt = gSuggestedBindings.find(static_cast<uint64_t>(profilePath));
+        if (profileIt == gSuggestedBindings.end())
+        {
+            continue;
+        }
+        for (const auto& binding : profileIt->second)
+        {
+            if (binding.actionHandle == action->GetHandle() && binding.topLevelPath == handPath &&
+                binding.bindingPathString.ends_with("/output/haptic"))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void SendHapticsToHands(Session* sess, const ActionState* action, XrPath subactionPath,
+                               float amplitude, float durationMs, float frequency)
+{
+    for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
+    {
+        if (HapticsTargetsHand(sess->GetInputManager(), action, subactionPath, hand))
+        {
+            sess->SendHaptics(static_cast<uint8_t>(hand), amplitude, durationMs, frequency);
+        }
+    }
+}
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
     XrSession session, const XrHapticActionInfo* hapticActionInfo,
     const XrHapticBaseHeader* hapticFeedback)
@@ -2603,6 +2687,14 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrApplyHapticFeedback(
         return XR_SESSION_NOT_FOCUSED;
     }
 
+    if (hapticFeedback->type == XR_TYPE_HAPTIC_VIBRATION)
+    {
+        const auto* vibration = reinterpret_cast<const XrHapticVibration*>(hapticFeedback);
+        const float durationMs = vibration->duration > 0 ? static_cast<float>(vibration->duration) / 1.0e6f : 0.0f;
+        const float frequency = vibration->frequency > 0.0f ? vibration->frequency : 0.0f;
+        SendHapticsToHands(sess, action, hapticActionInfo->subactionPath,
+                           std::clamp(vibration->amplitude, 0.0f, 1.0f), durationMs, frequency);
+    }
     return XR_SUCCESS;
 }
 
@@ -2642,6 +2734,7 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrStopHapticFeedback(
         return XR_SESSION_NOT_FOCUSED;
     }
 
+    SendHapticsToHands(sess, action, hapticActionInfo->subactionPath, 0.0f, 0.0f, 0.0f);
     return XR_SUCCESS;
 }
 
@@ -2719,6 +2812,10 @@ static std::string LocalizedInteractionProfileName(Session* session, XrPath sour
     {
         return "EXT Hand Interaction";
     }
+    if (profilePath == VALVE_FRAME_CONTROLLER_PROFILE)
+    {
+        return "Steam Frame Controller";
+    }
     return "Unknown Profile";
 }
 
@@ -2734,6 +2831,30 @@ static std::string LocalizedComponentName(XrPath sourcePath)
     if (component == "menu/click")
     {
         return "Menu";
+    }
+    if (component == "view/click")
+    {
+        return "View";
+    }
+    if (component == "bumper/click")
+    {
+        return "Bumper";
+    }
+    if (component == "dpad_up/click")
+    {
+        return "D-pad Up";
+    }
+    if (component == "dpad_down/click")
+    {
+        return "D-pad Down";
+    }
+    if (component == "dpad_left/click")
+    {
+        return "D-pad Left";
+    }
+    if (component == "dpad_right/click")
+    {
+        return "D-pad Right";
     }
     if (component == "grip/pose")
     {
@@ -3677,7 +3798,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // ============================================================================
 // XR_KHR_convert_timespec_time — CLOCK_MONOTONIC timespec <-> XrTime. The
 // session owns the exact time base (monoStartNs_); before a session exists we
-// fall back to a process-global monotonic epoch so conversions never hard-fail.
+// fall back to a process-global monotonic epoch, first sampled when an instance
+// is created so timespecs the application reads afterwards map to valid XrTimes.
 // ============================================================================
 static int64_t MonotonicFallbackEpochNs()
 {
@@ -3699,23 +3821,16 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
     {
         return XR_ERROR_HANDLE_INVALID;
     }
-    if (timespecTime == nullptr || time == nullptr ||
-        timespecTime->tv_nsec < 0 || timespecTime->tv_nsec >= 1000000000L)
+    if (timespecTime == nullptr || time == nullptr)
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
     if (Session* sess = inst->GetSession())
     {
-        *time = sess->TimespecToXrTime(*timespecTime);
+        return sess->TimespecToXrTime(*timespecTime, *time);
     }
-    else
-    {
-        const int64_t monoNs =
-            static_cast<int64_t>(timespecTime->tv_sec) * 1000000000LL + timespecTime->tv_nsec;
-        *time = static_cast<XrTime>(monoNs - MonotonicFallbackEpochNs());
-    }
-    return XR_SUCCESS;
+    return oxrsys::MonotonicTimespecToXrTime(*timespecTime, MonotonicFallbackEpochNs(), *time);
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
@@ -3733,15 +3848,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
 
     if (Session* sess = inst->GetSession())
     {
-        sess->XrTimeToTimespec(time, *timespecTime);
+        return sess->XrTimeToTimespec(time, *timespecTime);
     }
-    else
-    {
-        const int64_t monoNs = static_cast<int64_t>(time) + MonotonicFallbackEpochNs();
-        timespecTime->tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
-        timespecTime->tv_nsec = static_cast<long>(monoNs % 1000000000LL);
-    }
-    return XR_SUCCESS;
+    return oxrsys::XrTimeToMonotonicTimespec(time, MonotonicFallbackEpochNs(), *timespecTime);
 }
 #endif
 

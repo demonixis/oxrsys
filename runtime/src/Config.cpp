@@ -19,6 +19,7 @@
 #include <thread>
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -147,9 +148,44 @@ void TerminateProcessGroup(pid_t pid)
     }
 }
 
+// fork() for a child that only execs. Every signal stays blocked across the fork, and the child puts each caught signal
+// back to its default action before unblocking, so a signal that lands between fork and exec cannot run the parent's
+// handlers (a test runner's, an engine's crash reporter) in a child whose fork-time state is not yet safe to use.
+// Ignored signals stay ignored, as exec would leave them.
+pid_t ForkForExec()
+{
+    sigset_t all;
+    sigset_t old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        struct sigaction dfl = {};
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        for (int sig = 1; sig < NSIG; ++sig)
+        {
+            struct sigaction current = {};
+            if (sig == SIGKILL || sig == SIGSTOP || sigaction(sig, nullptr, &current) != 0)
+            {
+                continue;
+            }
+            const bool caught = (current.sa_flags & SA_SIGINFO) != 0 ||
+                                (current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN);
+            if (caught)
+            {
+                sigaction(sig, &dfl, nullptr);
+            }
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    return pid;
+}
+
 bool RunAdbLogcatClear(const std::string& adbPath, std::chrono::milliseconds timeout)
 {
-    const pid_t pid = fork();
+    const pid_t pid = ForkForExec();
     if (pid < 0)
     {
         return false;
@@ -389,9 +425,17 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "render_device")
         {
             value = ParseString(value);
-            if (value == "quest2" || value == "quest3" || value == "avp")
+            if (value == "quest2" || value == "quest3" || value == "quest3_native" || value == "avp")
             {
                 values.renderDevice = value;
+            }
+        }
+        else if (key == "stage_height_offset_m")
+        {
+            float val;
+            if (ParseFloat(value, val) && val >= -1.0f && val <= 1.0f)
+            {
+                values.stageHeightOffsetM = val;
             }
         }
         else if (key == "keyframe_interval_sec")
@@ -422,6 +466,27 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         {
             values.encoder10Bit = ParseBool(value);
         }
+        else if (key == "send_pacing_ms")
+        {
+            float val;
+            if (ParseFloat(value, val))
+            {
+                values.sendPacingMs = std::clamp(val, 0.0f, 10.0f);
+            }
+        }
+        else if (key == "send_pacing_keyframe_ms")
+        {
+            float val;
+            if (ParseFloat(value, val))
+            {
+                values.sendPacingKeyframeMs = std::clamp(val, 0.0f, 20.0f);
+            }
+        }
+        else if (key == "pacing_thread")
+        {
+            value = ParseString(value);
+            values.pacingThread = value == "realtime" ? value : "default";
+        }
         else if (key == "encoder_helper")
         {
             // Tri-state: "auto" (decide from the measured hardware-encoder
@@ -445,7 +510,7 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "transport")
         {
             value = ParseString(value);
-            if (value == "auto" || value == "wifi" || value == "usb_adb")
+            if (value == "auto" || value == "wifi" || value == "usb_adb" || value == "usb_ncm")
             {
                 values.streamingTransport = value;
             }
@@ -453,7 +518,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "foveated_encoding_preset")
         {
             value = ParseString(value);
-            if (value == "off" || value == "light" || value == "medium" || value == "high")
+            if (value == "off" || value == "light" || value == "medium" ||
+                value == "medium_plus" || value == "high")
             {
                 values.foveatedEncodingPreset = value;
             }
@@ -706,6 +772,10 @@ EyeResolution DeviceBaseEyeResolution(const std::string& device)
     {
         return {1440, 1584};
     }
+    if (device == "quest3_native")
+    {
+        return {2064, 2208};
+    }
     if (device == "avp")
     {
         return {3024, 3360};
@@ -810,7 +880,7 @@ void Config::StartLogcatCapture()
         return;
     }
 
-    const pid_t pid = fork();
+    const pid_t pid = ForkForExec();
     if (pid < 0)
     {
         spdlog::warn("Failed to fork adb logcat capture");

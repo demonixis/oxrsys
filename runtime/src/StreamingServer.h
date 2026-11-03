@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "ClientAdmission.h"
+
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -15,9 +17,11 @@
 #include <thread>
 #include <vector>
 
+#include "PacketPacer.h"
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
+#include "StreamingFoveationSnapshot.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
 
@@ -80,6 +84,10 @@ public:
 
     // Check if a client is connected
     bool IsClientConnected() const { return state_.load() == State::Connected; }
+    bool SendHaptics(const oxr::protocol::HapticsCommand& command)
+    {
+        return SendControlPayload(&command, sizeof(command));
+    }
     State GetState() const { return state_.load(); }
     uint32_t GetTargetRefreshRateHz() const { return targetRefreshRateHz_.load(); }
 
@@ -118,6 +126,7 @@ private:
         int64_t timestampNs = 0;
         oxr::protocol::VideoCodec codec = oxr::protocol::VideoCodec::H265;
         bool alphaBlend = false;
+        bool packedAlpha = false;
         bool hasPose = false;
         float headPosition[3] = {};
         float headOrientation[4] = {0, 0, 0, 1};
@@ -141,6 +150,7 @@ private:
         uint32_t foveatedTargetEyeHeight = 0;
         float activeResolutionScale = 0.75f;
         bool foveatedEncodingActive = false;
+        oxrsys::streaming_foveation::Snapshot foveation;
         uint32_t streamConfigSequence = 0;
     };
 
@@ -179,6 +189,9 @@ private:
     void CheckClientLiveness(int64_t nowNs);
     std::atomic<uint64_t> lastTrackingCountSeen_{0};
     std::atomic<int64_t> lastClientActivityNs_{0};
+    // Guarded by clientMutex_ (WiFi control and USB control threads): which address was
+    // last refused a ClientConnect and when that was last logged (see ClientAdmission.h).
+    oxrsys::ClientAdmissionState clientAdmission_;
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
     void HandleStreamConfigAck(const oxr::protocol::StreamConfigAck& ack);
@@ -213,7 +226,9 @@ private:
     uint32_t refreshRateHz_ = 90;
     std::atomic_bool clientFoveatedEncodingActive_{false};
     std::atomic_bool tenBitEncodingActive_{false};
+    std::atomic_bool packedAlphaActive_{false};
     std::atomic_bool clientSupportsFoveatedEncoding_{false};
+    std::atomic_bool clientSupportsFoveationEyeCenter_{false};
     std::atomic_bool clientSupportsStreamReconfigure_{false};
     std::atomic_bool clientSupportsMixedRealityPassthrough_{false};
     std::atomic_bool clientSupportsSpatialEntity_{false};
@@ -298,6 +313,16 @@ private:
     std::atomic<uint32_t> videoSendDroppedFramesTotalForAbr_{0};
     std::atomic<uint32_t> videoTcpSendFailures_{0};
     std::atomic<uint32_t> videoUdpRetransmittedPackets_{0};
+    // Packet pacing (send_pacing_ms): true while a frame newer than the one being
+    // sent is queued, so the pacer sends the rest of the current frame at once.
+    std::atomic<bool> videoSendNewerFrameQueued_{false};
+    std::atomic<uint32_t> videoPacedFlushes_{0};
+    std::atomic<uint32_t> videoUdpSendFailures_{0};
+    std::atomic<uint32_t> videoPacingMaxLatenessUs_{0};
+    oxrsys::streaming::PacketPacingConfig videoPacingConfig_; // video send thread only
+    std::atomic<float> videoPacingWindowMsForLog_{0.0f};
+    std::atomic<float> videoPacingKeyframeWindowMsForLog_{0.0f};
+    uint32_t videoPacingConfigAge_ = 0;
     std::mutex videoSendMutex_;
     std::condition_variable videoSendCv_;
     std::deque<EncodedVideoFrame> videoSendQueue_;
@@ -306,8 +331,14 @@ private:
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
-                     bool isKeyframe, bool alphaBlend, int64_t timestampNs,
-                     oxr::protocol::VideoCodec codec);
+                     bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
+                     oxr::protocol::VideoCodec codec,
+                     oxrsys::streaming::PacketPacer* pacer = nullptr);
+    // Sends one UDP datagram of the video stream after the pacer says it is due,
+    // and counts a failed send (EAGAIN/ENOBUFS drops the packet before the radio).
+    void SendPacedVideoDatagram(SocketHandle socket, const uint8_t* data, size_t size,
+                                const sockaddr_in& destAddr,
+                                oxrsys::streaming::PacketPacer* pacer);
     static bool SendTcpRecord(SocketHandle socket, oxr::protocol::TcpRecordType type,
                               const void* payload, size_t payloadSize);
     static bool SendTcpRecordParts(SocketHandle socket, oxr::protocol::TcpRecordType type,

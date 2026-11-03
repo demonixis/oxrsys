@@ -5,6 +5,7 @@
 #include <Foveation.h>
 #include <Protocol.h>
 
+#include <cmath>
 #include <cstddef>
 
 using namespace oxr::protocol;
@@ -23,6 +24,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(CLIENT_CODEC_CAPABILITY_H265 == 0x00000001);
     STATIC_REQUIRE(CLIENT_CODEC_CAPABILITY_H264 == 0x00000002);
     STATIC_REQUIRE(CLIENT_CAPABILITY_TEN_BIT_ENCODING == 0x00000400);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FOVEATION_EYE_CENTER == 0x00000800);
+    STATIC_REQUIRE(SERVER_FEATURE_FOVEATION_EYE_CENTER == 0x00000400);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, fecGroupLastPacketPayloadSize) == 12);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, reserved) == 14);
@@ -48,7 +51,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
 
-    STATIC_REQUIRE(sizeof(TrackingPacket) == 1168);
+    // controllerProfile and touchState end at 1176, already a multiple of the struct's int64 alignment.
+    STATIC_REQUIRE(sizeof(TrackingPacket) == 1176);
     STATIC_REQUIRE(TRACKING_PACKET_BASE_SIZE == 1008);
     STATIC_REQUIRE(offsetof(TrackingPacket, headLinearVelocity) == 152);
     STATIC_REQUIRE(offsetof(TrackingPacket, headAngularVelocity) == 164);
@@ -69,6 +73,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(offsetof(TrackingPacket, leftControllerAimAngularVelocity) == 1132);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimLinearVelocity) == 1144);
     STATIC_REQUIRE(offsetof(TrackingPacket, rightControllerAimAngularVelocity) == 1156);
+    STATIC_REQUIRE(offsetof(TrackingPacket, controllerProfile) == 1168);
+    STATIC_REQUIRE(offsetof(TrackingPacket, touchState) == 1172);
     STATIC_REQUIRE(TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE == 0x0004);
     STATIC_REQUIRE(TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE == 0x0008);
     STATIC_REQUIRE(TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID == 0x0010);
@@ -111,6 +117,56 @@ TEST_CASE("Foveated encoding presets calculate ALVR-style optimized eye sizes", 
     CHECK(off.optimizedEyeHeight == 2144);
 }
 
+TEST_CASE("Eye centre shift puts the full-resolution region on the eye's forward direction", "[protocol][foveation]")
+{
+    CHECK(EyeCenterShift(1.0f, 1.0f, 0.5f) == 0.0f);
+    // Quest 3 left eye: about 49.8 degrees outwards and 37.9 inwards.
+    const float shift = EyeCenterShift(std::tan(0.869f), std::tan(0.662f), 0.5f);
+    CHECK(shift > 0.35f);
+    CHECK(shift < 0.45f);
+    CHECK(std::fabs(EyeCenterShift(std::tan(0.662f), std::tan(0.869f), 0.5f) + shift) < 1e-5f);
+    CHECK(EyeCenterShift(10.0f, 0.1f, 0.5f) == 1.0f);
+    CHECK(EyeCenterShift(0.0f, 0.0f, 0.5f) == 0.0f);
+    CHECK(EyeCenterShift(1.0f, 2.0f, 1.0f) == 0.0f);
+
+    float shiftX = 0.0f;
+    float shiftY = 0.0f;
+    EyeCenterShifts(-0.869f, 0.662f, 0.785f, -0.785f, 0.5f, 0.45f, shiftX, shiftY);
+    CHECK(std::fabs(shiftX - shift) < 1e-5f);
+    CHECK(std::fabs(shiftY) < 1e-5f);
+}
+
+TEST_CASE("Explicit foveation parameters: medium_plus sits between medium and light", "[protocol][foveation]")
+{
+    // The parameters overload given a preset's own parameters is the preset overload.
+    const FoveationLayout medium =
+        CalculateFoveationLayout(2160, 2160, FoveationPreset::Medium);
+    const FoveationLayout mediumExplicit = CalculateFoveationLayout(
+        2160, 2160, FoveationPreset::Medium, ParametersForPreset(FoveationPreset::Medium));
+    CHECK(mediumExplicit.optimizedEyeWidth == medium.optimizedEyeWidth);
+    CHECK(mediumExplicit.optimizedEyeHeight == medium.optimizedEyeHeight);
+    CHECK(medium.optimizedEyeWidth == 1280);
+    CHECK(medium.optimizedEyeHeight == 1120);
+
+    const FoveationLayout plus = CalculateFoveationLayout(
+        2160, 2160, FoveationPreset::Medium, MediumPlusParameters());
+    CHECK(plus.optimizedEyeWidth == 1376);
+    CHECK(plus.optimizedEyeHeight == 1216);
+    CHECK(plus.parameters.centerSizeX == MediumPlusParameters().centerSizeX);
+    CHECK(IsFoveatedEncodingLayoutUsable(plus, 2160, 2160));
+
+    const FoveationLayout light =
+        CalculateFoveationLayout(2160, 2160, FoveationPreset::Light);
+    CHECK(light.optimizedEyeWidth == 1728);
+    CHECK(light.optimizedEyeHeight == 1536);
+
+    // Off ignores explicit parameters.
+    const FoveationLayout off = CalculateFoveationLayout(
+        2160, 2160, FoveationPreset::Off, MediumPlusParameters());
+    CHECK(off.optimizedEyeWidth == 2160);
+    CHECK(off.optimizedEyeHeight == 2160);
+}
+
 TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", "[protocol][foveation]")
 {
     const FoveationPreset presets[] = {
@@ -138,4 +194,18 @@ TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", 
     const FoveationLayout scaledLayout =
         CalculateFoveationLayout(1136, 1264, FoveationPreset::Light);
     CHECK_FALSE(IsFoveatedEncodingLayoutUsable(scaledLayout, 1512, 1680));
+}
+
+TEST_CASE("Packed alpha rows recover the eye height from the encoded height", "[protocol][passthrough]")
+{
+    STATIC_REQUIRE(VIDEO_FLAG_ALPHA_BLEND == 0x40);
+    STATIC_REQUIRE(VIDEO_FLAG_PACKED_ALPHA == 0x80);
+    CHECK(PackedAlphaRows(1264) == 316);
+    CHECK(PackedAlphaRows(1680) == 420);
+    CHECK(PackedAlphaRows(63) == 16);
+    for (uint32_t eyeHeight = 1; eyeHeight <= 4096; ++eyeHeight)
+    {
+        INFO("eye height " << eyeHeight);
+        CHECK(PackedAlphaEyeHeight(eyeHeight + PackedAlphaRows(eyeHeight)) == eyeHeight);
+    }
 }

@@ -42,6 +42,15 @@ public:
     // Inject a tracking packet from TCP (USB mode) — same effect as receiving via UDP
     void InjectPacket(const uint8_t* data, size_t size);
 
+    // A UDP tracking datagram. It is stored only when its source is the connected client's
+    // address (see SetClientAddress); any other sender is ignored.
+    void ReceivePacket(const uint8_t* data, size_t size, const sockaddr_in& source);
+
+    // The admitted WiFi client's IPv4 address in network byte order, or 0 when no WiFi
+    // client is connected (UDP tracking is then ignored). The port is not compared. When the
+    // client changes, set the address before Reset or ResetHistory.
+    void SetClientAddress(uint32_t address) { clientAddress_.store(address); }
+
     void SetPredictionHorizonMs(float predictionHorizonMs);
     float GetPredictionHorizonMs() const { return predictionHorizonMs_.load(); }
 
@@ -51,6 +60,11 @@ public:
 
     // Stats
     uint64_t GetPacketCount() const { return packetCount_.load(); }
+
+    // Forget the previous client's samples. The reorder guard in StorePacket compares client
+    // timestamps, and clients do not share a clock: a headset whose XrTime is seconds of uptime
+    // would have every packet dropped as "reordered" behind a simulator that ran for days.
+    void ResetHistory();
     uint64_t GetReorderedDropCount() const { return reorderedDropCount_.load(); }
 
 private:
@@ -61,7 +75,10 @@ private:
     };
 
     void ReceiveThread();
-    void StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs);
+    // udpSource is the sender of a UDP datagram, or nullptr for TCP tracking, which is not filtered.
+    void StorePayload(const uint8_t* data, size_t size, const uint32_t* udpSource);
+    void StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs,
+                     const uint32_t* udpSource);
 
     oxrsys::runtime_socket::SocketHandle socket_ = oxrsys::runtime_socket::InvalidSocket;
     std::thread receiveThread_;
@@ -69,6 +86,7 @@ private:
     std::atomic<bool> hasData_{false};
     std::atomic<uint64_t> packetCount_{0};
     std::atomic<uint64_t> reorderedDropCount_{0};
+    std::atomic<uint32_t> clientAddress_{0};
 
     mutable std::mutex poseMutex_;
     oxr::protocol::TrackingPacket latestPacket_ = {};

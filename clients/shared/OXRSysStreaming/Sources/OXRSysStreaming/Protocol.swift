@@ -286,6 +286,7 @@ public struct VideoFlags {
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
     public static let alphaBlend: UInt8 = 0x40
+    public static let packedAlpha: UInt8 = 0x80
 }
 
 public struct AudioPacketHeader: Sendable {
@@ -365,6 +366,11 @@ public struct TrackingPacket: Sendable {
     public var leftControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimLinearVelocity: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+
+    // 0 = CONTROLLER_PROFILE_UNKNOWN, so the runtime picks the profile from the client name.
+    // touchState is valid only with a known controllerProfile.
+    public var controllerProfile: UInt32 = 0
+    public var touchState: UInt32 = 0
 
     public init() {}
 }

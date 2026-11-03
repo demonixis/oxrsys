@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "TrackingSender.h"
+#include "UsbNetworkLink.h"
 
 #include <android/log.h>
 #include <arpa/inet.h>
@@ -79,6 +80,13 @@ bool TrackingSender::Connect(const char* serverIp, uint16_t trackingPort)
     addr.sin_family = AF_INET;
     addr.sin_port = htons(trackingPort);
     inet_pton(AF_INET, serverIp, &addr.sin_addr);
+
+    if (!usb_network::BindSocketForServer(socket_, serverIp))
+    {
+        close(socket_);
+        socket_ = -1;
+        return false;
+    }
 
     // "Connect" the UDP socket for easier send()
     if (connect(socket_, (sockaddr*)&addr, sizeof(addr)) < 0)

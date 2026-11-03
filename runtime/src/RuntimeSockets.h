@@ -27,6 +27,12 @@ SocketHandle Create(int domain, int type, int protocol);
 void Close(SocketHandle& socket);
 void Shutdown(SocketHandle socket);
 void ShutdownAndClose(SocketHandle& socket);
+// Releases the socket behind this descriptor but keeps the number: /dev/null is dup2()ed over it.
+// Like close(), that releases a thread blocked sending through the socket; unlike close(), the
+// number cannot be handed to a new file or socket while another thread still holds a copy of it,
+// whose sends now fail with ENOTSOCK. Close() frees the number afterwards. If /dev/null cannot be
+// put in its place, returns false and leaves the socket open: the number stays reserved either way.
+bool RetireKeepingDescriptor(SocketHandle& socket);
 
 bool SetReuseAddress(SocketHandle socket);
 bool SetBroadcast(SocketHandle socket);
