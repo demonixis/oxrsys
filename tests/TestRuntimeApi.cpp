@@ -3581,6 +3581,11 @@ TEST_CASE("XR_KHR_convert_timespec_time bridges CLOCK_MONOTONIC and XrTime", "[r
         CHECK(convertTimespecToTime(instance, &badTimespec, &scratch) ==
               XR_ERROR_VALIDATION_FAILURE);
 
+        // A valid XrTime is strictly positive (CTS "Invalid times").
+        struct timespec invalidOut{};
+        CHECK(convertTimeToTimespec(instance, XrTime(0), &invalidOut) == XR_ERROR_TIME_INVALID);
+        CHECK(convertTimeToTimespec(instance, XrTime(-1), &invalidOut) == XR_ERROR_TIME_INVALID);
+
         struct timespec now{};
         REQUIRE(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
         XrTime xrTime = 0;

@@ -103,8 +103,9 @@ public:
     // XR_KHR_convert_timespec_time helpers. CLOCK_MONOTONIC is captured at the
     // same instant startTime_ is set (monoStartNs_), so XrTime == mono_ns -
     // monoStartNs_ and the mapping is a pure offset consistent with GetCurrentTime().
-    XrTime TimespecToXrTime(const struct timespec& ts) const;
-    void XrTimeToTimespec(XrTime time, struct timespec& ts) const;
+    // Both return XR_ERROR_TIME_INVALID for times that are not a positive XrTime.
+    XrResult TimespecToXrTime(const struct timespec& ts, XrTime& time) const;
+    XrResult XrTimeToTimespec(XrTime time, struct timespec& ts) const;
     void BeginDebugUtilsLabelRegion(const XrDebugUtilsLabelEXT& labelInfo);
     void EndDebugUtilsLabelRegion();
     void InsertDebugUtilsLabel(const XrDebugUtilsLabelEXT& labelInfo);
