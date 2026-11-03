@@ -806,12 +806,10 @@ std::vector<std::string> InputManager::GetCurrentInteractionProfileCandidates(Ha
         return {kHandInteractionProfile};
     }
 
-    if (IsStreaming())
-    {
-        return {};
-    }
-
-    return {kSimpleControllerProfile};
+    // Nothing is tracked in this hand, with or without a client: report no profile (XR_NULL_PATH). Before a client
+    // connects, a khr/simple_controller fallback here is what apps that bind the first profile they see at session
+    // start keep, and they never take the switch to the client's controller profile when it connects.
+    return {};
 }
 
 std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) const
