@@ -215,6 +215,12 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
 - Fixed visionOS eye projection by sending the device's real per-eye FOV and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
 - Fixed Vision Pro head-rotation jitter at the source by tagging each streamed frame with the exact head pose captured at `xrLocateViews`, and by dropping out-of-order or duplicate UDP tracking packets before finite-difference prediction.
+- Foveated encoding now centres each eye's full-resolution region on that eye's forward direction for
+  clients that advertise `CLIENT_CAPABILITY_FOVEATION_EYE_CENTER` (the Quest/Pico client does). Quest
+  eyes see further outwards than inwards, so the fixed centre shift left the two eyes' sharp regions
+  apart, sharp in one eye where the other was compressed. The runtime also averages each encoded
+  pixel's whole source span (up to six taps per axis) instead of taking one bilinear sample, which
+  removes the aliasing and skipped rows in the compressed bands.
 
 ### Removed
 

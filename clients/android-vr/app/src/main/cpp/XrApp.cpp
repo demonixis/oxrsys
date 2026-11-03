@@ -2252,6 +2252,7 @@ void XrApp::ResetConnection(const char* reason)
     videoContentVMin_ = 0.0f;
     videoContentVMax_ = 1.0f;
     serverFoveatedEncodingEnabled_ = false;
+    serverFoveationEyeCentered_ = false;
     clientUpscalingEnabled_ = false;
     serverMixedRealityPassthroughEnabled_ = false;
     hasObservedProtocolAlphaFrame_ = false;
@@ -2585,6 +2586,8 @@ void XrApp::ConfigureServerConnection(const protocol::ServerAnnounce& server,
     serverFoveatedEncodingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_FOVEATED_ENCODING) != 0 &&
         server.foveatedEncodingPreset != protocol::FoveationPreset::Off;
+    serverFoveationEyeCentered_ =
+        (server.serverFeatures & protocol::SERVER_FEATURE_FOVEATION_EYE_CENTER) != 0;
     clientUpscalingEnabled_ =
         (server.serverFeatures & protocol::SERVER_FEATURE_CLIENT_UPSCALING) != 0 &&
         server.clientUpscalingMode != protocol::ClientUpscalingMode::Off;
@@ -2828,6 +2831,7 @@ void XrApp::SendClientConnect(const char* serverIp)
     connect.refreshRateHz = clientRefreshRateHz_;
     connect.clientCapabilities =
         protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING |
+        protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER |
         protocol::CLIENT_CAPABILITY_CLIENT_UPSCALING |
         protocol::CLIENT_CAPABILITY_STREAM_RECONFIGURE;
     if (foveationAvailable_ && foveationConfigurationAvailable_ && swapchainUpdateAvailable_)
@@ -4334,8 +4338,18 @@ void XrApp::BlitVideoToSwapchain(int eye)
     glUniform1i(blitClientUpscalingEnabledUniform_, clientUpscalingEnabled_ ? 1 : 0);
     glUniform2f(blitFoveationCenterSizeUniform_,
                 foveationCenterSizeX_, foveationCenterSizeY_);
-    glUniform2f(blitFoveationCenterShiftUniform_,
-                foveationCenterShiftX_, foveationCenterShiftY_);
+    float centerShiftX = foveationCenterShiftX_;
+    float centerShiftY = foveationCenterShiftY_;
+    if (serverFoveationEyeCentered_)
+    {
+        // The runtime renders the right eye with the left eye's fov mirrored, which is what it centres on.
+        const XrFovf& fov = views_[0].fov;
+        const float angleLeft = eye == 0 ? fov.angleLeft : -fov.angleRight;
+        const float angleRight = eye == 0 ? fov.angleRight : -fov.angleLeft;
+        protocol::EyeCenterShifts(angleLeft, angleRight, fov.angleUp, fov.angleDown,
+                                  foveationCenterSizeX_, foveationCenterSizeY_, centerShiftX, centerShiftY);
+    }
+    glUniform2f(blitFoveationCenterShiftUniform_, centerShiftX, centerShiftY);
     glUniform2f(blitFoveationEdgeRatioUniform_,
                 foveationEdgeRatioX_, foveationEdgeRatioY_);
     glUniform2f(blitFoveationEyeSizeRatioUniform_,

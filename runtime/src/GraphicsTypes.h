@@ -99,6 +99,8 @@ struct FrameImageSource
     uint64_t sourceFormat = 0;
     uint32_t imageWidth = 0;
     uint32_t imageHeight = 0;
+    // The submitted view's fov angles in radians: left, right, up, down. All zero when unknown.
+    float fov[4] = {};
 
     void* GetImage() const
     {

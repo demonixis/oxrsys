@@ -947,6 +947,7 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
     if (layoutState.foveatedEncodingActive)
     {
         announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_FOVEATED_ENCODING;
+        announce.serverFeatures |= oxr::protocol::SERVER_FEATURE_FOVEATION_EYE_CENTER;
     }
     oxr::protocol::ClientFoveationPreset clientFoveationPreset =
         ParseClientFoveationPreset(config.clientFoveationPreset);
@@ -1887,11 +1888,15 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                clientSupportsFoveationEyeCenter_.store(
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
-                encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
-                    useFoveatedEncoding, layout));
+                VideoEncoder::FoveationSettings foveationSettings =
+                    BuildEncoderFoveationSettings(useFoveatedEncoding, layout);
+                foveationSettings.eyeCentered = clientSupportsFoveationEyeCenter_.load();
+                encoder_->SetFoveationSettings(foveationSettings);
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2119,11 +2124,15 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
+                clientSupportsFoveationEyeCenter_.store(
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
-                encoder_->SetFoveationSettings(BuildEncoderFoveationSettings(
-                    useFoveatedEncoding, layout));
+                VideoEncoder::FoveationSettings foveationSettings =
+                    BuildEncoderFoveationSettings(useFoveatedEncoding, layout);
+                foveationSettings.eyeCentered = clientSupportsFoveationEyeCenter_.load();
+                encoder_->SetFoveationSettings(foveationSettings);
                 if (layoutState.foveatedEncodingActive && !clientSupportsFoveatedEncoding)
                 {
                     spdlog::warn("StreamingServer: USB client '{}' did not advertise foveated encoding support; sending reduced normal video",
@@ -2624,8 +2633,10 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
     auto newEncoder = std::make_shared<VideoEncoder>();
     const bool useFoveatedEncoding =
         layout.foveatedEncodingActive && clientSupportsFoveatedEncoding_.load();
-    newEncoder->SetFoveationSettings(BuildEncoderFoveationSettings(
-        useFoveatedEncoding, layout.foveationLayout));
+    VideoEncoder::FoveationSettings foveationSettings =
+        BuildEncoderFoveationSettings(useFoveatedEncoding, layout.foveationLayout);
+    foveationSettings.eyeCentered = clientSupportsFoveationEyeCenter_.load();
+    newEncoder->SetFoveationSettings(foveationSettings);
     newEncoder->SetTenBitEncoding(tenBitEncodingActive_.load());
 
     const uint32_t bitrateMbps = currentBitrateMbps_.load();
