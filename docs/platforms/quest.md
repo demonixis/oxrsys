@@ -239,10 +239,10 @@ Confirm:
 ## USB ADB Transport
 
 The USB path is optimized for sideloaded Quest development. The macOS SwiftUI Home app can detect an
-authorized Quest directly through the headset USB ADB interface, complete ADB authentication with a
-Home-managed host key, and configure reverse mappings without Android Studio, the Android SDK, or an
-`adb` executable. If the native path is unavailable, Home falls back to a running local ADB server on
-`127.0.0.1:5037` or an `adb` executable. Selecting USB in Home automatically checks and configures
+authorized Quest directly through the headset USB ADB interface and complete ADB authentication with
+a Home-managed host key without Android Studio, the Android SDK, or an `adb` executable. Reverse
+mappings always use a running ADB server on `127.0.0.1:5037` or an `adb` executable, because adbd
+drops them when their host connection closes. Selecting USB in Home automatically checks and configures
 the reverse mappings for the selected or single authorized device. The equivalent manual fallback
 commands are:
 

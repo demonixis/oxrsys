@@ -18,7 +18,7 @@
 
 ## Missing features
 
-- [ ] Deliver and cancel headset haptic commands.
+- [ ] Play headset haptic commands on the Apple clients.
 - [ ] Implement headset audio capture, transport, and playback.
 - [ ] Implement spatial anchors, scene queries, and persistence.
 - [ ] Implement environment-depth and scene-mesh occlusion.

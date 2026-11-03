@@ -46,7 +46,7 @@ not qualify either physical path.
 | Capability | Clients | Qualification note |
 | --- | --- | --- |
 | WiFi UDP streaming | Quest, Pico, Apple clients | Test loss, keyframe recovery, reconnect, and bounded latency |
-| USB ADB reverse TCP | Quest/Pico Android client | Test native Home ADB first, then server/external fallback |
+| USB ADB reverse TCP | Quest/Pico Android client | Test through the local ADB server and through external `adb` |
 | USB network (CDC-NCM) UDP | Quest Android client | Test with headset WiFi on: Home setup, accessory prompt, bound sockets, Restore USB Mode |
 | H.264/H.265 negotiation | Android and Apple clients | Verify configured preference and safe fallback |
 | HEVC Main10 | Advertised capable Apple clients | Verify exact color range and fallback to 8-bit |
