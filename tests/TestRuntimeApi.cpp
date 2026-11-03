@@ -4296,6 +4296,11 @@ TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][act
     LoopbackTrackingPeer peer(tcp);
     oxr::protocol::TrackingPacket packet = {};
     packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
 
     XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
     hapticActionInfo.action = hapticAction;
@@ -4336,4 +4341,119 @@ TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][act
         }
     }
     CHECK(stoppedHands == std::set<uint8_t>{0, 1});
+}
+
+// Unreal Engine and OpenComposite create one vibration action per hand without subaction paths and pass
+// XR_NULL_PATH, so each call must reach the hand its action is bound to and no other.
+TEST_CASE("Haptic feedback reaches only the hands its action is bound to", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    auto createHapticAction = [&](const char* name, uint32_t countSubactionPaths) {
+        XrAction action = XR_NULL_HANDLE;
+        XrActionCreateInfo createInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        createInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        createInfo.countSubactionPaths = countSubactionPaths;
+        createInfo.subactionPaths = handPaths;
+        std::strncpy(createInfo.actionName, name, XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(createInfo.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &createInfo, &action));
+        return action;
+    };
+    const XrAction leftAction = createHapticAction("left_haptic", 0);
+    const XrAction rightAction = createHapticAction("right_haptic", 0);
+    // Declares both hands, but is bound only to the left one.
+    const XrAction leftBoundAction = createHapticAction("left_bound_haptic", 2);
+
+    XrActionSuggestedBinding bindings[] = {
+        {leftAction, context.Path("/user/hand/left/output/haptic")},
+        {rightAction, context.Path("/user/hand/right/output/haptic")},
+        {leftBoundAction, context.Path("/user/hand/left/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 3;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = leftAction;
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 0);
+
+    // The hands of the commands that arrive until the peer is quiet for 200 ms; command keeps the last one.
+    auto readHands = [&] {
+        std::vector<uint8_t> hands;
+        while (peer.ReadHaptics(command, std::chrono::milliseconds(200)))
+        {
+            hands.push_back(command.hand);
+        }
+        return hands;
+    };
+    // Applies repeated while waiting may still be in flight; all of them are for the left hand.
+    for (uint8_t hand : readHands())
+    {
+        CHECK(hand == 0);
+    }
+
+    hapticActionInfo.action = rightAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    CHECK(command.amplitude == 0.0f);
+    hapticActionInfo.action = leftAction;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    CHECK(command.amplitude == 0.0f);
+
+    hapticActionInfo.action = leftBoundAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    hapticActionInfo.subactionPath = handPaths[1];
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands().empty());
 }
