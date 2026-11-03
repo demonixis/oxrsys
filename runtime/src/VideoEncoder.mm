@@ -828,7 +828,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     snapshotWaitSwitches_ = 0;
     snapshotWaitSwitchesLogged_ = 0;
     snapshotWaitLastLog_ = {};
-    foveationValidationWarningLogged_.store(false);
+    preEncodeDropCount_.store(0);
     droppedFrameCount_.store(0);
     inFlightFrameCount_.store(0);
     frameNumberCounter_.store(0);
@@ -1824,9 +1824,11 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
     id<MTLTexture> leftTex = (__bridge id<MTLTexture>)frameSource.left.GetImage();
     id<MTLTexture> rightTex = stereo ? (__bridge id<MTLTexture>)frameSource.right.GetImage() : nil;
     auto dropAcquiredSlot = [&](const char* reason) {
-        if (reason != nullptr && !foveationValidationWarningLogged_.exchange(true))
+        const uint64_t drops = preEncodeDropCount_.fetch_add(1) + 1;
+        if (reason != nullptr && ShouldLogPreEncodeDrop(drops))
         {
-            spdlog::warn("VideoEncoder: dropping frame before encode: {}", reason);
+            spdlog::warn("VideoEncoder: dropping frame before encode: {} ({} dropped before encode so far)",
+                         reason, drops);
         }
         droppedFrameCount_.fetch_add(1);
         ReleaseSlot(slotIndex);

@@ -261,6 +261,57 @@ TEST_CASE("Foveated encoding allows a 1% aspect mismatch and rejects more",
                    /*tenBit=*/false, /*forceSoftware=*/false, 128, 130, /*expectEncoded=*/false);
 }
 
+TEST_CASE("Every drop before encode is counted, and logged on the first and every 450th",
+          "[video][encoder][videotoolbox][foveation]")
+{
+    CHECK_FALSE(VideoEncoder::ShouldLogPreEncodeDrop(0));
+    CHECK(VideoEncoder::ShouldLogPreEncodeDrop(1));
+    CHECK_FALSE(VideoEncoder::ShouldLogPreEncodeDrop(2));
+    CHECK_FALSE(VideoEncoder::ShouldLogPreEncodeDrop(449));
+    CHECK(VideoEncoder::ShouldLogPreEncodeDrop(450));
+    CHECK_FALSE(VideoEncoder::ShouldLogPreEncodeDrop(451));
+    CHECK(VideoEncoder::ShouldLogPreEncodeDrop(900));
+
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+    {
+        VideoEncoder encoder;
+        VideoEncoder::FoveationSettings settings = {};
+        settings.enabled = true;
+        settings.targetEyeWidth = 64;
+        settings.targetEyeHeight = 64;
+        settings.eyeWidthRatio = 1.0f;
+        settings.eyeHeightRatio = 1.0f;
+        settings.centerSizeX = 0.5f;
+        settings.centerSizeY = 0.5f;
+        settings.edgeRatioX = 2.0f;
+        settings.edgeRatioY = 2.0f;
+        encoder.SetFoveationSettings(settings);
+        REQUIRE(encoder.Initialize(128, 64, 60, 8, graphics, oxr::protocol::VideoCodec::H264));
+
+        // 128x130 is more than 1% off the 64x64 target aspect, so each frame is dropped before encode.
+        constexpr uint32_t kFrames = 451;
+        for (uint32_t i = 0; i < kFrames; ++i)
+        {
+            FrameSource frame = {};
+            frame.left = MakeSource(device, 128, 130, MTLPixelFormatBGRA8Unorm);
+            frame.right = MakeSource(device, 128, 130, MTLPixelFormatBGRA8Unorm);
+            CHECK_FALSE(encoder.EncodeStereo(
+                std::move(frame), 1'000'000 + i,
+                [](const uint8_t*, size_t, bool, int64_t) {},
+                [](const VideoEncoder::FrameMetrics&) {}));
+        }
+        CHECK(encoder.GetPreEncodeDropCount() == kFrames);
+        encoder.Shutdown();
+    }
+    [queue release];
+    [device release];
+}
+
 TEST_CASE("A run of frames dropped before encode does not stall the next frame",
           "[video][encoder][videotoolbox][foveation]")
 {

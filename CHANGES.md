@@ -79,6 +79,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- A frame dropped before encode is now logged on the first drop and every 450th after it, with the
+  count so far, instead of only once per encoder. A stream that drops every frame keeps saying so.
 - The Quest/Pico client renders into a swapchain 1.3 times the recommended size per axis, capped at the
   runtime maximum, so streams up to the Quest 3 panel resolution are not downscaled into it. It also asks
   the compositor for quality supersampling and sharpening through `XR_FB_composition_layer_settings` when
