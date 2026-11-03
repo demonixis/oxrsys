@@ -3061,7 +3061,7 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec, &pacer);
+                    nal.isKeyframe, frame.alphaBlend, frame.packedAlpha, frame.timestampNs, frame.codec, &pacer);
     }
 
     if (pacer.Flushed())
@@ -3167,7 +3167,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
-                                  bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                                  bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
                                   oxr::protocol::VideoCodec codec,
                                   oxrsys::streaming::PacketPacer* pacer)
 {
@@ -3211,7 +3211,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3288,7 +3288,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3347,7 +3347,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
             }
-            if (packedAlphaActive_.load())
+            if (packedAlpha)
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
             }

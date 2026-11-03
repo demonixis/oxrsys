@@ -329,7 +329,7 @@ private:
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
-                     bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                     bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
                      oxr::protocol::VideoCodec codec,
                      oxrsys::streaming::PacketPacer* pacer = nullptr);
     // Sends one UDP datagram of the video stream after the pacer says it is due,
