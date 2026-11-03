@@ -1069,6 +1069,7 @@ void Session::AppendOverlayLayers(const XrFrameEndInfo& frameEndInfo, uint32_t p
         {
             continue;
         }
+        swapchain->SnapshotLastReleasedImageIfMissing();
         overlay.image = swapchain->GetLastReleasedFrameImageSource(subImage.imageArrayIndex);
         if (!overlay.image.IsValid())
         {

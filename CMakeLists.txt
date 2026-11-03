@@ -328,6 +328,10 @@ add_executable(oxrsys_videotoolbox_encoder_tests
     runtime/src/EncoderPathPolicy.cpp
     runtime/src/Config.cpp
     runtime/src/RuntimePlatform.cpp
+    runtime/src/Runtime.cpp
+    runtime/src/SwapchainCommon.cpp
+    runtime/src/SwapchainMetal.mm
+    runtime/src/SwapchainVulkan.cpp
 )
 target_include_directories(oxrsys_videotoolbox_encoder_tests PRIVATE
     runtime/src
@@ -339,6 +343,7 @@ target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
     Catch2::Catch2WithMain
     spdlog::spdlog
     glm::glm
+    OXRSYS::VulkanHeaders
     "-framework Metal"
     "-framework MetalPerformanceShaders"
     "-framework Foundation"
@@ -349,6 +354,7 @@ target_link_libraries(oxrsys_videotoolbox_encoder_tests PRIVATE
 )
 target_compile_definitions(oxrsys_videotoolbox_encoder_tests PRIVATE
     XR_USE_GRAPHICS_API_METAL
+    XR_USE_GRAPHICS_API_VULKAN
     OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
     OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
     OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
