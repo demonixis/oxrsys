@@ -717,9 +717,22 @@ final class HomeLauncherTests: XCTestCase {
             HomeAdbStatus.available(at: "/opt/homebrew/bin/adb").isAvailable,
             "Expected detected ADB to be available"
         )
+        let adbNotFound = QuestUsbBridgeError.adbNotFound.errorDescription ?? ""
+        for message in [HomeAdbStatus.nativeUsb.message, HomeAdbInstallGuidance.message, adbNotFound] {
+            try expect(
+                message.contains("USB Net") && message.contains("USB reverse") &&
+                    message.contains("ADB server") && message.contains("adb"),
+                "Expected native USB ADB to cover USB Net and USB reverse to need an ADB server or adb"
+            )
+        }
         try expect(
-            HomeAdbInstallGuidance.message.contains("Android SDK are not required"),
-            "Expected SDK-free USB setup guidance"
+            !adbNotFound.contains("optional") && !adbNotFound.contains("No native USB ADB headset"),
+            "Expected adb not to be offered as an optional fallback for USB reverse"
+        )
+        try expect(
+            HomeAdbInstallGuidance.message.contains("brew install --cask android-platform-tools") &&
+                HomeAdbInstallGuidance.homebrewURL.absoluteString.hasSuffix("/cask/android-platform-tools"),
+            "Expected the Homebrew guidance to install adb"
         )
     }
 
