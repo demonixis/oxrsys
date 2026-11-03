@@ -20,6 +20,12 @@
 // how a client resends a lost ClientConnect and how a restarted client (new source
 // port, same host) reconnects before the liveness watchdog has noticed the old one
 // is gone. The port is deliberately not compared.
+//
+// The transport is part of the identity. A USB ADB session records the placeholder
+// address "127.0.0.1", so a WiFi ClientConnect over loopback (the desktop simulator)
+// must not pass as that client reconnecting, and a USB ClientConnect must not take over
+// a WiFi session. A USB ClientConnect while a USB client owns the session is a
+// reconnect: there is only one ADB reverse path.
 namespace oxrsys
 {
 
@@ -45,10 +51,14 @@ inline ClientAdmissionDecision EvaluateClientAdmission(ClientAdmissionState& sta
                                                        const std::string& connectedIp,
                                                        const std::string& candidateIp,
                                                        int64_t nowNs,
-                                                       int64_t logIntervalNs)
+                                                       int64_t logIntervalNs,
+                                                       bool connectedUsesUsbAdb = false,
+                                                       bool candidateUsesUsbAdb = false)
 {
     ClientAdmissionDecision decision;
-    if (!clientConnected || connectedIp.empty() || connectedIp == candidateIp)
+    const bool sameClient = connectedUsesUsbAdb == candidateUsesUsbAdb &&
+                            (candidateUsesUsbAdb || connectedIp == candidateIp);
+    if (!clientConnected || connectedIp.empty() || sameClient)
     {
         return decision;
     }

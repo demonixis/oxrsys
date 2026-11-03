@@ -108,3 +108,43 @@ TEST_CASE("Client disconnect: nothing connected ignores ServerDisconnect", "[cli
     CHECK_FALSE(ShouldHonorWifiDisconnect(/*clientConnected=*/false, false, "", "192.0.2.10"));
     CHECK_FALSE(ShouldHonorWifiDisconnect(true, false, "", "192.0.2.10"));
 }
+
+TEST_CASE("Client admission: a loopback WiFi client cannot take over a USB ADB session",
+          "[client-admission]")
+{
+    // A USB ADB session records the placeholder address 127.0.0.1. The desktop simulator
+    // connects over loopback from the same address, but over WiFi/UDP.
+    ClientAdmissionState state;
+    const auto first = EvaluateClientAdmission(state, true, "127.0.0.1", "127.0.0.1",
+                                               1'000 * kMs, kLogIntervalNs,
+                                               /*connectedUsesUsbAdb=*/true,
+                                               /*candidateUsesUsbAdb=*/false);
+    CHECK_FALSE(first.accept);
+    CHECK(first.log);
+    const auto retry = EvaluateClientAdmission(state, true, "127.0.0.1", "127.0.0.1",
+                                               2'000 * kMs, kLogIntervalNs, true, false);
+    CHECK_FALSE(retry.accept);
+    CHECK_FALSE(retry.log);
+}
+
+TEST_CASE("Client admission: a USB ADB client cannot take over a WiFi session",
+          "[client-admission]")
+{
+    ClientAdmissionState state;
+    const auto decision = EvaluateClientAdmission(state, true, "192.0.2.10", "USB ADB",
+                                                  1'000 * kMs, kLogIntervalNs,
+                                                  /*connectedUsesUsbAdb=*/false,
+                                                  /*candidateUsesUsbAdb=*/true);
+    CHECK_FALSE(decision.accept);
+    CHECK(decision.log);
+}
+
+TEST_CASE("Client admission: the USB ADB owner may reconnect", "[client-admission]")
+{
+    ClientAdmissionState state;
+    const auto decision = EvaluateClientAdmission(state, true, "127.0.0.1", "USB ADB",
+                                                  1'000 * kMs, kLogIntervalNs,
+                                                  /*connectedUsesUsbAdb=*/true,
+                                                  /*candidateUsesUsbAdb=*/true);
+    CHECK(decision.accept);
+}
