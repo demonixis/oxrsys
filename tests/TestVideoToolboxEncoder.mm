@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "EncoderSessionColor.h"
 #include "VideoEncoder.h"
 #include "VuiColorTestSupport.h"
 
+#import <CoreMedia/CoreMedia.h>
 #import <Metal/Metal.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include <atomic>
 #include <chrono>
@@ -38,7 +41,7 @@ std::shared_ptr<void> AdoptTexture(id<MTLTexture> texture)
 }
 
 FrameImageSource MakeSource(id<MTLDevice> device, uint32_t width, uint32_t height,
-                            MTLPixelFormat pixelFormat)
+                            MTLPixelFormat pixelFormat, uint32_t pixel = 0xff304050u)
 {
     MTLTextureDescriptor* descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
@@ -50,7 +53,7 @@ FrameImageSource MakeSource(id<MTLDevice> device, uint32_t width, uint32_t heigh
     id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
     REQUIRE(texture != nil);
 
-    std::vector<uint32_t> pixels(static_cast<size_t>(width) * height, 0xff304050u);
+    std::vector<uint32_t> pixels(static_cast<size_t>(width) * height, pixel);
     [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
                mipmapLevel:0
                  withBytes:pixels.data()
@@ -551,6 +554,145 @@ TEST_CASE("VideoEncoder falls back in-process when the encoder helper dies mid-s
         CHECK(color.matrix == oxrsys::test::CFToString(oxrsys::encoder_color::kYCbCrMatrix));
         CHECK_FALSE(color.fullRange);
     }
+    [queue release];
+    [device release];
+}
+
+namespace
+{
+
+// Decodes one H.264 keyframe, given as Annex-B NAL units, to a BGRA pixel buffer.
+CVPixelBufferRef DecodeH264Keyframe(const std::vector<std::vector<uint8_t>>& nals)
+{
+    std::vector<const uint8_t*> parameterSets;
+    std::vector<size_t> parameterSetSizes;
+    std::vector<uint8_t> sample;
+    for (const std::vector<uint8_t>& nal : nals)
+    {
+        const uint8_t type = nal[4] & 0x1f;
+        if (type == 7 || type == 8)
+        {
+            parameterSets.push_back(nal.data() + 4);
+            parameterSetSizes.push_back(nal.size() - 4);
+            continue;
+        }
+        const uint32_t size = static_cast<uint32_t>(nal.size() - 4);
+        const uint8_t length[4] = {
+            static_cast<uint8_t>(size >> 24), static_cast<uint8_t>(size >> 16),
+            static_cast<uint8_t>(size >> 8), static_cast<uint8_t>(size)};
+        sample.insert(sample.end(), length, length + 4);
+        sample.insert(sample.end(), nal.begin() + 4, nal.end());
+    }
+
+    CMVideoFormatDescriptionRef format = nullptr;
+    REQUIRE(CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                kCFAllocatorDefault, parameterSets.size(), parameterSets.data(),
+                parameterSetSizes.data(), 4, &format) == noErr);
+
+    CMBlockBufferRef block = nullptr;
+    REQUIRE(CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, sample.size(),
+                                               kCFAllocatorDefault, nullptr, 0, sample.size(),
+                                               kCMBlockBufferAssureMemoryNowFlag, &block) == noErr);
+    REQUIRE(CMBlockBufferReplaceDataBytes(sample.data(), block, 0, sample.size()) == noErr);
+    CMSampleBufferRef sampleBuffer = nullptr;
+    const size_t sampleSize = sample.size();
+    REQUIRE(CMSampleBufferCreateReady(kCFAllocatorDefault, block, format, 1, 0, nullptr, 1,
+                                      &sampleSize, &sampleBuffer) == noErr);
+
+    NSDictionary* outputAttributes = @{
+        (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+    };
+    VTDecompressionSessionRef session = nullptr;
+    REQUIRE(VTDecompressionSessionCreate(kCFAllocatorDefault, format, nullptr,
+                                         (__bridge CFDictionaryRef)outputAttributes, nullptr,
+                                         &session) == noErr);
+    __block CVPixelBufferRef decoded = nullptr;
+    REQUIRE(VTDecompressionSessionDecodeFrameWithOutputHandler(
+                session, sampleBuffer, 0, nullptr,
+                ^(OSStatus status, VTDecodeInfoFlags, CVImageBufferRef image, CMTime, CMTime) {
+                    if (status == noErr && image != nullptr)
+                    {
+                        decoded = CVPixelBufferRetain(image);
+                    }
+                }) == noErr);
+    VTDecompressionSessionWaitForAsynchronousFrames(session);
+
+    VTDecompressionSessionInvalidate(session);
+    CFRelease(session);
+    CFRelease(sampleBuffer);
+    CFRelease(block);
+    CFRelease(format);
+    return decoded;
+}
+
+} // namespace
+
+TEST_CASE("Packed alpha appends each eye's alpha below the eyes",
+          "[video][encoder][videotoolbox][passthrough]")
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    REQUIRE(device != nil);
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    REQUIRE(queue != nil);
+    GraphicsContext graphics = GraphicsContext::Metal((__bridge void*)device,
+                                                       (__bridge void*)queue);
+
+    std::mutex mutex;
+    std::vector<std::vector<uint8_t>> nals;
+
+    const bool foveated = GENERATE(false, true);
+    CAPTURE(foveated);
+    VideoEncoder encoder;
+    if (foveated)
+    {
+        VideoEncoder::FoveationSettings settings = {};
+        settings.enabled = true;
+        settings.targetEyeWidth = 64;
+        settings.targetEyeHeight = 64;
+        settings.eyeWidthRatio = 1.0f;
+        settings.eyeHeightRatio = 1.0f;
+        settings.centerSizeX = 0.5f;
+        settings.centerSizeY = 0.5f;
+        settings.edgeRatioX = 2.0f;
+        settings.edgeRatioY = 2.0f;
+        encoder.SetFoveationSettings(settings);
+    }
+    encoder.SetPackedAlpha(true);
+    REQUIRE(encoder.Initialize(128, 64, 60, 8, graphics, oxr::protocol::VideoCodec::H264));
+
+    FrameSource frame = {};
+    frame.left = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm, 0x00304050u);
+    frame.right = MakeSource(device, 64, 64, MTLPixelFormatBGRA8Unorm, 0xff304050u);
+    encoder.ForceKeyframe();
+    REQUIRE(encoder.EncodeStereo(
+        std::move(frame),
+        1'000'000,
+        [&](const uint8_t* data, size_t size, bool, int64_t) {
+            std::lock_guard<std::mutex> lock(mutex);
+            nals.emplace_back(data, data + size);
+        },
+        [](const VideoEncoder::FrameMetrics&) {}));
+    encoder.FlushPendingFrames();
+    REQUIRE(encoder.Shutdown(std::chrono::seconds(5)));
+
+    std::lock_guard<std::mutex> lock(mutex);
+    CVPixelBufferRef decoded = DecodeH264Keyframe(nals);
+    REQUIRE(decoded != nullptr);
+    CHECK(CVPixelBufferGetWidth(decoded) == 128);
+    CHECK(CVPixelBufferGetHeight(decoded) == 64 + oxr::protocol::PackedAlphaRows(64));
+
+    CVPixelBufferLockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(decoded));
+    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(decoded);
+    const size_t alphaRow = 64 + oxr::protocol::PackedAlphaRows(64) / 2;
+    const uint8_t leftAlpha = base[alphaRow * bytesPerRow + 32 * 4 + 1];
+    const uint8_t rightAlpha = base[alphaRow * bytesPerRow + 96 * 4 + 1];
+    CVPixelBufferUnlockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
+    CVPixelBufferRelease(decoded);
+
+    CHECK(leftAlpha < 16);
+    CHECK(rightAlpha > 239);
+
     [queue release];
     [device release];
 }

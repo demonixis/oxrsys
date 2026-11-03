@@ -162,6 +162,8 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(TrackingFlagsValues.leftControllerAimAngularVelocityValid, 0x1000)
         XCTAssertEqual(TrackingFlagsValues.rightControllerAimLinearVelocityValid, 0x2000)
         XCTAssertEqual(TrackingFlagsValues.rightControllerAimAngularVelocityValid, 0x4000)
+        XCTAssertEqual(VideoFlags.alphaBlend, 0x40)
+        XCTAssertEqual(VideoFlags.packedAlpha, 0x80)
     }
 
     func testTrackingDefaultsDoNotAdvertiseBoundsOrVelocities() {

@@ -76,6 +76,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   negotiated codec in the runtime's own process, so native `arm64` hosts, H.264 under Rosetta, and
   AV1 stay in-process. Any helper failure, including its death mid-stream, falls back to the
   in-process encoder without ending the stream.
+- Added packed passthrough alpha. When passthrough and `app_alpha_blend_passthrough` are enabled and the
+  Quest/Pico client advertises `CLIENT_CAPABILITY_MIXED_REALITY_ALPHA`, the runtime appends each eye's alpha
+  below the eyes at half the encoded eye's width and height, following foveated encoding, and marks the
+  frames `VIDEO_FLAG_PACKED_ALPHA`; the frame grows by a quarter. The client reads that alpha instead of
+  keying out near-black pixels, so black content stays opaque and semi-transparent content blends with the
+  passthrough cameras. Each alpha pixel is the mean of a 2x2 block of encoded pixels, and the client rebuilds
+  an edge pixel's alpha from its premultiplied colour against the block's mean colour, so coloured edges keep
+  the full resolution.
 
 ### Changed
 
@@ -86,6 +94,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.
+- VideoToolbox sessions, in-process and in the encoder helper, now request low-latency rate control and
+  fall back to the standard rate control when the encoder does not offer it. On an M1 Pro (Apple Silicon)
+  at 2272x1264, 72 fps, HEVC, the time from submitting a frame to receiving it encoded fell from about
+  32 ms to about 11 ms; the standard rate control held each frame for about two frame periods.
 - Made the visionOS connection flow seamless, matching the Android client: discovery starts automatically on launch, a discovered server is connected to immediately (entering the immersive view remains a separate preference), and losing the stream returns to discovery and reconnects instead of holding a frozen frame. A user-initiated disconnect still stays disconnected.
 - Fixed the visionOS first connection often needing a reconnect before tracking worked: the ARKit session now starts when the stream comes up instead of when the immersive space opens, so the renderer no longer queries a world-tracking provider that has not started yet (previously the first frames had no device anchor and were never presented).
 - Focused the host runtime exclusively on macOS with Metal, Vulkan/MoltenVK, and VideoToolbox, while
@@ -105,6 +117,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Updated SwiftUI Home setup flows with first-launch runtime registration guidance, automatic USB reverse configuration when USB is selected, packaged-runtime manifest preference, and native ADB host-server protocol support before falling back to an external `adb` executable.
 - Updated documentation for the macOS-only runtime, dual host architectures, protocol v1.2,
   passthrough/MR, native ADB setup, simulator, and visionOS reprojection.
+- The Quest/Pico client keeps its decoder across stream reconfigurations that fit the size it was created
+  for, using MediaCodec adaptive playback sized for the connect-time stream, and applies the new layout with
+  the first frame of the new size. Before, every reconfiguration recreated the decoder and showed the shell
+  until the next keyframe decoded.
 
 ### Fixed
 
@@ -113,6 +129,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   (Pistol Whip, on Unity's OpenXR plugin) kept it and ignored the later switch to Touch; Pistol Whip never drew
   its guns. It now reports no profile (`XR_NULL_PATH`) until a controller or hand is tracked, as it already
   did while a client was connected with nothing tracked.
+- Fixed washed-out video on the Quest/Pico client. The decoded video is already sRGB-encoded, and the
+  client wrote it into a `GL_SRGB8_ALPHA8` swapchain, where GLES encodes it again on write. The blit shader
+  now decodes it to linear first.
 - Fixed Home's native USB ADB backend, which never ran. Matching the vendor-specific ADB interface by
   class, subclass, and protocol needs `idVendor` in the IOKit dictionary, so the lookup found nothing
   and Home always fell back to the ADB server or an external `adb`. Home now filters interfaces itself.
@@ -212,6 +231,12 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Fixed the visionOS viewer black screen and doubled AR view by sharing one ARKit world-tracking session between the tracking manager and the immersive renderer, and clearing the drawable depth buffer so the visionOS compositor has a surface to reproject.
 - Fixed visionOS eye projection by sending the device's real per-eye FOV and IPD to the runtime, so it renders a matching frustum instead of the symmetric fallback that made the projection look wrong.
 - Fixed Vision Pro head-rotation jitter at the source by tagging each streamed frame with the exact head pose captured at `xrLocateViews`, and by dropping out-of-order or duplicate UDP tracking packets before finite-difference prediction.
+- Foveated encoding now centres each eye's full-resolution region on that eye's forward direction for
+  clients that advertise `CLIENT_CAPABILITY_FOVEATION_EYE_CENTER` (the Quest/Pico client does). Quest
+  eyes see further outwards than inwards, so the fixed centre shift left the two eyes' sharp regions
+  apart, sharp in one eye where the other was compressed. The runtime also averages each encoded
+  pixel's whole source span (up to six taps per axis) instead of taking one bilinear sample, which
+  removes the aliasing and skipped rows in the compressed bands.
 
 ### Removed
 

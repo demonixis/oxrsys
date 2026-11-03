@@ -286,6 +286,7 @@ public struct VideoFlags {
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
     public static let alphaBlend: UInt8 = 0x40
+    public static let packedAlpha: UInt8 = 0x80
 }
 
 public struct AudioPacketHeader: Sendable {

@@ -433,16 +433,27 @@ CFStringRef ProfileLevel(CodecCode codec, ProfileCode profile)
 
 InitStatus CreateSession()
 {
-    NSDictionary* spec = @{
+    // The same low-latency rate control as the in-process session, with the same fallback.
+    NSMutableDictionary* spec = [NSMutableDictionary dictionaryWithDictionary:@{
         (NSString*)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @YES,
         (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder : @YES,
-    };
+        (NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl : @YES,
+    }];
 
     VTCompressionSessionRef s = nullptr;
     OSStatus st = VTCompressionSessionCreate(kCFAllocatorDefault, g.width, g.height,
                                              CodecType(g.codec),
                                              (__bridge CFDictionaryRef)spec, nullptr,
                                              kCFAllocatorDefault, CompressionCallback, nullptr, &s);
+    if (st != noErr)
+    {
+        LOGI("%s low-latency rate control unavailable (%d); using the standard rate control",
+             CodecName(g.codec), (int)st);
+        [spec removeObjectForKey:(NSString*)kVTVideoEncoderSpecification_EnableLowLatencyRateControl];
+        st = VTCompressionSessionCreate(kCFAllocatorDefault, g.width, g.height, CodecType(g.codec),
+                                        (__bridge CFDictionaryRef)spec, nullptr,
+                                        kCFAllocatorDefault, CompressionCallback, nullptr, &s);
+    }
     if (st != noErr || s == nullptr)
     {
         LOGE("VTCompressionSessionCreate(%s, RequireHardware=YES) failed: %d",

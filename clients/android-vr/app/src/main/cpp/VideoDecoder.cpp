@@ -62,7 +62,8 @@ VideoDecoder::~VideoDecoder()
     Shutdown();
 }
 
-bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCodec videoCodec)
+bool VideoDecoder::Initialize(uint32_t width, uint32_t height, uint32_t maxWidth, uint32_t maxHeight,
+                              protocol::VideoCodec videoCodec)
 {
     const char* mimeType = CodecMimeType(videoCodec);
     if (mimeType == nullptr)
@@ -73,8 +74,8 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
 
     Shutdown();
 
-    width_ = width;
-    height_ = height;
+    maxWidth_ = std::max(width, maxWidth);
+    maxHeight_ = std::max(height, maxHeight);
     activeCodec_ = videoCodec;
 
     // Create AImageReader as the output surface for MediaCodec.
@@ -82,7 +83,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
     // via EGLImage + GL_TEXTURE_EXTERNAL_OES. This avoids CPU YUV access which
     // doesn't work on Quest (Qualcomm UBWC format hides UV plane data).
     media_status_t imgStatus = AImageReader_new(
-        width, height,
+        maxWidth_, maxHeight_,
         AIMAGE_FORMAT_YUV_420_888,
         3,  // maxImages — allows a decoder output thread plus one held render image
         &imageReader_);
@@ -103,7 +104,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
         return false;
     }
 
-    LOGI("AImageReader created: %ux%u, format=YUV_420_888", width, height);
+    LOGI("AImageReader created: %ux%u, format=YUV_420_888", maxWidth_, maxHeight_);
 
     // Create decoder for the selected stream codec.
     codec_ = AMediaCodec_createDecoderByType(mimeType);
@@ -121,7 +122,10 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mimeType);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
-    const uint64_t pixelCount = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    // Adaptive playback: output buffers sized for the largest stream, so a size change needs no new decoder.
+    AMediaFormat_setInt32(format, "max-width", static_cast<int32_t>(maxWidth_));
+    AMediaFormat_setInt32(format, "max-height", static_cast<int32_t>(maxHeight_));
+    const uint64_t pixelCount = static_cast<uint64_t>(maxWidth_) * static_cast<uint64_t>(maxHeight_);
     const uint64_t maxInputSize = std::clamp<uint64_t>(
         pixelCount * 4u,
         2u * 1024u * 1024u,
@@ -348,11 +352,11 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame, void (*beforeReleasePrev
     int32_t imageHeight = 0;
     if (AImage_getWidth(currentImage_, &imageWidth) != AMEDIA_OK || imageWidth <= 0)
     {
-        imageWidth = static_cast<int32_t>(width_);
+        imageWidth = static_cast<int32_t>(maxWidth_);
     }
     if (AImage_getHeight(currentImage_, &imageHeight) != AMEDIA_OK || imageHeight <= 0)
     {
-        imageHeight = static_cast<int32_t>(height_);
+        imageHeight = static_cast<int32_t>(maxHeight_);
     }
 
     AImageCropRect cropRect = {};

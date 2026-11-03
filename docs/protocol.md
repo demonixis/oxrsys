@@ -111,6 +111,13 @@ preferred codec is implemented by both sides. Android and shared Apple clients a
 H.265 support while keeping H.265 as their preferred codec. Each video packet/NAL header carries the
 selected `VideoCodec`, so the wire format does not need a codec-specific stream.
 
+`CLIENT_CAPABILITY_FOVEATION_EYE_CENTER` says the client decodes eye-centred foveation. When foveated
+encoding is active the runtime announces `SERVER_FEATURE_FOVEATION_EYE_CENTER`, and with both bits each
+eye's full-resolution region is centred on that eye's forward direction instead of the announced
+`foveationCenterShiftX/Y`. Each side derives the shift with `EyeCenterShifts` in `common/Foveation.h`
+from the eye's fov and the announced centre size: the runtime from the fov the app submits, the Quest
+client from its left eye's fov, mirrored for the right eye.
+
 `CLIENT_CAPABILITY_TEN_BIT_ENCODING` separately advertises HEVC Main10 decode support. The runtime
 uses Main10 only when this capability is present, `streaming.encoder_10bit` is enabled, and H.265 is
 the negotiated codec. H.264 and clients without the capability receive 8-bit video.
@@ -172,7 +179,8 @@ The current stream also includes two recovery and timing helpers:
 
 - `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
-- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
+- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the alpha comes from `VIDEO_FLAG_PACKED_ALPHA` rows when the frame has them. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
+- `VIDEO_FLAG_PACKED_ALPHA` marks frames whose encoded picture is the eyes followed by `PackedAlphaRows(eyeHeight)` rows that hold each eye's alpha as grey at half the encoded eye's width and height, so each alpha pixel is the mean of a 2x2 block of encoded eye pixels and follows foveated encoding when it is active. Each eye's alpha is split into its top and bottom halves, placed side by side in that eye's columns. The runtime packs alpha only when passthrough and `streaming.app_alpha_blend_passthrough` are enabled and the client advertises `CLIENT_CAPABILITY_MIXED_REALITY_ALPHA`; the client recovers the eye height with `PackedAlphaEyeHeight(encodedHeight)`.
 
 For passthrough, `SERVER_FEATURE_MIXED_REALITY_PASSTHROUGH` means the desktop runtime is configured
 to keep a headset passthrough underlay available while streaming. Separately,
