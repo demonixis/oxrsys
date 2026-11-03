@@ -94,10 +94,6 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - The in-process VideoToolbox session now requires the hardware encoder when VideoToolbox reports
   one for the negotiated codec, retrying without the requirement only if that create fails, and the
   runtime log states whether the session it got is hardware or software.
-- VideoToolbox sessions, in-process and in the encoder helper, now request low-latency rate control and
-  fall back to the standard rate control when the encoder does not offer it. On an M1 Pro (Apple Silicon)
-  at 2272x1264, 72 fps, HEVC, the time from submitting a frame to receiving it encoded fell from about
-  32 ms to about 11 ms; the standard rate control held each frame for about two frame periods.
 - Made the visionOS connection flow seamless, matching the Android client: discovery starts automatically on launch, a discovered server is connected to immediately (entering the immersive view remains a separate preference), and losing the stream returns to discovery and reconnects instead of holding a frozen frame. A user-initiated disconnect still stays disconnected.
 - Fixed the visionOS first connection often needing a reconnect before tracking worked: the ARKit session now starts when the stream comes up instead of when the immersive space opens, so the renderer no longer queries a world-tracking provider that has not started yet (previously the first frames had no device anchor and were never presented).
 - Focused the host runtime exclusively on macOS with Metal, Vulkan/MoltenVK, and VideoToolbox, while
