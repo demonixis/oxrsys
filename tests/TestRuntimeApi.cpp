@@ -4165,6 +4165,11 @@ TEST_CASE("EndSession waits for a haptics call still using the streaming server"
     LoopbackTrackingPeer peer(tcp);
     oxr::protocol::TrackingPacket packet = {};
     packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
 
     XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
     hapticActionInfo.action = hapticAction;
