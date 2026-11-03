@@ -15,6 +15,17 @@ TEST_CASE("Stream reconfiguration is allowed only on reliable control transport"
     CHECK_FALSE(AllowsLiveReconfigure(false, false));
 }
 
+TEST_CASE("Eye-centred foveation needs the announce bit and the client capability",
+          "[streaming][reconfigure][foveation]")
+{
+    CHECK(UsesFoveationEyeCenter(true, true));
+    // An announce without a foveated layout, followed by a StreamConfigUpdate that turns
+    // foveation on: the client uses the update's centre shift, so the encoder must too.
+    CHECK_FALSE(UsesFoveationEyeCenter(false, true));
+    CHECK_FALSE(UsesFoveationEyeCenter(true, false));
+    CHECK_FALSE(UsesFoveationEyeCenter(false, false));
+}
+
 TEST_CASE("Pending stream reconfiguration retries and times out", "[streaming][reconfigure]")
 {
     PendingState pending;

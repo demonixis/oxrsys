@@ -1894,8 +1894,10 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -2136,8 +2138,10 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
