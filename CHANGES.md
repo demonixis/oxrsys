@@ -185,6 +185,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   rebuilding the encoder for the newcomer (two interleaved tracking clocks shook the rendered
   view). The connected address can still reconnect, and UDP tracking from any other sender is
   ignored.
+- Fixed a refused Quest or Pico headset ending the live session when it gave up waiting for video:
+  a WiFi `ServerDisconnect` is now honoured only from the connected WiFi client, and a USB ADB
+  `Disconnect` record only while the USB client owns the session.
 - Fixed H.264 streams on Quest holding about 16 frames (around 220 ms at 72 Hz) in the decoder before
   output. The Android VR client now sets the Qualcomm decode-order and low-latency MediaCodec keys,
   which brings H.264 decode on Quest 3 to about 11 ms.
