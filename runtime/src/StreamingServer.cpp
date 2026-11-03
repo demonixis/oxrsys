@@ -1047,7 +1047,20 @@ void StreamingServer::ControlThread()
         }
         else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ServerDisconnect))
         {
-            HandleClientDisconnect();
+            char ipStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+            std::string connectedIp;
+            bool usbClient = false;
+            {
+                std::lock_guard<std::mutex> lock(clientMutex_);
+                connectedIp = clientIp_;
+                usbClient = clientUsesUsbAdb_.load();
+            }
+            if (oxrsys::ShouldHonorWifiDisconnect(state_.load() == State::Connected, usbClient,
+                                                  connectedIp, ipStr))
+            {
+                HandleClientDisconnect();
+            }
         }
         else
         {
@@ -1182,7 +1195,11 @@ void StreamingServer::TcpControlThread()
             }
             else if (header.type == oxr::protocol::TcpRecordType::Disconnect)
             {
-                HandleClientDisconnect();
+                // Only the USB ADB session owner may end the session; a WiFi owner stays.
+                if (clientUsesUsbAdb_.load())
+                {
+                    HandleClientDisconnect();
+                }
                 break;
             }
         }
