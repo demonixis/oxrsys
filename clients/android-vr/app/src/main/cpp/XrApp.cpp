@@ -281,6 +281,8 @@ void main() {
         float maxChannel = max(max(color.r, color.g), color.b);
         alpha = smoothstep(0.02, 0.10, maxChannel);
     }
+    // The swapchain is GL_SRGB8_ALPHA8, so GLES encodes on write; the decoded video is already sRGB-encoded.
+    color = mix(color / 12.92, pow((color + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), color));
     fragColor = vec4(color, alpha);
 }
 )";

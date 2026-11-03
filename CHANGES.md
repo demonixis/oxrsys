@@ -124,6 +124,9 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed washed-out video on the Quest/Pico client. The decoded video is already sRGB-encoded, and the
+  client wrote it into a `GL_SRGB8_ALPHA8` swapchain, where GLES encodes it again on write. The blit shader
+  now decodes it to linear first.
 - Fixed Home's native USB ADB backend, which never ran. Matching the vendor-specific ADB interface by
   class, subclass, and protocol needs `idVendor` in the IOKit dictionary, so the lookup found nothing
   and Home always fell back to the ADB server or an external `adb`. Home now filters interfaces itself.
