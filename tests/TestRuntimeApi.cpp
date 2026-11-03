@@ -1216,6 +1216,60 @@ TEST_CASE("Runtime validates xrLocateSpaces count and velocity invariants", "[ru
     XR_CHECK(xrDestroySpace(spaces[0]));
 }
 
+// Spaces of one reference space type move together, so their relative velocity is known and zero
+// even without a tracking connection, which leaves the head's own velocity unknown. The CTS locates
+// VIEW spaces in a VIEW space this way ("space velocities valid inputs").
+TEST_CASE("Spaces of one reference space type have a known zero relative velocity", "[runtime][spaces]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrReferenceSpaceCreateInfo createInfo = {XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    createInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<XrSpace, 2> viewSpaces = {};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[0]));
+    createInfo.poseInReferenceSpace.position = {0.1f, -0.2f, 0.3f};
+    createInfo.poseInReferenceSpace.orientation = {0.0f, 0.70710678f, 0.0f, 0.70710678f};
+    XR_CHECK(xrCreateReferenceSpace(context.session, &createInfo, &viewSpaces[1]));
+
+    const auto checkAtRest = [](XrSpaceVelocityFlags flags, const XrVector3f& linear, const XrVector3f& angular) {
+        CHECK(flags == (XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT));
+        CHECK(linear.x == 0.0f);
+        CHECK(linear.y == 0.0f);
+        CHECK(linear.z == 0.0f);
+        CHECK(angular.x == 0.0f);
+        CHECK(angular.y == 0.0f);
+        CHECK(angular.z == 0.0f);
+    };
+
+    std::array<XrSpaceLocationData, 2> locationData = {};
+    std::array<XrSpaceVelocityData, 2> velocityData = {};
+    XrSpaceVelocities velocities = {XR_TYPE_SPACE_VELOCITIES};
+    velocities.velocityCount = static_cast<uint32_t>(velocityData.size());
+    velocities.velocities = velocityData.data();
+    XrSpaceLocations locations = {XR_TYPE_SPACE_LOCATIONS, &velocities};
+    locations.locationCount = static_cast<uint32_t>(locationData.size());
+    locations.locations = locationData.data();
+    XrSpacesLocateInfo locateInfo = {XR_TYPE_SPACES_LOCATE_INFO};
+    locateInfo.baseSpace = viewSpaces[1];
+    locateInfo.time = 1;
+    locateInfo.spaceCount = static_cast<uint32_t>(viewSpaces.size());
+    locateInfo.spaces = viewSpaces.data();
+    XR_CHECK(xrLocateSpaces(context.session, &locateInfo, &locations));
+    for (const XrSpaceVelocityData& data : velocityData)
+    {
+        checkAtRest(data.velocityFlags, data.linearVelocity, data.angularVelocity);
+    }
+
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION, &velocity};
+    XR_CHECK(xrLocateSpace(viewSpaces[1], viewSpaces[0], locateInfo.time, &location));
+    checkAtRest(velocity.velocityFlags, velocity.linearVelocity, velocity.angularVelocity);
+
+    XR_CHECK(xrDestroySpace(viewSpaces[1]));
+    XR_CHECK(xrDestroySpace(viewSpaces[0]));
+}
+
 TEST_CASE("Loopback tracking reaches OpenXR velocities and STAGE bounds", "[runtime][tracking][loopback]")
 {
     const bool tcp = GENERATE(false, true);
