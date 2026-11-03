@@ -4187,9 +4187,14 @@ bool XrApp::RenderFrame(XrTime predictedDisplayTime)
                         videoContentHeight_ = static_cast<uint32_t>(cropBottom - cropTop);
 
                         hasVideo = true;
+                        // The update's encodedHeight is the eyes only; packed alpha rows sit below them.
+                        const uint32_t deferredFrameHeight = streamHasPackedAlpha_.load()
+                            ? frameDeferredStreamConfig_.encodedHeight +
+                                  protocol::PackedAlphaRows(frameDeferredStreamConfig_.encodedHeight)
+                            : frameDeferredStreamConfig_.encodedHeight;
                         const bool frameHasDeferredSize = hasFrameDeferredStreamConfig_ &&
                             static_cast<uint32_t>(cropRight - cropLeft) == frameDeferredStreamConfig_.encodedWidth &&
-                            static_cast<uint32_t>(cropBottom - cropTop) == frameDeferredStreamConfig_.encodedHeight;
+                            static_cast<uint32_t>(cropBottom - cropTop) == deferredFrameHeight;
                         if (frameHasDeferredSize ||
                             (hasFrameDeferredStreamConfig_ &&
                              std::chrono::steady_clock::now() - frameDeferredStreamConfigSince_ >
