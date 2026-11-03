@@ -2589,23 +2589,42 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
-// The hands a haptic call reaches: its subaction path, or every hand the action declares.
-static bool HapticsTargetsHand(const ActionState* action, XrPath subactionPath, const char* handPath)
+// The hands a haptic call reaches: those whose /output/haptic the action is bound to in the hand's active
+// interaction profiles, narrowed to its subaction path or, without one, to the hands the action declares, if any.
+static bool HapticsTargetsHand(const InputManager& inputManager, const ActionState* action, XrPath subactionPath,
+                               InputManager::Hand hand)
 {
-    if (subactionPath != XR_NULL_PATH)
+    const XrPath handPath = TopLevelPathFromHand(hand);
+    if (subactionPath != XR_NULL_PATH && subactionPath != handPath)
     {
-        return Runtime::Get().GetPathString(subactionPath) == handPath;
+        return false;
     }
     const std::vector<XrPath>& subactionPaths = action->GetSubactionPaths();
-    if (subactionPaths.empty())
+    if (subactionPath == XR_NULL_PATH && !subactionPaths.empty() &&
+        std::find(subactionPaths.begin(), subactionPaths.end(), handPath) == subactionPaths.end())
     {
-        return true;
+        return false;
     }
-    for (XrPath path : subactionPaths)
+    for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
     {
-        if (Runtime::Get().GetPathString(path) == handPath)
+        if (profilePathString.empty())
         {
-            return true;
+            continue;
+        }
+        XrPath profilePath = XR_NULL_PATH;
+        Runtime::Get().StringToPath(profilePathString.c_str(), &profilePath);
+        auto profileIt = gSuggestedBindings.find(static_cast<uint64_t>(profilePath));
+        if (profileIt == gSuggestedBindings.end())
+        {
+            continue;
+        }
+        for (const auto& binding : profileIt->second)
+        {
+            if (binding.actionHandle == action->GetHandle() && binding.topLevelPath == handPath &&
+                binding.bindingPathString.ends_with("/output/haptic"))
+            {
+                return true;
+            }
         }
     }
     return false;
@@ -2614,12 +2633,11 @@ static bool HapticsTargetsHand(const ActionState* action, XrPath subactionPath, 
 static void SendHapticsToHands(Session* sess, const ActionState* action, XrPath subactionPath,
                                float amplitude, float durationMs, float frequency)
 {
-    const char* handPaths[] = {"/user/hand/left", "/user/hand/right"};
-    for (uint8_t hand = 0; hand < 2; ++hand)
+    for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
     {
-        if (HapticsTargetsHand(action, subactionPath, handPaths[hand]))
+        if (HapticsTargetsHand(sess->GetInputManager(), action, subactionPath, hand))
         {
-            sess->SendHaptics(hand, amplitude, durationMs, frequency);
+            sess->SendHaptics(static_cast<uint8_t>(hand), amplitude, durationMs, frequency);
         }
     }
 }

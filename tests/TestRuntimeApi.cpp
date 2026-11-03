@@ -3963,163 +3963,6 @@ TEST_CASE("Distinct swapchains can be created and destroyed concurrently",
 // session state, so without one lock around both transition paths an exit request landing in that
 // window could emit STOPPING and then be overwritten back to SYNCHRONIZED, leaving xrEndSession to
 // fail with XR_ERROR_SESSION_NOT_STOPPING. Every interleaving must still reach STOPPING and end.
-TEST_CASE("RequestExitSession racing the first frame submission still reaches STOPPING", "[runtime][loader]")
-{
-    // Hold the frame-driven READY -> SYNCHRONIZED step for 2 ms after its branch is chosen, and send the
-    // exit request 1 ms into that window, so the bad interleaving happens every time.
-    setenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US", "2000", 1);
-    for (int iteration = 0; iteration < 10; ++iteration)
-    {
-        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
-
-        XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
-        bool sawStopping = false;
-        bool regressed = false;
-        auto drainStates = [&]() {
-            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
-            while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
-            {
-                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
-                {
-                    lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
-                    regressed = regressed || (sawStopping && lastState != XR_SESSION_STATE_STOPPING);
-                    sawStopping = sawStopping || lastState == XR_SESSION_STATE_STOPPING;
-                }
-                event = {XR_TYPE_EVENT_DATA_BUFFER};
-            }
-        };
-        drainStates();
-
-        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
-        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
-        XR_CHECK(xrBeginFrame(context.session, nullptr));
-        XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
-        endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        endInfo.displayTime = frameState.predictedDisplayTime;
-
-        std::atomic<bool> go{false};
-        XrResult exitResult = XR_ERROR_RUNTIME_FAILURE;
-        std::thread exiter([&] {
-            while (!go.load(std::memory_order_acquire))
-            {
-            }
-            std::this_thread::sleep_for(std::chrono::microseconds(1000));
-            exitResult = xrRequestExitSession(context.session);
-        });
-        go.store(true, std::memory_order_release);
-        CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
-        exiter.join();
-        CHECK(exitResult == XR_SUCCESS);
-
-        // An app ends the session as soon as it sees STOPPING. If the race emitted STOPPING, the state
-        // must not have regressed after it, and xrEndSession must succeed right away.
-        sawStopping = false;
-        regressed = false;
-        drainStates();
-        if (sawStopping)
-        {
-            CHECK_FALSE(regressed);
-            CHECK(xrEndSession(context.session) == XR_SUCCESS);
-            continue;
-        }
-        // Otherwise the exit request landed after the transition: a rendering session advances one
-        // state per frame, so keep the loop running until STOPPING, then end.
-        for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
-        {
-            XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
-            XR_CHECK(xrBeginFrame(context.session, nullptr));
-            endInfo.displayTime = frameState.predictedDisplayTime;
-            XR_CHECK(xrEndFrame(context.session, &endInfo));
-            drainStates();
-        }
-        REQUIRE(lastState == XR_SESSION_STATE_STOPPING);
-        CHECK(xrEndSession(context.session) == XR_SUCCESS);
-    }
-    unsetenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US");
-}
-
-TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][actions][haptics][loopback]")
-{
-    const bool tcp = GENERATE(false, true);
-    CAPTURE(tcp);
-
-    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
-    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
-
-    XrActionSet actionSet = XR_NULL_HANDLE;
-    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
-    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
-    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
-    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
-
-    XrAction hapticAction = XR_NULL_HANDLE;
-    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
-    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
-    hapticCreateInfo.countSubactionPaths = 2;
-    hapticCreateInfo.subactionPaths = handPaths;
-    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
-    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
-    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
-
-    XrActionSuggestedBinding bindings[] = {
-        {hapticAction, context.Path("/user/hand/left/output/haptic")},
-        {hapticAction, context.Path("/user/hand/right/output/haptic")},
-    };
-    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
-    suggestedBindings.suggestedBindings = bindings;
-    suggestedBindings.countSuggestedBindings = 2;
-    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
-    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
-    attachInfo.countActionSets = 1;
-    attachInfo.actionSets = &actionSet;
-    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
-
-    LoopbackTrackingPeer peer(tcp);
-    oxr::protocol::TrackingPacket packet = {};
-    packet.headOrientation[3] = 1.0f;
-
-    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
-    hapticActionInfo.action = hapticAction;
-    hapticActionInfo.subactionPath = handPaths[1];
-    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
-    vibration.amplitude = 0.5f;
-    vibration.duration = 20'000'000;
-    vibration.frequency = 160.0f;
-
-    oxr::protocol::HapticsCommand command = {};
-    bool received = false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!received && std::chrono::steady_clock::now() < deadline)
-    {
-        peer.SendTracking(packet, sizeof(packet));
-        PumpTrackingFrame(context.session);
-        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
-                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
-        if (result == XR_SUCCESS)
-        {
-            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
-        }
-    }
-    REQUIRE(received);
-    CHECK(command.hand == 1);
-    CHECK_THAT(command.amplitude, WithinAbs(0.5f, 0.0001f));
-    CHECK_THAT(command.durationMs, WithinAbs(20.0f, 0.0001f));
-    CHECK_THAT(command.frequency, WithinAbs(160.0f, 0.0001f));
-
-    hapticActionInfo.subactionPath = XR_NULL_PATH;
-    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
-    std::set<uint8_t> stoppedHands;
-    while (stoppedHands.size() < 2 && peer.ReadHaptics(command, std::chrono::seconds(2)))
-    {
-        if (command.amplitude == 0.0f)
-        {
-            stoppedHands.insert(command.hand);
-        }
-    }
-    CHECK(stoppedHands == std::set<uint8_t>{0, 1});
-}
-
 TEST_CASE("EndSession waits for a haptics call still using the streaming server",
           "[runtime][actions][haptics][loopback]")
 {
@@ -4248,4 +4091,281 @@ TEST_CASE("EndSession waits for a haptics call still using the streaming server"
     REQUIRE(peer.ReadHaptics(command, std::chrono::seconds(2)));
     CHECK(command.hand == 1);
     CHECK_THAT(command.amplitude, WithinAbs(0.75f, 0.0001f));
+}
+
+TEST_CASE("RequestExitSession racing the first frame submission still reaches STOPPING", "[runtime][loader]")
+{
+    // Hold the frame-driven READY -> SYNCHRONIZED step for 2 ms after its branch is chosen, and send the
+    // exit request 1 ms into that window, so the bad interleaving happens every time.
+    setenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US", "2000", 1);
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+        XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+        bool sawStopping = false;
+        bool regressed = false;
+        auto drainStates = [&]() {
+            XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+            while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+            {
+                if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+                {
+                    lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+                    regressed = regressed || (sawStopping && lastState != XR_SESSION_STATE_STOPPING);
+                    sawStopping = sawStopping || lastState == XR_SESSION_STATE_STOPPING;
+                }
+                event = {XR_TYPE_EVENT_DATA_BUFFER};
+            }
+        };
+        drainStates();
+
+        XrFrameState frameState = {XR_TYPE_FRAME_STATE};
+        XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+        XR_CHECK(xrBeginFrame(context.session, nullptr));
+        XrFrameEndInfo endInfo = {XR_TYPE_FRAME_END_INFO};
+        endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+        endInfo.displayTime = frameState.predictedDisplayTime;
+
+        std::atomic<bool> go{false};
+        XrResult exitResult = XR_ERROR_RUNTIME_FAILURE;
+        std::thread exiter([&] {
+            while (!go.load(std::memory_order_acquire))
+            {
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(1000));
+            exitResult = xrRequestExitSession(context.session);
+        });
+        go.store(true, std::memory_order_release);
+        CHECK(xrEndFrame(context.session, &endInfo) == XR_SUCCESS);
+        exiter.join();
+        CHECK(exitResult == XR_SUCCESS);
+
+        // An app ends the session as soon as it sees STOPPING. If the race emitted STOPPING, the state
+        // must not have regressed after it, and xrEndSession must succeed right away.
+        sawStopping = false;
+        regressed = false;
+        drainStates();
+        if (sawStopping)
+        {
+            CHECK_FALSE(regressed);
+            CHECK(xrEndSession(context.session) == XR_SUCCESS);
+            continue;
+        }
+        // Otherwise the exit request landed after the transition: a rendering session advances one
+        // state per frame, so keep the loop running until STOPPING, then end.
+        for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_STOPPING; ++frame)
+        {
+            XR_CHECK(xrWaitFrame(context.session, nullptr, &frameState));
+            XR_CHECK(xrBeginFrame(context.session, nullptr));
+            endInfo.displayTime = frameState.predictedDisplayTime;
+            XR_CHECK(xrEndFrame(context.session, &endInfo));
+            drainStates();
+        }
+        REQUIRE(lastState == XR_SESSION_STATE_STOPPING);
+        CHECK(xrEndSession(context.session) == XR_SUCCESS);
+    }
+    unsetenv("OXRSYS_TEST_ENDFRAME_ADVANCE_DELAY_US");
+}
+
+TEST_CASE("Haptic feedback reaches the connected headset client", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    XrAction hapticAction = XR_NULL_HANDLE;
+    XrActionCreateInfo hapticCreateInfo = {XR_TYPE_ACTION_CREATE_INFO};
+    hapticCreateInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    hapticCreateInfo.countSubactionPaths = 2;
+    hapticCreateInfo.subactionPaths = handPaths;
+    std::strncpy(hapticCreateInfo.actionName, "haptic_action", XR_MAX_ACTION_NAME_SIZE);
+    std::strncpy(hapticCreateInfo.localizedActionName, "Haptic Action", XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+    XR_CHECK(xrCreateAction(actionSet, &hapticCreateInfo, &hapticAction));
+
+    XrActionSuggestedBinding bindings[] = {
+        {hapticAction, context.Path("/user/hand/left/output/haptic")},
+        {hapticAction, context.Path("/user/hand/right/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 2;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    // Haptics follow each hand's active interaction profiles, which come from its streamed controller.
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = hapticAction;
+    hapticActionInfo.subactionPath = handPaths[1];
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+    vibration.frequency = 160.0f;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 1);
+    CHECK_THAT(command.amplitude, WithinAbs(0.5f, 0.0001f));
+    CHECK_THAT(command.durationMs, WithinAbs(20.0f, 0.0001f));
+    CHECK_THAT(command.frequency, WithinAbs(160.0f, 0.0001f));
+
+    hapticActionInfo.subactionPath = XR_NULL_PATH;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    std::set<uint8_t> stoppedHands;
+    while (stoppedHands.size() < 2 && peer.ReadHaptics(command, std::chrono::seconds(2)))
+    {
+        if (command.amplitude == 0.0f)
+        {
+            stoppedHands.insert(command.hand);
+        }
+    }
+    CHECK(stoppedHands == std::set<uint8_t>{0, 1});
+}
+
+// Unreal Engine and OpenComposite create one vibration action per hand without subaction paths and pass
+// XR_NULL_PATH, so each call must reach the hand its action is bound to and no other.
+TEST_CASE("Haptic feedback reaches only the hands its action is bound to", "[runtime][actions][haptics][loopback]")
+{
+    const bool tcp = GENERATE(false, true);
+    CAPTURE(tcp);
+
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+    XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
+
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrActionSetCreateInfo actionSetCreateInfo = {XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(actionSetCreateInfo.actionSetName, "haptics", XR_MAX_ACTION_SET_NAME_SIZE);
+    std::strncpy(actionSetCreateInfo.localizedActionSetName, "Haptics", XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE);
+    XR_CHECK(xrCreateActionSet(context.instance, &actionSetCreateInfo, &actionSet));
+
+    auto createHapticAction = [&](const char* name, uint32_t countSubactionPaths) {
+        XrAction action = XR_NULL_HANDLE;
+        XrActionCreateInfo createInfo = {XR_TYPE_ACTION_CREATE_INFO};
+        createInfo.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        createInfo.countSubactionPaths = countSubactionPaths;
+        createInfo.subactionPaths = handPaths;
+        std::strncpy(createInfo.actionName, name, XR_MAX_ACTION_NAME_SIZE);
+        std::strncpy(createInfo.localizedActionName, name, XR_MAX_LOCALIZED_ACTION_NAME_SIZE);
+        XR_CHECK(xrCreateAction(actionSet, &createInfo, &action));
+        return action;
+    };
+    const XrAction leftAction = createHapticAction("left_haptic", 0);
+    const XrAction rightAction = createHapticAction("right_haptic", 0);
+    // Declares both hands, but is bound only to the left one.
+    const XrAction leftBoundAction = createHapticAction("left_bound_haptic", 2);
+
+    XrActionSuggestedBinding bindings[] = {
+        {leftAction, context.Path("/user/hand/left/output/haptic")},
+        {rightAction, context.Path("/user/hand/right/output/haptic")},
+        {leftBoundAction, context.Path("/user/hand/left/output/haptic")},
+    };
+    XrInteractionProfileSuggestedBinding suggestedBindings = {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    suggestedBindings.interactionProfile = context.Path("/interaction_profiles/oculus/touch_controller");
+    suggestedBindings.suggestedBindings = bindings;
+    suggestedBindings.countSuggestedBindings = 3;
+    XR_CHECK(xrSuggestInteractionProfileBindings(context.instance, &suggestedBindings));
+    XrSessionActionSetsAttachInfo attachInfo = {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actionSet;
+    XR_CHECK(xrAttachSessionActionSets(context.session, &attachInfo));
+
+    LoopbackTrackingPeer peer(tcp);
+    oxr::protocol::TrackingPacket packet = {};
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE |
+                           oxr::protocol::TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    packet.rightControllerRot[3] = 1.0f;
+
+    XrHapticActionInfo hapticActionInfo = {XR_TYPE_HAPTIC_ACTION_INFO};
+    hapticActionInfo.action = leftAction;
+    XrHapticVibration vibration = {XR_TYPE_HAPTIC_VIBRATION};
+    vibration.amplitude = 0.5f;
+    vibration.duration = 20'000'000;
+
+    oxr::protocol::HapticsCommand command = {};
+    bool received = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!received && std::chrono::steady_clock::now() < deadline)
+    {
+        peer.SendTracking(packet, sizeof(packet));
+        PumpTrackingFrame(context.session);
+        const XrResult result = xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                                      reinterpret_cast<XrHapticBaseHeader*>(&vibration));
+        if (result == XR_SUCCESS)
+        {
+            received = peer.ReadHaptics(command, std::chrono::milliseconds(50));
+        }
+    }
+    REQUIRE(received);
+    CHECK(command.hand == 0);
+
+    // The hands of the commands that arrive until the peer is quiet for 200 ms; command keeps the last one.
+    auto readHands = [&] {
+        std::vector<uint8_t> hands;
+        while (peer.ReadHaptics(command, std::chrono::milliseconds(200)))
+        {
+            hands.push_back(command.hand);
+        }
+        return hands;
+    };
+    // Applies repeated while waiting may still be in flight; all of them are for the left hand.
+    for (uint8_t hand : readHands())
+    {
+        CHECK(hand == 0);
+    }
+
+    hapticActionInfo.action = rightAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{1});
+    CHECK(command.amplitude == 0.0f);
+    hapticActionInfo.action = leftAction;
+    XR_CHECK(xrStopHapticFeedback(context.session, &hapticActionInfo));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    CHECK(command.amplitude == 0.0f);
+
+    hapticActionInfo.action = leftBoundAction;
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands() == std::vector<uint8_t>{0});
+    hapticActionInfo.subactionPath = handPaths[1];
+    XR_CHECK(xrApplyHapticFeedback(context.session, &hapticActionInfo,
+                                   reinterpret_cast<XrHapticBaseHeader*>(&vibration)));
+    CHECK(readHands().empty());
 }
