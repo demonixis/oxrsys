@@ -718,7 +718,7 @@ final class HomeLauncherTests: XCTestCase {
             "Expected detected ADB to be available"
         )
         let adbNotFound = QuestUsbBridgeError.adbNotFound.errorDescription ?? ""
-        for message in [HomeAdbStatus.nativeUsb.message, HomeAdbInstallGuidance.message, adbNotFound] {
+        for message in [HomeAdbStatus.missing.message, HomeAdbStatus.nativeUsb.message, HomeAdbInstallGuidance.message, adbNotFound] {
             try expect(
                 message.contains("USB Net") && message.contains("USB reverse") &&
                     message.contains("ADB server") && message.contains("adb"),
@@ -726,7 +726,8 @@ final class HomeLauncherTests: XCTestCase {
             )
         }
         try expect(
-            !adbNotFound.contains("optional") && !adbNotFound.contains("No native USB ADB headset"),
+            !adbNotFound.contains("optional") && !adbNotFound.contains("No native USB ADB headset") &&
+                !HomeAdbStatus.missing.message.contains("fallback"),
             "Expected adb not to be offered as an optional fallback for USB reverse"
         )
         try expect(

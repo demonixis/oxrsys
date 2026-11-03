@@ -710,7 +710,7 @@ struct HomeAdbStatus: Equatable, Sendable {
     nonisolated static var missing: HomeAdbStatus {
         HomeAdbStatus(
             executablePath: nil,
-            message: "Connect a USB debugging-enabled headset, or configure an external ADB fallback."
+            message: "No USB debugging headset, ADB server or adb was found. Connect a headset with USB debugging for device listing and USB Net; USB reverse also needs a running ADB server or an adb executable."
         )
     }
 
