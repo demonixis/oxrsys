@@ -260,7 +260,21 @@ enum VideoFlags : uint8_t
     VIDEO_FLAG_FEC = 0x10,     // Forward Error Correction parity packet
     VIDEO_FLAG_RENDER_POSE = 0x20, // Payload contains the server's render pose for this frame
     VIDEO_FLAG_ALPHA_BLEND = 0x40, // App submitted alpha-blend environment or source-alpha projection layer
+    VIDEO_FLAG_PACKED_ALPHA = 0x80, // Rows below the eyes carry each eye's alpha at PackedAlphaRows height
 };
+
+// Packed alpha (CLIENT_CAPABILITY_MIXED_REALITY_ALPHA): the encoded frame is the eyes followed by
+// PackedAlphaRows(eyeHeight) rows holding each eye's alpha as grey, at half the eye's width and height.
+// Each eye's alpha is split into its top and bottom halves, placed side by side in that eye's columns.
+constexpr uint32_t PackedAlphaRows(uint32_t eyeHeight)
+{
+    return (eyeHeight + 3) / 4;
+}
+
+constexpr uint32_t PackedAlphaEyeHeight(uint32_t frameHeight)
+{
+    return frameHeight * 4 / 5;
+}
 
 struct AudioPacketHeader
 {

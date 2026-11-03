@@ -637,6 +637,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     }
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
+    packedAlphaActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
@@ -1429,6 +1430,7 @@ void StreamingServer::EncodeThread()
         encodedFrame->timestampNs = frame.timestampNs;
         encodedFrame->codec = activeVideoCodec_.load();
         encodedFrame->alphaBlend = frame.alphaBlend;
+        encodedFrame->packedAlpha = encoder->UsesPackedAlpha();
         encodedFrame->hasPose = frame.hasPose;
         if (frame.hasPose)
         {
@@ -1460,6 +1462,10 @@ void StreamingServer::EncodeThread()
                 if (encodedFrame->alphaBlend)
                 {
                     nalHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
+                }
+                if (encodedFrame->packedAlpha)
+                {
+                    nalHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
                 }
                 if (isKeyframe)
                 {
@@ -1910,6 +1916,11 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
                     tenBitEncodingActive_.store(useTenBit);
                     encoder_->SetTenBitEncoding(useTenBit);
+                    const bool usePackedAlpha = config.passthroughEnabled &&
+                        config.appAlphaBlendPassthrough &&
+                        HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_MIXED_REALITY_ALPHA);
+                    packedAlphaActive_.store(usePackedAlpha);
+                    encoder_->SetPackedAlpha(usePackedAlpha);
                     if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
                                              bitrateMbps, graphicsContext_, selectedCodec))
                     {
@@ -1942,6 +1953,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                 if (!encoderReady)
                 {
                     tenBitEncodingActive_.store(false);
+                    packedAlphaActive_.store(false);
                     spdlog::error("StreamingServer: Failed to initialize VideoEncoder for any compatible WiFi codec");
                     encoder_.reset();
                 }
@@ -2146,6 +2158,11 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                         HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_TEN_BIT_ENCODING);
                     tenBitEncodingActive_.store(useTenBit);
                     encoder_->SetTenBitEncoding(useTenBit);
+                    const bool usePackedAlpha = config.passthroughEnabled &&
+                        config.appAlphaBlendPassthrough &&
+                        HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_MIXED_REALITY_ALPHA);
+                    packedAlphaActive_.store(usePackedAlpha);
+                    encoder_->SetPackedAlpha(usePackedAlpha);
                     if (encoder_->Initialize(layoutState.encodedWidth, layoutState.encodedHeight, negotiatedRefresh,
                                              bitrateMbps, graphicsContext_, selectedCodec))
                     {
@@ -2175,6 +2192,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                 if (!encoderReady)
                 {
                     tenBitEncodingActive_.store(false);
+                    packedAlphaActive_.store(false);
                     spdlog::error("StreamingServer: Failed to initialize VideoEncoder for any compatible USB ADB codec");
                     encoder_.reset();
                 }
@@ -2280,6 +2298,7 @@ void StreamingServer::HandleClientDisconnect()
     targetRefreshRateHz_.store(refreshRateHz_);
     clientFoveatedEncodingActive_.store(false);
     tenBitEncodingActive_.store(false);
+    packedAlphaActive_.store(false);
     clientSupportsFoveatedEncoding_.store(false);
     clientSupportsStreamReconfigure_.store(false);
     clientSupportsMixedRealityPassthrough_.store(false);
@@ -2638,6 +2657,7 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
     foveationSettings.eyeCentered = clientSupportsFoveationEyeCenter_.load();
     newEncoder->SetFoveationSettings(foveationSettings);
     newEncoder->SetTenBitEncoding(tenBitEncodingActive_.load());
+    newEncoder->SetPackedAlpha(packedAlphaActive_.load());
 
     const uint32_t bitrateMbps = currentBitrateMbps_.load();
     const uint32_t refreshHz = std::max(targetRefreshRateHz_.load(), 1u);
@@ -3187,6 +3207,10 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
+        if (packedAlphaActive_.load())
+        {
+            nalHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
+        }
         if (isKeyframe)
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
@@ -3260,6 +3284,10 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
+        if (packedAlphaActive_.load())
+        {
+            header.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
+        }
         if (isKeyframe)
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_KEYFRAME;
@@ -3314,6 +3342,10 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             if (alphaBlend)
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
+            }
+            if (packedAlphaActive_.load())
+            {
+                fecHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
             }
             fecHeader.fecGroupLastPacketPayloadSize =
                 payloadSizes[groupStart + groupCount - 1];

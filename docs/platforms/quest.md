@@ -56,10 +56,14 @@ releasing only the local shell GL resources. It does not by itself expose OpenXR
 environment modes to desktop apps. Apps can opt into streamed alpha passthrough only when the
 advanced `streaming.app_alpha_blend_passthrough = true` setting is enabled before the OpenXR instance
 is created; normal VR apps should leave it disabled so dark reflections and black content stay
-opaque. Alpha-capable frames are marked in the video stream. Until a real alpha or depth transport
-exists, the Quest shader only applies black-key alpha when an explicit compatibility/debug path
-allows it; the default path uses protocol alpha flags and never treats ordinary dark pixels as
-transparent.
+opaque. Alpha-capable frames are marked in the video stream. The client advertises
+`CLIENT_CAPABILITY_MIXED_REALITY_ALPHA` with passthrough, and the runtime then appends each eye's
+alpha below the eyes (`VIDEO_FLAG_PACKED_ALPHA`), which the blit shader reads as the layer alpha. Packed
+alpha has half the encoded resolution; at partly transparent edges the shader scales it by each pixel's
+premultiplied colour against its 2x2 block, so coloured edges stay sharp.
+Without packed alpha, the Quest shader only applies black-key alpha when an explicit
+compatibility/debug path allows it; the default path uses protocol alpha flags and never treats
+ordinary dark pixels as transparent.
 
 This support is negotiated, not hardcoded by model name. The client advertises
 `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` only after the headset OpenXR runtime exposes

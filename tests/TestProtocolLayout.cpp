@@ -195,3 +195,17 @@ TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", 
         CalculateFoveationLayout(1136, 1264, FoveationPreset::Light);
     CHECK_FALSE(IsFoveatedEncodingLayoutUsable(scaledLayout, 1512, 1680));
 }
+
+TEST_CASE("Packed alpha rows recover the eye height from the encoded height", "[protocol][passthrough]")
+{
+    STATIC_REQUIRE(VIDEO_FLAG_ALPHA_BLEND == 0x40);
+    STATIC_REQUIRE(VIDEO_FLAG_PACKED_ALPHA == 0x80);
+    CHECK(PackedAlphaRows(1264) == 316);
+    CHECK(PackedAlphaRows(1680) == 420);
+    CHECK(PackedAlphaRows(63) == 16);
+    for (uint32_t eyeHeight = 1; eyeHeight <= 4096; ++eyeHeight)
+    {
+        INFO("eye height " << eyeHeight);
+        CHECK(PackedAlphaEyeHeight(eyeHeight + PackedAlphaRows(eyeHeight)) == eyeHeight);
+    }
+}

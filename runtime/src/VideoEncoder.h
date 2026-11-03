@@ -114,6 +114,9 @@ public:
     void SetFoveationSettings(const FoveationSettings& settings) { foveationSettings_ = settings; }
     // Applies before Initialize(); only the H.265 VideoToolbox path supports Main10.
     void SetTenBitEncoding(bool enabled) { tenBit_ = enabled; }
+    // Applies before Initialize(): appends oxr::protocol::PackedAlphaRows rows of eye alpha below the eyes.
+    void SetPackedAlpha(bool enabled) { packedAlpha_ = enabled; }
+    bool UsesPackedAlpha() const { return packedAlpha_; }
     // Diagnostics (and tests): pid of the live out-of-process encoder helper
     // frames are currently sent to, or -1 when they are encoded in-process.
     int EncoderHelperPid() const;
@@ -162,6 +165,8 @@ public:
     uint32_t GetInFlightFrameCount() const { return inFlightFrameCount_.load(); }
 
 private:
+    bool EncodeAlphaPack(void* commandBuffer, void* leftTexture, void* rightTexture, void* outputTexture,
+                         bool stereo, bool eyesSideBySide);
     struct BufferSlot
     {
         void* pixelBuffer = nullptr;      // CVPixelBufferRef
@@ -223,6 +228,7 @@ private:
         void* copySampler = nullptr;       // id<MTLSamplerState>
         void* foveationPipeline = nullptr; // id<MTLComputePipelineState>
         void* foveationSampler = nullptr;  // id<MTLSamplerState>
+        void* alphaPackPipeline = nullptr; // id<MTLComputePipelineState>
         // Software sessions only: BGRA -> video-range 4:2:0 before encode.
         void* videoRangeTransfer = nullptr; // VTPixelTransferSessionRef
         void* videoRangePool = nullptr;     // CVPixelBufferPoolRef
@@ -231,13 +237,15 @@ private:
     GraphicsContext graphicsContext_ = {};
     VideoToolboxState videoToolbox_ = {};
     uint32_t width_ = 0;       // Total encoded width (may be 2x eye width for stereo)
-    uint32_t height_ = 0;
+    uint32_t height_ = 0;      // Eye height
+    uint32_t frameHeight_ = 0; // Encoded height: height_ plus any packed alpha rows
     uint32_t eyeWidth_ = 0;   // Single eye width (width_/2 for stereo)
     uint32_t fps_ = 90;
     uint32_t bitrateMbps_ = 50;
     oxr::protocol::VideoCodec codec_ = oxr::protocol::VideoCodec::H265;
     FoveationSettings foveationSettings_ = {};
     bool tenBit_ = false;
+    bool packedAlpha_ = false;
     bool forceSoftwareForTesting_ = false;
     bool inProcessSessionHardware_ = false;
 

@@ -76,6 +76,14 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   negotiated codec in the runtime's own process, so native `arm64` hosts, H.264 under Rosetta, and
   AV1 stay in-process. Any helper failure, including its death mid-stream, falls back to the
   in-process encoder without ending the stream.
+- Added packed passthrough alpha. When passthrough and `app_alpha_blend_passthrough` are enabled and the
+  Quest/Pico client advertises `CLIENT_CAPABILITY_MIXED_REALITY_ALPHA`, the runtime appends each eye's alpha
+  below the eyes at half the encoded eye's width and height, following foveated encoding, and marks the
+  frames `VIDEO_FLAG_PACKED_ALPHA`; the frame grows by a quarter. The client reads that alpha instead of
+  keying out near-black pixels, so black content stays opaque and semi-transparent content blends with the
+  passthrough cameras. Each alpha pixel is the mean of a 2x2 block of encoded pixels, and the client rebuilds
+  an edge pixel's alpha from its premultiplied colour against the block's mean colour, so coloured edges keep
+  the full resolution.
 
 ### Changed
 
