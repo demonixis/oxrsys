@@ -99,6 +99,19 @@ TEST_CASE("InputManager — initial state", "[input]")
     }
 }
 
+TEST_CASE("InputManager — no profile before a client connects", "[input]")
+{
+    // Apps that bind the first profile they see would keep a khr/simple_controller reported here, after the client
+    // connects with its own controller profile.
+    InputManager im;
+    for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
+    {
+        CHECK_FALSE(im.IsInputDeviceActive(hand));
+        CHECK(im.GetCurrentInteractionProfile(hand).empty());
+        CHECK(im.GetActiveInteractionProfiles(hand).empty());
+    }
+}
+
 TEST_CASE("InputManager — hand joint generation", "[input]")
 {
     InputManager im;

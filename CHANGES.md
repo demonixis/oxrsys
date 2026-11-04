@@ -121,6 +121,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the current interaction profile before a client connects. With nothing tracked, the runtime reported
+  `khr/simple_controller` until a client connected, and apps that bind the first profile they see at session start
+  (Pistol Whip, on Unity's OpenXR plugin) kept it and ignored the later switch to Touch; Pistol Whip never drew
+  its guns. It now reports no profile (`XR_NULL_PATH`) until a controller or hand is tracked, as it already
+  did while a client was connected with nothing tracked.
 - Fixed washed-out video on the Quest/Pico client. The decoded video is already sRGB-encoded, and the
   client wrote it into a `GL_SRGB8_ALPHA8` swapchain, where GLES encodes it again on write. The blit shader
   now decodes it to linear first.
