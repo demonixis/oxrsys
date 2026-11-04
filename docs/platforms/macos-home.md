@@ -15,7 +15,7 @@ tab. Its first tool opens the integrated OXRSys Simulator in a single Home-owned
 
 The main window also shows the current runtime activity: idle or streaming, the active transport
 when streaming, the connected device family, the OpenXR application name reported by the runtime,
-and a WiFi/USB transport readiness control.
+and a WiFi/USB/USB Net transport readiness control.
 
 The Home app now targets direct notarized distribution instead of App Store/TestFlight sandboxing.
 The launcher and registration workflow need access to `/Applications`, app executables, Terminal
@@ -113,7 +113,7 @@ The file is updated when an OpenXR app creates or destroys an instance, when the
 starts or stops, and when a headset client connects or disconnects. The Home app polls it once per
 second and shows:
 
-- state: `Idle`, `Streaming (WiFi)`, or `Streaming (USB)`
+- state: `Idle`, `Streaming (WiFi)`, `Streaming (USB)`, or `Streaming (USB Network)`
 - device: `Quest`, `Pico`, `Simulator`, `Vision Pro`, or `Unknown`
 - profile app: the OpenXR application name from `XrInstanceCreateInfo`, with the Home-launched
   app as a fallback before the runtime has written status
@@ -148,7 +148,7 @@ idle. The fields are:
   `counters.pending_depth_max`, `counters.reprojected_frames_delta`,
   `counters.stale_frame_reuses_delta`, `counters.render_pose_fallbacks_delta`
 
-The same header area includes a WiFi/USB selector. Selecting WiFi writes `streaming.transport = "wifi"`
+The same header area includes a WiFi/USB/USB Net selector. Selecting WiFi writes `streaming.transport = "wifi"`
 and shows whether the Mac WiFi interface is powered on. Selecting USB first switches the header into
 USB setup, then checks the selected or single authorized Quest device and automatically configures
 missing reverse mappings on `9944`, `9945`, `9946`, and `9948`. The Home app writes
@@ -310,8 +310,10 @@ The runtime reloads config file changes opportunistically:
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails
+- `foveated_encoding_preset` applies at the next OpenXR session, or with a live `abr_mode = "full"`
+  resolution change; a client reconnect keeps the preset the stream started with
 - `bitrate_mbps`, `resolution_scale`, `dynamic_resolution_min_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
-  `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`,
+  `client_foveation_preset`, `client_upscaling`,
   `client_reprojection`, `abr_mode`, `passthrough_enabled`,
   `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, `headset_audio`, `encoder_helper`,
   and `encoder_helper_path` apply when streaming or the encoder/client connection is recreated

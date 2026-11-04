@@ -21,6 +21,7 @@
 #include "RuntimeSockets.h"
 #include "GraphicsTypes.h"
 #include "StreamingAbr.h"
+#include "StreamingFoveationSnapshot.h"
 #include "StreamingFrameQueue.h"
 #include "StreamingReconfigure.h"
 
@@ -149,6 +150,7 @@ private:
         uint32_t foveatedTargetEyeHeight = 0;
         float activeResolutionScale = 0.75f;
         bool foveatedEncodingActive = false;
+        oxrsys::streaming_foveation::Snapshot foveation;
         uint32_t streamConfigSequence = 0;
     };
 
@@ -187,8 +189,8 @@ private:
     void CheckClientLiveness(int64_t nowNs);
     std::atomic<uint64_t> lastTrackingCountSeen_{0};
     std::atomic<int64_t> lastClientActivityNs_{0};
-    // Control-thread only: which address was last refused a ClientConnect and when
-    // that was last logged (see ClientAdmission.h).
+    // Guarded by clientMutex_ (WiFi control and USB control threads): which address was
+    // last refused a ClientConnect and when that was last logged (see ClientAdmission.h).
     oxrsys::ClientAdmissionState clientAdmission_;
     void HandleLatencyReport(const oxr::protocol::LatencyReport& report);
     void HandleKeyframeRequest(const oxr::protocol::RequestKeyframe& request);
@@ -329,7 +331,7 @@ private:
 
     void SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                      uint32_t frameIndex, const uint8_t* data, size_t size,
-                     bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                     bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
                      oxr::protocol::VideoCodec codec,
                      oxrsys::streaming::PacketPacer* pacer = nullptr);
     // Sends one UDP datagram of the video stream after the pacer says it is due,

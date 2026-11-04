@@ -101,7 +101,7 @@ struct ContentView: View {
                 }
             })
         ) {
-            Button("Optional adb Fallback") {
+            Button("Install adb") {
                 model.openAdbInstallHelp()
             }
             Button("OK", role: .cancel) {

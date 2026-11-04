@@ -105,4 +105,12 @@ inline bool AllowsLiveReconfigure(bool reliableControlTransport, bool clientSupp
     return reliableControlTransport && clientSupportsReconfigure;
 }
 
+// The client centres each eye only when the announce it answered carried
+// SERVER_FEATURE_FOVEATION_EYE_CENTER, which is sent only with a foveated layout. A
+// StreamConfigUpdate that turns foveation on later carries no eye-centre signal.
+inline bool UsesFoveationEyeCenter(bool announcedFoveatedLayout, bool clientSupportsEyeCenter)
+{
+    return announcedFoveatedLayout && clientSupportsEyeCenter;
+}
+
 } // namespace oxrsys::streaming_reconfigure

@@ -138,6 +138,7 @@ supported server paths. The announced presets currently map to:
 
 - `Light`: center `0.60 x 0.55`, edge ratio `2 x 3`
 - `Medium`: center `0.45 x 0.40`, edge ratio `4 x 5`
+- `Medium` from the `medium_plus` configuration preset: center `0.50 x 0.45`, edge ratio `4 x 5`
 - `High`: center `0.35 x 0.32`, edge ratio `6 x 7`
 
 The server aligns the active foveated area to encoder-friendly dimensions and announces the encoded
@@ -196,17 +197,28 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 
 - headset pose
 - headset linear and angular velocity when the client can provide it
-- left and right controller poses
+- left and right controller grip and aim poses (aim falls back to grip when it is unset)
+- controller grip and aim linear and angular velocities when the client can provide them
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+- STAGE bounds when the client can provide them
+- the controller profile the client's own runtime reports, and capacitive touch state
+
+The aim poses and every later field are appended after `TRACKING_PACKET_BASE_SIZE`. The runtime
+accepts any packet of at least that size and zero-fills the fields it does not carry. It clears a
+velocity or STAGE-bounds valid flag when the packet ends before that field, and it keeps
+`controllerProfile` and `touchState` only from a packet that reaches the end of `touchState`.
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
 `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
 controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.
 
-Velocity values are optional. Zero vectors mean the runtime should fall back to its bounded finite-difference prediction path.
+Velocity values are optional, and applications see one only when its `TRACKING_FLAG_*_VELOCITY_VALID`
+flag is set; STAGE bounds likewise need `TRACKING_FLAG_STAGE_BOUNDS_VALID`. A flagged zero vector is
+a measured stationary value. Without its flag, a non-zero head velocity is still used for head pose
+prediction, and a zero one falls back to the runtime's bounded finite-difference prediction path.
 
 ## Control Channel
 
@@ -220,9 +232,10 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 - `StreamConfigAck`
 
 `HapticsCommand` carries one hand's vibration from `xrApplyHapticFeedback`: amplitude 0-1, duration in
-milliseconds (0 = the headset's minimum) and frequency in Hz (0 = unspecified). An action applied without a
-subaction path sends one command per hand it declares. Amplitude 0 stops that hand, which is how
-`xrStopHapticFeedback` is forwarded.
+milliseconds (0 = the headset's minimum) and frequency in Hz (0 = unspecified). A call sends one command per
+hand whose `/output/haptic` the action is bound to in that hand's active interaction profiles; a subaction
+path narrows it to that hand, and without one an action that declares subaction paths reaches only those
+hands. Amplitude 0 stops that hand, which is how `xrStopHapticFeedback` is forwarded.
 
 Latency reports allow the runtime to keep prediction bounded. The first 20 bytes are the historical
 base report: receive-to-submit, decode, compositor, and total client latency. Newer clients append
@@ -239,7 +252,8 @@ and `balanced` use `resolution_scale`, `smooth` uses
 `max(dynamic_resolution_min_scale, resolution_scale * 0.70)`. WiFi control remains best-effort in
 this version, so WiFi clients fall back to bitrate/profile status without live decoder
 reconfiguration. For USB TCP, the runtime sends `StreamConfigUpdate` outside `Session::EndFrame()`,
-the client recreates its decoder on a client worker thread, replies with `StreamConfigAck` only after
+the client keeps its decoder when the new encoded size fits the size it was created for and
+otherwise recreates it on a client worker thread, replies with `StreamConfigAck` only after
 the decoder is ready, and the runtime swaps encoders, clears queued video, and forces an IDR only
 after the ack. Pending updates have bounded retry/timeout behavior; timeout disconnects the client
 so encoder and decoder state recover through the normal reconnect path.
@@ -250,7 +264,7 @@ OpenXR extensions are still advertised only when there is a coherent runtime
 implementation or fallback for the selected mode.
 
 Keyframe requests let the client recover after packet loss or decode stalls. `HapticsCommand` is
-reserved; runtime delivery and client playback are not implemented.
+played by the Quest/Pico client; the Apple clients do not play it.
 
 `NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
 

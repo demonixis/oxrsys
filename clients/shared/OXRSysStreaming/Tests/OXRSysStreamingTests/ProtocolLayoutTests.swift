@@ -128,8 +128,8 @@ final class ProtocolLayoutTests: XCTestCase {
     }
 
     func testTrackingLayoutMatchesCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1168)
-        XCTAssertEqual(MemoryLayout<TrackingPacket>.stride, 1168)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1176)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.stride, 1176)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headLinearVelocity), 152)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headAngularVelocity), 164)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftHandJoints), 176)
@@ -149,6 +149,8 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimAngularVelocity), 1132)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimLinearVelocity), 1144)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimAngularVelocity), 1156)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.controllerProfile), 1168)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.touchState), 1172)
         XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
         XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
         XCTAssertEqual(TrackingFlagsValues.headLinearVelocityValid, 0x0010)
@@ -171,5 +173,7 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(packet.trackingFlags, 0)
         XCTAssertEqual(packet.stageBoundsWidth, 0)
         XCTAssertEqual(packet.stageBoundsHeight, 0)
+        XCTAssertEqual(packet.controllerProfile, 0)
+        XCTAssertEqual(packet.touchState, 0)
     }
 }
