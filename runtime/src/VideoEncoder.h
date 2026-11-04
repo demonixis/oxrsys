@@ -162,6 +162,13 @@ public:
     // Stats
     uint32_t GetEncodedFrameCount() const { return frameCount_; }
     uint32_t GetDroppedFrameCount() const { return droppedFrameCount_.load(); }
+    uint64_t GetPreEncodeDropCount() const { return preEncodeDropCount_.load(); }
+    // A drop before encode is logged on the 1st and then every 450th (about 5 s at 90 Hz),
+    // so a stream that drops every frame keeps saying so.
+    static bool ShouldLogPreEncodeDrop(uint64_t dropNumber)
+    {
+        return dropNumber == 1 || (dropNumber != 0 && dropNumber % 450 == 0);
+    }
     uint32_t GetInFlightFrameCount() const { return inFlightFrameCount_.load(); }
 
 private:
@@ -290,7 +297,7 @@ private:
     uint64_t snapshotWaitSwitches_ = 0;
     uint64_t snapshotWaitSwitchesLogged_ = 0;
     std::chrono::steady_clock::time_point snapshotWaitLastLog_ = {};
-    std::atomic<bool> foveationValidationWarningLogged_{false};
+    std::atomic<uint64_t> preEncodeDropCount_{0};
     std::atomic<bool> videoRangeConversionWarningLogged_{false};
     std::atomic<uint32_t> droppedFrameCount_{0};
     std::atomic<uint32_t> inFlightFrameCount_{0};

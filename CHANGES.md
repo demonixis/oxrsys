@@ -88,6 +88,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Changed
 
+- A frame dropped before encode is now logged on the first drop and every 450th after it, with the
+  count so far, instead of only once per encoder. A stream that drops every frame keeps saying so.
 - The Quest/Pico client renders into a swapchain 1.3 times the recommended size per axis, capped at the
   runtime maximum, so streams up to the Quest 3 panel resolution are not downscaled into it. It also asks
   the compositor for quality supersampling and sharpening through `XR_FB_composition_layer_settings` when
@@ -121,6 +123,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed the current interaction profile before a client connects. With nothing tracked, the runtime reported
+  `khr/simple_controller` until a client connected, and apps that bind the first profile they see at session start
+  (Pistol Whip, on Unity's OpenXR plugin) kept it and ignored the later switch to Touch; Pistol Whip never drew
+  its guns. It now reports no profile (`XR_NULL_PATH`) until a controller or hand is tracked, as it already
+  did while a client was connected with nothing tracked.
 - Fixed washed-out video on the Quest/Pico client. The decoded video is already sRGB-encoded, and the
   client wrote it into a `GL_SRGB8_ALPHA8` swapchain, where GLES encodes it again on write. The blit shader
   now decodes it to linear first.
