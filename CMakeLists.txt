@@ -193,6 +193,8 @@ add_executable(oxrsys_runtime_tests
     tests/TestVulkanDispatch.cpp
     tests/TestCompositionLayerAlpha.cpp
     tests/TestCompositionOverlay.cpp
+    tests/TestProtocolFec.cpp
+    tests/TestVideoFrameAssembler.cpp
     tests/TestProtocolLayout.cpp
     tests/TestQuestPassthroughAlphaPolicy.cpp
     tests/TestQuestShellInteraction.cpp

@@ -114,6 +114,7 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
     SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
     SERVER_FEATURE_FOVEATION_EYE_CENTER = 0x00000400, // foveation centres follow each eye's forward direction
+    SERVER_FEATURE_FEC_INTERLEAVED = 0x00000800,
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -130,6 +131,10 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
     CLIENT_CAPABILITY_TEN_BIT_ENCODING = 0x00000400, // client can decode HEVC Main10
     CLIENT_CAPABILITY_FOVEATION_EYE_CENTER = 0x00000800, // client decodes eye-centred foveation
+    // The client assigns FEC groups by the interleaved layout (fec::GroupLayout). Must be
+    // negotiated: a receiver using a different layout from the sender XORs a packet out of the
+    // wrong group and produces plausible garbage rather than failing cleanly.
+    CLIENT_CAPABILITY_FEC_INTERLEAVED = 0x00001000,
 };
 
 enum ClientCodecCapabilityFlags : uint32_t

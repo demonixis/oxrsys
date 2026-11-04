@@ -50,6 +50,10 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(sizeof(StreamConfigAck) == 16);
     STATIC_REQUIRE(SERVER_FEATURE_STREAM_RECONFIGURE == 0x00000010);
     STATIC_REQUIRE(CLIENT_CAPABILITY_STREAM_RECONFIGURE == 0x00000010);
+    // A layout mismatch XORs the wrong packets together, so these bits must agree with every
+    // client mirror (Protocol.swift pins the same values).
+    STATIC_REQUIRE(SERVER_FEATURE_FEC_INTERLEAVED == 0x00000800);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FEC_INTERLEAVED == 0x00001000);
 
     // controllerProfile and touchState end at 1176, already a multiple of the struct's int64 alignment.
     STATIC_REQUIRE(sizeof(TrackingPacket) == 1176);

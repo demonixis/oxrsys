@@ -40,6 +40,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 - Added foveated_encoding_preset = "medium_plus": centre 0.50x0.45, edges 4x5, between medium
   and light (2752x1216 encoded for 2160x2160 eyes, against 2560x1120 and 3456x1536). It is
   announced as Medium with its own centre/edge parameters, which clients already read.
+- Added an interleaved FEC group layout, negotiated with `CLIENT_CAPABILITY_FEC_INTERLEAVED` and
+  `SERVER_FEATURE_FEC_INTERLEAVED`. Parity groups previously covered runs of consecutive packets,
+  so any two adjacent losses landed in the same group and could not be recovered - the common case
+  on Wi-Fi, where loss arrives in bursts. Interleaving spreads each group across the frame so
+  adjacent packets fall in different groups, which recovers bursts up to the group count at
+  identical parity overhead. Clients that do not advertise the capability keep the contiguous
+  layout unchanged.
 - Added first-class macOS `arm64` and `x86_64` CI lanes plus universal release packaging with
   architecture validation for the runtime and OXRSys Home.
 - Added a macOS/iOS simulator build lane covering the Cardboard-style stereo viewer and ARKit
