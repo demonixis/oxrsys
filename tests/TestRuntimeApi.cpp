@@ -4095,9 +4095,10 @@ TEST_CASE("EndSession waits for a haptics call still using the streaming server"
     const bool tcp = GENERATE(false, true);
     CAPTURE(tcp);
 
-    // Hold every haptics send on the live server for 300 ms, and end the session inside that window,
-    // so the call is always still using the server when xrEndSession stops it.
-    setenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US", "300000", 1);
+    // Hold every haptics send on the live server for 1 s, and end the session inside that window,
+    // so the call is always still using the server when xrEndSession stops it. CI runners can take
+    // several hundred milliseconds per frame to reach STOPPING, so the window must cover a few frames.
+    setenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US", "1000000", 1);
     RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
     unsetenv("OXRSYS_TEST_SEND_HAPTICS_DELAY_US");
     XrPath handPaths[2] = {context.Path("/user/hand/left"), context.Path("/user/hand/right")};
