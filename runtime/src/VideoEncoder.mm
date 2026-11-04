@@ -8,6 +8,8 @@
 #import "OverlayCompositor.h"
 #import "VideoTextureFormat.h"
 
+#include <Foveation.h>
+
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <IOSurface/IOSurface.h>
@@ -80,6 +82,19 @@ struct MetalFoveationUniforms
     vector_float2 edgeRatio;
     vector_float2 eyeSizeRatio;
     vector_uint2 sourceSrgb;
+    vector_float2 rightCenterShift;
+};
+
+struct MetalAlphaPackUniforms
+{
+    uint32_t outputWidth;
+    uint32_t eyeWidth;
+    uint32_t eyeHeight;
+    uint32_t alphaRows;
+    uint32_t stereo;
+    uint32_t padding;
+    float sourceUvScale[2];
+    float rightSourceUvOffset[2];
 };
 
 struct MetalVideoCopyUniforms
@@ -134,6 +149,57 @@ kernel void video_copy_kernel(texture2d<float, access::sample> sourceTexture [[t
     }
     outputTexture.write(color, params.destinationOrigin + gid);
 }
+
+struct AlphaPackUniforms
+{
+    uint outputWidth;
+    uint eyeWidth;
+    uint eyeHeight;
+    uint alphaRows;
+    uint stereo;
+    uint padding;
+    float2 sourceUvScale;
+    float2 rightSourceUvOffset;
+};
+
+kernel void alpha_pack_kernel(texture2d<float, access::sample> leftTexture [[texture(0)]],
+                              texture2d<float, access::sample> rightTexture [[texture(1)]],
+                              texture2d<float, access::write> outputTexture [[texture(2)]],
+                              sampler linearSampler [[sampler(0)]],
+                              constant AlphaPackUniforms& params [[buffer(0)]],
+                              uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= params.outputWidth || gid.y >= params.alphaRows)
+    {
+        return;
+    }
+
+    uint tileWidth = max(params.eyeWidth / 2, 1u);
+    uint tile = min(gid.x / tileWidth, params.stereo != 0 ? 3u : 1u);
+    bool rightEye = tile >= 2;
+    uint lowerHalf = tile & 1u;
+    float2 alphaSize = float2(tileWidth, params.alphaRows * 2);
+    float2 alphaTexel = float2(gid.x - tile * tileWidth, gid.y + lowerHalf * params.alphaRows);
+    texture2d<float, access::sample> source = rightEye ? rightTexture : leftTexture;
+    float2 sourceTexel = 1.0 / float2(source.get_width(), source.get_height());
+    float2 eyeOrigin = rightEye ? params.rightSourceUvOffset : float2(0.0);
+    float2 eyeMin = eyeOrigin + 0.5 * sourceTexel;
+    float2 eyeMax = eyeOrigin + params.sourceUvScale - 0.5 * sourceTexel;
+    float2 span = 1.0 / alphaSize;
+    // Each bilinear tap averages a 2x2 source block, so taps one source texel pair apart cover the span.
+    int2 taps = clamp(int2(ceil(span * params.sourceUvScale / sourceTexel * 0.5)), int2(1), int2(4));
+    float alpha = 0.0;
+    for (int y = 0; y < taps.y; ++y)
+    {
+        for (int x = 0; x < taps.x; ++x)
+        {
+            float2 eyeUv = (alphaTexel + (float2(x, y) + 0.5) / float2(taps)) * span;
+            alpha += source.sample(linearSampler, clamp(eyeOrigin + eyeUv * params.sourceUvScale, eyeMin, eyeMax)).a;
+        }
+    }
+    alpha /= float(taps.x * taps.y);
+    outputTexture.write(float4(alpha, alpha, alpha, 1.0), uint2(gid.x, params.eyeHeight + gid.y));
+}
 )METAL";
 
 // Axis-aligned foveated encoding shader logic adapted from ALVR's AADT
@@ -149,6 +215,7 @@ struct FoveationUniforms
     float2 edgeRatio;
     float2 eyeSizeRatio;
     uint2 sourceSrgb;
+    float2 rightCenterShift;
 };
 
 static float3 linear_to_srgb(float3 value)
@@ -203,16 +270,35 @@ kernel void foveation_kernel(texture2d<float, access::sample> leftTexture [[text
     uint eyeWidth = max(outputWidth / 2, 1u);
     bool rightEye = gid.x >= eyeWidth;
     uint localX = rightEye ? gid.x - eyeWidth : gid.x;
-    float2 uv = (float2(localX, gid.y) + float2(0.5)) / float2(eyeWidth, outputHeight);
-    float2 eyeUv = uv / max(params.eyeSizeRatio, float2(0.0001));
-    float2 compressedUv;
-    compressedUv.x = compress_axis(eyeUv.x, params.centerSize.x, params.centerShift.x, params.edgeRatio.x);
-    compressedUv.y = compress_axis(eyeUv.y, params.centerSize.y, params.centerShift.y, params.edgeRatio.y);
-    compressedUv = clamp(compressedUv, float2(0.0), float2(1.0));
+    float2 shift = rightEye ? params.rightCenterShift : params.centerShift;
+    float2 outputTexel = 1.0 / float2(eyeWidth, outputHeight);
+    float2 eyeScale = 1.0 / max(params.eyeSizeRatio, float2(0.0001));
+    float2 uv = (float2(localX, gid.y) + float2(0.5)) * outputTexel;
 
-    float4 color = rightEye
-        ? rightTexture.sample(linearSampler, compressedUv)
-        : leftTexture.sample(linearSampler, compressedUv);
+    // The source span this output pixel covers. In compressed bands it spans several source pixels,
+    // which are averaged instead of keeping one bilinear sample.
+    float2 lo = (uv - 0.5 * outputTexel) * eyeScale;
+    float2 hi = (uv + 0.5 * outputTexel) * eyeScale;
+    float2 sourceLo = float2(compress_axis(lo.x, params.centerSize.x, shift.x, params.edgeRatio.x),
+                             compress_axis(lo.y, params.centerSize.y, shift.y, params.edgeRatio.y));
+    float2 sourceHi = float2(compress_axis(hi.x, params.centerSize.x, shift.x, params.edgeRatio.x),
+                             compress_axis(hi.y, params.centerSize.y, shift.y, params.edgeRatio.y));
+    float2 sourceSize = rightEye ? float2(rightTexture.get_width(), rightTexture.get_height())
+                                 : float2(leftTexture.get_width(), leftTexture.get_height());
+    int2 taps = clamp(int2(ceil(abs(sourceHi - sourceLo) * sourceSize)), int2(1), int2(6));
+
+    float4 color = float4(0.0);
+    for (int ty = 0; ty < taps.y; ++ty)
+    {
+        for (int tx = 0; tx < taps.x; ++tx)
+        {
+            float2 sourceUv = clamp(mix(sourceLo, sourceHi, (float2(tx, ty) + 0.5) / float2(taps)),
+                                    float2(0.0), float2(1.0));
+            color += rightEye ? rightTexture.sample(linearSampler, sourceUv)
+                              : leftTexture.sample(linearSampler, sourceUv);
+        }
+    }
+    color /= float(taps.x * taps.y);
     if (params.sourceSrgb[rightEye ? 1 : 0] != 0)
     {
         color.rgb = linear_to_srgb(color.rgb);
@@ -564,7 +650,7 @@ bool TextureAllowsUsage(id<MTLTexture> texture, MTLTextureUsage requiredUsage)
            (declaredUsage & requiredUsage) == requiredUsage;
 }
 
-id<MTLComputePipelineState> CreateVideoCopyPipeline(id<MTLDevice> device)
+id<MTLComputePipelineState> CreateVideoComputePipeline(id<MTLDevice> device, NSString* functionName)
 {
     NSError* error = nil;
     NSString* source = [NSString stringWithUTF8String:kVideoCopyMetalSource];
@@ -576,7 +662,7 @@ id<MTLComputePipelineState> CreateVideoCopyPipeline(id<MTLDevice> device)
         return nil;
     }
 
-    id<MTLFunction> kernelFunction = [library newFunctionWithName:@"video_copy_kernel"];
+    id<MTLFunction> kernelFunction = [library newFunctionWithName:functionName];
     if (kernelFunction == nil)
     {
         spdlog::error("VideoEncoder: Failed to load texture conversion entry point");
@@ -816,6 +902,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     width_ = width;
     height_ = height;
+    frameHeight_ = packedAlpha_ ? height + oxr::protocol::PackedAlphaRows(height) : height;
     eyeWidth_ = width / 2;
     fps_ = fps;
     bitrateMbps_ = bitrateMbps;
@@ -843,7 +930,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
 
     videoToolbox_.commandQueue = (void*)[device newCommandQueue];
     videoToolbox_.scaler = (void*)[[MPSImageBilinearScale alloc] initWithDevice:device];
-    videoToolbox_.copyPipeline = (void*)CreateVideoCopyPipeline(device);
+    videoToolbox_.copyPipeline = (void*)CreateVideoComputePipeline(device, @"video_copy_kernel");
     videoToolbox_.copySampler = (void*)CreateLinearClampSampler(device);
     if (videoToolbox_.commandQueue == nullptr || videoToolbox_.scaler == nullptr ||
         videoToolbox_.copyPipeline == nullptr || videoToolbox_.copySampler == nullptr)
@@ -863,6 +950,17 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             return false;
         }
     }
+    if (packedAlpha_)
+    {
+        videoToolbox_.alphaPackPipeline = (void*)CreateVideoComputePipeline(device, @"alpha_pack_kernel");
+        if (videoToolbox_.alphaPackPipeline == nullptr)
+        {
+            spdlog::error("VideoEncoder: Packed alpha was negotiated but the shader is unavailable");
+            Shutdown();
+            return false;
+        }
+        spdlog::info("VideoEncoder: packing eye alpha into {} rows below the {}x{} eyes", frameHeight_ - height_, width_, height_);
+    }
 
     CVMetalTextureCacheRef cache = nullptr;
     CVReturn cvResult = CVMetalTextureCacheCreate(
@@ -879,7 +977,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     };
     NSDictionary* poolAttrs = @{
         (NSString*)kCVPixelBufferWidthKey: @(width),
-        (NSString*)kCVPixelBufferHeightKey: @(height),
+        (NSString*)kCVPixelBufferHeightKey: @(frameHeight_),
         (NSString*)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
         (NSString*)kCVPixelBufferIOSurfacePropertiesKey: @{},
         (NSString*)kCVPixelBufferMetalCompatibilityKey: @YES,
@@ -939,7 +1037,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             nullptr,
             MTLPixelFormatBGRA8Unorm,
             width_,
-            height_,
+            frameHeight_,
             0,
             &cvMetalTexture);
         if (cvResult != kCVReturnSuccess || cvMetalTexture == nullptr)
@@ -978,7 +1076,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     const bool forceSoftware = forceSoftwareForTesting_;
     const bool hardwareInProcess =
         !forceSoftware &&
-        HardwareEncoderAvailableInProcess(VideoToolboxCodecType(codec_), width, height);
+        HardwareEncoderAvailableInProcess(VideoToolboxCodecType(codec_), width, frameHeight_);
     {
         oxrsys::encoder::EncodePathInputs pathInputs;
         pathInputs.codec = codec_;
@@ -1011,7 +1109,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     OSStatus status = VTCompressionSessionCreate(
         kCFAllocatorDefault,
         width,
-        height,
+        frameHeight_,
         VideoToolboxCodecType(codec_),
         (__bridge CFDictionaryRef)encoderSpec,
         nullptr,
@@ -1032,7 +1130,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
             (NSString*)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: @NO,
         };
         status = VTCompressionSessionCreate(
-            kCFAllocatorDefault, width, height, VideoToolboxCodecType(codec_),
+            kCFAllocatorDefault, width, frameHeight_, VideoToolboxCodecType(codec_),
             (__bridge CFDictionaryRef)relaxedSpec, nullptr, kCFAllocatorDefault,
             CompressionOutputCallback, nullptr, &compressionSession);
     }
@@ -1176,7 +1274,7 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps,
     // and this session takes over mid-stream. Hand it an explicitly video-range
     // 4:2:0 conversion of each frame instead; see EncoderSessionColor.h. Set up
     // now, not on helper death, so the fallback never allocates on the frame path.
-    if (!inProcessSessionHardware_ && !CreateVideoRangeConversion(width, height))
+    if (!inProcessSessionHardware_ && !CreateVideoRangeConversion(width, frameHeight_))
     {
         spdlog::warn("VideoEncoder: could not set up the video-range conversion for the software "
                      "{} session - its stream may signal full range",
@@ -1304,7 +1402,7 @@ bool VideoEncoder::TryStartHelper()
 
     EncoderHelperClient::Config helperConfig;
     helperConfig.width = width_;
-    helperConfig.height = height_;
+    helperConfig.height = frameHeight_;
     helperConfig.fps = fps_;
     helperConfig.bitrateMbps = bitrateMbps_;
     helperConfig.keyframeIntervalSec = config.keyframeIntervalSec;
@@ -1469,6 +1567,58 @@ void VideoEncoder::OnHelperDied()
     ReclaimHelperFrames("encoder helper died");
 }
 
+bool VideoEncoder::EncodeAlphaPack(void* commandBuffer, void* leftTexture, void* rightTexture, void* outputTexture,
+                                   bool stereo, bool eyesSideBySide)
+{
+    id<MTLCommandBuffer> cmdBuf = (id<MTLCommandBuffer>)commandBuffer;
+    id<MTLTexture> leftTex = (id<MTLTexture>)leftTexture;
+    id<MTLTexture> rightTex = (id<MTLTexture>)rightTexture;
+    id<MTLTexture> dstTexture = (id<MTLTexture>)outputTexture;
+    id<MTLComputePipelineState> pipeline = (id<MTLComputePipelineState>)videoToolbox_.alphaPackPipeline;
+    if (pipeline == nil || dstTexture.height < (NSUInteger)frameHeight_ ||
+        !TextureAllowsUsage(leftTex, MTLTextureUsageShaderRead) ||
+        !TextureAllowsUsage(rightTex, MTLTextureUsageShaderRead) ||
+        !TextureAllowsUsage(dstTexture, MTLTextureUsageShaderWrite))
+    {
+        return false;
+    }
+
+    MetalAlphaPackUniforms uniforms = {};
+    uniforms.outputWidth = width_;
+    uniforms.eyeWidth = stereo ? eyeWidth_ : width_;
+    uniforms.eyeHeight = height_;
+    uniforms.alphaRows = frameHeight_ - height_;
+    uniforms.stereo = stereo ? 1u : 0u;
+    uniforms.sourceUvScale[0] = eyesSideBySide ? static_cast<float>(uniforms.eyeWidth) / leftTex.width : 1.0f;
+    uniforms.sourceUvScale[1] = eyesSideBySide ? static_cast<float>(height_) / leftTex.height : 1.0f;
+    uniforms.rightSourceUvOffset[0] = eyesSideBySide ? uniforms.sourceUvScale[0] : 0.0f;
+    uniforms.rightSourceUvOffset[1] = 0.0f;
+
+    id<MTLComputeCommandEncoder> computeEncoder = [cmdBuf computeCommandEncoder];
+    if (computeEncoder == nil)
+    {
+        return false;
+    }
+    [computeEncoder setComputePipelineState:pipeline];
+    [computeEncoder setTexture:leftTex atIndex:0];
+    [computeEncoder setTexture:rightTex atIndex:1];
+    [computeEncoder setTexture:dstTexture atIndex:2];
+    [computeEncoder setSamplerState:(id<MTLSamplerState>)videoToolbox_.copySampler atIndex:0];
+    [computeEncoder setBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+
+    const NSUInteger threadsX = std::max<NSUInteger>(1, std::min<NSUInteger>(pipeline.threadExecutionWidth, 16));
+    const NSUInteger threadsY = std::max<NSUInteger>(
+        1,
+        std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup / threadsX, 16));
+    const MTLSize threadgroups = MTLSizeMake(
+        ((NSUInteger)uniforms.outputWidth + threadsX - 1) / threadsX,
+        ((NSUInteger)uniforms.alphaRows + threadsY - 1) / threadsY,
+        1);
+    [computeEncoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:MTLSizeMake(threadsX, threadsY, 1)];
+    [computeEncoder endEncoding];
+    return true;
+}
+
 bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
 {
     const auto deadline = Clock::now() + timeout;
@@ -1577,6 +1727,11 @@ bool VideoEncoder::Shutdown(std::chrono::nanoseconds timeout)
     {
         [(id<MTLSamplerState>)videoToolbox_.foveationSampler release];
         videoToolbox_.foveationSampler = nullptr;
+    }
+    if (videoToolbox_.alphaPackPipeline != nullptr)
+    {
+        [(id<MTLComputePipelineState>)videoToolbox_.alphaPackPipeline release];
+        videoToolbox_.alphaPackPipeline = nullptr;
     }
     if (videoToolbox_.commandQueue != nullptr)
     {
@@ -1715,7 +1870,8 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
 
 
     // Vulkan/MoltenVK snapshots are submitted from xrReleaseSwapchainImage on
-    // the application's queue (projection and overlay layers alike), behind the
+    // the application's queue (projection and overlay layers alike, and from
+    // xrEndFrame for an overlay whose release took none), behind the
     // application's own rendering, so the fence signals only when the
     // application's GPU frame is done. Wait for those copies only on this
     // encoder worker, never from Session::EndFrame().
@@ -2038,6 +2194,24 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
         MetalFoveationUniforms uniforms = {};
         uniforms.centerSize = {foveationSettings_.centerSizeX, foveationSettings_.centerSizeY};
         uniforms.centerShift = {foveationSettings_.centerShiftX, foveationSettings_.centerShiftY};
+        uniforms.rightCenterShift = uniforms.centerShift;
+        if (foveationSettings_.eyeCentered)
+        {
+            const float* leftFov = frameSource.left.fov;
+            const float* rightFov = frameSource.right.fov;
+            float leftX = 0.0f;
+            float leftY = 0.0f;
+            float rightX = 0.0f;
+            float rightY = 0.0f;
+            oxr::protocol::EyeCenterShifts(leftFov[0], leftFov[1], leftFov[2], leftFov[3],
+                                           foveationSettings_.centerSizeX, foveationSettings_.centerSizeY,
+                                           leftX, leftY);
+            oxr::protocol::EyeCenterShifts(rightFov[0], rightFov[1], rightFov[2], rightFov[3],
+                                           foveationSettings_.centerSizeX, foveationSettings_.centerSizeY,
+                                           rightX, rightY);
+            uniforms.centerShift = {leftX, leftY};
+            uniforms.rightCenterShift = {rightX, rightY};
+        }
         uniforms.edgeRatio = {foveationSettings_.edgeRatioX, foveationSettings_.edgeRatioY};
         uniforms.eyeSizeRatio = {foveationSettings_.eyeWidthRatio, foveationSettings_.eyeHeightRatio};
         uniforms.sourceSrgb = {
@@ -2188,6 +2362,18 @@ bool VideoEncoder::EncodeInternal(FrameSource frameSource, bool stereo,
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
+    }
+
+    // Foveated eyes carry their alpha in the scratch image, so the alpha rows follow the same foveation.
+    id<MTLTexture> foveatedEyes = useFoveatedEncoding ? (id<MTLTexture>)slot.foveatedScratchTexture : nil;
+    const bool packedAlphaPacked = !packedAlpha_ ||
+        (foveatedEyes != nil
+            ? EncodeAlphaPack((void*)cmdBuf, (void*)foveatedEyes, (void*)foveatedEyes, (void*)dstTexture, stereo, true)
+            : EncodeAlphaPack((void*)cmdBuf, (void*)leftTex, (void*)(stereo ? rightTex : leftTex), (void*)dstTexture,
+                              stereo, false));
+    if (!packedAlphaPacked)
+    {
+        return dropAcquiredSlot("failed to pack eye alpha");
     }
 
     auto* context = new EncodeFrameContext();

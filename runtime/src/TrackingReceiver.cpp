@@ -261,14 +261,17 @@ void TrackingReceiver::ReceivePacket(const uint8_t* data, size_t size, const soc
 {
     // Only the admitted client may drive the pose. A refused or not-yet-admitted client keeps
     // sending tracking, and its clock interleaved with the active one makes the head pose jump.
-    if (source.sin_addr.s_addr != clientAddress_.load())
-    {
-        return;
-    }
-    InjectPacket(data, size);
+    // StorePacket compares the source under poseMutex_, so a datagram that arrives while the
+    // client changes is either cleared by the reset or refused after it.
+    StorePayload(data, size, &source.sin_addr.s_addr);
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
+{
+    StorePayload(data, size, nullptr);
+}
+
+void TrackingReceiver::StorePayload(const uint8_t* data, size_t size, const uint32_t* udpSource)
 {
     if (data == nullptr || size < kMinTrackingPacketSize)
     {
@@ -311,7 +314,7 @@ void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
         }
     }
     ClearFieldsBeyond(packet, size);
-    StorePacket(packet, SteadyClockNowNs());
+    StorePacket(packet, SteadyClockNowNs(), udpSource);
 }
 
 bool TrackingReceiver::GetLatestPose(oxr::protocol::TrackingPacket& outPacket) const
@@ -505,12 +508,17 @@ void TrackingReceiver::ResetHistory()
     spdlog::info("TrackingReceiver: history reset for a new client");
 }
 
-void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs)
+void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs,
+                                   const uint32_t* udpSource)
 {
     oxr::protocol::TrackingPacket normalizedPacket = packet;
 
     {
         std::lock_guard<std::mutex> lock(poseMutex_);
+        if (udpSource != nullptr && *udpSource != clientAddress_.load())
+        {
+            return;
+        }
 
         // Drop out-of-order / duplicate tracking packets. UDP reorders packets freely over Wi-Fi,
         // and the client stamps each sample with a monotonically increasing timestamp. If a packet

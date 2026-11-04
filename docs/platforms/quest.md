@@ -56,10 +56,14 @@ releasing only the local shell GL resources. It does not by itself expose OpenXR
 environment modes to desktop apps. Apps can opt into streamed alpha passthrough only when the
 advanced `streaming.app_alpha_blend_passthrough = true` setting is enabled before the OpenXR instance
 is created; normal VR apps should leave it disabled so dark reflections and black content stay
-opaque. Alpha-capable frames are marked in the video stream. Until a real alpha or depth transport
-exists, the Quest shader only applies black-key alpha when an explicit compatibility/debug path
-allows it; the default path uses protocol alpha flags and never treats ordinary dark pixels as
-transparent.
+opaque. Alpha-capable frames are marked in the video stream. The client advertises
+`CLIENT_CAPABILITY_MIXED_REALITY_ALPHA` with passthrough, and the runtime then appends each eye's
+alpha below the eyes (`VIDEO_FLAG_PACKED_ALPHA`), which the blit shader reads as the layer alpha. Packed
+alpha has half the encoded resolution; at partly transparent edges the shader scales it by each pixel's
+premultiplied colour against its 2x2 block, so coloured edges stay sharp.
+Without packed alpha, the Quest shader only applies black-key alpha when an explicit
+compatibility/debug path allows it; the default path uses protocol alpha flags and never treats
+ordinary dark pixels as transparent.
 
 This support is negotiated, not hardcoded by model name. The client advertises
 `CLIENT_CAPABILITY_MIXED_REALITY_PASSTHROUGH` only after the headset OpenXR runtime exposes
@@ -235,10 +239,10 @@ Confirm:
 ## USB ADB Transport
 
 The USB path is optimized for sideloaded Quest development. The macOS SwiftUI Home app can detect an
-authorized Quest directly through the headset USB ADB interface, complete ADB authentication with a
-Home-managed host key, and configure reverse mappings without Android Studio, the Android SDK, or an
-`adb` executable. If the native path is unavailable, Home falls back to a running local ADB server on
-`127.0.0.1:5037` or an `adb` executable. Selecting USB in Home automatically checks and configures
+authorized Quest directly through the headset USB ADB interface and complete ADB authentication with
+a Home-managed host key without Android Studio, the Android SDK, or an `adb` executable. Reverse
+mappings always use a running ADB server on `127.0.0.1:5037` or an `adb` executable, because adbd
+drops them when their host connection closes. Selecting USB in Home automatically checks and configures
 the reverse mappings for the selected or single authorized device. The equivalent manual fallback
 commands are:
 

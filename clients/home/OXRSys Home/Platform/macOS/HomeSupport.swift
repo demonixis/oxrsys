@@ -710,7 +710,7 @@ struct HomeAdbStatus: Equatable, Sendable {
     nonisolated static var missing: HomeAdbStatus {
         HomeAdbStatus(
             executablePath: nil,
-            message: "Connect a USB debugging-enabled headset, or configure an external ADB fallback."
+            message: "No USB debugging headset, ADB server or adb was found. Connect a headset with USB debugging for device listing and USB Net; USB reverse also needs a running ADB server or an adb executable."
         )
     }
 
@@ -745,7 +745,7 @@ struct HomeAdbStatus: Equatable, Sendable {
     nonisolated static var nativeUsb: HomeAdbStatus {
         HomeAdbStatus(
             executablePath: "adb-usb://native",
-            message: "Native USB ADB is available; Android SDK tools are not required."
+            message: "Native USB ADB is available for device listing and USB Net. USB reverse needs a running ADB server or an adb executable."
         )
     }
 }
@@ -753,14 +753,12 @@ struct HomeAdbStatus: Equatable, Sendable {
 enum HomeAdbInstallGuidance {
     static let title = "USB debugging setup is required"
     static let message = """
-    USB streaming can configure the ADB reverse tunnel directly through the headset USB connection. Android Studio and the Android SDK are not required.
+    Enable developer mode and USB debugging on the headset, connect it over USB, then accept the computer authorization prompt inside the headset. Home then lists the headset and can set up USB Net without Android Studio, the Android SDK, or adb.
 
-    Enable developer mode and USB debugging on the headset, connect it over USB, then accept the computer authorization prompt inside the headset.
-
-    External adb remains optional for diagnostics. With Homebrew, run:
-    brew install adb-enhanced
+    USB reverse streaming needs a running ADB server or an adb executable. With Homebrew, run:
+    brew install --cask android-platform-tools
     """
-    static let homebrewURL = URL(string: "https://formulae.brew.sh/formula/adb-enhanced#default")!
+    static let homebrewURL = URL(string: "https://formulae.brew.sh/cask/android-platform-tools")!
 }
 
 struct QuestUsbDevice: Identifiable, Equatable, Sendable {
@@ -992,6 +990,10 @@ enum AdbUsbProtocolError: LocalizedError {
 }
 
 enum AdbUsbBridge {
+    // USBInterfaceOpen claims the interface exclusively: a native connection opened while another
+    // Home worker holds one would fail over to the ADB server or external adb, so take turns.
+    nonisolated private static let connectionLock = NSLock()
+
     nonisolated static func isAvailable() -> Bool {
         guard let services = try? matchingServices() else {
             return false
@@ -1005,6 +1007,8 @@ enum AdbUsbBridge {
     }
 
     nonisolated static func devices() throws -> [QuestUsbDevice] {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let services = try matchingServices()
         guard !services.isEmpty else {
             throw AdbUsbProtocolError.noDevice
@@ -1050,6 +1054,8 @@ enum AdbUsbBridge {
     }
 
     nonisolated static func shell(_ command: String, serial: String) throws -> String {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
         let (connection, _) = try connectedDevice(matching: serial)
         return try connection.runService("shell:\(command)")
     }
@@ -2117,7 +2123,7 @@ enum QuestUsbBridgeError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .adbNotFound:
-            return "No native USB ADB headset was available, no ADB server was available on 127.0.0.1:5037, and adb was not found from OXRSys Home. Connect a developer-mode headset over USB and accept USB debugging, or configure an optional adb fallback."
+            return "No ADB server was available on 127.0.0.1:5037 and adb was not found from OXRSys Home. Native USB ADB lists a connected, authorized headset and sets up USB Net without them, but USB reverse needs one of them: install adb, or select a custom adb in Settings."
         case let .invalidCustomAdb(path):
             return "Custom adb path is invalid: \(path). Select an executable adb that passes `adb version`, or clear the custom path to auto-detect."
         case let .missingReversePorts(ports):

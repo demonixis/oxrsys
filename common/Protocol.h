@@ -113,6 +113,7 @@ enum ServerFeatureFlags : uint32_t
     SERVER_FEATURE_DEPTH_OCCLUSION = 0x00000080,
     SERVER_FEATURE_SPATIAL_ENTITY = 0x00000100,
     SERVER_FEATURE_SCENE_CAPTURE = 0x00000200,
+    SERVER_FEATURE_FOVEATION_EYE_CENTER = 0x00000400, // foveation centres follow each eye's forward direction
 };
 
 enum ClientCapabilityFlags : uint32_t
@@ -128,6 +129,7 @@ enum ClientCapabilityFlags : uint32_t
     CLIENT_CAPABILITY_SPATIAL_ENTITY = 0x00000100,
     CLIENT_CAPABILITY_SCENE_CAPTURE = 0x00000200,
     CLIENT_CAPABILITY_TEN_BIT_ENCODING = 0x00000400, // client can decode HEVC Main10
+    CLIENT_CAPABILITY_FOVEATION_EYE_CENTER = 0x00000800, // client decodes eye-centred foveation
 };
 
 enum ClientCodecCapabilityFlags : uint32_t
@@ -258,7 +260,21 @@ enum VideoFlags : uint8_t
     VIDEO_FLAG_FEC = 0x10,     // Forward Error Correction parity packet
     VIDEO_FLAG_RENDER_POSE = 0x20, // Payload contains the server's render pose for this frame
     VIDEO_FLAG_ALPHA_BLEND = 0x40, // App submitted alpha-blend environment or source-alpha projection layer
+    VIDEO_FLAG_PACKED_ALPHA = 0x80, // Rows below the eyes carry each eye's alpha at PackedAlphaRows height
 };
+
+// Packed alpha (CLIENT_CAPABILITY_MIXED_REALITY_ALPHA): the encoded frame is the eyes followed by
+// PackedAlphaRows(eyeHeight) rows holding each eye's alpha as grey, at half the eye's width and height.
+// Each eye's alpha is split into its top and bottom halves, placed side by side in that eye's columns.
+constexpr uint32_t PackedAlphaRows(uint32_t eyeHeight)
+{
+    return (eyeHeight + 3) / 4;
+}
+
+constexpr uint32_t PackedAlphaEyeHeight(uint32_t frameHeight)
+{
+    return frameHeight * 4 / 5;
+}
 
 struct AudioPacketHeader
 {

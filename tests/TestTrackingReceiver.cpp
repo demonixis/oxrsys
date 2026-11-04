@@ -5,6 +5,7 @@
 
 #include "TrackingReceiver.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -228,4 +229,48 @@ TEST_CASE("Tracking receiver accepts UDP tracking only from the connected client
     clientPacket.timestampNs = 4'000'000'000;
     receiver.ReceivePacket(clientBytes, sizeof(clientPacket), client);
     CHECK(receiver.GetPacketCount() == 2);
+}
+
+TEST_CASE("Tracking receiver keeps no sample from a client replaced while it sends", "[tracking]")
+{
+    TrackingReceiver receiver;
+    sockaddr_in previous = {};
+    previous.sin_family = AF_INET;
+    previous.sin_addr.s_addr = inet_addr("127.0.0.2");
+    previous.sin_port = htons(50000);
+
+    // A sample stored after the switch would shadow the next client's clock. The switch is
+    // ordered like the server's, address first and then the history, while the replaced client
+    // keeps sending; repeat it so a datagram is often in flight when the client changes.
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        CAPTURE(attempt);
+        receiver.SetClientAddress(previous.sin_addr.s_addr);
+        std::atomic<bool> sending{true};
+        std::atomic<uint32_t> sent{0};
+        std::thread sender([&] {
+            TrackingPacket packet = {};
+            packet.timestampNs = 500'000'000'000'000;
+            packet.headOrientation[3] = 1.0f;
+            while (sending.load())
+            {
+                ++packet.timestampNs;
+                receiver.ReceivePacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet), previous);
+                sent.fetch_add(1);
+            }
+        });
+        while (sent.load() == 0)
+        {
+            std::this_thread::yield();
+        }
+
+        receiver.SetClientAddress(0);
+        receiver.Reset();
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+        sending.store(false);
+        sender.join();
+
+        TrackingPacket latest = {};
+        REQUIRE_FALSE(receiver.GetLatestPose(latest));
+    }
 }

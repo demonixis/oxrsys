@@ -78,7 +78,8 @@ void CheckAxis(const AxisCase& axis, double& maxUvError, double& maxSlopeError)
         double expected = BisectInverse(t, axis.centerSize, axis.centerShift, axis.edgeRatio);
         maxUvError = std::fmax(maxUvError, std::fabs(u - expected));
 
-        const double h = 1e-4;
+        // Small enough for the narrow, strongly curved edge that a centre shift near +-1 leaves.
+        const double h = 1e-5;
         if (t > 2.0 * h && t < 1.0 - 2.0 * h)
         {
             double tPlus = std::fmin(t + h, 1.0);
@@ -120,10 +121,14 @@ AxisCase AxisY(const oxr::protocol::FoveationPresetParameters& p, float shift)
 TEST_CASE("Quest foveation closed-form inverse matches the server warp", "[quest][foveation]")
 {
     using oxr::protocol::FoveationPreset;
-    for (FoveationPreset preset : {FoveationPreset::Light, FoveationPreset::Medium, FoveationPreset::High})
+    using oxr::protocol::ParametersForPreset;
+    for (const oxr::protocol::FoveationPresetParameters& params :
+         {ParametersForPreset(FoveationPreset::Light), ParametersForPreset(FoveationPreset::Medium),
+          oxr::protocol::MediumPlusParameters(), ParametersForPreset(FoveationPreset::High)})
     {
-        oxr::protocol::FoveationPresetParameters params = oxr::protocol::ParametersForPreset(preset);
-        for (float shift : {0.0f, 0.1f, -0.1f, 0.4f, -0.4f})
+        // Eye-centred foveation (EyeCenterShift) shifts a Quest 3 eye by up to about +-0.6 on light
+        // and clamps to +-1 for a strongly asymmetric fov.
+        for (float shift : {0.0f, 0.1f, -0.1f, 0.4f, -0.4f, 0.6f, -0.6f, 0.9f, -0.9f, 1.0f, -1.0f})
         {
             for (const AxisCase& axis : {AxisX(params, shift), AxisY(params, shift)})
             {

@@ -38,7 +38,9 @@ public:
     VideoDecoder(const VideoDecoder&) = delete;
     VideoDecoder& operator=(const VideoDecoder&) = delete;
 
-    bool Initialize(uint32_t width, uint32_t height, protocol::VideoCodec codec);
+    // The decoder keeps decoding a stream whose size changes within maxWidth x maxHeight.
+    bool Initialize(uint32_t width, uint32_t height, uint32_t maxWidth, uint32_t maxHeight,
+                    protocol::VideoCodec codec);
     void Shutdown();
 
     // Feed an encoded video NAL unit to the decoder.
@@ -73,8 +75,8 @@ public:
     bool IsInitialized() const { return codec_ != nullptr; }
     protocol::VideoCodec GetCodec() const { return activeCodec_; }
 
-    uint32_t GetWidth() const { return width_; }
-    uint32_t GetHeight() const { return height_; }
+    uint32_t GetMaxWidth() const { return maxWidth_; }
+    uint32_t GetMaxHeight() const { return maxHeight_; }
     uint32_t GetSkippedFramesBeforeAcquire() const { return skippedFramesBeforeAcquire_.load(); }
 
 private:
@@ -102,8 +104,8 @@ private:
     std::atomic<bool> outputThreadRunning_{false};
     std::atomic<uint32_t> outputFramesReleasedSinceAcquire_{0};
 
-    uint32_t width_ = 0;
-    uint32_t height_ = 0;
+    uint32_t maxWidth_ = 0;
+    uint32_t maxHeight_ = 0;
     std::mutex metadataMutex_;
     std::deque<PendingFrameMetadata> pendingFrames_;
     std::atomic<uint32_t> skippedFramesBeforeAcquire_{0};

@@ -5,6 +5,7 @@
 #include <Foveation.h>
 #include <Protocol.h>
 
+#include <cmath>
 #include <cstddef>
 
 using namespace oxr::protocol;
@@ -23,6 +24,8 @@ TEST_CASE("C++ protocol layouts match the documented wire format", "[protocol]")
     STATIC_REQUIRE(CLIENT_CODEC_CAPABILITY_H265 == 0x00000001);
     STATIC_REQUIRE(CLIENT_CODEC_CAPABILITY_H264 == 0x00000002);
     STATIC_REQUIRE(CLIENT_CAPABILITY_TEN_BIT_ENCODING == 0x00000400);
+    STATIC_REQUIRE(CLIENT_CAPABILITY_FOVEATION_EYE_CENTER == 0x00000800);
+    STATIC_REQUIRE(SERVER_FEATURE_FOVEATION_EYE_CENTER == 0x00000400);
     STATIC_REQUIRE(sizeof(VideoPacketHeader) == 24);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, fecGroupLastPacketPayloadSize) == 12);
     STATIC_REQUIRE(offsetof(VideoPacketHeader, reserved) == 14);
@@ -114,6 +117,25 @@ TEST_CASE("Foveated encoding presets calculate ALVR-style optimized eye sizes", 
     CHECK(off.optimizedEyeHeight == 2144);
 }
 
+TEST_CASE("Eye centre shift puts the full-resolution region on the eye's forward direction", "[protocol][foveation]")
+{
+    CHECK(EyeCenterShift(1.0f, 1.0f, 0.5f) == 0.0f);
+    // Quest 3 left eye: about 49.8 degrees outwards and 37.9 inwards.
+    const float shift = EyeCenterShift(std::tan(0.869f), std::tan(0.662f), 0.5f);
+    CHECK(shift > 0.35f);
+    CHECK(shift < 0.45f);
+    CHECK(std::fabs(EyeCenterShift(std::tan(0.662f), std::tan(0.869f), 0.5f) + shift) < 1e-5f);
+    CHECK(EyeCenterShift(10.0f, 0.1f, 0.5f) == 1.0f);
+    CHECK(EyeCenterShift(0.0f, 0.0f, 0.5f) == 0.0f);
+    CHECK(EyeCenterShift(1.0f, 2.0f, 1.0f) == 0.0f);
+
+    float shiftX = 0.0f;
+    float shiftY = 0.0f;
+    EyeCenterShifts(-0.869f, 0.662f, 0.785f, -0.785f, 0.5f, 0.45f, shiftX, shiftY);
+    CHECK(std::fabs(shiftX - shift) < 1e-5f);
+    CHECK(std::fabs(shiftY) < 1e-5f);
+}
+
 TEST_CASE("Explicit foveation parameters: medium_plus sits between medium and light", "[protocol][foveation]")
 {
     // The parameters overload given a preset's own parameters is the preset overload.
@@ -172,4 +194,18 @@ TEST_CASE("Quest foveated layout stays aligned and rejects incoherent targets", 
     const FoveationLayout scaledLayout =
         CalculateFoveationLayout(1136, 1264, FoveationPreset::Light);
     CHECK_FALSE(IsFoveatedEncodingLayoutUsable(scaledLayout, 1512, 1680));
+}
+
+TEST_CASE("Packed alpha rows recover the eye height from the encoded height", "[protocol][passthrough]")
+{
+    STATIC_REQUIRE(VIDEO_FLAG_ALPHA_BLEND == 0x40);
+    STATIC_REQUIRE(VIDEO_FLAG_PACKED_ALPHA == 0x80);
+    CHECK(PackedAlphaRows(1264) == 316);
+    CHECK(PackedAlphaRows(1680) == 420);
+    CHECK(PackedAlphaRows(63) == 16);
+    for (uint32_t eyeHeight = 1; eyeHeight <= 4096; ++eyeHeight)
+    {
+        INFO("eye height " << eyeHeight);
+        CHECK(PackedAlphaEyeHeight(eyeHeight + PackedAlphaRows(eyeHeight)) == eyeHeight);
+    }
 }
