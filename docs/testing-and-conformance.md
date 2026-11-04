@@ -79,8 +79,8 @@ cmake -B build_cts -G Ninja \
 cmake --build build_cts --target openxr_cts_run
 ```
 
-The CTS sub-build receives the resolved `metal` and `metallib` paths. As of March 17, 2026, the
-pinned local baseline is 63 passed, 36 skipped, and 0 failed. Record a new date and exact counts
+The CTS sub-build receives the resolved `metal` and `metallib` paths. As of November 3, 2026, the
+pinned local baseline is 64 passed, 35 skipped, and 0 failed. Record a new date and exact counts
 whenever the pin or result changes.
 
 ## Physical Qualification
@@ -89,7 +89,7 @@ Automated checks do not replace these release gates:
 
 - launch and register OXRSys on a real Apple Silicon Mac and real Intel Mac
 - stream an actual Metal application and an actual Vulkan/MoltenVK application
-- test WiFi and native ADB reverse USB on affected Quest 1/2/3/Pro and Pico devices
+- test WiFi and USB ADB reverse on affected Quest 1/2/3/Pro and Pico devices
 - validate controller, hand, codec, refresh-rate, passthrough, ABR, and reprojection changes
 - for encoder-helper changes, stream H.265 Main, H.265 Main10, and H.264 from an `x86_64` runtime
   under Rosetta to a physical headset, then kill the helper mid-stream and confirm the stream

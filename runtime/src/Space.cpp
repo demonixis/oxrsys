@@ -241,6 +241,17 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
 
     LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
     LocatedWorldPose basePose = baseSpace == this ? thisPose : GetWorldPose(baseSpace, inputManager);
+    if (type_ == Type::Reference && baseSpace->GetType() == Type::Reference &&
+        referenceSpaceType_ == baseSpace->GetReferenceSpaceType())
+    {
+        // Two spaces of one reference space type move together (VIEW spaces with the head), so their
+        // relative velocity is known and zero even while that motion is not measured, as without a
+        // tracking connection.
+        XrSpaceVelocity atRest = {XR_TYPE_SPACE_VELOCITY};
+        atRest.velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+        thisPose.velocity = atRest;
+        basePose.velocity = atRest;
+    }
     LocateRelativePose(thisPose, basePose, location);
 
     return XR_SUCCESS;

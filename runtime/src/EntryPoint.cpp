@@ -19,6 +19,7 @@
 #include "HandTracker.h"
 #include "Config.h"
 #include "RuntimeStatus.h"
+#include "TimespecConversion.h"
 #include "VulkanDispatch.h"
 #include <spdlog/spdlog.h>
 #include <glm/glm.hpp>
@@ -586,6 +587,10 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrEnumerateApiLayerProperties(
     return XR_SUCCESS;
 }
 
+#ifdef XR_USE_TIMESPEC
+static int64_t MonotonicFallbackEpochNs();
+#endif
+
 static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     const XrInstanceCreateInfo* createInfo, XrInstance* instance)
 {
@@ -649,6 +654,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateInstance(
     }
 
     gInstance = std::make_unique<Instance>(createInfo->applicationInfo.apiVersion, enabledExtensions);
+#ifdef XR_USE_TIMESPEC
+    MonotonicFallbackEpochNs();
+#endif
     RuntimeStatus::SetApplicationName(createInfo->applicationInfo.applicationName);
     *instance = reinterpret_cast<XrInstance>(gInstance->GetHandle());
     return XR_SUCCESS;
@@ -2589,23 +2597,42 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrCreateActionSpace(
     return sess->CreateActionSpace(createInfo->action, subactionPath, createInfo->poseInActionSpace, space);
 }
 
-// The hands a haptic call reaches: its subaction path, or every hand the action declares.
-static bool HapticsTargetsHand(const ActionState* action, XrPath subactionPath, const char* handPath)
+// The hands a haptic call reaches: those whose /output/haptic the action is bound to in the hand's active
+// interaction profiles, narrowed to its subaction path or, without one, to the hands the action declares, if any.
+static bool HapticsTargetsHand(const InputManager& inputManager, const ActionState* action, XrPath subactionPath,
+                               InputManager::Hand hand)
 {
-    if (subactionPath != XR_NULL_PATH)
+    const XrPath handPath = TopLevelPathFromHand(hand);
+    if (subactionPath != XR_NULL_PATH && subactionPath != handPath)
     {
-        return Runtime::Get().GetPathString(subactionPath) == handPath;
+        return false;
     }
     const std::vector<XrPath>& subactionPaths = action->GetSubactionPaths();
-    if (subactionPaths.empty())
+    if (subactionPath == XR_NULL_PATH && !subactionPaths.empty() &&
+        std::find(subactionPaths.begin(), subactionPaths.end(), handPath) == subactionPaths.end())
     {
-        return true;
+        return false;
     }
-    for (XrPath path : subactionPaths)
+    for (const std::string& profilePathString : inputManager.GetActiveInteractionProfiles(hand))
     {
-        if (Runtime::Get().GetPathString(path) == handPath)
+        if (profilePathString.empty())
         {
-            return true;
+            continue;
+        }
+        XrPath profilePath = XR_NULL_PATH;
+        Runtime::Get().StringToPath(profilePathString.c_str(), &profilePath);
+        auto profileIt = gSuggestedBindings.find(static_cast<uint64_t>(profilePath));
+        if (profileIt == gSuggestedBindings.end())
+        {
+            continue;
+        }
+        for (const auto& binding : profileIt->second)
+        {
+            if (binding.actionHandle == action->GetHandle() && binding.topLevelPath == handPath &&
+                binding.bindingPathString.ends_with("/output/haptic"))
+            {
+                return true;
+            }
         }
     }
     return false;
@@ -2614,12 +2641,11 @@ static bool HapticsTargetsHand(const ActionState* action, XrPath subactionPath, 
 static void SendHapticsToHands(Session* sess, const ActionState* action, XrPath subactionPath,
                                float amplitude, float durationMs, float frequency)
 {
-    const char* handPaths[] = {"/user/hand/left", "/user/hand/right"};
-    for (uint8_t hand = 0; hand < 2; ++hand)
+    for (InputManager::Hand hand : {InputManager::Hand::Left, InputManager::Hand::Right})
     {
-        if (HapticsTargetsHand(action, subactionPath, handPaths[hand]))
+        if (HapticsTargetsHand(sess->GetInputManager(), action, subactionPath, hand))
         {
-            sess->SendHaptics(hand, amplitude, durationMs, frequency);
+            sess->SendHaptics(static_cast<uint8_t>(hand), amplitude, durationMs, frequency);
         }
     }
 }
@@ -3772,7 +3798,8 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrGetMetalGraphicsRequirementsKHR(
 // ============================================================================
 // XR_KHR_convert_timespec_time — CLOCK_MONOTONIC timespec <-> XrTime. The
 // session owns the exact time base (monoStartNs_); before a session exists we
-// fall back to a process-global monotonic epoch so conversions never hard-fail.
+// fall back to a process-global monotonic epoch, first sampled when an instance
+// is created so timespecs the application reads afterwards map to valid XrTimes.
 // ============================================================================
 static int64_t MonotonicFallbackEpochNs()
 {
@@ -3794,23 +3821,16 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimespecTimeToTimeKHR(
     {
         return XR_ERROR_HANDLE_INVALID;
     }
-    if (timespecTime == nullptr || time == nullptr ||
-        timespecTime->tv_nsec < 0 || timespecTime->tv_nsec >= 1000000000L)
+    if (timespecTime == nullptr || time == nullptr)
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
 
     if (Session* sess = inst->GetSession())
     {
-        *time = sess->TimespecToXrTime(*timespecTime);
+        return sess->TimespecToXrTime(*timespecTime, *time);
     }
-    else
-    {
-        const int64_t monoNs =
-            static_cast<int64_t>(timespecTime->tv_sec) * 1000000000LL + timespecTime->tv_nsec;
-        *time = static_cast<XrTime>(monoNs - MonotonicFallbackEpochNs());
-    }
-    return XR_SUCCESS;
+    return oxrsys::MonotonicTimespecToXrTime(*timespecTime, MonotonicFallbackEpochNs(), *time);
 }
 
 static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
@@ -3828,15 +3848,9 @@ static XRAPI_ATTR XrResult XRAPI_CALL OxrConvertTimeToTimespecTimeKHR(
 
     if (Session* sess = inst->GetSession())
     {
-        sess->XrTimeToTimespec(time, *timespecTime);
+        return sess->XrTimeToTimespec(time, *timespecTime);
     }
-    else
-    {
-        const int64_t monoNs = static_cast<int64_t>(time) + MonotonicFallbackEpochNs();
-        timespecTime->tv_sec = static_cast<time_t>(monoNs / 1000000000LL);
-        timespecTime->tv_nsec = static_cast<long>(monoNs % 1000000000LL);
-    }
-    return XR_SUCCESS;
+    return oxrsys::XrTimeToMonotonicTimespec(time, MonotonicFallbackEpochNs(), *timespecTime);
 }
 #endif
 

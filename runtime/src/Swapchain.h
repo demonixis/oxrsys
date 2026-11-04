@@ -120,6 +120,12 @@ public:
 
     bool HasReleasedImage() const;
 
+    // OpenXR composes the most recently released image, however long ago it was
+    // released. A release made while no headset was connected took no snapshot;
+    // take it now so a quad or cylinder drawn once still reaches the headset.
+    // Called from xrEndFrame, where the runtime may use the application's queue.
+    void SnapshotLastReleasedImageIfMissing();
+
     // Release-time snapshots are only useful while a headset encoder is ready.
     // The shared flag avoids coupling swapchains to StreamingServer lifetime.
     void SetStreamingSnapshotDemand(const std::shared_ptr<std::atomic_bool>& demand)

@@ -633,6 +633,9 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
         streamLayout_.foveatedTargetEyeWidth = streamLayout.foveatedTargetEyeWidth;
         streamLayout_.foveatedTargetEyeHeight = streamLayout.foveatedTargetEyeHeight;
         streamLayout_.foveatedEncodingActive = streamLayout.foveatedEncodingActive;
+        streamLayout_.foveation = oxrsys::streaming_foveation::TakeSnapshot(
+            streamLayout.foveatedEncodingActive, streamLayout.foveationPreset,
+            streamLayout.foveationLayout);
         streamLayout_.streamConfigSequence = 0;
     }
     clientFoveatedEncodingActive_.store(false);
@@ -935,15 +938,8 @@ oxr::protocol::ServerAnnounce StreamingServer::BuildServerAnnounce(
     strncpy(announce.serverName, "OXRSys Runtime", sizeof(announce.serverName) - 1);
 
     const ConfigValues config = Config::Get().GetValues();
-    const oxr::protocol::FoveationPreset foveationPreset =
-        layoutState.foveatedEncodingActive
-            ? ParseFoveationPreset(config.foveatedEncodingPreset)
-            : oxr::protocol::FoveationPreset::Off;
-    const oxr::protocol::FoveationLayout layout =
-        ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                layoutState.foveatedTargetEyeHeight,
-                                                foveationPreset,
-                                                config.foveatedEncodingPreset);
+    const oxr::protocol::FoveationPreset foveationPreset = layoutState.foveation.preset;
+    const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
 
     if (layoutState.foveatedEncodingActive)
     {
@@ -1047,7 +1043,20 @@ void StreamingServer::ControlThread()
         }
         else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ServerDisconnect))
         {
-            HandleClientDisconnect();
+            char ipStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+            std::string connectedIp;
+            bool usbClient = false;
+            {
+                std::lock_guard<std::mutex> lock(clientMutex_);
+                connectedIp = clientIp_;
+                usbClient = clientUsesUsbAdb_.load();
+            }
+            if (oxrsys::ShouldHonorWifiDisconnect(state_.load() == State::Connected, usbClient,
+                                                  connectedIp, ipStr))
+            {
+                HandleClientDisconnect();
+            }
         }
         else
         {
@@ -1098,14 +1107,10 @@ bool StreamingServer::StartUsbTcpListeners()
 
 void StreamingServer::SendUsbDisconnectBestEffort()
 {
-    SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
+    std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+    if (oxrsys::runtime_socket::IsValid(tcpControlClientSocket_))
     {
-        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-        controlSocket = tcpControlClientSocket_;
-    }
-    if (oxrsys::runtime_socket::IsValid(controlSocket))
-    {
-        SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
+        SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Disconnect, nullptr, 0);
     }
 }
 
@@ -1186,7 +1191,11 @@ void StreamingServer::TcpControlThread()
             }
             else if (header.type == oxr::protocol::TcpRecordType::Disconnect)
             {
-                HandleClientDisconnect();
+                // Only the USB ADB session owner may end the session; a WiFi owner stays.
+                if (clientUsesUsbAdb_.load())
+                {
+                    HandleClientDisconnect();
+                }
                 break;
             }
         }
@@ -1277,9 +1286,11 @@ void StreamingServer::TcpTrackingThread()
             {
                 break;
             }
+            // Only the USB ADB session owner may send tracking, as UDP tracking is limited
+            // to the admitted WiFi address.
             if (header.type == oxr::protocol::TcpRecordType::Tracking &&
                 payload.size() >= oxr::protocol::TRACKING_PACKET_BASE_SIZE &&
-                trackingReceiver_ != nullptr)
+                trackingReceiver_ != nullptr && clientUsesUsbAdb_.load())
             {
                 trackingReceiver_->InjectPacket(payload.data(), payload.size());
             }
@@ -1721,14 +1732,16 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     {
         std::string connectedIp;
         std::string connectedName;
+        oxrsys::ClientAdmissionDecision admission;
         {
             std::lock_guard<std::mutex> lock(clientMutex_);
             connectedIp = clientIp_;
             connectedName = clientName_;
+            admission = oxrsys::EvaluateClientAdmission(
+                clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
+                SteadyClockNowNs(), kClientAdmissionLogIntervalNs, clientUsesUsbAdb_.load(),
+                /*candidateUsesUsbAdb=*/false);
         }
-        const oxrsys::ClientAdmissionDecision admission = oxrsys::EvaluateClientAdmission(
-            clientAdmission_, state_.load() == State::Connected, connectedIp, ipStr,
-            SteadyClockNowNs(), kClientAdmissionLogIntervalNs);
         if (!admission.accept)
         {
             if (admission.log)
@@ -1746,8 +1759,8 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
     // From here on only this address may send tracking.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(clientAddr.sin_addr.s_addr);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -1882,20 +1895,14 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                     abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
                 }
                 const StreamLayoutState layoutState = GetStreamLayoutState();
-                const oxr::protocol::FoveationPreset foveationPreset =
-                    layoutState.foveatedEncodingActive
-                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                        : oxr::protocol::FoveationPreset::Off;
-                const oxr::protocol::FoveationLayout layout =
-                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                            layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset,
-                                                            config.foveatedEncodingPreset);
+                const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -1986,12 +1993,39 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
 
 void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect& clientConnect)
 {
+    // Same one-client rule as HandleClientConnect: a USB client may not take over a WiFi
+    // session. A USB client owning the session may reconnect.
+    {
+        std::string connectedIp;
+        std::string connectedName;
+        oxrsys::ClientAdmissionDecision admission;
+        {
+            std::lock_guard<std::mutex> lock(clientMutex_);
+            connectedIp = clientIp_;
+            connectedName = clientName_;
+            admission = oxrsys::EvaluateClientAdmission(
+                clientAdmission_, state_.load() == State::Connected, connectedIp, "USB ADB",
+                SteadyClockNowNs(), kClientAdmissionLogIntervalNs, clientUsesUsbAdb_.load(),
+                /*candidateUsesUsbAdb=*/true);
+        }
+        if (!admission.accept)
+        {
+            if (admission.log)
+            {
+                spdlog::warn("StreamingServer: refusing USB ADB ClientConnect while '{}' ({}) is "
+                             "connected; disconnect it first",
+                             connectedName, connectedIp);
+            }
+            return;
+        }
+    }
+
     // Same as HandleClientConnect: a new client brings a new clock. USB tracking arrives over
     // TCP, so no UDP sender is the client.
     if (trackingReceiver_)
     {
-        trackingReceiver_->ResetHistory();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->ResetHistory();
     }
 
     std::string clientName(clientConnect.deviceName,
@@ -2124,20 +2158,14 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
                     abrProfileName_ = config.abrMode == "full" ? "balanced" : "bitrate";
                 }
                 const StreamLayoutState layoutState = GetStreamLayoutState();
-                const oxr::protocol::FoveationPreset foveationPreset =
-                    layoutState.foveatedEncodingActive
-                        ? ParseFoveationPreset(config.foveatedEncodingPreset)
-                        : oxr::protocol::FoveationPreset::Off;
-                const oxr::protocol::FoveationLayout layout =
-                    ConfiguredFoveationLayout(layoutState.foveatedTargetEyeWidth,
-                                                            layoutState.foveatedTargetEyeHeight,
-                                                            foveationPreset,
-                                                            config.foveatedEncodingPreset);
+                const oxr::protocol::FoveationLayout& layout = layoutState.foveation.layout;
                 const bool clientSupportsFoveatedEncoding =
                     HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATED_ENCODING);
                 clientSupportsFoveatedEncoding_.store(clientSupportsFoveatedEncoding);
-                clientSupportsFoveationEyeCenter_.store(
-                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER));
+                // BuildServerAnnounce sets SERVER_FEATURE_FOVEATION_EYE_CENTER from this same stored layout.
+                clientSupportsFoveationEyeCenter_.store(oxrsys::streaming_reconfigure::UsesFoveationEyeCenter(
+                    layoutState.foveatedEncodingActive,
+                    HasClientCapability(clientConnect, oxr::protocol::CLIENT_CAPABILITY_FOVEATION_EYE_CENTER)));
                 const bool useFoveatedEncoding =
                     layoutState.foveatedEncodingActive && clientSupportsFoveatedEncoding;
                 clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -2251,8 +2279,8 @@ void StreamingServer::HandleClientDisconnect()
     }
     if (trackingReceiver_ != nullptr)
     {
-        trackingReceiver_->Reset();
         trackingReceiver_->SetClientAddress(0);
+        trackingReceiver_->Reset();
     }
     InvalidateCallbackAccess();
 
@@ -2445,13 +2473,12 @@ bool StreamingServer::SendControlPayload(const void* payload, size_t payloadSize
 
     if (clientUsesUsbAdb_.load())
     {
-        SocketHandle controlSocket = oxrsys::runtime_socket::InvalidSocket;
-        {
-            std::lock_guard<std::mutex> lock(tcpSocketMutex_);
-            controlSocket = tcpControlClientSocket_;
-        }
-        return oxrsys::runtime_socket::IsValid(controlSocket) &&
-               SendTcpRecord(controlSocket, oxr::protocol::TcpRecordType::Control,
+        // Haptics come from the application thread while TcpControlThread and VideoSendThread
+        // send stream config updates: one lock across the record keeps it whole and keeps the
+        // descriptor open until it is written.
+        std::lock_guard<std::mutex> lock(tcpSocketMutex_);
+        return oxrsys::runtime_socket::IsValid(tcpControlClientSocket_) &&
+               SendTcpRecord(tcpControlClientSocket_, oxr::protocol::TcpRecordType::Control,
                              payload, payloadSize);
     }
 
@@ -2720,6 +2747,8 @@ void StreamingServer::ApplyPendingStreamConfigLocked(
         streamLayout_.foveatedTargetEyeWidth = layout.foveatedTargetEyeWidth;
         streamLayout_.foveatedTargetEyeHeight = layout.foveatedTargetEyeHeight;
         streamLayout_.foveatedEncodingActive = layout.foveatedEncodingActive;
+        streamLayout_.foveation = oxrsys::streaming_foveation::TakeSnapshot(
+            layout.foveatedEncodingActive, layout.foveationPreset, layout.foveationLayout);
         streamLayout_.streamConfigSequence = update.sequence;
     }
     clientFoveatedEncodingActive_.store(useFoveatedEncoding);
@@ -3057,7 +3086,7 @@ void StreamingServer::SendEncodedVideoFrame(const EncodedVideoFrame& frame)
             nalHeader->payloadSize,
             nal.tcpPayload.size() - sizeof(oxr::protocol::TcpVideoNalHeader));
         SendNalUnit(packetDispatchState_, frame.frameIndex, nalData, nalSize,
-                    nal.isKeyframe, frame.alphaBlend, frame.timestampNs, frame.codec, &pacer);
+                    nal.isKeyframe, frame.alphaBlend, frame.packedAlpha, frame.timestampNs, frame.codec, &pacer);
     }
 
     if (pacer.Flushed())
@@ -3163,7 +3192,7 @@ void StreamingServer::SendRenderPosePacket(const EncodedVideoFrame& frame)
 
 void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& dispatchState,
                                   uint32_t frameIndex, const uint8_t* data, size_t size,
-                                  bool isKeyframe, bool alphaBlend, int64_t timestampNs,
+                                  bool isKeyframe, bool alphaBlend, bool packedAlpha, int64_t timestampNs,
                                   oxr::protocol::VideoCodec codec,
                                   oxrsys::streaming::PacketPacer* pacer)
 {
@@ -3207,7 +3236,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             nalHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3284,7 +3313,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
         }
-        if (packedAlphaActive_.load())
+        if (packedAlpha)
         {
             header.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
         }
@@ -3343,7 +3372,7 @@ void StreamingServer::SendNalUnit(const std::shared_ptr<PacketDispatchState>& di
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_ALPHA_BLEND;
             }
-            if (packedAlphaActive_.load())
+            if (packedAlpha)
             {
                 fecHeader.flags |= oxr::protocol::VIDEO_FLAG_PACKED_ALPHA;
             }
