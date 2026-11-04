@@ -783,7 +783,7 @@ TEST_CASE("Packed alpha appends each eye's alpha below the eyes",
     CVPixelBufferRef decoded = DecodeH264Keyframe(nals);
     REQUIRE(decoded != nullptr);
     CHECK(CVPixelBufferGetWidth(decoded) == 128);
-    CHECK(CVPixelBufferGetHeight(decoded) == 64 + oxr::protocol::PackedAlphaRows(64));
+    REQUIRE(CVPixelBufferGetHeight(decoded) == 64 + oxr::protocol::PackedAlphaRows(64));
 
     CVPixelBufferLockBaseAddress(decoded, kCVPixelBufferLock_ReadOnly);
     const uint8_t* base = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(decoded));
