@@ -218,49 +218,54 @@ void WriteStatusLocked(const std::string& state,
                        const std::string& transport,
                        const std::string& clientName)
 {
-    try
+    const Config& config = Config::Get();
+    std::error_code ec;
+    std::filesystem::create_directories(config.appSupportDir, ec);
+    if (ec)
     {
-        const Config& config = Config::Get();
-        std::filesystem::create_directories(config.appSupportDir);
-
-        const std::string deviceType = DeviceTypeForClientName(clientName);
-        const std::string tempPath = config.runtimeStatusPath + ".tmp";
-
-        std::ofstream file(tempPath, std::ios::trunc);
-        if (!file.is_open())
-        {
-            return;
-        }
-
-        file << "{\n";
-        file << "  \"state\": \"" << JsonEscape(state) << "\",\n";
-        file << "  \"transport\": \"" << JsonEscape(transport) << "\",\n";
-        file << "  \"device_type\": \"" << JsonEscape(deviceType) << "\",\n";
-        file << "  \"client_name\": \"" << JsonEscape(clientName) << "\",\n";
-        file << "  \"application_name\": \"" << JsonEscape(ApplicationName()) << "\",\n";
-        file << "  \"process_id\": "
-             << static_cast<long long>(oxrsys::runtime_platform::ProcessId()) << ",\n";
-        file << "  \"updated_at_unix_ms\": " << UnixTimeMilliseconds();
-        if (state == "streaming" && HasStreamingStats())
-        {
-            file << ",\n";
-            WriteStreamingStats(file, CurrentStreamingStats());
-        }
-        else
-        {
-            file << "\n";
-        }
-        file << "}\n";
-        file.close();
-
-        std::filesystem::rename(tempPath, config.runtimeStatusPath);
+        return;
     }
-    catch (const std::exception& ex)
+
+    const std::string deviceType = DeviceTypeForClientName(clientName);
+    const std::string tempPath = config.runtimeStatusPath + ".tmp";
+
+    std::ofstream file(tempPath, std::ios::trunc);
+    if (!file.is_open())
     {
-        (void)ex;
+        return;
     }
-    catch (...)
+
+    file << "{\n";
+    file << "  \"state\": \"" << JsonEscape(state) << "\",\n";
+    file << "  \"transport\": \"" << JsonEscape(transport) << "\",\n";
+    file << "  \"device_type\": \"" << JsonEscape(deviceType) << "\",\n";
+    file << "  \"client_name\": \"" << JsonEscape(clientName) << "\",\n";
+    file << "  \"application_name\": \"" << JsonEscape(ApplicationName()) << "\",\n";
+    file << "  \"process_id\": "
+         << static_cast<long long>(oxrsys::runtime_platform::ProcessId()) << ",\n";
+    file << "  \"updated_at_unix_ms\": " << UnixTimeMilliseconds();
+    if (state == "streaming" && HasStreamingStats())
     {
+        file << ",\n";
+        WriteStreamingStats(file, CurrentStreamingStats());
+    }
+    else
+    {
+        file << "\n";
+    }
+    file << "}\n";
+    file.close();
+
+    if (file.fail())
+    {
+        std::filesystem::remove(tempPath, ec);
+        return;
+    }
+
+    std::filesystem::rename(tempPath, config.runtimeStatusPath, ec);
+    if (ec)
+    {
+        std::filesystem::remove(tempPath, ec);
     }
 }
 

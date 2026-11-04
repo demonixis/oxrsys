@@ -218,6 +218,10 @@ void Swapchain::InitVulkan(void* /*metalDevice*/, const VulkanGraphicsContext& v
            VK_IMAGE_USAGE_SAMPLED_BIT);
     imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if ((createInfo->usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0)
+    {
+        imageCI.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    }
 
 #if defined(__APPLE__)
     VkExportMetalObjectCreateInfoEXT exportCI{};

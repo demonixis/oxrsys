@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-// Protocol.swift — Swift port of common/protocol/include/oxrsys/protocol/Protocol.h
+// Protocol.swift — Swift port of common/Protocol.h
 // Binary-compatible with the C++ structs for UDP wire format.
 
 import Foundation
@@ -107,9 +107,10 @@ public struct ServerFeatureFlags {
     public static let depthOcclusion: UInt32 = 0x00000080
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
+    // 0x00000400 is SERVER_FEATURE_FOVEATION_EYE_CENTER in Protocol.h.
     /// Server emits FEC parity with the interleaved group layout for clients that advertise
     /// `ClientCapabilityFlags.fecInterleaved`.
-    public static let fecInterleaved: UInt32 = 0x00000400
+    public static let fecInterleaved: UInt32 = 0x00000800
 }
 
 public struct ClientCapabilityFlags {
@@ -124,7 +125,7 @@ public struct ClientCapabilityFlags {
     public static let spatialEntity: UInt32 = 0x00000100
     public static let sceneCapture: UInt32 = 0x00000200
     public static let tenBitEncoding: UInt32 = 0x00000400
-    // 0x00000800 is claimed by the foveation-centre capability (gaze foveation PR).
+    // 0x00000800 is CLIENT_CAPABILITY_FOVEATION_EYE_CENTER in Protocol.h.
     /// The client assigns FEC groups by the interleaved layout (`FEC.GroupLayout`). Must be
     /// negotiated: a receiver using a different layout from the sender XORs a packet out of
     /// the wrong group and produces plausible garbage rather than failing cleanly.
@@ -294,6 +295,7 @@ public struct VideoFlags {
     public static let fec: UInt8 = 0x10
     public static let renderPose: UInt8 = 0x20
     public static let alphaBlend: UInt8 = 0x40
+    public static let packedAlpha: UInt8 = 0x80
 }
 
 public struct AudioPacketHeader: Sendable {
@@ -393,7 +395,7 @@ public struct TrackingPacket: Sendable {
     public var ipd: Float = 0
     public var eyeFov: (Float, Float, Float, Float) = (0, 0, 0, 0)
 
-    // Velocity from the client IMU, used by the runtime for bounded pose prediction.
+    // Measured velocities are valid only with their matching tracking flag.
     public var headLinearVelocity: (Float, Float, Float) = (0, 0, 0)
     public var headAngularVelocity: (Float, Float, Float) = (0, 0, 0)
 
@@ -408,6 +410,22 @@ public struct TrackingPacket: Sendable {
     public var leftControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
     public var rightControllerAimPos: (Float, Float, Float) = (0, 0, 0)
     public var rightControllerAimRot: (Float, Float, Float, Float) = (0, 0, 0, 1)
+
+    public var stageBoundsWidth: Float = 0
+    public var stageBoundsHeight: Float = 0
+    public var leftControllerLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAimLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var leftControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAimLinearVelocity: (Float, Float, Float) = (0, 0, 0)
+    public var rightControllerAimAngularVelocity: (Float, Float, Float) = (0, 0, 0)
+
+    // 0 = CONTROLLER_PROFILE_UNKNOWN, so the runtime picks the profile from the client name.
+    // touchState is valid only with a known controllerProfile.
+    public var controllerProfile: UInt32 = 0
+    public var touchState: UInt32 = 0
 
     public init() {}
 }
@@ -458,6 +476,17 @@ public struct TrackingFlagsValues {
     public static let rightHandActive: UInt32 = 0x0002
     public static let leftControllerActive: UInt32 = 0x0004
     public static let rightControllerActive: UInt32 = 0x0008
+    public static let headLinearVelocityValid: UInt32 = 0x0010
+    public static let headAngularVelocityValid: UInt32 = 0x0020
+    public static let stageBoundsValid: UInt32 = 0x0040
+    public static let leftControllerLinearVelocityValid: UInt32 = 0x0080
+    public static let leftControllerAngularVelocityValid: UInt32 = 0x0100
+    public static let rightControllerLinearVelocityValid: UInt32 = 0x0200
+    public static let rightControllerAngularVelocityValid: UInt32 = 0x0400
+    public static let leftControllerAimLinearVelocityValid: UInt32 = 0x0800
+    public static let leftControllerAimAngularVelocityValid: UInt32 = 0x1000
+    public static let rightControllerAimLinearVelocityValid: UInt32 = 0x2000
+    public static let rightControllerAimAngularVelocityValid: UInt32 = 0x4000
 }
 
 public struct ButtonFlags {

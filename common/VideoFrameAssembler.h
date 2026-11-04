@@ -2,8 +2,8 @@
 
 #pragma once
 
-#include <oxrsys/protocol/FecCodec.h>
-#include <oxrsys/protocol/Protocol.h>
+#include <FecCodec.h>
+#include <Protocol.h>
 
 #include <algorithm>
 #include <array>
@@ -18,7 +18,7 @@ namespace streaming
 {
 
 // Reassembles UDP video packets into complete NAL units, recovering losses from XOR FEC parity.
-// Shared by every UDP video client (android-vr, steam-frame) so the reassembly rules -- parity
+// Shared by every UDP video client (android-vr) so the reassembly rules -- parity
 // matched by totalPackets as well as frameIndex, negotiated group layouts, recovery on parity
 // arrival -- exist and are tested exactly once; the receivers own sockets, NACKs, logging, and
 // stats, and drive this from their receive thread. Single-threaded by design.

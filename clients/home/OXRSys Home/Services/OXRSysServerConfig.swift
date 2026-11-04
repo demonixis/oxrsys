@@ -60,9 +60,9 @@ struct OXRSysServerConfig: Equatable {
     # and a reliable USB TCP headset client supports live stream reconfiguration.
     dynamic_resolution_min_scale = 0.50
 
-    # Target headset for the per-eye render resolution: "quest2", "quest3", or "avp".
+    # Target headset for the per-eye render resolution: "quest2", "quest3", "quest3_native", or "avp".
     # Sets the resolution the runtime renders at (quest2=1440x1584, quest3=1512x1680,
-    # avp=3024x3360 per eye). Use resolution_scale to trim how much of it is streamed.
+    # quest3_native=2064x2208, the Quest 3 panel resolution, avp=3024x3360 per eye). Use resolution_scale to trim how much of it is streamed.
     render_device = "quest3"
 
     # Keyframe interval in seconds (1-10). Higher = less bandwidth spikes, slower recovery.
@@ -81,10 +81,10 @@ struct OXRSysServerConfig: Equatable {
     # Encode HEVC Main10 for capable H.265 clients. H.264 remains 8-bit.
     encoder_10bit = false
 
-    # Streaming transport: "auto", "wifi", or "usb_adb".
+    # Streaming transport: "auto", "wifi", "usb_adb", or "usb_ncm".
     transport = "auto"
 
-    # Server-side foveated video encoding preset: "off", "light", "medium", or "high".
+    # Server-side foveated video encoding preset: "off", "light", "medium_plus", "medium", or "high".
     foveated_encoding_preset = "off"
 
     # Headset client foveation override: "auto", "off", "light", "medium", or "high".

@@ -5,8 +5,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <oxrsys/protocol/FecCodec.h>
-#include <oxrsys/protocol/Protocol.h>
+#include <FecCodec.h>
+#include <Protocol.h>
 
 #include <cstdint>
 #include <cstring>

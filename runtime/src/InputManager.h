@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 class TrackingReceiver;
 
@@ -46,7 +46,19 @@ public:
 
     // Head pose
     XrPosef GetHeadPose() const;
+    XrSpaceVelocity GetHeadVelocity() const;
     void GetEyeViews(XrView* views, uint32_t viewCount) const;
+    bool GetStageBounds(XrExtent2Df& bounds) const;
+
+    // World-origin pose for a reference space type (STAGE/LOCAL/LOCAL_FLOOR).
+    // The incoming client head pose is STAGE (physical-floor) relative, so STAGE is
+    // the identity origin. LOCAL is anchored to the HMD pose captured at session
+    // start (yaw-only, gravity-aligned); LOCAL_FLOOR shares LOCAL's x/z + yaw but
+    // sits at floor height. See Space::GetWorldPose.
+    XrPosef GetReferenceSpacePose(XrReferenceSpaceType referenceSpaceType) const;
+
+    // Re-anchor the LOCAL reference to the current head pose (recenter).
+    void RecenterLocalReference();
 
     // Controller poses (world space)
     XrPosef GetControllerPose(Hand hand) const;
@@ -71,6 +83,7 @@ public:
     float GetFloatComponent(Hand hand, const std::string& componentPath) const;
     XrVector2f GetVector2fComponent(Hand hand, const std::string& componentPath) const;
     XrPosef GetPoseComponent(Hand hand, const std::string& componentPath) const;
+    bool GetFrameControllerComponent(Hand hand, const std::string& componentPath) const;
     bool GetBooleanComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
     float GetFloatComponentForProfile(Hand hand, const std::string& componentPath,
@@ -79,7 +92,12 @@ public:
                                               const std::string& profilePath) const;
     XrPosef GetPoseComponentForProfile(Hand hand, const std::string& componentPath,
                                        const std::string& profilePath) const;
+    XrSpaceVelocity GetPoseVelocityForProfile(Hand hand, const std::string& componentPath,
+                                             const std::string& profilePath) const;
     void SetStreamingClientName(const std::string& clientName);
+    // OXRSYS_FRAME_XBOX (read at construction); see ApplyFrameXboxLayout.
+    void SetFrameXboxLayout(bool on) { frameXboxLayout_ = on; }
+    static void ApplyFrameXboxLayout(uint32_t& buttons, float& leftGrip, float& rightGrip);
 
     // Conformance automation overrides
     void SetAutomationInteractionProfile(Hand hand, const std::string& interactionProfile, bool isActive);
@@ -95,6 +113,7 @@ public:
     }
 
 private:
+    bool frameXboxLayout_ = false;
     struct AutomationHandState
     {
         bool hasExplicitActivity = false;
@@ -119,6 +138,13 @@ private:
     TrackingReceiver* trackingReceiver_ = nullptr;
 
     // Head state (quaternion from streaming client)
+    // LOCAL reference space anchor, captured from the first streamed head pose
+    // (and on recenter). Position is the HMD position at capture; orientation is
+    // the yaw-only (gravity-aligned) component of the head orientation at capture.
+    bool localReferenceCaptured_ = false;
+    glm::vec3 localReferencePosition_ = {0.0f, 0.0f, 0.0f};
+    glm::quat localReferenceYaw_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
     glm::quat headQuat_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f); // w,x,y,z
     glm::quat leftControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     glm::quat rightControllerRot_ = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -135,6 +161,14 @@ private:
     XrVector2f leftThumbstick_ = {0.0f, 0.0f};
     XrVector2f rightThumbstick_ = {0.0f, 0.0f};
     uint32_t buttonState_ = 0;
+    // From the client's packet (Protocol.h ControllerProfile): which controller its own runtime bound, and
+    // the touch bits that go with it. Zero from a client that does not say.
+    uint32_t controllerProfile_ = 0;
+    uint32_t touchState_ = 0;
+    // The buttons and grips as the client sent them, before OXRSYS_FRAME_XBOX: the Frame profile's own bindings
+    // read these, so the Xbox layout reaches Touch bindings only.
+    uint32_t frameButtonState_ = 0;
+    std::array<float, 2> frameGripValue_ = {0.0f, 0.0f};
     std::array<bool, 2> streamingControllerActive_ = {false, false};
     std::string streamingClientName_;
     std::string streamingControllerProfile_;

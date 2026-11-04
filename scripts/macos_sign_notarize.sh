@@ -19,6 +19,7 @@ HOME_APP=""
 HOME_ENTITLEMENTS="${DEFAULT_HOME_ENTITLEMENTS}"
 RUNTIME_DIR=""
 RUNTIME_DYLIB=""
+RUNTIME_HELPER=""
 RUNTIME_MANIFEST=""
 RUNTIME_CONFIG=""
 ARCHIVE_DIR="${DEFAULT_ARCHIVE_DIR}"
@@ -43,10 +44,11 @@ usage() {
 Usage:
   ${SCRIPT_NAME} [options]
 
-Signs the macOS runtime dylib and OXRSys Home app, then creates a single zip archive containing:
+Signs the macOS runtime dylib, its encoder helper and OXRSys Home app, then creates a single zip archive containing:
   OXRSys-macOS/
     OXRSys Home.app
     runtime/liboxrsys-runtime.dylib
+    runtime/oxrsys-encoder-helper
     runtime/oxrsys-runtime.json
     runtime/oxrsys-runtime.toml
 
@@ -69,6 +71,7 @@ Build options:
 Path options:
   --runtime-dir DIR       Runtime output directory. Default: <cmake-build-dir>/runtime
   --runtime-dylib PATH    Runtime dylib path. Default: <runtime-dir>/liboxrsys-runtime.dylib
+  --runtime-helper PATH   Native-arm64 encoder helper. Default: <runtime-dir>/oxrsys-encoder-helper
   --runtime-manifest PATH Runtime manifest path. Default: <runtime-dir>/oxrsys-runtime.json
   --runtime-config PATH   Runtime TOML path. Default: <runtime-dir>/oxrsys-runtime.toml
   --home-app PATH         OXRSys Home.app path. Default: <home-derived-data>/Build/Products/Release/OXRSys Home.app
@@ -203,6 +206,11 @@ parse_args() {
                 RUNTIME_DYLIB="$(absolute_path "$2")"
                 shift 2
                 ;;
+            --runtime-helper)
+                [[ $# -ge 2 ]] || fail "--runtime-helper requires a value"
+                RUNTIME_HELPER="$(absolute_path "$2")"
+                shift 2
+                ;;
             --runtime-manifest)
                 [[ $# -ge 2 ]] || fail "--runtime-manifest requires a value"
                 RUNTIME_MANIFEST="$(absolute_path "$2")"
@@ -250,6 +258,9 @@ apply_defaults() {
     fi
     if [[ -z "${RUNTIME_DYLIB}" ]]; then
         RUNTIME_DYLIB="${RUNTIME_DIR}/liboxrsys-runtime.dylib"
+    fi
+    if [[ -z "${RUNTIME_HELPER}" ]]; then
+        RUNTIME_HELPER="${RUNTIME_DIR}/oxrsys-encoder-helper"
     fi
     if [[ -z "${RUNTIME_MANIFEST}" ]]; then
         RUNTIME_MANIFEST="${RUNTIME_DIR}/oxrsys-runtime.json"
@@ -338,10 +349,12 @@ resolve_sign_identity() {
 validate_inputs() {
     [[ -f "${RUNTIME_DYLIB}" ]] || fail "Runtime dylib not found: ${RUNTIME_DYLIB}"
     [[ -f "${RUNTIME_MANIFEST}" ]] || fail "Runtime manifest not found: ${RUNTIME_MANIFEST}"
+    [[ -x "${RUNTIME_HELPER}" ]] || fail "Encoder helper not found: ${RUNTIME_HELPER}"
     [[ -d "${HOME_APP}" ]] || fail "Home app not found: ${HOME_APP}"
     [[ -f "$(home_executable_path)" ]] || fail "Home executable not found: $(home_executable_path)"
 
     validate_binary_architectures "${RUNTIME_DYLIB}" "Runtime dylib"
+    validate_helper_architecture "${RUNTIME_HELPER}"
     validate_binary_architectures "$(home_executable_path)" "Home executable"
 
     if [[ -n "${HOME_ENTITLEMENTS}" && ! -f "${HOME_ENTITLEMENTS}" ]]; then
@@ -397,6 +410,18 @@ validate_binary_architectures() {
     done
 }
 
+# The helper must be arm64 and only arm64, for every package architecture: its
+# whole purpose is to be a native process when the runtime runs under Rosetta.
+validate_helper_architecture() {
+    local binary_path="$1"
+    local actual_architectures
+    actual_architectures="$(/usr/bin/lipo -archs "${binary_path}")" \
+        || fail "Could not inspect encoder helper: ${binary_path}"
+    if [[ "${actual_architectures}" != "arm64" ]]; then
+        fail "Encoder helper must be arm64 only; found: ${actual_architectures}"
+    fi
+}
+
 home_executable_path() {
     local executable_name
     executable_name="$(/usr/libexec/PlistBuddy \
@@ -418,6 +443,20 @@ sign_runtime() {
         "${RUNTIME_DYLIB}"
 
     run /usr/bin/codesign --verify --strict --verbose=2 "${RUNTIME_DYLIB}"
+
+    # The helper is a separate executable the runtime spawns, so notarization
+    # needs it signed with the hardened runtime like everything else shipped.
+    echo "Signing encoder helper:"
+    echo "  ${RUNTIME_HELPER}"
+
+    run /usr/bin/codesign \
+        --force \
+        --timestamp \
+        --options runtime \
+        --sign "${SIGN_IDENTITY}" \
+        "${RUNTIME_HELPER}"
+
+    run /usr/bin/codesign --verify --strict --verbose=2 "${RUNTIME_HELPER}"
 }
 
 sign_home() {
@@ -468,6 +507,8 @@ create_archive() {
 
     run /usr/bin/ditto "${HOME_APP}" "${package_root}/OXRSys Home.app"
     run /usr/bin/ditto "${RUNTIME_DYLIB}" "${package_runtime_dir}/$(basename "${RUNTIME_DYLIB}")"
+    # Beside the dylib, under the name the runtime looks for by default.
+    run /usr/bin/ditto "${RUNTIME_HELPER}" "${package_runtime_dir}/oxrsys-encoder-helper"
 
     local packaged_manifest="${package_runtime_dir}/$(basename "${RUNTIME_MANIFEST}")"
     run /usr/bin/ditto "${RUNTIME_MANIFEST}" "${packaged_manifest}"

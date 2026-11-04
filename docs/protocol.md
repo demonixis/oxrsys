@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the internal streaming protocol shared by the macOS runtime and headset clients. The authoritative wire layout lives in `common/protocol/include/oxrsys/protocol/Protocol.h`.
+This document describes the internal streaming protocol shared by the macOS runtime and headset clients. The authoritative wire layout lives in `common/Protocol.h`.
 
 ## Goals
 
@@ -34,7 +34,7 @@ The Quest USB path uses ADB reverse TCP on localhost ports:
 - Control TCP: `9946`
 - Spatial TCP: `9948`
 
-The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback.
+The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback. `usb_ncm` runs the WiFi UDP path only, for the USB network (CDC-NCM) link between the Mac at `192.168.42.1` and the headset at `192.168.42.2`.
 
 TCP payloads are framed with `TcpRecordHeader`, which contains the record magic, protocol version, record type, and payload size. Current TCP record types are:
 
@@ -59,6 +59,11 @@ WiFi is enabled and the runtime is in its broadcasting state, the runtime replie
 address and port with the same complete `ServerAnnounce` used by broadcast discovery. The request
 does not select a codec, mutate connection state, or replace `ClientConnect`. Clients must bound
 their retry count and receive timeout; no response means that direct discovery failed.
+
+The Quest client uses direct discovery for the USB network link, where the broadcast does not reach
+the headset: while the headset reports the cable's Ethernet network and the client is discovering,
+it sends one request per second to `192.168.42.1`, the same rate as the broadcast beacon, and stops
+when it connects or the network goes away.
 
 The handshake exposes:
 
@@ -106,6 +111,13 @@ preferred codec is implemented by both sides. Android and shared Apple clients a
 H.265 support while keeping H.265 as their preferred codec. Each video packet/NAL header carries the
 selected `VideoCodec`, so the wire format does not need a codec-specific stream.
 
+`CLIENT_CAPABILITY_FOVEATION_EYE_CENTER` says the client decodes eye-centred foveation. When foveated
+encoding is active the runtime announces `SERVER_FEATURE_FOVEATION_EYE_CENTER`, and with both bits each
+eye's full-resolution region is centred on that eye's forward direction instead of the announced
+`foveationCenterShiftX/Y`. Each side derives the shift with `EyeCenterShifts` in `common/Foveation.h`
+from the eye's fov and the announced centre size: the runtime from the fov the app submits, the Quest
+client from its left eye's fov, mirrored for the right eye.
+
 `CLIENT_CAPABILITY_TEN_BIT_ENCODING` separately advertises HEVC Main10 decode support. The runtime
 uses Main10 only when this capability is present, `streaming.encoder_10bit` is enabled, and H.265 is
 the negotiated codec. H.264 and clients without the capability receive 8-bit video.
@@ -126,6 +138,7 @@ supported server paths. The announced presets currently map to:
 
 - `Light`: center `0.60 x 0.55`, edge ratio `2 x 3`
 - `Medium`: center `0.45 x 0.40`, edge ratio `4 x 5`
+- `Medium` from the `medium_plus` configuration preset: center `0.50 x 0.45`, edge ratio `4 x 5`
 - `High`: center `0.35 x 0.32`, edge ratio `6 x 7`
 
 The server aligns the active foveated area to encoder-friendly dimensions and announces the encoded
@@ -167,7 +180,8 @@ The current stream also includes two recovery and timing helpers:
 
 - `VIDEO_FLAG_FEC` marks XOR parity packets. One parity packet is sent per `FEC_GROUP_SIZE` data packets and can recover one lost data packet in that group. FEC packets also carry the payload size of that group's last data packet in the existing 24-byte header padding. Receivers use that size only when the recovered packet is the last packet of the group; other recovered packets remain `MAX_PACKET_PAYLOAD`. Which data packets a parity packet covers is negotiated; see "FEC group layout" below.
 - `VIDEO_FLAG_RENDER_POSE` marks metadata packets that carry the server render pose for a frame. These packets are not video data. Headset clients must match them to the decoded frame by presentation timestamp before submitting projection layers so compositor reprojection uses the pose that rendered that exact frame.
-- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the current stream does not carry a full alpha plane. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
+- `VIDEO_FLAG_ALPHA_BLEND` marks frames submitted by an explicit alpha-enabled app with `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND` or a projection layer using `XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT`. Quest clients use this with server-enabled passthrough to reveal the passthrough underlay; the alpha comes from `VIDEO_FLAG_PACKED_ALPHA` rows when the frame has them. Quest clients do not enable black-key alpha by default because normal VR content often contains dark reflective pixels. Any transparent-clear black-key compatibility path must be explicitly enabled outside the default stream.
+- `VIDEO_FLAG_PACKED_ALPHA` marks frames whose encoded picture is the eyes followed by `PackedAlphaRows(eyeHeight)` rows that hold each eye's alpha as grey at half the encoded eye's width and height, so each alpha pixel is the mean of a 2x2 block of encoded eye pixels and follows foveated encoding when it is active. Each eye's alpha is split into its top and bottom halves, placed side by side in that eye's columns. The runtime packs alpha only when passthrough and `streaming.app_alpha_blend_passthrough` are enabled and the client advertises `CLIENT_CAPABILITY_MIXED_REALITY_ALPHA`; the client recovers the eye height with `PackedAlphaEyeHeight(encodedHeight)`.
 
 ### FEC group layout
 
@@ -194,17 +208,28 @@ the passthrough objects. Runtime status reports `passthrough_ready` only when bo
 
 - headset pose
 - headset linear and angular velocity when the client can provide it
-- left and right controller poses
+- left and right controller grip and aim poses (aim falls back to grip when it is unset)
+- controller grip and aim linear and angular velocities when the client can provide them
 - buttons, triggers, grips, and thumbsticks
 - IPD and eye FOV overrides
 - optional 26-joint hand tracking payloads for each hand
+- STAGE bounds when the client can provide them
+- the controller profile the client's own runtime reports, and capacitive touch state
+
+The aim poses and every later field are appended after `TRACKING_PACKET_BASE_SIZE`. The runtime
+accepts any packet of at least that size and zero-fills the fields it does not carry. It clears a
+velocity or STAGE-bounds valid flag when the packet ends before that field, and it keeps
+`controllerProfile` and `touchState` only from a packet that reaches the end of `touchState`.
 
 Hand presence is indicated by `TRACKING_FLAG_LEFT_HAND_ACTIVE` and `TRACKING_FLAG_RIGHT_HAND_ACTIVE`.
 Controller pose presence is indicated independently by `TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE` and
 `TRACKING_FLAG_RIGHT_CONTROLLER_ACTIVE`. If a controller flag is absent, the runtime treats that
 controller as inactive and preserves the last valid pose instead of applying zeroed packet fields.
 
-Velocity values are optional. Zero vectors mean the runtime should fall back to its bounded finite-difference prediction path.
+Velocity values are optional, and applications see one only when its `TRACKING_FLAG_*_VELOCITY_VALID`
+flag is set; STAGE bounds likewise need `TRACKING_FLAG_STAGE_BOUNDS_VALID`. A flagged zero vector is
+a measured stationary value. Without its flag, a non-zero head velocity is still used for head pose
+prediction, and a zero one falls back to the runtime's bounded finite-difference prediction path.
 
 ## Control Channel
 
@@ -216,6 +241,12 @@ The control channel currently defines the following payloads over UDP or TCP `Co
 - `NackRequest`
 - `StreamConfigUpdate`
 - `StreamConfigAck`
+
+`HapticsCommand` carries one hand's vibration from `xrApplyHapticFeedback`: amplitude 0-1, duration in
+milliseconds (0 = the headset's minimum) and frequency in Hz (0 = unspecified). A call sends one command per
+hand whose `/output/haptic` the action is bound to in that hand's active interaction profiles; a subaction
+path narrows it to that hand, and without one an action that declares subaction paths reaches only those
+hands. Amplitude 0 stops that hand, which is how `xrStopHapticFeedback` is forwarded.
 
 Latency reports allow the runtime to keep prediction bounded. The first 20 bytes are the historical
 base report: receive-to-submit, decode, compositor, and total client latency. Newer clients append
@@ -232,7 +263,8 @@ and `balanced` use `resolution_scale`, `smooth` uses
 `max(dynamic_resolution_min_scale, resolution_scale * 0.70)`. WiFi control remains best-effort in
 this version, so WiFi clients fall back to bitrate/profile status without live decoder
 reconfiguration. For USB TCP, the runtime sends `StreamConfigUpdate` outside `Session::EndFrame()`,
-the client recreates its decoder on a client worker thread, replies with `StreamConfigAck` only after
+the client keeps its decoder when the new encoded size fits the size it was created for and
+otherwise recreates it on a client worker thread, replies with `StreamConfigAck` only after
 the decoder is ready, and the runtime swaps encoders, clears queued video, and forces an IDR only
 after the ack. Pending updates have bounded retry/timeout behavior; timeout disconnects the client
 so encoder and decoder state recover through the normal reconnect path.
@@ -242,8 +274,8 @@ stream reconfiguration, passthrough, depth occlusion, spatial entities, and scen
 OpenXR extensions are still advertised only when there is a coherent runtime
 implementation or fallback for the selected mode.
 
-Keyframe requests let the client recover after packet loss or decode stalls. Haptics are sent from
-the runtime to the client.
+Keyframe requests let the client recover after packet loss or decode stalls. `HapticsCommand` is
+played by the Quest/Pico client; the Apple clients do not play it.
 
 `NackRequest` lets a UDP client ask the runtime to retransmit specific recently sent video packets. It is a short-window recovery mechanism, not a guarantee of full stream reliability. USB TCP clients do not send NACKs.
 
@@ -267,4 +299,4 @@ The expected lifecycle is:
 
 ## Compatibility
 
-The protocol is still internal and may evolve with the runtime and client implementations. When updating the wire format, keep `common/protocol/include/oxrsys/protocol/Protocol.h`, the runtime, the Android client, and this document aligned in the same change.
+The protocol is still internal and may evolve with the runtime and client implementations. When updating the wire format, keep `common/Protocol.h`, the runtime, the Android client, and this document aligned in the same change.

@@ -2,10 +2,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <oxrsys/streaming/VideoFrameAssembler.h>
+#include <VideoFrameAssembler.h>
 
-#include <oxrsys/protocol/FecCodec.h>
-#include <oxrsys/protocol/Protocol.h>
+#include <FecCodec.h>
+#include <Protocol.h>
 
 #include <array>
 #include <cstring>

@@ -9,7 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <media/NdkMediaFormat.h>
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 #define LOG_TAG "OXRSys-Decoder"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -62,7 +62,8 @@ VideoDecoder::~VideoDecoder()
     Shutdown();
 }
 
-bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCodec videoCodec)
+bool VideoDecoder::Initialize(uint32_t width, uint32_t height, uint32_t maxWidth, uint32_t maxHeight,
+                              protocol::VideoCodec videoCodec)
 {
     const char* mimeType = CodecMimeType(videoCodec);
     if (mimeType == nullptr)
@@ -73,8 +74,8 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
 
     Shutdown();
 
-    width_ = width;
-    height_ = height;
+    maxWidth_ = std::max(width, maxWidth);
+    maxHeight_ = std::max(height, maxHeight);
     activeCodec_ = videoCodec;
 
     // Create AImageReader as the output surface for MediaCodec.
@@ -82,7 +83,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
     // via EGLImage + GL_TEXTURE_EXTERNAL_OES. This avoids CPU YUV access which
     // doesn't work on Quest (Qualcomm UBWC format hides UV plane data).
     media_status_t imgStatus = AImageReader_new(
-        width, height,
+        maxWidth_, maxHeight_,
         AIMAGE_FORMAT_YUV_420_888,
         3,  // maxImages — allows a decoder output thread plus one held render image
         &imageReader_);
@@ -103,7 +104,7 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
         return false;
     }
 
-    LOGI("AImageReader created: %ux%u, format=YUV_420_888", width, height);
+    LOGI("AImageReader created: %ux%u, format=YUV_420_888", maxWidth_, maxHeight_);
 
     // Create decoder for the selected stream codec.
     codec_ = AMediaCodec_createDecoderByType(mimeType);
@@ -121,7 +122,10 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
     AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, mimeType);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
     AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
-    const uint64_t pixelCount = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+    // Adaptive playback: output buffers sized for the largest stream, so a size change needs no new decoder.
+    AMediaFormat_setInt32(format, "max-width", static_cast<int32_t>(maxWidth_));
+    AMediaFormat_setInt32(format, "max-height", static_cast<int32_t>(maxHeight_));
+    const uint64_t pixelCount = static_cast<uint64_t>(maxWidth_) * static_cast<uint64_t>(maxHeight_);
     const uint64_t maxInputSize = std::clamp<uint64_t>(
         pixelCount * 4u,
         2u * 1024u * 1024u,
@@ -131,6 +135,18 @@ bool VideoDecoder::Initialize(uint32_t width, uint32_t height, protocol::VideoCo
 
     // Low latency mode (Android 11+)
     AMediaFormat_setInt32(format, "low-latency", 1);
+    if (activeCodec_ == protocol::VideoCodec::H264)
+    {
+        // Qualcomm (Quest XR2) decoders ignore "low-latency" for H.264 streams whose VUI lacks
+        // bitstream_restriction and hold a full DPB (~16 frames, ~220 ms at 72 Hz) before
+        // output. These are the vendor keys ALVR sets: emit pictures in decode order and use
+        // the Qualcomm low-latency path. Decoders that do not know a key ignore it.
+        // Decode order equals display order only because the host encoders disable frame
+        // reordering (kVTCompressionPropertyKey_AllowFrameReordering = false).
+        AMediaFormat_setInt32(format, "vendor.qti-ext-dec-picture-order.enable", 1);
+        AMediaFormat_setInt32(format, "vendor.qti-ext-dec-low-latency.enable", 1);
+    }
+    AMediaFormat_setInt32(format, "priority", 0); // realtime
 
     // Configure with the AImageReader's surface as output
     media_status_t status = AMediaCodec_configure(
@@ -228,7 +244,13 @@ bool VideoDecoder::SubmitNalUnit(const uint8_t* data, size_t size, int64_t prese
 
     memcpy(buffer, data, size);
     int64_t submitTimeNs = SteadyClockNowNs();
-    AMediaCodec_queueInputBuffer(codec_, bufferIndex, 0, size, presentationTimeUs, 0);
+    media_status_t status = AMediaCodec_queueInputBuffer(
+        codec_, bufferIndex, 0, size, presentationTimeUs, 0);
+    if (status != AMEDIA_OK)
+    {
+        LOGE("Failed to queue decoder input: %d", status);
+        return false;
+    }
     RememberSubmittedFrame(presentationTimeUs, receiveTimeNs, submitTimeNs, alphaBlend);
     return true;
 }
@@ -289,39 +311,38 @@ void VideoDecoder::OutputThreadMain()
     LOGI("Decoder output thread ended");
 }
 
-bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
+bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame, void (*beforeReleasePrevious)())
 {
     if (codec_ == nullptr || imageReader_ == nullptr || outFrame == nullptr)
     {
         return false;
     }
 
-    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
-
-    // Release previous image if still held
-    if (currentImage_ != nullptr)
-    {
-        AImage_delete(currentImage_);
-        currentImage_ = nullptr;
-    }
-
     // Acquire the latest decoded image (drops older images automatically)
-    media_status_t status = AImageReader_acquireLatestImage(imageReader_, &currentImage_);
-    if (status != AMEDIA_OK || currentImage_ == nullptr)
+    AImage* nextImage = nullptr;
+    media_status_t status = AImageReader_acquireLatestImage(imageReader_, &nextImage);
+    if (status != AMEDIA_OK || nextImage == nullptr)
     {
         return false;  // No image available yet
     }
 
     // Get AHardwareBuffer for zero-copy GPU rendering
     AHardwareBuffer* hwBuffer = nullptr;
-    status = AImage_getHardwareBuffer(currentImage_, &hwBuffer);
+    status = AImage_getHardwareBuffer(nextImage, &hwBuffer);
     if (status != AMEDIA_OK || hwBuffer == nullptr)
     {
         LOGE("Failed to get AHardwareBuffer from AImage: %d", status);
-        AImage_delete(currentImage_);
-        currentImage_ = nullptr;
+        AImage_delete(nextImage);
         return false;
     }
+
+    if (currentImage_ != nullptr)
+    {
+        beforeReleasePrevious();
+        AImage_delete(currentImage_);
+    }
+    currentImage_ = nextImage;
+    const uint32_t outputFramesReleased = outputFramesReleasedSinceAcquire_.exchange(0);
 
     // Get timestamp
     int64_t timestampNs = 0;
@@ -331,11 +352,11 @@ bool VideoDecoder::AcquireFrame(DecodedFrame* outFrame)
     int32_t imageHeight = 0;
     if (AImage_getWidth(currentImage_, &imageWidth) != AMEDIA_OK || imageWidth <= 0)
     {
-        imageWidth = static_cast<int32_t>(width_);
+        imageWidth = static_cast<int32_t>(maxWidth_);
     }
     if (AImage_getHeight(currentImage_, &imageHeight) != AMEDIA_OK || imageHeight <= 0)
     {
-        imageHeight = static_cast<int32_t>(height_);
+        imageHeight = static_cast<int32_t>(maxHeight_);
     }
 
     AImageCropRect cropRect = {};

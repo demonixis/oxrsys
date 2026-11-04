@@ -19,13 +19,39 @@ struct ConfigValues
     uint32_t refreshRateHz = 72;    // Preferred headset refresh rate
     float resolutionScale = 0.75f;  // Encode resolution multiplier (0.25-1.0)
     float dynamicResolutionMinScale = 0.50f; // Lowest ABR full-mode encode scale
-    std::string renderDevice = "quest3"; // Per-eye render resolution target: "quest2", "quest3", "avp"
+    std::string renderDevice = "quest3"; // Per-eye render resolution target: "quest2", "quest3", "quest3_native", "avp"
     uint32_t keyframeIntervalSec = 2; // Seconds between forced keyframes
     std::string videoCodec = "h265"; // "h265", "h264", "auto"
     std::string encoderPreset = "balanced"; // "quality", "balanced", "speed"
     bool encoder10Bit = false;      // Encode HEVC Main10 for capable H.265 clients
-    std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb"
-    std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "high"
+    // send_pacing_ms: spread each encoded frame's UDP packets evenly over this many ms instead
+    // of handing them to the socket as one burst (an AP queue under contention drops a burst's
+    // tail, and the XOR FEC cannot repair consecutive losses). Capped at 0.8 of the frame period;
+    // the rest of a frame goes at once if a newer frame is waiting. 0 = burst (the old behaviour).
+    float sendPacingMs = 0.0f;
+    // send_pacing_keyframe_ms: the window for frames that carry a keyframe (up to ~300 kB).
+    // 0 = twice send_pacing_ms. Same cap.
+    float sendPacingKeyframeMs = 0.0f;
+    // pacing_thread: "default" | "realtime". realtime gives each thread that calls xrWaitFrame a
+    // Mach time-constraint policy (period = one frame, computation = a third of it, constraint =
+    // half of it), so its sleep to the frame deadline wakes on time instead of up to several ms
+    // late. Set again when the frame period changes; the thread's previous policy comes back when
+    // the session ends or the key is switched off. Anything else reads as "default".
+    std::string pacingThread = "default";
+
+    // Out-of-process native-arm64 hardware encoder helper. When the runtime
+    // dylib is loaded by an x86_64/Rosetta host it cannot reach VideoToolbox's
+    // hardware HEVC encoder; the runtime then spawns a native-arm64 helper that
+    // can, sharing the compose IOSurfaces zero-copy, and falls back to the
+    // in-process encoder if anything about that fails.
+    //   "auto"  (default) use the helper only when this process is refused a
+    //           hardware encoder for the negotiated codec
+    //   "true"  always use the helper (debugging)
+    //   "false" never use the helper (debugging)
+    std::string encoderHelperMode = "auto";
+    std::string encoderHelperPath; // empty = sibling of the runtime dylib
+    std::string streamingTransport = "auto"; // "auto", "wifi", "usb_adb", "usb_ncm"
+    std::string foveatedEncodingPreset = "off"; // "off", "light", "medium", "medium_plus", "high"
     std::string clientFoveationPreset = "auto"; // "auto", "off", "light", "medium", "high"
     bool clientUpscaling = false;    // Enable Quest shader upscaling
     float clientSharpening = 0.0f;   // Headset contrast-adaptive sharpen strength (0.0-1.0); 0 = off
@@ -40,6 +66,13 @@ struct ConfigValues
     bool spatialAnchors = false;
     bool spatialScene = false;
     bool spatialPersistence = false;
+
+    // Manual calibration for the STAGE (standing/roomscale) floor. Added to the
+    // head height a game sees in STAGE and LOCAL_FLOOR spaces. 0 = trust the
+    // client's floor-relative pose unchanged. Positive raises the player (taller);
+    // negative lowers them (shorter). Use this when the headset's guardian floor
+    // is miscalibrated so a standing player stands at the wrong height in-game.
+    float stageHeightOffsetM = 0.0f;
 
     bool fileLogging = true;        // Write logs to oxrsys-runtime.log
     bool questLogcat = false;       // Capture Quest logcat to oxrsys-headset.log

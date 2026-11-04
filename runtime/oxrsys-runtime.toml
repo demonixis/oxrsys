@@ -22,9 +22,9 @@ refresh_rate_hz = 72
 # 0.5 = half resolution (recommended for WiFi), 1.0 = native resolution.
 resolution_scale = 0.75
 
-# Target headset for the per-eye render resolution: "quest2", "quest3", or "avp".
+# Target headset for the per-eye render resolution: "quest2", "quest3", "quest3_native", or "avp".
 # Sets the resolution the runtime renders at (quest2=1440x1584, quest3=1512x1680,
-# avp=3024x3360 per eye). Pick the headset you are streaming to; use resolution_scale
+# quest3_native=2064x2208, the Quest 3 panel resolution, avp=3024x3360 per eye). Pick the headset you are streaming to; use resolution_scale
 # above to trim how much of it is encoded and streamed.
 render_device = "quest3"
 
@@ -52,13 +52,55 @@ encoder_preset = "balanced"
 # H.264 and clients without the capability continue to receive 8-bit video.
 encoder_10bit = false
 
+# Scheduling of the app thread that waits in xrWaitFrame. "default" leaves it alone; "realtime"
+# gives it a Mach time-constraint policy, so its sleep to each frame deadline wakes on time instead
+# of up to several ms late, and the frame cadence holds steady. The thread's previous policy comes back
+# when the session ends or this is set back to "default".
+pacing_thread = "default"
+
+# UDP video pacing (WiFi and usb_ncm; USB ADB TCP is not paced): spread each encoded frame's
+# datagrams, data and FEC parity, evenly over this many ms instead of one burst. 0 = burst
+# (default), up to 10. Capped at 0.8 of the frame period; the rest of a frame goes at once when a
+# newer frame is waiting. Re-read while streaming.
+send_pacing_ms = 0
+
+# Pacing window for frames that carry a keyframe, up to 20 and with the same cap. 0 = twice
+# send_pacing_ms. Only used when send_pacing_ms is above 0.
+send_pacing_keyframe_ms = 0
+
+# Out-of-process native-arm64 HARDWARE video encoder helper.
+# When the runtime dylib is loaded in-process by an x86_64/Rosetta host (for
+# example CrossOver's Wine host), VideoToolbox refuses it the hardware HEVC
+# encoder and silently falls back to the software encoder (~20-34ms/frame here,
+# 27-40ms on real content). A small native-arm64 helper process IS granted the
+# hardware encoder (~8ms/frame), and the runtime shares its compose IOSurfaces
+# with it zero-copy via mach send rights.
+#   "auto"  (default) use the helper only when THIS process cannot get a
+#           hardware encoder for the negotiated codec, asked of VideoToolbox
+#           rather than guessed from the architecture. A runtime running
+#           natively on arm64 already has one, so it keeps encoding in-process;
+#           so does a Rosetta host negotiating H.264, which Rosetta is granted.
+#   "true"  always use the helper (debugging)
+#   "false" never use the helper (debugging)
+# The helper covers H.265 Main, H.265 Main10 and H.264 Main, always encoding the
+# codec and profile that were negotiated. If it cannot start or does not get the
+# hardware encoder, the runtime logs where it broke and transparently keeps using
+# the in-process encoder.
+encoder_helper = "auto"
+# Path to the helper binary. Empty = look for "oxrsys-encoder-helper" next to the
+# runtime dylib (also overridable at runtime via $OXRSYS_ENCODER_HELPER_PATH).
+encoder_helper_path = ""
+
 # Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
-# listeners, and "usb_adb" disables WiFi discovery fallback.
+# listeners, and "usb_adb" disables WiFi discovery fallback. "usb_ncm" streams over the
+# USB network (CDC-NCM) link that OXRSys Home sets up, using the WiFi UDP path.
 transport = "auto"
 
-# Server-side foveated video encoding preset: "off", "light", "medium", or "high".
+# Server-side foveated video encoding preset: "off", "light", "medium", "medium_plus", or "high".
 # This compresses frame edges before video encoding and asks compatible clients
-# to re-expand the image after decode.
+# to re-expand the image after decode. "medium_plus" sits between medium and light
+# (2160x2160 eyes: medium 2560x1120, medium_plus 2752x1216, light 3456x1536); it is
+# announced as medium with its own centre/edge parameters, which clients read.
 foveated_encoding_preset = "off"
 
 # Headset client foveation override: "auto", "off", "light", "medium", or "high".

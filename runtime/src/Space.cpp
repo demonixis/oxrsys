@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "Space.h"
+#include "SpaceVelocity.h"
 #include "Session.h"
 #include "Runtime.h"
 #include "InputManager.h"
@@ -92,10 +93,11 @@ struct LocatedWorldPose
 {
     XrPosef pose{};
     bool active = true;
+    XrSpaceVelocity velocity = {XR_TYPE_SPACE_VELOCITY};
 };
 
 // Compute world pose of a space.
-static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputManager)
+static LocatedWorldPose GetWorldPose(const Space* space, const InputManager& inputManager)
 {
     LocatedWorldPose result{};
     result.pose.orientation = {0, 0, 0, 1};
@@ -107,11 +109,21 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
         {
             case XR_REFERENCE_SPACE_TYPE_VIEW:
                 result.pose = inputManager.GetHeadPose();
+                if (space->GetSession()->HasTrackingConnection())
+                {
+                    result.velocity = inputManager.GetHeadVelocity();
+                }
                 break;
             case XR_REFERENCE_SPACE_TYPE_LOCAL:
             case XR_REFERENCE_SPACE_TYPE_LOCAL_FLOOR:
             case XR_REFERENCE_SPACE_TYPE_STAGE:
-                // Identity — world origin
+                // Distinct origins per OpenXR semantics: STAGE at the physical
+                // floor (client head pose is floor-relative), LOCAL anchored to the
+                // HMD pose at session start (yaw-only, ~eye height), LOCAL_FLOOR =
+                // LOCAL x/z + yaw at floor height.
+                result.pose = inputManager.GetReferenceSpacePose(space->GetReferenceSpaceType());
+                result.velocity.velocityFlags =
+                    XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
                 break;
             default:
                 break;
@@ -147,6 +159,11 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
             InputManager::Hand hand = HandFromBindingPath(poseBindingPath);
             result.pose = inputManager.GetPoseComponentForProfile(
                 hand, ComponentFromBindingPath(poseBindingPath), poseProfilePath);
+            if (space->GetSession()->HasTrackingConnection())
+            {
+                result.velocity = inputManager.GetPoseVelocityForProfile(
+                    hand, ComponentFromBindingPath(poseBindingPath), poseProfilePath);
+            }
         }
         else
         {
@@ -165,32 +182,15 @@ static LocatedWorldPose GetWorldPose(Space* space, const InputManager& inputMana
     glm::quat finalRot = worldRot * offsetRot;
     glm::vec3 finalPos = worldPos + worldRot * offsetPos;
 
+    result.velocity = oxrsys::space_velocity::AtOffset(result.velocity, worldRot * offsetPos);
     result.pose.orientation = ToXr(finalRot);
     result.pose.position = ToXr(finalPos);
     return result;
 }
 
-XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)
+static void LocateRelativePose(const LocatedWorldPose& thisPose, const LocatedWorldPose& basePose,
+                               XrSpaceLocation* location)
 {
-    if (location == nullptr || baseSpace == nullptr)
-    {
-        return XR_ERROR_VALIDATION_FAILURE;
-    }
-    if (time <= 0)
-    {
-        return XR_ERROR_TIME_INVALID;
-    }
-    if (baseSpace->GetSession() != session_)
-    {
-        return XR_ERROR_HANDLE_INVALID;
-    }
-
-    const InputManager& inputManager = session_->GetInputManager();
-
-    // Get world poses for both spaces
-    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
-    LocatedWorldPose basePose = GetWorldPose(baseSpace, inputManager);
-
     // Compute relative pose: this relative to base
     glm::quat baseRotInv = glm::inverse(ToGlm(basePose.pose.orientation));
     glm::vec3 basePos = ToGlm(basePose.pose.position);
@@ -210,10 +210,58 @@ XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* loca
 
     if (XrSpaceVelocity* velocity = FindSpaceVelocity(location->next))
     {
-        velocity->velocityFlags = 0;
-        velocity->linearVelocity = {0.0f, 0.0f, 0.0f};
-        velocity->angularVelocity = {0.0f, 0.0f, 0.0f};
+        XrSpaceVelocity relativeVelocity = {XR_TYPE_SPACE_VELOCITY};
+        if (thisPose.active && basePose.active)
+        {
+            relativeVelocity = oxrsys::space_velocity::Relative(
+                thisPose.velocity, basePose.velocity, ToGlm(basePose.pose.orientation), thisPos - basePos);
+        }
+        velocity->velocityFlags = relativeVelocity.velocityFlags;
+        velocity->linearVelocity = relativeVelocity.linearVelocity;
+        velocity->angularVelocity = relativeVelocity.angularVelocity;
+    }
+}
+
+XrResult Space::LocateSpace(Space* baseSpace, XrTime time, XrSpaceLocation* location)
+{
+    if (location == nullptr || baseSpace == nullptr)
+    {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (time <= 0)
+    {
+        return XR_ERROR_TIME_INVALID;
+    }
+    if (baseSpace->GetSession() != session_)
+    {
+        return XR_ERROR_HANDLE_INVALID;
     }
 
+    const InputManager& inputManager = session_->GetInputManager();
+
+    LocatedWorldPose thisPose = GetWorldPose(this, inputManager);
+    LocatedWorldPose basePose = baseSpace == this ? thisPose : GetWorldPose(baseSpace, inputManager);
+    if (type_ == Type::Reference && baseSpace->GetType() == Type::Reference &&
+        referenceSpaceType_ == baseSpace->GetReferenceSpaceType())
+    {
+        // Two spaces of one reference space type move together (VIEW spaces with the head), so their
+        // relative velocity is known and zero even while that motion is not measured, as without a
+        // tracking connection.
+        XrSpaceVelocity atRest = {XR_TYPE_SPACE_VELOCITY};
+        atRest.velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT | XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+        thisPose.velocity = atRest;
+        basePose.velocity = atRest;
+    }
+    LocateRelativePose(thisPose, basePose, location);
+
     return XR_SUCCESS;
+}
+
+XrSpaceLocation Space::LocateWorldPose(const XrPosef& pose) const
+{
+    LocatedWorldPose thisPose = {pose};
+    LocatedWorldPose basePose = GetWorldPose(this, session_->GetInputManager());
+    XrSpaceLocation location = {XR_TYPE_SPACE_LOCATION};
+    LocateRelativePose(thisPose, basePose, &location);
+    return location;
 }

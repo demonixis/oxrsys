@@ -24,7 +24,7 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(ClientCapabilityFlags.tenBitEncoding, 0x00000400)
         // A layout mismatch XORs the wrong packets together, so these bits must agree with
         // Protocol.h (TestProtocolLayout.cpp pins the same values).
-        XCTAssertEqual(ServerFeatureFlags.fecInterleaved, 0x00000400)
+        XCTAssertEqual(ServerFeatureFlags.fecInterleaved, 0x00000800)
         XCTAssertEqual(ClientCapabilityFlags.fecInterleaved, 0x00001000)
         XCTAssertEqual(VideoCodec.h264.rawValue, 1)
         XCTAssertEqual(ClientCodecCapability.h265, 0x00000001)
@@ -132,7 +132,8 @@ final class ProtocolLayoutTests: XCTestCase {
     }
 
     func testTrackingLayoutMatchesCppWireFormat() {
-        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1064)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.size, 1176)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.stride, 1176)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headLinearVelocity), 152)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.headAngularVelocity), 164)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftHandJoints), 176)
@@ -142,8 +143,42 @@ final class ProtocolLayoutTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimRot), 1020)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimPos), 1036)
         XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimRot), 1048)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.stageBoundsWidth), 1064)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.stageBoundsHeight), 1068)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerLinearVelocity), 1072)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAngularVelocity), 1084)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerLinearVelocity), 1096)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAngularVelocity), 1108)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimLinearVelocity), 1120)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.leftControllerAimAngularVelocity), 1132)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimLinearVelocity), 1144)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.rightControllerAimAngularVelocity), 1156)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.controllerProfile), 1168)
+        XCTAssertEqual(MemoryLayout<TrackingPacket>.offset(of: \.touchState), 1172)
         XCTAssertEqual(TrackingFlagsValues.leftControllerActive, 0x0004)
         XCTAssertEqual(TrackingFlagsValues.rightControllerActive, 0x0008)
+        XCTAssertEqual(TrackingFlagsValues.headLinearVelocityValid, 0x0010)
+        XCTAssertEqual(TrackingFlagsValues.headAngularVelocityValid, 0x0020)
+        XCTAssertEqual(TrackingFlagsValues.stageBoundsValid, 0x0040)
+        XCTAssertEqual(TrackingFlagsValues.leftControllerLinearVelocityValid, 0x0080)
+        XCTAssertEqual(TrackingFlagsValues.leftControllerAngularVelocityValid, 0x0100)
+        XCTAssertEqual(TrackingFlagsValues.rightControllerLinearVelocityValid, 0x0200)
+        XCTAssertEqual(TrackingFlagsValues.rightControllerAngularVelocityValid, 0x0400)
+        XCTAssertEqual(TrackingFlagsValues.leftControllerAimLinearVelocityValid, 0x0800)
+        XCTAssertEqual(TrackingFlagsValues.leftControllerAimAngularVelocityValid, 0x1000)
+        XCTAssertEqual(TrackingFlagsValues.rightControllerAimLinearVelocityValid, 0x2000)
+        XCTAssertEqual(TrackingFlagsValues.rightControllerAimAngularVelocityValid, 0x4000)
+        XCTAssertEqual(VideoFlags.alphaBlend, 0x40)
+        XCTAssertEqual(VideoFlags.packedAlpha, 0x80)
+    }
+
+    func testTrackingDefaultsDoNotAdvertiseBoundsOrVelocities() {
+        let packet = TrackingPacket()
+        XCTAssertEqual(packet.trackingFlags, 0)
+        XCTAssertEqual(packet.stageBoundsWidth, 0)
+        XCTAssertEqual(packet.stageBoundsHeight, 0)
+        XCTAssertEqual(packet.controllerProfile, 0)
+        XCTAssertEqual(packet.touchState, 0)
     }
 
     // Mirrors TestProtocolFec.cpp: the Swift GroupLayout must implement the same formulas as

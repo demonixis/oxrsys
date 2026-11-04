@@ -19,9 +19,11 @@ trademarks referenced by this project.
 - macOS runtime for `arm64` and `x86_64`, with universal release packaging
 - `XR_KHR_metal_enable`, including blit-to-swapchain applications such as Blender, and
   Vulkan/MoltenVK graphics paths
-- VideoToolbox H.264, H.265, and negotiated HEVC Main10 streaming
-- WiFi UDP and reconnecting USB ADB reverse TCP transport
-- SDK-free native ADB setup in OXRSys Home, with local ADB server and external `adb` fallbacks
+- VideoToolbox H.264, H.265, and negotiated HEVC Main10 streaming, with a native `arm64` encoder
+  helper that keeps H.265 on the hardware encoder when an `x86_64` runtime runs under Rosetta
+- WiFi UDP, reconnecting USB ADB reverse TCP, and Quest USB network (CDC-NCM) transports
+- SDK-free native ADB headset detection and USB Net setup in OXRSys Home; USB ADB reverse uses the
+  local ADB server or an external `adb`
 - Quest controller, hand tracking, reprojection, passthrough, foveation, and ABR paths
 - native visionOS immersive viewer with resilient compositor-frame submission, automatic and
   direct-IP discovery, hand tracking, and accessory-controller tracking
@@ -42,7 +44,7 @@ clients/
   visionos/              visionOS immersive viewer
   android-vr/            Quest/Pico OpenXR client
   shared/                shared Swift streaming and simulator packages
-common/protocol/         shared C++ wire protocol
+common/                  shared C++ wire protocol
 scripts/                 packaging, notarization, registration, and Unity helpers
 tests/                   runtime and protocol tests
 docs/                    detailed project documentation

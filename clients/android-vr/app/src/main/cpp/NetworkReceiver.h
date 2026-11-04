@@ -11,9 +11,9 @@
 #include <thread>
 #include <vector>
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
-#include <oxrsys/streaming/VideoFrameAssembler.h>
+#include <VideoFrameAssembler.h>
 
 namespace oxr
 {

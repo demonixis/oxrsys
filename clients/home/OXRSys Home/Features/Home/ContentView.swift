@@ -101,7 +101,7 @@ struct ContentView: View {
                 }
             })
         ) {
-            Button("Optional adb Fallback") {
+            Button("Install adb") {
                 model.openAdbInstallHelp()
             }
             Button("OK", role: .cancel) {
@@ -194,7 +194,7 @@ struct ContentView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 120)
+            .frame(width: 190)
 
             StatusPill(
                 title: readiness.isReady ? "Ready" : "Action needed",
@@ -210,11 +210,15 @@ struct ContentView: View {
 
             if readiness.canConfigureUsb {
                 Button {
-                    model.configureQuestUsbReverse()
+                    if model.mainTransportSelection == .usbNetwork {
+                        model.configureQuestUsbNetwork()
+                    } else {
+                        model.configureQuestUsbReverse()
+                    }
                 } label: {
                     Label("Configure", systemImage: "cable.connector")
                 }
-                .disabled(model.isUsbSetupInProgress)
+                .disabled(model.isUsbSetupInProgress || model.isUsbNetworkSetupInProgress)
             }
         }
         .frame(minWidth: 360, alignment: .leading)
@@ -496,6 +500,11 @@ struct ContentView: View {
                                   $0.serial == model.selectedQuestUsbSerial && $0.isUsable
                               }) ||
                               model.isUsbSetupInProgress)
+                    Button("Restore USB Mode") {
+                        model.restoreQuestUsbMode()
+                    }
+                    .help("Switch the headset from its USB network mode back to its default USB mode.")
+                    .disabled(model.isUsbNetworkSetupInProgress)
                     Spacer()
                 }
             }
@@ -606,16 +615,22 @@ struct ContentView: View {
 
                         Toggle("Passthrough", isOn: streamingBinding(\.passthroughEnabled))
 
-                        Picker("Occlusion", selection: streamingBinding(\.occlusionMode)) {
+                        Picker("Occlusion (unavailable)", selection: streamingBinding(\.occlusionMode)) {
                             ForEach(OcclusionModeSetting.allCases) { mode in
                                 Text(mode.displayName).tag(mode)
                             }
                         }
+                        .disabled(true)
+                        .help("Depth and scene mesh occlusion are not implemented.")
 
-                        Toggle("Spatial features", isOn: streamingBinding(\.spatialEnabled))
-                        Toggle("Spatial anchors", isOn: streamingBinding(\.spatialAnchors))
-                        Toggle("Scene scan", isOn: streamingBinding(\.spatialScene))
-                        Toggle("Spatial persistence", isOn: streamingBinding(\.spatialPersistence))
+                        Group {
+                            Toggle("Spatial features (unavailable)", isOn: streamingBinding(\.spatialEnabled))
+                            Toggle("Spatial anchors (unavailable)", isOn: streamingBinding(\.spatialAnchors))
+                            Toggle("Scene scan (unavailable)", isOn: streamingBinding(\.spatialScene))
+                            Toggle("Spatial persistence (unavailable)", isOn: streamingBinding(\.spatialPersistence))
+                        }
+                        .disabled(true)
+                        .help("Spatial data exchange and persistence are not implemented.")
 
                         HStack {
                             Button("Default") {
@@ -661,7 +676,9 @@ struct ContentView: View {
                                 Text(mode.displayName).tag(mode)
                             }
                         }
-                        Toggle("Headset audio", isOn: streamingBinding(\.headsetAudio))
+                        Toggle("Headset audio (unavailable)", isOn: streamingBinding(\.headsetAudio))
+                            .disabled(true)
+                            .help("Audio capture and playback are not implemented.")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 8)

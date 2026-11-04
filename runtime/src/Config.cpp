@@ -3,7 +3,7 @@
 #include "Config.h"
 #include "RuntimePlatform.h"
 
-#include <oxrsys/protocol/Protocol.h>
+#include <Protocol.h>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -11,11 +11,15 @@
 #include <chrono>
 #include <fstream>
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <thread>
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -144,9 +148,44 @@ void TerminateProcessGroup(pid_t pid)
     }
 }
 
+// fork() for a child that only execs. Every signal stays blocked across the fork, and the child puts each caught signal
+// back to its default action before unblocking, so a signal that lands between fork and exec cannot run the parent's
+// handlers (a test runner's, an engine's crash reporter) in a child whose fork-time state is not yet safe to use.
+// Ignored signals stay ignored, as exec would leave them.
+pid_t ForkForExec()
+{
+    sigset_t all;
+    sigset_t old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    const pid_t pid = fork();
+    if (pid == 0)
+    {
+        struct sigaction dfl = {};
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        for (int sig = 1; sig < NSIG; ++sig)
+        {
+            struct sigaction current = {};
+            if (sig == SIGKILL || sig == SIGSTOP || sigaction(sig, nullptr, &current) != 0)
+            {
+                continue;
+            }
+            const bool caught = (current.sa_flags & SA_SIGINFO) != 0 ||
+                                (current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN);
+            if (caught)
+            {
+                sigaction(sig, &dfl, nullptr);
+            }
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    return pid;
+}
+
 bool RunAdbLogcatClear(const std::string& adbPath, std::chrono::milliseconds timeout)
 {
-    const pid_t pid = fork();
+    const pid_t pid = ForkForExec();
     if (pid < 0)
     {
         return false;
@@ -257,6 +296,36 @@ static bool ParseBool(const std::string& value)
     return lower == "true" || lower == "1" || lower == "yes";
 }
 
+static bool ParseInteger(const std::string& value, int& val)
+{
+    const std::string number = Trim(value.substr(0, value.find('#')));
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(number.c_str(), &end, 10);
+    if (errno != 0 || end == number.c_str() || end != number.c_str() + number.size() ||
+        parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max())
+    {
+        return false;
+    }
+    val = static_cast<int>(parsed);
+    return true;
+}
+
+static bool ParseFloat(const std::string& value, float& val)
+{
+    const std::string number = Trim(value.substr(0, value.find('#')));
+    char* end = nullptr;
+    errno = 0;
+    const float parsed = std::strtof(number.c_str(), &end);
+    if (errno != 0 || end == number.c_str() || end != number.c_str() + number.size() ||
+        !std::isfinite(parsed))
+    {
+        return false;
+    }
+    val = parsed;
+    return true;
+}
+
 static bool IsSupportedRefreshRate(uint32_t value)
 {
     return value == 60 || value == 72 || value == 80 || value == 90 || value == 120;
@@ -300,202 +369,245 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         std::string key = Trim(line.substr(0, eq));
         std::string value = Trim(line.substr(eq + 1));
 
-        try
+        if (key == "runtime_enabled")
         {
-            if (key == "runtime_enabled")
+            values.runtimeEnabled = ParseBool(value);
+        }
+        else if (key == "file_logging")
+        {
+            values.fileLogging = ParseBool(value);
+        }
+        else if (key == "quest_logcat")
+        {
+            values.questLogcat = ParseBool(value);
+        }
+        else if (key == "bitrate_mbps")
+        {
+            int val;
+            if (ParseInteger(value, val) && val >= static_cast<int>(oxr::protocol::STREAMING_MIN_BITRATE_MBPS) &&
+                val <= static_cast<int>(oxr::protocol::STREAMING_MAX_BITRATE_MBPS))
             {
-                values.runtimeEnabled = ParseBool(value);
-            }
-            else if (key == "file_logging")
-            {
-                values.fileLogging = ParseBool(value);
-            }
-            else if (key == "quest_logcat")
-            {
-                values.questLogcat = ParseBool(value);
-            }
-            else if (key == "bitrate_mbps")
-            {
-                int val = std::stoi(value);
-                if (val >= static_cast<int>(oxr::protocol::STREAMING_MIN_BITRATE_MBPS) &&
-                    val <= static_cast<int>(oxr::protocol::STREAMING_MAX_BITRATE_MBPS))
-                {
-                    values.bitrateMbps = val;
-                }
-            }
-            else if (key == "fov_degrees")
-            {
-                int val = std::stoi(value);
-                if (val >= 60 && val <= 150)
-                {
-                    values.fovDegrees = val;
-                }
-            }
-            else if (key == "refresh_rate_hz")
-            {
-                int val = std::stoi(value);
-                if (val > 0 && IsSupportedRefreshRate(static_cast<uint32_t>(val)))
-                {
-                    values.refreshRateHz = static_cast<uint32_t>(val);
-                }
-            }
-            else if (key == "resolution_scale")
-            {
-                float val = std::stof(value);
-                if (val >= 0.25f && val <= 1.0f)
-                {
-                    values.resolutionScale = val;
-                }
-            }
-            else if (key == "dynamic_resolution_min_scale")
-            {
-                float val = std::stof(value);
-                if (val >= 0.25f && val <= 1.0f)
-                {
-                    values.dynamicResolutionMinScale = val;
-                }
-            }
-            else if (key == "render_device")
-            {
-                value = ParseString(value);
-                if (value == "quest2" || value == "quest3" || value == "avp")
-                {
-                    values.renderDevice = value;
-                }
-            }
-            else if (key == "keyframe_interval_sec")
-            {
-                int val = std::stoi(value);
-                if (val >= 1 && val <= 10)
-                {
-                    values.keyframeIntervalSec = val;
-                }
-            }
-            else if (key == "video_codec")
-            {
-                value = ParseString(value);
-                if (value == "h265" || value == "h264" || value == "auto")
-                {
-                    values.videoCodec = value;
-                }
-            }
-            else if (key == "encoder_preset")
-            {
-                value = ParseString(value);
-                if (value == "quality" || value == "balanced" || value == "speed")
-                {
-                    values.encoderPreset = value;
-                }
-            }
-            else if (key == "encoder_10bit")
-            {
-                values.encoder10Bit = ParseBool(value);
-            }
-            else if (key == "transport")
-            {
-                value = ParseString(value);
-                if (value == "auto" || value == "wifi" || value == "usb_adb")
-                {
-                    values.streamingTransport = value;
-                }
-            }
-            else if (key == "foveated_encoding_preset")
-            {
-                value = ParseString(value);
-                if (value == "off" || value == "light" || value == "medium" || value == "high")
-                {
-                    values.foveatedEncodingPreset = value;
-                }
-            }
-            else if (key == "client_foveation_preset")
-            {
-                value = ParseString(value);
-                if (value == "auto" || value == "off" || value == "light" ||
-                    value == "medium" || value == "high")
-                {
-                    values.clientFoveationPreset = value;
-                }
-            }
-            else if (key == "client_upscaling")
-            {
-                values.clientUpscaling = ParseBool(value);
-            }
-            else if (key == "client_sharpening")
-            {
-                float val = std::stof(value);
-                if (val >= 0.0f && val <= 1.0f)
-                {
-                    values.clientSharpening = val;
-                }
-            }
-            else if (key == "client_reprojection")
-            {
-                value = ParseString(value);
-                if (value == "off" || value == "pose" || value == "pose_warp")
-                {
-                    values.clientReprojectionMode = value;
-                }
-            }
-            else if (key == "abr_mode")
-            {
-                value = ParseString(value);
-                if (value == "off" || value == "bitrate" || value == "full")
-                {
-                    values.abrMode = value;
-                }
-            }
-            else if (key == "passthrough_enabled")
-            {
-                values.passthroughEnabled = ParseBool(value);
-                hasExplicitPassthroughEnabled = true;
-            }
-            else if (key == "app_alpha_blend_passthrough")
-            {
-                values.appAlphaBlendPassthrough = ParseBool(value);
-                hasExplicitAppAlphaBlendPassthrough = true;
-            }
-            else if (key == "mixed_reality_mode")
-            {
-                value = ParseString(value);
-                if (value == "off" || value == "passthrough" || value == "alpha")
-                {
-                    hasLegacyMixedRealityMode = true;
-                    legacyPassthroughEnabled = value != "off";
-                    legacyAppAlphaBlendPassthrough = value == "alpha";
-                }
-            }
-            else if (key == "occlusion_mode")
-            {
-                value = ParseString(value);
-                if (value == "off" || value == "scene_mesh" || value == "environment_depth")
-                {
-                    values.occlusionMode = value;
-                }
-            }
-            else if (key == "headset_audio")
-            {
-                values.headsetAudio = ParseBool(value);
-            }
-            else if (key == "enabled")
-            {
-                values.spatialEnabled = ParseBool(value);
-            }
-            else if (key == "anchors")
-            {
-                values.spatialAnchors = ParseBool(value);
-            }
-            else if (key == "scene")
-            {
-                values.spatialScene = ParseBool(value);
-            }
-            else if (key == "persistence")
-            {
-                values.spatialPersistence = ParseBool(value);
+                values.bitrateMbps = val;
             }
         }
-        catch (const std::exception&)
+        else if (key == "fov_degrees")
         {
-            // Ignore malformed values and keep the last valid/default setting.
+            int val;
+            if (ParseInteger(value, val) && val >= 60 && val <= 150)
+            {
+                values.fovDegrees = val;
+            }
+        }
+        else if (key == "refresh_rate_hz")
+        {
+            int val;
+            if (ParseInteger(value, val) && val > 0 && IsSupportedRefreshRate(static_cast<uint32_t>(val)))
+            {
+                values.refreshRateHz = static_cast<uint32_t>(val);
+            }
+        }
+        else if (key == "resolution_scale")
+        {
+            float val;
+            if (ParseFloat(value, val) && val >= 0.25f && val <= 1.0f)
+            {
+                values.resolutionScale = val;
+            }
+        }
+        else if (key == "dynamic_resolution_min_scale")
+        {
+            float val;
+            if (ParseFloat(value, val) && val >= 0.25f && val <= 1.0f)
+            {
+                values.dynamicResolutionMinScale = val;
+            }
+        }
+        else if (key == "render_device")
+        {
+            value = ParseString(value);
+            if (value == "quest2" || value == "quest3" || value == "quest3_native" || value == "avp")
+            {
+                values.renderDevice = value;
+            }
+        }
+        else if (key == "stage_height_offset_m")
+        {
+            float val;
+            if (ParseFloat(value, val) && val >= -1.0f && val <= 1.0f)
+            {
+                values.stageHeightOffsetM = val;
+            }
+        }
+        else if (key == "keyframe_interval_sec")
+        {
+            int val;
+            if (ParseInteger(value, val) && val >= 1 && val <= 10)
+            {
+                values.keyframeIntervalSec = val;
+            }
+        }
+        else if (key == "video_codec")
+        {
+            value = ParseString(value);
+            if (value == "h265" || value == "h264" || value == "auto")
+            {
+                values.videoCodec = value;
+            }
+        }
+        else if (key == "encoder_preset")
+        {
+            value = ParseString(value);
+            if (value == "quality" || value == "balanced" || value == "speed")
+            {
+                values.encoderPreset = value;
+            }
+        }
+        else if (key == "encoder_10bit")
+        {
+            values.encoder10Bit = ParseBool(value);
+        }
+        else if (key == "send_pacing_ms")
+        {
+            float val;
+            if (ParseFloat(value, val))
+            {
+                values.sendPacingMs = std::clamp(val, 0.0f, 10.0f);
+            }
+        }
+        else if (key == "send_pacing_keyframe_ms")
+        {
+            float val;
+            if (ParseFloat(value, val))
+            {
+                values.sendPacingKeyframeMs = std::clamp(val, 0.0f, 20.0f);
+            }
+        }
+        else if (key == "pacing_thread")
+        {
+            value = ParseString(value);
+            values.pacingThread = value == "realtime" ? value : "default";
+        }
+        else if (key == "encoder_helper")
+        {
+            // Tri-state: "auto" (decide from the measured hardware-encoder
+            // availability), or an explicit true/false override. Anything
+            // unrecognised keeps the current value rather than silently
+            // flipping the policy on a typo.
+            value = ParseString(value);
+            std::string lowered = value;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(), ::tolower);
+            if (lowered == "auto" || lowered == "true" || lowered == "false" ||
+                lowered == "yes" || lowered == "no" || lowered == "on" || lowered == "off" ||
+                lowered == "1" || lowered == "0")
+            {
+                values.encoderHelperMode = lowered;
+            }
+        }
+        else if (key == "encoder_helper_path")
+        {
+            values.encoderHelperPath = ParseString(value);
+        }
+        else if (key == "transport")
+        {
+            value = ParseString(value);
+            if (value == "auto" || value == "wifi" || value == "usb_adb" || value == "usb_ncm")
+            {
+                values.streamingTransport = value;
+            }
+        }
+        else if (key == "foveated_encoding_preset")
+        {
+            value = ParseString(value);
+            if (value == "off" || value == "light" || value == "medium" ||
+                value == "medium_plus" || value == "high")
+            {
+                values.foveatedEncodingPreset = value;
+            }
+        }
+        else if (key == "client_foveation_preset")
+        {
+            value = ParseString(value);
+            if (value == "auto" || value == "off" || value == "light" ||
+                value == "medium" || value == "high")
+            {
+                values.clientFoveationPreset = value;
+            }
+        }
+        else if (key == "client_upscaling")
+        {
+            values.clientUpscaling = ParseBool(value);
+        }
+        else if (key == "client_sharpening")
+        {
+            float val;
+            if (ParseFloat(value, val) && val >= 0.0f && val <= 1.0f)
+            {
+                values.clientSharpening = val;
+            }
+        }
+        else if (key == "client_reprojection")
+        {
+            value = ParseString(value);
+            if (value == "off" || value == "pose" || value == "pose_warp")
+            {
+                values.clientReprojectionMode = value;
+            }
+        }
+        else if (key == "abr_mode")
+        {
+            value = ParseString(value);
+            if (value == "off" || value == "bitrate" || value == "full")
+            {
+                values.abrMode = value;
+            }
+        }
+        else if (key == "passthrough_enabled")
+        {
+            values.passthroughEnabled = ParseBool(value);
+            hasExplicitPassthroughEnabled = true;
+        }
+        else if (key == "app_alpha_blend_passthrough")
+        {
+            values.appAlphaBlendPassthrough = ParseBool(value);
+            hasExplicitAppAlphaBlendPassthrough = true;
+        }
+        else if (key == "mixed_reality_mode")
+        {
+            value = ParseString(value);
+            if (value == "off" || value == "passthrough" || value == "alpha")
+            {
+                hasLegacyMixedRealityMode = true;
+                legacyPassthroughEnabled = value != "off";
+                legacyAppAlphaBlendPassthrough = value == "alpha";
+            }
+        }
+        else if (key == "occlusion_mode")
+        {
+            value = ParseString(value);
+            if (value == "off" || value == "scene_mesh" || value == "environment_depth")
+            {
+                values.occlusionMode = value;
+            }
+        }
+        else if (key == "headset_audio")
+        {
+            values.headsetAudio = ParseBool(value);
+        }
+        else if (key == "enabled")
+        {
+            values.spatialEnabled = ParseBool(value);
+        }
+        else if (key == "anchors")
+        {
+            values.spatialAnchors = ParseBool(value);
+        }
+        else if (key == "scene")
+        {
+            values.spatialScene = ParseBool(value);
+        }
+        else if (key == "persistence")
+        {
+            values.spatialPersistence = ParseBool(value);
         }
     }
 
@@ -660,6 +772,10 @@ EyeResolution DeviceBaseEyeResolution(const std::string& device)
     {
         return {1440, 1584};
     }
+    if (device == "quest3_native")
+    {
+        return {2064, 2208};
+    }
     if (device == "avp")
     {
         return {3024, 3360};
@@ -764,7 +880,7 @@ void Config::StartLogcatCapture()
         return;
     }
 
-    const pid_t pid = fork();
+    const pid_t pid = ForkForExec();
     if (pid < 0)
     {
         spdlog::warn("Failed to fork adb logcat capture");

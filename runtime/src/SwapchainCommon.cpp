@@ -228,6 +228,8 @@ XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
         (streamingSnapshotDemand_ != nullptr &&
          streamingSnapshotDemand_->load(std::memory_order_acquire));
 
+    // xrEndFrame may take a missing snapshot from another thread.
+    std::scoped_lock lock(stateMutex_);
 #ifdef XR_USE_GRAPHICS_API_METAL
     if (graphicsApi_ == GraphicsApi::Metal)
     {
@@ -241,6 +243,36 @@ XrResult Swapchain::ReleaseImage(const XrSwapchainImageReleaseInfo* releaseInfo)
     }
 #endif
     return XR_SUCCESS;
+}
+
+void Swapchain::SnapshotLastReleasedImageIfMissing()
+{
+    // A static image was captured at its release whatever the demand, and no
+    // snapshot work is done while no headset is connected.
+    if (imageCount_ == 1 || streamingSnapshotDemand_ == nullptr ||
+        !streamingSnapshotDemand_->load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    std::scoped_lock lock(stateMutex_);
+    if (!hasReleasedImage_ || imageStates_[lastReleasedIndex_] != ImageState::Available)
+    {
+        return;
+    }
+#ifdef XR_USE_GRAPHICS_API_METAL
+    if (graphicsApi_ == GraphicsApi::Metal && !hasSnapshot_)
+    {
+        SnapshotMetalReleasedImage(true);
+    }
+#endif
+#ifdef XR_USE_GRAPHICS_API_VULKAN
+    if (graphicsApi_ == GraphicsApi::Vulkan &&
+        (lastVulkanSnapshots_.empty() || !lastVulkanSnapshots_.front().IsValid()))
+    {
+        SnapshotVulkanReleasedImage(true);
+    }
+#endif
 }
 
 void* Swapchain::GetLastReleasedTexture() const

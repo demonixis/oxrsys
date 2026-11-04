@@ -35,6 +35,7 @@ public final class VideoDecoder: @unchecked Sendable {
     private var lastSessionRebuildNs: Int64 = 0
     private static let sessionRebuildCooldownNs: Int64 = 500_000_000
     public var totalDecodeErrors: Int { locked { decodeErrorCount } }
+    public var isRecovering: Bool { locked { awaitingKeyframe } }
 
     /// Called on decode errors (from VT callback thread) for keyframe recovery.
     public var onDecodeError: (@Sendable () -> Void)? {

@@ -9,6 +9,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -25,10 +31,64 @@ public class NativeActivity extends android.app.NativeActivity
 {
     private static final String TAG = "OXRSys-NativeActivity";
     private static final String ACTION_USB_PERMISSION = "net.demonixis.oxrsys.android.USB_PERMISSION";
+    // OXRSys Home's fixed headset address on the USB network link (UsbNetworkLink.h).
+    private static final String USB_NETWORK_HEADSET_ADDRESS = "192.168.42.2";
 
     private UsbManager usbManager;
     private PendingIntent usbPermissionIntent;
     private boolean usbReceiverRegistered = false;
+    private ConnectivityManager connectivityManager;
+    private Network usbNetwork; // Only touched on the network callback thread.
+
+    static
+    {
+        // NativeActivity loads the library itself, but JNI only resolves Java native methods in
+        // libraries loaded through System.loadLibrary.
+        System.loadLibrary("oxrsys_android");
+    }
+
+    private static native void nativeSetUsbNetwork(long networkHandle);
+
+    /**
+     * Reports the USB network (CDC-NCM) link's Ethernet network to the native client, which binds
+     * its sockets to it: the link has no gateway, so the Quest's default network stays Wi-Fi.
+     */
+    private final ConnectivityManager.NetworkCallback usbNetworkCallback =
+        new ConnectivityManager.NetworkCallback()
+    {
+        @Override
+        public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties)
+        {
+            // The request matches any Ethernet network, such as a USB Ethernet adapter on the LAN;
+            // only the cable link carries the headset's fixed address.
+            boolean isUsbLink = false;
+            for (LinkAddress address : linkProperties.getLinkAddresses())
+            {
+                isUsbLink |= USB_NETWORK_HEADSET_ADDRESS.equals(address.getAddress().getHostAddress());
+            }
+            if (isUsbLink && !network.equals(usbNetwork))
+            {
+                Log.i(TAG, "USB network available: " + network);
+                usbNetwork = network;
+                nativeSetUsbNetwork(network.getNetworkHandle());
+            }
+            else if (!isUsbLink && network.equals(usbNetwork))
+            {
+                onLost(network);
+            }
+        }
+
+        @Override
+        public void onLost(Network network)
+        {
+            if (network.equals(usbNetwork))
+            {
+                Log.i(TAG, "USB network lost: " + network);
+                usbNetwork = null;
+                nativeSetUsbNetwork(0);
+            }
+        }
+    };
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver()
     {
@@ -57,6 +117,7 @@ public class NativeActivity extends android.app.NativeActivity
     {
         Log.i(TAG, "onCreate");
         initializeUsbPermissionHandling();
+        registerUsbNetworkCallback();
         super.onCreate(savedInstanceState);
         probeUsbPermissionTargets(getIntent());
     }
@@ -94,6 +155,12 @@ public class NativeActivity extends android.app.NativeActivity
             unregisterReceiver(usbReceiver);
             usbReceiverRegistered = false;
         }
+        if (connectivityManager != null)
+        {
+            connectivityManager.unregisterNetworkCallback(usbNetworkCallback);
+            connectivityManager = null;
+            nativeSetUsbNetwork(0);
+        }
         super.onDestroy();
     }
 
@@ -120,6 +187,17 @@ public class NativeActivity extends android.app.NativeActivity
             registerReceiver(usbReceiver, filter);
         }
         usbReceiverRegistered = true;
+    }
+
+    private void registerUsbNetworkCallback()
+    {
+        connectivityManager = (ConnectivityManager)getSystemService(Context.CONNECTIVITY_SERVICE);
+        // The link carries no internet, so do not require the INTERNET capability.
+        NetworkRequest request = new NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build();
+        connectivityManager.registerNetworkCallback(request, usbNetworkCallback);
     }
 
     private void probeUsbPermissionTargets(Intent launchIntent)

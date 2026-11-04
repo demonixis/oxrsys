@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <glm/glm.hpp>
@@ -60,7 +61,8 @@ void StoreVec3(float* dst, const glm::vec3& vec)
 // Predict position using client-reported velocity if available, otherwise finite difference.
 glm::vec3 PredictPosition(const glm::vec3& previous, const glm::vec3& current,
                           float dtSeconds, float horizonSeconds, float maxSpeed,
-                          const glm::vec3& reportedVelocity = glm::vec3(0.0f))
+                          const glm::vec3& reportedVelocity = glm::vec3(0.0f),
+                          bool reportedVelocityValid = false)
 {
     if (horizonSeconds <= 0.0f)
     {
@@ -69,7 +71,7 @@ glm::vec3 PredictPosition(const glm::vec3& previous, const glm::vec3& current,
 
     glm::vec3 velocity;
     float reportedSpeed = glm::length(reportedVelocity);
-    if (reportedSpeed > 0.001f)
+    if (std::isfinite(reportedSpeed) && (reportedVelocityValid || reportedSpeed > 0.001f))
     {
         // Use client-reported IMU velocity (more accurate than finite difference)
         velocity = reportedVelocity;
@@ -202,7 +204,17 @@ void TrackingReceiver::Stop()
         receiveThread_.join();
     }
 
+    Reset();
+
     spdlog::info("TrackingReceiver: Stopped ({} packets received)", packetCount_.load());
+}
+
+void TrackingReceiver::Reset()
+{
+    std::lock_guard<std::mutex> lock(poseMutex_);
+    history_.clear();
+    latestPacket_ = {};
+    hasData_.store(false);
 }
 
 // Minimum acceptable tracking packet: everything up to (but not including) the aim-pose fields,
@@ -211,7 +223,18 @@ void TrackingReceiver::Stop()
 // aim pose) stay zero, and the runtime falls back to the grip pose for aim/pose. This keeps the
 // protocol backward-compatible instead of dropping every shorter packet as "no tracking".
 static constexpr size_t kMinTrackingPacketSize =
-    offsetof(oxr::protocol::TrackingPacket, leftControllerAimPos);
+    oxr::protocol::TRACKING_PACKET_BASE_SIZE;
+
+// controllerProfile and touchState were appended last. Only a packet that reaches the end of touchState carries
+// them; a shorter one is from a client that does not send them.
+static void ClearFieldsBeyond(oxr::protocol::TrackingPacket& packet, size_t received)
+{
+    if (received < offsetof(oxr::protocol::TrackingPacket, touchState) + sizeof(packet.touchState))
+    {
+        packet.controllerProfile = oxr::protocol::CONTROLLER_PROFILE_UNKNOWN;
+        packet.touchState = 0;
+    }
+}
 
 void TrackingReceiver::ReceiveThread()
 {
@@ -221,39 +244,103 @@ void TrackingReceiver::ReceiveThread()
     {
         oxrsys::runtime_socket::SetReceiveTimeout(socket_, 0, 5000);
 
-        int received = oxrsys::runtime_socket::Receive(socket_, buffer, sizeof(buffer), 0);
+        sockaddr_in source = {};
+        oxrsys::runtime_socket::SocketLength sourceLength = sizeof(source);
+        int received = oxrsys::runtime_socket::ReceiveFrom(socket_, buffer, sizeof(buffer), 0,
+                                                           (sockaddr*)&source, &sourceLength);
         if (received < static_cast<int>(kMinTrackingPacketSize))
         {
             continue;
         }
 
-        oxr::protocol::TrackingPacket packet = {};
-        size_t copyBytes = std::min(static_cast<size_t>(received), sizeof(packet));
-        memcpy(&packet, buffer, copyBytes);
-        StorePacket(packet, SteadyClockNowNs());
+        ReceivePacket(buffer, static_cast<size_t>(received), source);
     }
+}
+
+void TrackingReceiver::ReceivePacket(const uint8_t* data, size_t size, const sockaddr_in& source)
+{
+    // Only the admitted client may drive the pose. A refused or not-yet-admitted client keeps
+    // sending tracking, and its clock interleaved with the active one makes the head pose jump.
+    // StorePacket compares the source under poseMutex_, so a datagram that arrives while the
+    // client changes is either cleared by the reset or refused after it.
+    StorePayload(data, size, &source.sin_addr.s_addr);
 }
 
 void TrackingReceiver::InjectPacket(const uint8_t* data, size_t size)
 {
-    if (size < kMinTrackingPacketSize)
+    StorePayload(data, size, nullptr);
+}
+
+void TrackingReceiver::StorePayload(const uint8_t* data, size_t size, const uint32_t* udpSource)
+{
+    if (data == nullptr || size < kMinTrackingPacketSize)
     {
         return;
     }
 
     oxr::protocol::TrackingPacket packet = {};
     memcpy(&packet, data, std::min(size, sizeof(packet)));
-    StorePacket(packet, SteadyClockNowNs());
+
+    // A short legacy packet cannot validate fields it did not actually carry.
+    using namespace oxr::protocol;
+    const struct
+    {
+        uint32_t flag;
+        size_t end;
+    } fields[] = {
+        {TRACKING_FLAG_STAGE_BOUNDS_VALID, offsetof(TrackingPacket, stageBoundsHeight) + sizeof(float)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerLinearVelocity) + sizeof(packet.leftControllerLinearVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAngularVelocity) + sizeof(packet.leftControllerAngularVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerLinearVelocity) + sizeof(packet.rightControllerLinearVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAngularVelocity) + sizeof(packet.rightControllerAngularVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAimLinearVelocity) + sizeof(packet.leftControllerAimLinearVelocity)},
+        {TRACKING_FLAG_LEFT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, leftControllerAimAngularVelocity) + sizeof(packet.leftControllerAimAngularVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_AIM_LINEAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAimLinearVelocity) + sizeof(packet.rightControllerAimLinearVelocity)},
+        {TRACKING_FLAG_RIGHT_CONTROLLER_AIM_ANGULAR_VELOCITY_VALID,
+         offsetof(TrackingPacket, rightControllerAimAngularVelocity) + sizeof(packet.rightControllerAimAngularVelocity)},
+    };
+    for (const auto& field : fields)
+    {
+        if (size < field.end)
+        {
+            packet.trackingFlags &= ~field.flag;
+        }
+    }
+    ClearFieldsBeyond(packet, size);
+    StorePacket(packet, SteadyClockNowNs(), udpSource);
 }
 
 bool TrackingReceiver::GetLatestPose(oxr::protocol::TrackingPacket& outPacket) const
 {
+    std::lock_guard<std::mutex> lock(poseMutex_);
     if (!hasData_.load())
     {
         return false;
     }
 
+    outPacket = latestPacket_;
+    return true;
+}
+
+bool TrackingReceiver::GetFreshPose(oxr::protocol::TrackingPacket& outPacket) const
+{
     std::lock_guard<std::mutex> lock(poseMutex_);
+    if (!hasData_.load() || history_.empty())
+    {
+        return false;
+    }
+    const int64_t age = SteadyClockNowNs() - history_.back().receiveTimeNs;
+    if (age < 0 || age > 250'000'000)
+    {
+        return false;
+    }
     outPacket = latestPacket_;
     return true;
 }
@@ -296,7 +383,9 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     glm::vec3 headLinVel = LoadVec3(current.packet.headLinearVelocity);
     glm::vec3 headAngVel = LoadVec3(current.packet.headAngularVelocity);
     float headAngularSpeed = glm::length(headAngVel);
-    bool hasHeadAngularVelocity = headAngularSpeed > 0.001f;
+    bool hasHeadAngularVelocity = std::isfinite(headAngularSpeed) &&
+        ((current.packet.trackingFlags & oxr::protocol::TRACKING_FLAG_HEAD_ANGULAR_VELOCITY_VALID) != 0 ||
+         headAngularSpeed > 0.001f);
 
     float totalHorizonSeconds = horizonMs / 1000.0f;
     float headRotationHorizonSeconds = hasHeadAngularVelocity
@@ -305,21 +394,51 @@ bool TrackingReceiver::GetPredictedPose(oxr::protocol::TrackingPacket& outPacket
     float controllerRotationHorizonSeconds = totalHorizonSeconds;
     float positionHorizonSeconds = totalHorizonSeconds * 0.5f;
 
+    // Issue: "look-down-moves-forward" (rotation -> translation coupling).
+    // The client-reported head linear velocity during a head rotation is the
+    // tangential velocity of the eye pivoting about the neck (~0.1-0.15m lever arm).
+    // Linearly extrapolating along that tangent overshoots the genuine (arc) eye
+    // motion, so the scene appears to translate when the user only rotates. Scale the
+    // HEAD position-prediction horizon down as angular speed rises: full horizon for
+    // near-pure translation, ramping to a small floor during brisk head turns. This
+    // tames the overshoot without disabling prediction (no added latency/judder) and
+    // leaves genuine walking translation unaffected.
+    constexpr float kCouplingRampLoRadPerSec = 0.5f;  // below this: no reduction
+    constexpr float kCouplingRampHiRadPerSec = 4.0f;  // at/above this: full reduction
+    constexpr float kCouplingMinHorizonScale = 0.15f; // floor on the position horizon
+    float couplingT = hasHeadAngularVelocity
+        ? std::clamp((headAngularSpeed - kCouplingRampLoRadPerSec) /
+                         (kCouplingRampHiRadPerSec - kCouplingRampLoRadPerSec),
+                     0.0f, 1.0f)
+        : 0.0f;
+    float couplingScale = 1.0f - (1.0f - kCouplingMinHorizonScale) * couplingT;
+    float headPositionHorizonSeconds = positionHorizonSeconds * couplingScale;
+
+    float headReportedSpeed = glm::length(headLinVel);
+
     int64_t nowNs = SteadyClockNowNs();
     int64_t lastLogNs = lastPredictionDiagnosticNs_.load();
     if (nowNs - lastLogNs >= 5LL * 1000LL * 1000LL * 1000LL &&
         lastPredictionDiagnosticNs_.compare_exchange_strong(lastLogNs, nowNs))
     {
-        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} speed={:.2f}rad/s "
-                     "reordered_dropped={}",
+        // Diagnostic evidence for the coupling fix: reported linear/angular speed,
+        // the scaled head position horizon, and the resulting predicted forward
+        // displacement (what previously overshot as "world moves when I look").
+        spdlog::info("TrackingReceiver: prediction horizon={:.1f}ms head_ang_vel={} "
+                     "ang_speed={:.2f}rad/s lin_speed={:.3f}m/s pos_horizon={:.2f}ms "
+                     "(scale={:.2f}) predicted_disp={:.1f}mm reordered_dropped={}",
                      horizonMs, hasHeadAngularVelocity ? "yes" : "no", headAngularSpeed,
+                     headReportedSpeed, headPositionHorizonSeconds * 1000.0f, couplingScale,
+                     std::min(headReportedSpeed, 3.0f) * headPositionHorizonSeconds * 1000.0f,
                      reorderedDropCount_.load());
     }
 
     StoreVec3(outPacket.headPosition,
               PredictPosition(LoadVec3(previous.packet.headPosition),
                               LoadVec3(current.packet.headPosition),
-                              dtSeconds, positionHorizonSeconds, 3.0f, headLinVel));
+                              dtSeconds, headPositionHorizonSeconds, 3.0f, headLinVel,
+                              (current.packet.trackingFlags &
+                               oxr::protocol::TRACKING_FLAG_HEAD_LINEAR_VELOCITY_VALID) != 0));
 
     if (hasHeadAngularVelocity)
     {
@@ -383,12 +502,23 @@ void TrackingReceiver::SetPredictionHorizonMs(float predictionHorizonMs)
     predictionHorizonMs_.store(std::max(predictionHorizonMs, 0.0f));
 }
 
-void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs)
+void TrackingReceiver::ResetHistory()
+{
+    Reset();
+    spdlog::info("TrackingReceiver: history reset for a new client");
+}
+
+void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, int64_t receiveTimeNs,
+                                   const uint32_t* udpSource)
 {
     oxr::protocol::TrackingPacket normalizedPacket = packet;
 
     {
         std::lock_guard<std::mutex> lock(poseMutex_);
+        if (udpSource != nullptr && *udpSource != clientAddress_.load())
+        {
+            return;
+        }
 
         // Drop out-of-order / duplicate tracking packets. UDP reorders packets freely over Wi-Fi,
         // and the client stamps each sample with a monotonically increasing timestamp. If a packet
@@ -436,8 +566,8 @@ void TrackingReceiver::StorePacket(const oxr::protocol::TrackingPacket& packet, 
         {
             history_.pop_front();
         }
+        hasData_.store(true);
     }
 
-    hasData_.store(true);
     packetCount_.fetch_add(1);
 }

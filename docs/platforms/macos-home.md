@@ -15,7 +15,7 @@ tab. Its first tool opens the integrated OXRSys Simulator in a single Home-owned
 
 The main window also shows the current runtime activity: idle or streaming, the active transport
 when streaming, the connected device family, the OpenXR application name reported by the runtime,
-and a WiFi/USB transport readiness control.
+and a WiFi/USB/USB Net transport readiness control.
 
 The Home app now targets direct notarized distribution instead of App Store/TestFlight sandboxing.
 The launcher and registration workflow need access to `/Applications`, app executables, Terminal
@@ -113,7 +113,7 @@ The file is updated when an OpenXR app creates or destroys an instance, when the
 starts or stops, and when a headset client connects or disconnects. The Home app polls it once per
 second and shows:
 
-- state: `Idle`, `Streaming (WiFi)`, or `Streaming (USB)`
+- state: `Idle`, `Streaming (WiFi)`, `Streaming (USB)`, or `Streaming (USB Network)`
 - device: `Quest`, `Pico`, `Simulator`, `Vision Pro`, or `Unknown`
 - profile app: the OpenXR application name from `XrInstanceCreateInfo`, with the Home-launched
   app as a fallback before the runtime has written status
@@ -148,7 +148,7 @@ idle. The fields are:
   `counters.pending_depth_max`, `counters.reprojected_frames_delta`,
   `counters.stale_frame_reuses_delta`, `counters.render_pose_fallbacks_delta`
 
-The same header area includes a WiFi/USB selector. Selecting WiFi writes `streaming.transport = "wifi"`
+The same header area includes a WiFi/USB/USB Net selector. Selecting WiFi writes `streaming.transport = "wifi"`
 and shows whether the Mac WiFi interface is powered on. Selecting USB first switches the header into
 USB setup, then checks the selected or single authorized Quest device and automatically configures
 missing reverse mappings on `9944`, `9945`, `9946`, and `9948`. The Home app writes
@@ -159,12 +159,24 @@ retry. On startup, Home performs this automatic reverse setup only when the pers
 already `usb_adb`; the default `auto` transport only refreshes readiness until the user selects USB
 or presses `Configure USB Reverse`.
 
+Selecting USB Net sets up the USB network link for the selected or single authorized device: it
+switches the headset to its CDC-NCM USB mode over ADB, waits up to two minutes for the macOS accessory
+prompt, configures the Mac service for the headset interface as `192.168.42.1/24` without a router,
+sets the headset to `192.168.42.2/24` without a gateway, and checks that the headset can ping the Mac
+over `usb0` and that the Mac's primary route did not change. The ping runs on the headset over ADB, so
+Home itself sends no local network traffic and needs no macOS Local Network permission. Home writes
+`streaming.transport = "usb_ncm"` only after that succeeds, and repeats the setup on startup when
+that transport is persisted. Readiness is refreshed from the IORegistry and the interface address. `Restore USB Mode` in the ADB section switches the headset back to its default USB mode.
+See [Quest](quest.md#usb-network-transport) for the client side.
+
 The Settings ADB section stores an ADB mode and optional custom `adb` executable path in SwiftUI Home
-`UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly, performs ADB
-authentication with a Home-managed host key, and configures reverse mappings without Android Studio,
-the Android SDK, Homebrew, or an `adb` executable. If the native USB path is unavailable, Home falls
-back to a running local ADB server on `127.0.0.1:5037`, then to SDK, Homebrew, and `PATH` executable
-candidates. `Custom` mode tries only the configured executable path; `Auto Detect` pre-fills that
+`UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly and performs ADB
+authentication with a Home-managed host key, so it lists devices without Android Studio, the Android
+SDK, Homebrew, or an `adb` executable; the first connection asks the headset to allow the
+`OXRSys@<host>` key. If the native USB path is unavailable, Home falls back to a running local ADB
+server on `127.0.0.1:5037`, then to SDK, Homebrew, and `PATH` executable candidates. Reverse mappings
+always use the ADB server or the external `adb`: adbd drops them when their host connection closes,
+and Home does not keep a native connection open to relay the headset's connections. `Custom` mode tries only the configured executable path; `Auto Detect` pre-fills that
 path from the detected external `adb` executable when one is available. If the selected custom path
 is empty or invalid, Home reports that path and does not silently fall back to Internal mode.
 
@@ -223,6 +235,18 @@ for clients that explicitly advertise H.264 support.
 
 The `encoder_10bit` control requests HEVC Main10 and takes effect only for an H.265 stream to a
 client that advertises 10-bit decode support. H.264 remains 8-bit.
+
+Two encoder keys are edited in the TOML only, not in Home:
+
+- `streaming.encoder_helper` (default `"auto"`) chooses where VideoToolbox encodes. `auto` uses the
+  native `arm64` encoder helper only when the runtime's own process has no hardware encoder for the
+  negotiated codec, which is the case for H.265 in an `x86_64` runtime under Rosetta. `"true"` and
+  `"false"` force the helper on or off; any other value is treated as `auto`.
+- `streaming.encoder_helper_path` (default empty) overrides where the helper binary is found. Empty
+  means `oxrsys-encoder-helper` next to the runtime dylib. The `OXRSYS_ENCODER_HELPER_PATH`
+  environment variable takes precedence over both.
+
+See [Architecture](../architecture.md#encode-path) for the encode-path decision and fallback.
 
 The refresh control writes one of `60`, `72`, `80`, `90`, or `120` Hz. The
 runtime announces that value, and Quest clients request it through
@@ -286,11 +310,13 @@ The runtime reloads config file changes opportunistically:
 - `keyframe_interval_sec` is picked up by the encode loop without restarting the process
 - `quest_logcat` can start or stop adb capture after the autosaved config is written; the runtime
   clears headset logcat best-effort with a timeout before capture and continues if that clear fails
+- `foveated_encoding_preset` applies at the next OpenXR session, or with a live `abr_mode = "full"`
+  resolution change; a client reconnect keeps the preset the stream started with
 - `bitrate_mbps`, `resolution_scale`, `dynamic_resolution_min_scale`, `refresh_rate_hz`, `encoder_preset`, `transport`,
-  `foveated_encoding_preset`, `client_foveation_preset`, `client_upscaling`,
+  `client_foveation_preset`, `client_upscaling`,
   `client_reprojection`, `abr_mode`, `passthrough_enabled`,
-  `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, and `headset_audio` apply when streaming or the
-  encoder/client connection is recreated
+  `app_alpha_blend_passthrough`, `occlusion_mode`, `[spatial]`, `headset_audio`, `encoder_helper`,
+  and `encoder_helper_path` apply when streaming or the encoder/client connection is recreated
 - file logger sink setup still requires a restart
 
-The Settings ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the native USB ADB protocol, the local ADB server protocol, or `adb reverse --list` fallback. USB refresh/setup results are request-scoped so stale results after ADB mode, path, selected device, or transport changes are ignored. If a periodic refresh cannot read reverse mappings for the same still-authorized device, Home preserves previously verified reverse ports instead of flipping the main readiness pill to not ready. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.
+The Settings ADB section detects authorized ADB devices, applies reverse mappings for ports `9944`, `9945`, `9946`, and `9948`, then verifies them through the local ADB server protocol or `adb reverse --list` fallback. USB refresh/setup results are request-scoped so stale results after ADB mode, path, selected device, or transport changes are ignored. If a periodic refresh cannot read reverse mappings for the same still-authorized device, Home preserves previously verified reverse ports instead of flipping the main readiness pill to not ready. This prepares the USB TCP transport and the reserved reliable spatial channel; it is separate from Android `UsbManager` app permission prompts.

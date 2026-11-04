@@ -177,6 +177,13 @@ void Swapchain::InitMetal(void* metalDevice, const XrSwapchainCreateInfo* create
                                                                                    height:height_
                                                                                 mipmapped:NO];
     desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    if ((createInfo->usageFlags & XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT) != 0)
+    {
+        // Lets the application create texture views with a compatible pixel format, such as
+        // RGBA8Unorm <-> RGBA8Unorm_sRGB. Only set on request: Metal may disable lossless
+        // texture compression for textures that carry this usage.
+        desc.usage |= MTLTextureUsagePixelFormatView;
+    }
     desc.storageMode = MTLStorageModePrivate;
     if (arraySize_ > 1)
     {

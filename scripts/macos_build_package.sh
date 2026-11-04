@@ -29,6 +29,7 @@ Builds the macOS runtime and OXRSys Home, then assembles one local package direc
   build/OXRSys-macOS/
     OXRSys Home.app
     runtime/liboxrsys-runtime.dylib
+    runtime/oxrsys-encoder-helper   (always arm64, whatever --architectures says)
     runtime/oxrsys-runtime.json
     runtime/oxrsys-runtime.toml
 
@@ -147,6 +148,12 @@ runtime_dylib_path() {
     print -r -- "$(runtime_dir)/liboxrsys-runtime.dylib"
 }
 
+# The native-arm64 encoder helper. The runtime looks for it beside its dylib; it
+# is built by the oxrsys_runtime target (a dependency) into the same directory.
+runtime_helper_path() {
+    print -r -- "$(runtime_dir)/oxrsys-encoder-helper"
+}
+
 runtime_manifest_path() {
     print -r -- "$(runtime_dir)/oxrsys-runtime.json"
 }
@@ -252,6 +259,18 @@ validate_binary_architectures() {
     done
 }
 
+# The helper must be arm64 and only arm64, for every package architecture: its
+# whole purpose is to be a native process when the runtime runs under Rosetta.
+validate_helper_architecture() {
+    local binary_path="$1"
+    local actual_architectures
+    actual_architectures="$(/usr/bin/lipo -archs "${binary_path}")" \
+        || fail "Could not inspect encoder helper: ${binary_path}"
+    if [[ "${actual_architectures}" != "arm64" ]]; then
+        fail "Encoder helper must be arm64 only; found: ${actual_architectures}"
+    fi
+}
+
 home_executable_path() {
     local executable_name
     executable_name="$(/usr/libexec/PlistBuddy \
@@ -264,10 +283,12 @@ home_executable_path() {
 validate_build_outputs() {
     [[ -f "$(runtime_dylib_path)" ]] || fail "Runtime dylib not found: $(runtime_dylib_path)"
     [[ -f "$(runtime_manifest_path)" ]] || fail "Runtime manifest not found: $(runtime_manifest_path)"
+    [[ -x "$(runtime_helper_path)" ]] || fail "Encoder helper not found: $(runtime_helper_path)"
     [[ -d "$(home_app_path)" ]] || fail "Home app not found: $(home_app_path)"
     [[ -f "$(home_executable_path)" ]] || fail "Home executable not found: $(home_executable_path)"
 
     validate_binary_architectures "$(runtime_dylib_path)" "Runtime dylib"
+    validate_helper_architecture "$(runtime_helper_path)"
     validate_binary_architectures "$(home_executable_path)" "Home executable"
 }
 
@@ -296,6 +317,8 @@ assemble_package() {
 
     run /usr/bin/ditto "$(home_app_path)" "${OUTPUT_DIR}/OXRSys Home.app"
     run /usr/bin/ditto "$(runtime_dylib_path)" "${output_runtime_dir}/liboxrsys-runtime.dylib"
+    # Beside the dylib: that is where the runtime looks for it by default.
+    run /usr/bin/ditto "$(runtime_helper_path)" "${output_runtime_dir}/oxrsys-encoder-helper"
 
     local packaged_manifest="${output_runtime_dir}/oxrsys-runtime.json"
     run /usr/bin/ditto "$(runtime_manifest_path)" "${packaged_manifest}"

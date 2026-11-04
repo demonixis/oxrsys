@@ -60,6 +60,7 @@ private:
     {
         WifiUdp,
         UsbAdbTcp,
+        UsbNetworkUdp, // WiFi UDP path over the USB network (CDC-NCM) link
     };
 
     enum class ConnectionState
@@ -111,11 +112,13 @@ private:
     void StopControlReceiver();
     void ControlReceiveThreadMain();
     void HandleControlPayload(const uint8_t* data, size_t size);
+    void ApplyPendingHaptics();
     void HandleStreamConfigUpdate(const protocol::StreamConfigUpdate& update);
     void StartStreamConfigWorker();
     void StopStreamConfigWorker();
     void StreamConfigWorkerMain();
     void ApplyCompletedStreamConfigUpdate();
+    void ApplyStreamConfigParameters(const protocol::StreamConfigUpdate& update);
     void SendStreamConfigAck(const protocol::StreamConfigUpdate& update, uint8_t status);
     void SendLatencyReport();
     void RequestKeyframe(uint32_t reasonFlags, uint32_t detail);
@@ -166,6 +169,8 @@ private:
     bool foveationConfigurationAvailable_ = false;
     bool swapchainUpdateAvailable_ = false;
     bool displayRefreshRateAvailable_ = false;
+    bool compositionLayerSettingsAvailable_ = false;
+    bool serverFoveationEyeCentered_ = false;
     PFN_xrCreateFoveationProfileFB xrCreateFoveationProfileFB_ = nullptr;
     PFN_xrDestroyFoveationProfileFB xrDestroyFoveationProfileFB_ = nullptr;
     PFN_xrUpdateSwapchainFB xrUpdateSwapchainFB_ = nullptr;
@@ -197,6 +202,7 @@ private:
     XrAction aButtonAction_ = XR_NULL_HANDLE;
     XrAction bButtonAction_ = XR_NULL_HANDLE;
     XrAction menuAction_ = XR_NULL_HANDLE;
+    XrAction hapticAction_ = XR_NULL_HANDLE;
     XrSpace gripSpaces_[2] = {};     // [0]=left, [1]=right
     XrSpace aimSpaces_[2] = {};      // [0]=left, [1]=right
     XrPath handPaths_[2] = {};       // /user/hand/left, /user/hand/right
@@ -249,6 +255,10 @@ private:
     GLint blitReprojectionWarpEnabledUniform_ = -1;
     GLint blitReprojectionWarpOffsetUniform_ = -1;
     GLint blitPassthroughAlphaEnabledUniform_ = -1;
+    GLint blitPackedAlphaEnabledUniform_ = -1;
+    GLint blitAlphaOriginUniform_ = -1;
+    GLint blitContentTexelSizeUniform_ = -1;
+    GLint blitAlphaTileSizeUniform_ = -1;
     GLint shellMvpUniform_ = -1;
 
     // Networking
@@ -294,6 +304,9 @@ private:
     float videoContentUMax_ = 1.0f;
     float videoContentVMin_ = 0.0f;
     float videoContentVMax_ = 1.0f;
+    uint32_t videoContentWidth_ = 0;
+    uint32_t videoContentHeight_ = 0;
+    std::atomic<bool> streamHasPackedAlpha_{false};
     uint32_t clientRefreshRateHz_ = 90;
     protocol::ClientFoveationPreset clientFoveationPreset_ =
         protocol::ClientFoveationPreset::Off;
@@ -325,6 +338,9 @@ private:
     float foveationEyeHeightRatio_ = 1.0f;
     float decodedTexelWidth_ = 1.0f;
     float decodedTexelHeight_ = 1.0f;
+    std::mutex pendingHapticsMutex_;
+    std::array<protocol::HapticsCommand, 2> pendingHaptics_ = {};
+    std::array<bool, 2> hasPendingHaptics_ = {};
     std::mutex pendingStreamConfigMutex_;
     std::condition_variable pendingStreamConfigCv_;
     protocol::StreamConfigUpdate pendingStreamConfigUpdate_;
@@ -333,6 +349,10 @@ private:
     protocol::StreamConfigUpdate completedStreamConfigUpdate_;
     bool hasCompletedStreamConfigUpdate_ = false;
     bool completedStreamConfigAccepted_ = false;
+    bool completedStreamConfigDecoderKept_ = false;
+    protocol::StreamConfigUpdate frameDeferredStreamConfig_ = {};
+    std::chrono::steady_clock::time_point frameDeferredStreamConfigSince_ = {};
+    bool hasFrameDeferredStreamConfig_ = false;
     std::thread streamConfigWorkerThread_;
     std::atomic<bool> streamConfigWorkerRunning_{false};
     std::atomic<uint32_t> streamConfigWorkerSequence_{0};
@@ -387,6 +407,7 @@ private:
 
     // Diagnostic counters
     uint32_t nalUnitsReceived_ = 0;
+    std::atomic<uint32_t> pendingDecoderSubmitFailures_{0};
     uint32_t decodedFrameCount_ = 0;
 
     struct ShellControllerInput
