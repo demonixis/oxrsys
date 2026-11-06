@@ -78,7 +78,11 @@ When that entitlement is unavailable, enter the Mac's IPv4 address or hostname a
 runtime answers with its real, complete `ServerAnnounce`, after which the normal connection
 handshake continues. This direct path does not require the multicast entitlement, but
 `NSLocalNetworkUsageDescription` and user-granted Local Network access are still required on a
-physical Vision Pro. The last valid direct host is retained as a convenience.
+physical Vision Pro. The direct connection field remains available while broadcast discovery is in
+progress, so it can also be used with `avp_usb`, where the runtime intentionally sends no
+broadcasts. For AVP USB, enter the Mac's USB Ethernet IP (not the Vision Pro's address); the
+current setup's default is `169.254.30.24`, and the last valid direct host is retained as a
+convenience.
 
 Do not infer physical discovery support from the Simulator or unsigned generic-device build. Replay
 both automatic broadcast discovery on an entitled/provisioned Vision Pro and direct unicast
@@ -103,7 +107,7 @@ apply.
 1. Launch the runtime on macOS.
 2. Build and run `OXRSys visionOS` on visionOS Simulator or device.
 3. In the floating app window, press `Find Server`, or enter the Mac's IPv4 address/hostname and
-   press `Connect` for direct unicast discovery.
+   press `Connect by IP` for direct unicast discovery. For AVP USB, use the Mac's USB Ethernet IP.
 4. If `Auto-enter immersive` is enabled, the viewer connects to the first discovered runtime and opens its immersive space once the stream is active; otherwise, press `Connect` after discovery.
 5. If the stream is active and the immersive space is not open, press `Enter Immersive`.
 6. By default, the control window hides after immersive entry. Disable this with `Keep window in immersive` before connecting if you want the control window to remain open while immersed.

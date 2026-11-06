@@ -86,6 +86,21 @@ TEST_CASE("USB network clients are recognized by the link subnet", "[streaming][
     CHECK_FALSE(IsUsbNetworkClientAddress("not-an-ip"));
 }
 
+TEST_CASE("AVP USB transport uses direct UDP without WiFi broadcast or USB ADB", "[streaming][transport]")
+{
+    using namespace oxrsys::streaming_transport;
+
+    CHECK(UdpEnabled("avp_usb"));
+    CHECK_FALSE(DiscoveryBroadcastEnabled("avp_usb"));
+    CHECK_FALSE(UsbAdbEnabled("avp_usb"));
+    CHECK_FALSE(UdpEnabled("usb_adb"));
+    CHECK(DiscoveryBroadcastEnabled("wifi"));
+    CHECK(UsbAdbEnabled("auto"));
+    CHECK(UsbAdbEnabled("usb_adb"));
+    CHECK_FALSE(IsUsbNetworkClientAddress(""));
+    CHECK_FALSE(IsUsbNetworkClientAddress("not-an-ip"));
+}
+
 TEST_CASE("Stream foveation snapshot keeps the preset its encoded size was built for", "[streaming][foveation]")
 {
     using namespace oxr::protocol;

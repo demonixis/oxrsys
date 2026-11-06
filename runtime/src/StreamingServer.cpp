@@ -618,9 +618,10 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     const ConfigValues config = Config::Get().GetValues();
     refreshRateHz_ = config.refreshRateHz;
     targetRefreshRateHz_.store(refreshRateHz_);
-    wifiEnabled_ = config.streamingTransport != "usb_adb";
-    // usb_ncm runs the WiFi UDP path over the USB network link.
-    usbAdbEnabled_ = config.streamingTransport != "wifi" && config.streamingTransport != "usb_ncm";
+    udpEnabled_ = oxrsys::streaming_transport::UdpEnabled(config.streamingTransport);
+    broadcastEnabled_ = oxrsys::streaming_transport::DiscoveryBroadcastEnabled(config.streamingTransport);
+    // usb_ncm runs UDP over the USB network link; avp_usb accepts only direct unicast discovery.
+    usbAdbEnabled_ = oxrsys::streaming_transport::UsbAdbEnabled(config.streamingTransport);
     StreamLayout streamLayout = BuildStreamLayout(
         renderWidth, renderHeight, config.resolutionScale, config, graphicsContext_);
     {
@@ -754,7 +755,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
 
     if (usbAdbEnabled_ && !StartUsbTcpListeners())
     {
-        if (!wifiEnabled_)
+        if (!udpEnabled_)
         {
             spdlog::error("StreamingServer: Failed to start required USB ADB TCP listeners");
             running_.store(false);
@@ -770,7 +771,7 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
         usbAdbEnabled_ = false;
     }
 
-    if (wifiEnabled_ && running_.load() && state_.load() == State::Broadcasting)
+    if (broadcastEnabled_ && running_.load() && state_.load() == State::Broadcasting)
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
         if (!broadcastThread_.joinable() && state_.load() == State::Broadcasting)
@@ -783,8 +784,8 @@ bool StreamingServer::Start(uint32_t renderWidth, uint32_t renderHeight, uint32_
     encodeThread_ = std::thread(&StreamingServer::EncodeThread, this);
 
     std::string ip = GetLocalIpAddress();
-    spdlog::info("StreamingServer: Started transport={} wifi={} usb_adb={} on {} ({}x{} @ {}Hz)",
-                  config.streamingTransport, wifiEnabled_, usbAdbEnabled_,
+    spdlog::info("StreamingServer: Started transport={} udp={} discovery_broadcast={} usb_adb={} on {} ({}x{} @ {}Hz)",
+                  config.streamingTransport, udpEnabled_, broadcastEnabled_, usbAdbEnabled_,
                   ip, renderWidth_, renderHeight_, refreshRateHz_);
     return true;
 }
@@ -1019,7 +1020,7 @@ void StreamingServer::ControlThread()
             // Direct discovery is the unicast fallback for Apple clients that cannot receive the
             // UDP broadcast beacon. Keep it append-only and side-effect-free: the normal
             // ClientConnect handshake still selects codecs, capabilities, and stream state.
-            if (wifiEnabled_ && state_.load() == State::Broadcasting)
+            if (udpEnabled_ && state_.load() == State::Broadcasting)
             {
                 const oxr::protocol::ServerAnnounce announce = BuildServerAnnounce(false);
                 oxrsys::runtime_socket::SendTo(controlSocket_,
@@ -1033,7 +1034,7 @@ void StreamingServer::ControlThread()
         else if (type == static_cast<uint8_t>(oxr::protocol::MessageType::ClientConnect) &&
             received >= static_cast<int>(oxr::protocol::CLIENT_CONNECT_BASE_SIZE))
         {
-            if (wifiEnabled_)
+            if (udpEnabled_)
             {
                 oxr::protocol::ClientConnect clientConnect = {};
                 memcpy(&clientConnect, buffer, std::min<size_t>(
@@ -1944,13 +1945,19 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
                         encoder_->ForceKeyframe();
                         frameIndex_ = 0;
                         encoderReady = true;
-                        const bool usbNetworkClient =
+                        const bool avpUsbClient = config.streamingTransport == "avp_usb";
+                        const bool usbNetworkClient = !avpUsbClient &&
                             oxrsys::streaming_transport::IsUsbNetworkClientAddress(clientIp_);
+                        const char* transportName = avpUsbClient
+                            ? "AVP USB"
+                            : usbNetworkClient ? "USB network" : "WiFi";
                         spdlog::info("StreamingServer: Client connected via {}: {} ({}:{}) refresh={}Hz codec={} backend={}",
-                                      usbNetworkClient ? "USB network" : "WiFi",
+                                      transportName,
                                       clientName, clientIp_, clientPort_, negotiatedRefresh,
                                       VideoCodecName(selectedCodec), backendCapabilities.backendName);
-                        RuntimeStatus::SetStreaming(usbNetworkClient ? "usb_ncm" : "wifi", clientName);
+                        RuntimeStatus::SetStreaming(
+                            avpUsbClient ? "avp_usb" : usbNetworkClient ? "usb_ncm" : "wifi",
+                            clientName);
                         break;
                     }
                     spdlog::warn("StreamingServer: {} failed to initialize {}; trying fallback codec if available",
@@ -1978,7 +1985,7 @@ void StreamingServer::HandleClientConnect(const oxr::protocol::ClientConnect& cl
         InvalidateCallbackAccess();
         RuntimeStatus::SetIdle();
         state_.store(State::Broadcasting);
-        if (wifiEnabled_ && running_.load())
+        if (broadcastEnabled_ && running_.load())
         {
             std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
             if (running_.load() && state_.load() == State::Broadcasting &&
@@ -2239,7 +2246,7 @@ void StreamingServer::HandleUsbClientConnect(const oxr::protocol::ClientConnect&
         RuntimeStatus::SetIdle();
         clientUsesUsbAdb_.store(false);
         state_.store(State::Broadcasting);
-        if (wifiEnabled_ && running_.load())
+        if (broadcastEnabled_ && running_.load())
         {
             std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
             if (running_.load() && state_.load() == State::Broadcasting &&
@@ -2355,7 +2362,7 @@ void StreamingServer::HandleClientDisconnect()
         JoinWorkerThread(broadcastThread_, "broadcast");
     }
 
-    if (previousState == State::Connected && wifiEnabled_ && running_.load())
+    if (previousState == State::Connected && broadcastEnabled_ && running_.load())
     {
         std::lock_guard<std::mutex> broadcastLock(broadcastThreadMutex_);
         if (running_.load() && state_.load() == State::Broadcasting &&

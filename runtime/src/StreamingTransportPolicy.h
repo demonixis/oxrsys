@@ -9,6 +9,21 @@
 namespace oxrsys::streaming_transport
 {
 
+inline bool UdpEnabled(const std::string& transport)
+{
+    return transport != "usb_adb";
+}
+
+inline bool DiscoveryBroadcastEnabled(const std::string& transport)
+{
+    return UdpEnabled(transport) && transport != "avp_usb";
+}
+
+inline bool UsbAdbEnabled(const std::string& transport)
+{
+    return transport == "auto" || transport == "usb_adb";
+}
+
 inline bool UsbAdbTcpListenersReady(bool controlReady,
                                     bool videoReady,
                                     bool trackingReady,
@@ -22,7 +37,7 @@ inline bool UsbAdbTcpListenersReady(bool controlReady,
 }
 
 // OXRSys Home gives the USB network (CDC-NCM) link fixed addresses in 192.168.42.0/24: the Mac
-// is 192.168.42.1 and the Quest 192.168.42.2. Clients on it use the WiFi UDP path.
+// is 192.168.42.1 and the Quest 192.168.42.2. Clients on it use the normal UDP path.
 inline bool IsUsbNetworkClientAddress(const std::string& ip)
 {
     in_addr addr = {};

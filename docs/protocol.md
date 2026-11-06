@@ -34,7 +34,7 @@ The Quest USB path uses ADB reverse TCP on localhost ports:
 - Control TCP: `9946`
 - Spatial TCP: `9948`
 
-The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback. `usb_ncm` runs the WiFi UDP path only, for the USB network (CDC-NCM) link between the Mac at `192.168.42.1` and the headset at `192.168.42.2`.
+The runtime can run both transports in `auto` mode. `wifi` disables the TCP listeners. `usb_adb` disables WiFi discovery fallback. `usb_ncm` runs the UDP path only, for the USB network (CDC-NCM) link between the Mac at `192.168.42.1` and the Quest at `192.168.42.2`. `avp_usb` disables USB ADB and discovery broadcasts while keeping direct unicast discovery and UDP streaming enabled; the Vision Pro client connects to the Mac's USB Ethernet IP, and macOS must route the Vision Pro's USB IP over that interface.
 
 TCP payloads are framed with `TcpRecordHeader`, which contains the record magic, protocol version, record type, and payload size. Current TCP record types are:
 
@@ -55,7 +55,7 @@ The runtime broadcasts `ServerAnnounce` messages on UDP `9943`. Clients answer w
 
 Clients that already know an IPv4 address or hostname can send the one-byte
 `DiscoveryRequest` message (`MessageType` `0x04`) to UDP `9946` from an ephemeral source port. While
-WiFi is enabled and the runtime is in its broadcasting state, the runtime replies to that source
+UDP discovery is enabled and the runtime is in its listening state, the runtime replies to that source
 address and port with the same complete `ServerAnnounce` used by broadcast discovery. The request
 does not select a codec, mutate connection state, or replace `ClientConnect`. Clients must bound
 their retry count and receive timeout; no response means that direct discovery failed.

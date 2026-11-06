@@ -15,7 +15,7 @@ tab. Its first tool opens the integrated OXRSys Simulator in a single Home-owned
 
 The main window also shows the current runtime activity: idle or streaming, the active transport
 when streaming, the connected device family, the OpenXR application name reported by the runtime,
-and a WiFi/USB/USB Net transport readiness control.
+and a WiFi/USB/USB Net/AVP USB transport selector.
 
 The Home app now targets direct notarized distribution instead of App Store/TestFlight sandboxing.
 The launcher and registration workflow need access to `/Applications`, app executables, Terminal
@@ -148,7 +148,7 @@ idle. The fields are:
   `counters.pending_depth_max`, `counters.reprojected_frames_delta`,
   `counters.stale_frame_reuses_delta`, `counters.render_pose_fallbacks_delta`
 
-The same header area includes a WiFi/USB/USB Net selector. Selecting WiFi writes `streaming.transport = "wifi"`
+The same header area includes a WiFi/USB/USB Net/AVP USB selector. Selecting WiFi writes `streaming.transport = "wifi"`
 and shows whether the Mac WiFi interface is powered on. Selecting USB first switches the header into
 USB setup, then checks the selected or single authorized Quest device and automatically configures
 missing reverse mappings on `9944`, `9945`, `9946`, and `9948`. The Home app writes
@@ -168,6 +168,13 @@ Home itself sends no local network traffic and needs no macOS Local Network perm
 `streaming.transport = "usb_ncm"` only after that succeeds, and repeats the setup on startup when
 that transport is persisted. Readiness is refreshed from the IORegistry and the interface address. `Restore USB Mode` in the ADB section switches the headset back to its default USB mode.
 See [Quest](quest.md#usb-network-transport) for the client side.
+
+Selecting AVP USB writes `streaming.transport = "avp_usb"` and uses UDP with direct IP discovery;
+it disables WiFi discovery broadcasts and USB ADB listeners. Enter the Mac's USB Ethernet address
+in the Vision Pro client. Ensure macOS routes the Vision Pro's USB address over the USB Ethernet
+interface; Home and the runtime do not change system routes automatically. Home lets you enter the
+Vision Pro's IP and test the connection; it shows `Connected` only when the route uses a suitable
+interface and the Vision Pro replies to a ping sent through that interface.
 
 The Settings ADB section stores an ADB mode and optional custom `adb` executable path in SwiftUI Home
 `UserDefaults`. `Internal` mode first claims the headset's USB ADB interface directly and performs ADB

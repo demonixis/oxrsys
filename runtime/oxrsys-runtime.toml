@@ -91,9 +91,10 @@ encoder_helper = "auto"
 # runtime dylib (also overridable at runtime via $OXRSYS_ENCODER_HELPER_PATH).
 encoder_helper_path = ""
 
-# Streaming transport: "auto" tries USB ADB reverse and WiFi, "wifi" disables USB TCP
-# listeners, and "usb_adb" disables WiFi discovery fallback. "usb_ncm" streams over the
-# USB network (CDC-NCM) link that OXRSys Home sets up, using the WiFi UDP path.
+# Streaming transport: "auto" tries USB ADB reverse and WiFi; "wifi" disables USB TCP listeners;
+# "usb_adb" disables WiFi discovery fallback; "usb_ncm" uses UDP over the Quest USB network;
+# "avp_usb" disables discovery broadcasts and USB ADB, requiring direct IP discovery over the
+# Vision Pro USB Ethernet link. The operating system's route to the Vision Pro must use that link.
 transport = "auto"
 
 # Server-side foveated video encoding preset: "off", "light", "medium", "medium_plus", or "high".

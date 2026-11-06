@@ -75,63 +75,43 @@ struct ContentView: View {
     private var controls: some View {
         switch appModel.connectionState {
         case .disconnected:
-            if appModel.discoveredServer != nil {
-                HStack(spacing: 10) {
-                    Button("Connect") {
-                        appModel.connect()
-                        Task {
-                            await synchronizePresentationState()
+            VStack(alignment: .leading, spacing: 12) {
+                if appModel.discoveredServer != nil {
+                    HStack(spacing: 10) {
+                        Button("Connect") {
+                            appModel.connect()
+                            Task {
+                                await synchronizePresentationState()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Search Again") {
+                            appModel.startDiscovery()
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-
-                    Button("Search Again") {
-                        appModel.startDiscovery()
-                    }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
+                } else {
                     Button("Find Server") {
                         appModel.startDiscovery()
                     }
                     .buttonStyle(.borderedProminent)
-
-                    Text("Or connect directly")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        TextField(
-                            "IPv4 address or hostname",
-                            text: Binding(
-                                get: { appModel.directServerHost },
-                                set: { appModel.directServerHost = $0 }
-                            )
-                        )
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .onSubmit {
-                                appModel.connectDirect()
-                            }
-
-                        Button("Connect") {
-                            appModel.connectDirect()
-                        }
-                        .disabled(!appModel.directServerHostIsValid)
-                    }
                 }
+                directConnectionControls
             }
 
         case .discovering:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
 
-                Button("Cancel", role: .cancel) {
-                    Task {
-                        await disconnectAndDismissImmersive()
+                    Button("Cancel", role: .cancel) {
+                        Task {
+                            await disconnectAndDismissImmersive()
+                        }
                     }
                 }
+                directConnectionControls
             }
 
         case .connecting:
@@ -159,6 +139,45 @@ struct ContentView: View {
                         await disconnectAndDismissImmersive()
                     }
                 }
+            }
+        }
+    }
+
+    private var directConnectionControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Connect directly")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("For AVP USB, enter the Mac's USB Ethernet IP, not the Vision Pro IP.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                TextField(
+                    "Mac IP (e.g. 169.254.30.24)",
+                    text: Binding(
+                        get: { appModel.directServerHost },
+                        set: { appModel.directServerHost = $0 }
+                    )
+                )
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .disabled(appModel.isDirectDiscoveryInProgress)
+                    .onSubmit {
+                        appModel.connectDirect()
+                    }
+
+                Button("Connect by IP") {
+                    appModel.connectDirect()
+                }
+                .disabled(
+                    !appModel.directServerHostIsValid ||
+                    appModel.isDirectDiscoveryInProgress ||
+                    appModel.connectionState == .connecting ||
+                    appModel.connectionState == .streaming
+                )
             }
         }
     }

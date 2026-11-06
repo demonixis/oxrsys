@@ -366,6 +366,18 @@ transport = "usb_ncm"
     CHECK(values.streamingTransport == "usb_ncm");
 }
 
+TEST_CASE("Config parser accepts the Vision Pro USB transport", "[config]")
+{
+    std::istringstream input(R"TOML(
+[streaming]
+transport = "avp_usb"
+)TOML");
+
+    const ConfigValues values = ParseConfigToml(input);
+
+    CHECK(values.streamingTransport == "avp_usb");
+}
+
 TEST_CASE("Config parser enables Quest logcat capture from TOML", "[config]")
 {
     std::istringstream input(R"TOML(

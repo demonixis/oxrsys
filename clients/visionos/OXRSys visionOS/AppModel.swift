@@ -170,6 +170,7 @@ private nonisolated final class PostFXState: @unchecked Sendable {
 @Observable
 final class AppModel {
     private static let directServerHostPreferenceKey = "visionOSDirectServerHost"
+    private static let defaultDirectServerHost = "169.254.30.24"
 
     enum ConnectionState {
         case disconnected
@@ -221,7 +222,8 @@ final class AppModel {
     var statusText = "Searching for the runtime..."
     var directServerHost = UserDefaults.standard.string(
         forKey: AppModel.directServerHostPreferenceKey
-    ) ?? ""
+    ) ?? AppModel.defaultDirectServerHost
+    var isDirectDiscoveryInProgress = false
     var framesDecoded: UInt64 = 0
     var isTrackingActive = false
     var stats = StreamStats()
@@ -238,6 +240,7 @@ final class AppModel {
     }
 
     private let discovery = DiscoveryClient()
+    private let directDiscovery = DiscoveryClient()
     private let videoReceiver = VideoReceiver()
     private let trackingSender = TrackingSender()
     private let controlChannel = ControlChannel()
@@ -452,13 +455,17 @@ final class AppModel {
         guard connectionState == .disconnected else { return }
         shouldAutoReconnect = true
         usesDirectServerAddress = false
+        isDirectDiscoveryInProgress = false
+        directDiscovery.stop()
         connectionState = .discovering
         discoveredServer = nil
         statusText = "Searching for server..."
 
         discovery.start { [weak self] server in
             Task { @MainActor [weak self] in
-                guard let self, self.connectionState == .discovering else { return }
+                guard let self,
+                      self.connectionState == .discovering,
+                      !self.usesDirectServerAddress else { return }
                 self.discoveredServer = server
                 self.discovery.stop()
                 // Connect as soon as a server appears, like the Android client. Whether we then
@@ -470,24 +477,31 @@ final class AppModel {
     }
 
     func connectDirect() {
-        guard connectionState == .disconnected else { return }
+        guard connectionState == .disconnected ||
+                (connectionState == .discovering && !isDirectDiscoveryInProgress) else {
+            return
+        }
         guard let host = DiscoveryClient.normalizedDirectHost(directServerHost) else {
             statusText = "Enter a valid IPv4 address or hostname without a port"
             return
         }
 
+        discovery.stop()
+        directDiscovery.stop()
         directServerHost = host
         UserDefaults.standard.set(host, forKey: Self.directServerHostPreferenceKey)
         usesDirectServerAddress = true
         connectionState = .discovering
+        isDirectDiscoveryInProgress = true
         discoveredServer = nil
         statusText = "Contacting \(host)..."
 
-        discovery.requestServer(at: host) { [weak self] server in
+        directDiscovery.requestServer(at: host) { [weak self] server in
             Task { @MainActor [weak self] in
                 guard let self,
                       self.connectionState == .discovering,
                       self.usesDirectServerAddress else { return }
+                self.isDirectDiscoveryInProgress = false
                 self.discoveredServer = server
                 self.statusText = "Found \(server.name), connecting..."
                 self.connect()
@@ -497,6 +511,7 @@ final class AppModel {
                 guard let self,
                       self.connectionState == .discovering,
                       self.usesDirectServerAddress else { return }
+                self.isDirectDiscoveryInProgress = false
                 self.connectionState = .disconnected
                 self.usesDirectServerAddress = false
                 self.statusText = message
@@ -506,6 +521,9 @@ final class AppModel {
 
     func connect() {
         guard let server = discoveredServer else { return }
+        discovery.stop()
+        directDiscovery.stop()
+        isDirectDiscoveryInProgress = false
         let serverAddress = resolvedServerAddress(for: server)
         let refreshRateHz = refreshRate
 
@@ -625,6 +643,8 @@ final class AppModel {
         controlChannel.disconnect()
         decoder.invalidate()
         discovery.stop()
+        directDiscovery.stop()
+        isDirectDiscoveryInProgress = false
         latencyReporter.reset()
 
         connectionState = .disconnected
@@ -634,7 +654,7 @@ final class AppModel {
         framesDecoded = 0
         isTrackingActive = false
         stats = StreamStats()
-        statusText = "Tap Search to find the runtime"
+        statusText = "Search or connect by IP to find the runtime"
         pixelBufferState.set(nil, presentationTimeNs: 0, decodeTimeNs: 0)
         keyframeRecoveryState.reset()
         renderPoseReprojector.reset()

@@ -281,7 +281,8 @@ private:
     std::mutex broadcastThreadMutex_;
     std::mutex callbackAccessMutex_;
     std::shared_ptr<CallbackAccess> callbackAccess_;
-    bool wifiEnabled_ = true;
+    bool udpEnabled_ = true;
+    bool broadcastEnabled_ = true;
     bool usbAdbEnabled_ = true;
     std::atomic_bool clientUsesUsbAdb_{false};
 

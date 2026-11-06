@@ -510,7 +510,8 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
         else if (key == "transport")
         {
             value = ParseString(value);
-            if (value == "auto" || value == "wifi" || value == "usb_adb" || value == "usb_ncm")
+            if (value == "auto" || value == "wifi" || value == "usb_adb" ||
+                value == "usb_ncm" || value == "avp_usb")
             {
                 values.streamingTransport = value;
             }
