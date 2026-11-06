@@ -386,6 +386,50 @@ target_include_directories(oxrsys_pacing_probe PRIVATE
     common
 )
 
+# Encoder latency bench (not a test): the runtime's own VideoEncoder, with its
+# VideoToolbox session setup, Metal compose and colour conversion, fed a
+# GPU-rendered moving pattern at a fixed rate. Prints submit->callback latency
+# percentiles, bytes per frame and whether the session is hardware. Needs a Mac
+# with a GPU and a media engine, so it is not run by ctest. See tools/EncoderBench.mm.
+add_executable(oxrsys_encoder_bench
+    tools/EncoderBench.mm
+    runtime/src/VideoEncoder.mm
+    runtime/src/OverlayCompositor.mm
+    runtime/src/EncoderHelperClient.mm
+    runtime/src/EncoderPathPolicy.cpp
+    runtime/src/Config.cpp
+    runtime/src/RuntimePlatform.cpp
+    runtime/src/Runtime.cpp
+    runtime/src/SwapchainCommon.cpp
+    runtime/src/SwapchainMetal.mm
+    runtime/src/SwapchainVulkan.cpp
+)
+target_include_directories(oxrsys_encoder_bench PRIVATE
+    runtime/src
+    runtime/encoder_helper
+    common
+    ${openxr_SOURCE_DIR}/include
+)
+target_link_libraries(oxrsys_encoder_bench PRIVATE
+    spdlog::spdlog
+    glm::glm
+    OXRSYS::VulkanHeaders
+    "-framework Metal"
+    "-framework MetalPerformanceShaders"
+    "-framework Foundation"
+    "-framework VideoToolbox"
+    "-framework CoreMedia"
+    "-framework CoreVideo"
+    "-framework IOSurface"
+)
+target_compile_definitions(oxrsys_encoder_bench PRIVATE
+    XR_USE_GRAPHICS_API_METAL
+    XR_USE_GRAPHICS_API_VULKAN
+    OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
+    OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
+    OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
+)
+
 add_dependencies(oxrsys_runtime_sync_compile_commands
     ${OXRSYS_RUNTIME_TEST_TARGETS}
 )
