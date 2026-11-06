@@ -7,6 +7,7 @@ struct ContentView: View {
     @ObservedObject var model: HomeAppModel
     @ObservedObject var preferences: HomePreferences
     @Environment(\.openWindow) private var openWindow
+    @State private var isErrorAlertPresented = false
 
     private var selectedLogApp: LauncherApp? {
         guard let selectedLogAppID = model.selectedLogAppID else {
@@ -53,20 +54,24 @@ struct ContentView: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
         }
-        .frame(minWidth: 980, minHeight: 720)
+        .frame(minWidth: 1270, minHeight: 720)
         .task {
             model.presentRuntimeSetupGuidanceIfNeeded()
         }
-        .alert("Error", isPresented: Binding(
-            get: { model.errorMessage != nil },
-            set: { newValue in
-                if !newValue {
-                    model.errorMessage = nil
-                }
-            })
-        ) {
-            Button("OK", role: .cancel) {
+        .onAppear {
+            isErrorAlertPresented = model.errorMessage != nil
+        }
+        .onChange(of: model.errorMessage) { _, errorMessage in
+            isErrorAlertPresented = errorMessage != nil
+        }
+        .onChange(of: isErrorAlertPresented) { _, isPresented in
+            if !isPresented {
                 model.errorMessage = nil
+            }
+        }
+        .alert("Error", isPresented: $isErrorAlertPresented) {
+            Button("OK", role: .cancel) {
+                isErrorAlertPresented = false
             }
         } message: {
             Text(model.errorMessage ?? "")
@@ -194,19 +199,45 @@ struct ContentView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 190)
+            .frame(width: 240)
 
             StatusPill(
-                title: readiness.isReady ? "Ready" : "Action needed",
-                color: readiness.isReady ? .green : .red
-            )
+                title: model.mainTransportSelection == .avpUsb
+                    ? model.isAvpUsbTestInProgress
+                        ? "Testing"
+                        : readiness.isReady ? "Connected" : "Not connected"
+                    : readiness.isReady ? "Ready" : "Action needed",
+                color: readiness.isReady
+                    ? .green
+                    : model.mainTransportSelection == .avpUsb && model.isAvpUsbTestInProgress
+                        ? .orange
+                        : .red
+            ).frame(width: 70)
 
             Text(readiness.message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 280, alignment: .leading)
+                .frame(minWidth: 85)
+
+            if model.mainTransportSelection == .avpUsb {
+                TextField("Vision Pro IP", text: Binding(
+                    get: { model.avpUsbHostAddress },
+                    set: { model.setAvpUsbHostAddress($0) }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 140)
+                .help("IPv4 address of the Vision Pro on USB Ethernet")
+
+                Button {
+                    model.testAvpUsbConnection()
+                } label: {
+                    Label("Test", systemImage: "cable.connector")
+                }
+                .disabled(model.isAvpUsbTestInProgress)
+                .frame(width: 75)
+            }
 
             if readiness.canConfigureUsb {
                 Button {
