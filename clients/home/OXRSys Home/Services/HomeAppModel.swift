@@ -65,6 +65,9 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     @Published var isUsbSetupInProgress = false
     @Published var usbNetworkStatus = QuestUsbNetworkStatus.unknown
     @Published var isUsbNetworkSetupInProgress = false
+    @Published var avpUsbHostAddress: String
+    @Published var avpUsbNetworkStatus: AvpUsbNetworkStatus
+    @Published var isAvpUsbTestInProgress = false
     @Published var runtimeActivity = HomeRuntimeActivity.idle
     @Published private(set) var runtimeStatsHistory: [HomeRuntimeStreamingStats] = []
     @Published private(set) var activeLaunchedAppID: String?
@@ -76,6 +79,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private let runtimeManifestPathKey = "runtimeManifestPath"
     private let adbModeKey = "adbMode"
     private let customAdbPathKey = "customAdbPath"
+    private let avpUsbHostAddressKey = "avpUsbHostAddress"
     private let launcherScanner = LauncherAppScanner()
     private let maxLogCharacters = 30_000
     private var launcherStore = LauncherAppsStore()
@@ -91,6 +95,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private var latestUsbSetupRequestID = 0
     private var isUsbRefreshInProgress = false
     private var latestUsbNetworkRequestID = 0
+    private var latestAvpUsbTestID = 0
     private var pollTask: Task<Void, Never>?
     private var runtimeStatsStreamIdentity: RuntimeStatsStreamIdentity?
     private var hasPresentedRuntimeSetupGuidanceThisLaunch = false
@@ -99,6 +104,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     init() {
         runtimeManifestPath = defaults.string(forKey: runtimeManifestPathKey) ?? SourceDefaults.defaultRuntimeManifestPath()
         customAdbPath = defaults.string(forKey: customAdbPathKey) ?? ""
+        let avpUsbAddress = defaults.string(forKey: avpUsbHostAddressKey) ?? ""
+        avpUsbHostAddress = avpUsbAddress
+        avpUsbNetworkStatus = .disconnected(
+            avpUsbAddress,
+            message: AvpUsbNetworkLink.idleMessage(for: avpUsbAddress)
+        )
         if let rawMode = defaults.string(forKey: adbModeKey),
            let storedMode = HomeAdbMode(rawValue: rawMode) {
             adbMode = storedMode
@@ -189,6 +200,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 return .usbAdb
             case .usbNcm:
                 return .usbNetwork
+            case .avpUsb:
+                return .avpUsb
             case nil:
                 break
             }
@@ -200,6 +213,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             return .usbAdb
         case .usbNcm:
             return .usbNetwork
+        case .avpUsb:
+            return .avpUsb
         case .auto:
             return .usbAdb
         }
@@ -262,6 +277,11 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 isReady: usbNetworkStatus.isReady,
                 message: usbNetworkStatus.message,
                 canConfigureUsb: !usbNetworkStatus.isReady
+            )
+        case .avpUsb:
+            return HomeTransportReadiness(
+                isReady: avpUsbNetworkStatus.isConnected,
+                message: avpUsbNetworkStatus.message
             )
         }
     }
@@ -337,7 +357,7 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: false)
         case .usbNcm:
             startUsbNetworkSetup(persistTransportOnSuccess: false)
-        case .auto, .wifi:
+        case .auto, .wifi, .avpUsb:
             break
         }
     }
@@ -456,6 +476,9 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         if mainTransportSelection == .usbNetwork && !isUsbNetworkSetupInProgress {
             startUsbNetworkRefresh()
         }
+        if mainTransportSelection == .avpUsb && !isAvpUsbTestInProgress {
+            testAvpUsbConnection()
+        }
     }
 
     func refreshQuestUsbDevices() {
@@ -515,10 +538,54 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             return
         }
 
+        latestAvpUsbTestID += 1
+        isAvpUsbTestInProgress = false
         mainTransportOverride = selection
         serverConfig.transport = selection.configTransport
         saveStructuredConfig()
         refreshTransportHealth(force: true)
+    }
+
+    func setAvpUsbHostAddress(_ hostAddress: String) {
+        guard avpUsbHostAddress != hostAddress else {
+            return
+        }
+        avpUsbHostAddress = hostAddress
+        defaults.set(hostAddress, forKey: avpUsbHostAddressKey)
+        latestAvpUsbTestID += 1
+        isAvpUsbTestInProgress = false
+        avpUsbNetworkStatus = .disconnected(
+            hostAddress,
+            message: AvpUsbNetworkLink.idleMessage(for: hostAddress)
+        )
+    }
+
+    func testAvpUsbConnection() {
+        guard mainTransportSelection == .avpUsb, !isAvpUsbTestInProgress else {
+            return
+        }
+        let hostAddress = avpUsbHostAddress
+        latestAvpUsbTestID += 1
+        let requestID = latestAvpUsbTestID
+        isAvpUsbTestInProgress = true
+        avpUsbNetworkStatus = .disconnected(
+            hostAddress,
+            message: "Testing USB Ethernet connection..."
+        )
+
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                AvpUsbNetworkLink.testConnection(hostAddress: hostAddress)
+            }.value
+            guard let self,
+                  requestID == self.latestAvpUsbTestID,
+                  self.mainTransportSelection == .avpUsb,
+                  self.avpUsbHostAddress == hostAddress else {
+                return
+            }
+            self.isAvpUsbTestInProgress = false
+            self.avpUsbNetworkStatus = result
+        }
     }
 
     func setAdbMode(_ mode: HomeAdbMode) {

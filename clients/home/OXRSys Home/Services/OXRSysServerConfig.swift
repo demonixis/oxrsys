@@ -81,7 +81,8 @@ struct OXRSysServerConfig: Equatable {
     # Encode HEVC Main10 for capable H.265 clients. H.264 remains 8-bit.
     encoder_10bit = false
 
-    # Streaming transport: "auto", "wifi", "usb_adb", or "usb_ncm".
+    # Streaming transport: "auto", "wifi", "usb_adb", "usb_ncm", or "avp_usb".
+    # "avp_usb" uses direct IP discovery over the Vision Pro USB Ethernet link.
     transport = "auto"
 
     # Server-side foveated video encoding preset: "off", "light", "medium_plus", "medium", or "high".

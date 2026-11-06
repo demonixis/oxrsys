@@ -2,12 +2,15 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import Darwin
 
 struct ContentView: View {
     @ObservedObject var model: HomeAppModel
     @ObservedObject var preferences: HomePreferences
     @Environment(\.openWindow) private var openWindow
-
+    @State private var isErrorAlertPresented = false
+    @State private var networkAddresses: [InterfaceAddress] = []
+    
     private var selectedLogApp: LauncherApp? {
         guard let selectedLogAppID = model.selectedLogAppID else {
             return nil
@@ -25,6 +28,43 @@ struct ContentView: View {
             runtimeActivitySummary
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
+
+            VStack(alignment: .leading, spacing: 8) {
+                
+                Divider()
+                
+                HStack {
+                    Text("Mac USB-Ethernet Address for AVP (Hostname)")
+                        .font(.headline)
+
+                    Spacer()
+
+                    Button {
+                        refreshNetworkAddresses()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Refresh network addresses")
+                }
+
+                if networkAddresses.isEmpty {
+                    Text("No network addresses found")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(networkAddresses) { item in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.address)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                Divider()
+                
+            }.padding(.horizontal, 20)
+             .padding(.bottom, 8)
 
             TabView(selection: $model.selectedTab) {
                 appsTab
@@ -53,20 +93,24 @@ struct ContentView: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
         }
-        .frame(minWidth: 980, minHeight: 720)
+        .frame(minWidth: 1270, minHeight: 720)
         .task {
             model.presentRuntimeSetupGuidanceIfNeeded()
         }
-        .alert("Error", isPresented: Binding(
-            get: { model.errorMessage != nil },
-            set: { newValue in
-                if !newValue {
-                    model.errorMessage = nil
-                }
-            })
-        ) {
-            Button("OK", role: .cancel) {
+        .onAppear {
+            isErrorAlertPresented = model.errorMessage != nil
+        }
+        .onChange(of: model.errorMessage) { _, errorMessage in
+            isErrorAlertPresented = errorMessage != nil
+        }
+        .onChange(of: isErrorAlertPresented) { _, isPresented in
+            if !isPresented {
                 model.errorMessage = nil
+            }
+        }
+        .alert("Error", isPresented: $isErrorAlertPresented) {
+            Button("OK", role: .cancel) {
+                isErrorAlertPresented = false
             }
         } message: {
             Text(model.errorMessage ?? "")
@@ -172,6 +216,73 @@ struct ContentView: View {
                 .stroke(Color.secondary.opacity(0.18))
         )
     }
+    
+    /// Returns the numeric IPv4 and IPv6 addresses assigned to local interfaces.
+    private struct InterfaceAddress: Identifiable {
+        let id: String
+        let interface: String
+        let address: String
+    }
+
+    private func getAllInterfaceAddresses() -> [InterfaceAddress] {
+        var addresses: [InterfaceAddress] = []
+        var interfaceList: UnsafeMutablePointer<ifaddrs>?
+
+        guard getifaddrs(&interfaceList) == 0, let firstInterface = interfaceList else {
+            return []
+        }
+        defer {
+            freeifaddrs(interfaceList)
+        }
+
+        for pointer in sequence(first: firstInterface, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            guard let socketAddress = interface.ifa_addr else { continue }
+
+            let family = socketAddress.pointee.sa_family
+            guard family == UInt8(AF_INET) else {
+                continue
+            }
+
+            let interfaceName = String(cString: interface.ifa_name)
+
+            // Loopback und WLAN ausschließen
+            if interfaceName == "lo0" || interfaceName == "en0" {
+                continue
+            }
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+
+            guard result == 0 else { continue }
+            let address = String(cString: hostname)
+            addresses.append(
+                InterfaceAddress(
+                    id: "\(interfaceName)-\(address)",
+                    interface: interfaceName,
+                    address: address
+                )
+            )
+        }
+
+        return addresses.sorted {
+            if $0.interface == $1.interface {
+                return $0.address < $1.address
+            }
+            return $0.interface < $1.interface
+        }
+    }
+    
+    private func refreshNetworkAddresses() {
+        networkAddresses = getAllInterfaceAddresses()
+    }
 
     private var transportHealthControl: some View {
         let readiness = model.mainTransportReadiness
@@ -194,19 +305,45 @@ struct ContentView: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 190)
+            .frame(width: 240)
 
             StatusPill(
-                title: readiness.isReady ? "Ready" : "Action needed",
-                color: readiness.isReady ? .green : .red
-            )
+                title: model.mainTransportSelection == .avpUsb
+                    ? model.isAvpUsbTestInProgress
+                        ? "Testing"
+                        : readiness.isReady ? "Connected" : "Not connected"
+                    : readiness.isReady ? "Ready" : "Action needed",
+                color: readiness.isReady
+                    ? .green
+                    : model.mainTransportSelection == .avpUsb && model.isAvpUsbTestInProgress
+                        ? .orange
+                        : .red
+            ).frame(width: 70)
 
             Text(readiness.message)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 280, alignment: .leading)
+                .frame(minWidth: 85)
+
+            if model.mainTransportSelection == .avpUsb {
+                TextField("Vision Pro IP", text: Binding(
+                    get: { model.avpUsbHostAddress },
+                    set: { model.setAvpUsbHostAddress($0) }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 140)
+                .help("IPv4 address of the Vision Pro on USB Ethernet")
+
+                Button {
+                    model.testAvpUsbConnection()
+                } label: {
+                    Label("Test", systemImage: "cable.connector")
+                }
+                .disabled(model.isAvpUsbTestInProgress)
+                .frame(width: 75)
+            }
 
             if readiness.canConfigureUsb {
                 Button {

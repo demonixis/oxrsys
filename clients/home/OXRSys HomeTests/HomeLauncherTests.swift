@@ -606,6 +606,82 @@ final class HomeLauncherTests: XCTestCase {
         try expect(activity?.stateDisplayName == "Streaming (USB Network)", "Expected USB network display state")
     }
 
+    func testAvpUsbTransportSelection() throws {
+        let parsed = OXRSysServerConfig.parse(from: """
+        [streaming]
+        transport = "avp_usb"
+        """)
+        try expect(parsed.transport == .avpUsb, "Expected AVP USB transport parse")
+        try expect(
+            parsed.merged(into: OXRSysServerConfig.defaultText).contains("transport = \"avp_usb\""),
+            "Expected AVP USB transport serialization"
+        )
+        try expect(HomePrimaryTransport.avpUsb.configTransport == .avpUsb, "Expected AVP USB config mapping")
+        try expect(HomePrimaryTransport.avpUsb.displayName == "AVP USB", "Expected AVP USB display name")
+
+        let activity = HomeRuntimeActivity.parse(Data("""
+        {
+          "state": "streaming",
+          "transport": "avp_usb",
+          "device_type": "vision_pro",
+          "client_name": "Vision Pro"
+        }
+        """.utf8))
+        try expect(activity?.transport == .avpUsb, "Expected AVP USB activity transport")
+        try expect(activity?.stateDisplayName == "Streaming (AVP USB)", "Expected AVP USB display state")
+    }
+
+    func testAvpUsbNetworkStatusParsing() throws {
+        let route = """
+        route to: 169.254.34.86
+        destination: 169.254.0.0
+        interface: en17
+        """
+        try expect(
+            AvpUsbNetworkLink.interfaceName(fromRoute: route) == "en17",
+            "Expected route interface parsing"
+        )
+
+        let hardwarePorts = """
+        Hardware Port: Wi-Fi
+        Device: en0
+        Ethernet Address: aa:bb:cc:dd:ee:ff
+
+        Hardware Port: Vision Pro
+        Device: en17
+        Ethernet Address: 12:f9:c3:45:1c:9d
+        """
+        let hardwarePort = AvpUsbNetworkLink.hardwarePortName(for: "en17", in: hardwarePorts)
+        try expect(hardwarePort == "Vision Pro", "Expected Vision Pro USB Ethernet interface lookup")
+        try expect(
+            AvpUsbNetworkLink.isUsbEthernetPort(hardwarePort ?? ""),
+            "Expected Vision Pro interface to be identified as USB Ethernet"
+        )
+        try expect(
+            !AvpUsbNetworkLink.isUsbEthernetPort("Wi-Fi"),
+            "Expected Wi-Fi not to be identified as USB Ethernet"
+        )
+
+        try expect(
+            AvpUsbNetworkLink.hardwarePortName(for: "en99", in: hardwarePorts) == nil,
+            "Expected unknown device to have no hardware port"
+        )
+        try expect(
+            AvpUsbNetworkLink.hardwarePortName(for: "lo0", in: hardwarePorts) == nil,
+            "Expected loopback to be missing from the hardware port inventory"
+        )
+        try expect(
+            AvpUsbNetworkLink.interfaceName(
+                fromRoute: "route to: 169.254.34.86\ndestination: 169.254.0.0"
+            ) == nil,
+            "Expected missing interface line to yield nil"
+        )
+        try expect(
+            AvpUsbNetworkLink.isUsbEthernetPort("USB 10/100/1000 LAN"),
+            "Expected generic USB LAN adapter to be identified as USB Ethernet"
+        )
+    }
+
     func testUsbNetworkMacConfigurationParsing() throws {
         let serviceOrder = """
         An asterisk (*) denotes that a network service is disabled.
