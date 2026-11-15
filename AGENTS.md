@@ -77,8 +77,8 @@ As of November 3, 2026, the pinned non-interactive OpenXR-CTS baseline is green 
   `vkGetInstanceProcAddr` through `dlsym(RTLD_DEFAULT, ...)`.
 - `Session::EndFrame()` must remain non-blocking.
 - Session-state transitions driven by frame submission and by `xrRequestExitSession` share one
-  short-held mutex. A session that never ran a frame loop goes straight to `STOPPING` on an exit
-  request.
+  short-held mutex. An exit request moves a running session straight to `STOPPING`, whether or not
+  it ran a frame loop.
 - Encoded-frame dispatch is bounded and latest-frame-oriented. Replacing a pending frame must
   release its `FrameSource` resources; backpressure must never run in VideoToolbox callbacks or
   `Session::EndFrame()`.
