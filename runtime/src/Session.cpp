@@ -329,16 +329,23 @@ XrResult Session::RequestExitSession()
     std::scoped_lock transitionLock(stateTransitionMutex_);
     exitRequested_ = true;
 
-    // Exit normally advances one step per submitted frame. A session that never left READY has
-    // no frame loop to do that (OpenComposite requests exit and only pumps events), so step
-    // straight to STOPPING here instead of leaving the app to time out.
+    // Step straight to STOPPING instead of waiting for frames: apps may stop rendering once they
+    // request exit and only pump events until STOPPING arrives. OpenComposite does so before its
+    // first frame, and Blender's VR session after its frame loop ran.
+    switch (state_)
     {
-        std::scoped_lock lock(frameStateMutex_);
-        if (state_ == XR_SESSION_STATE_READY && !frameBegun_ && waitedFrameCount_ == 0)
-        {
+        case XR_SESSION_STATE_FOCUSED:
+            TransitionState(XR_SESSION_STATE_VISIBLE);
+            [[fallthrough]];
+        case XR_SESSION_STATE_VISIBLE:
+        case XR_SESSION_STATE_READY:
             TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
+            [[fallthrough]];
+        case XR_SESSION_STATE_SYNCHRONIZED:
             TransitionState(XR_SESSION_STATE_STOPPING);
-        }
+            break;
+        default:
+            break;
     }
     return XR_SUCCESS;
 }
@@ -1226,30 +1233,10 @@ void Session::AdvanceSessionStateAfterFrameSubmission()
         return;
     }
 
+    // RequestExitSession already moved the session to STOPPING; frames submitted until
+    // xrEndSession must not move it back.
     if (exitRequested_)
     {
-        switch (state_)
-        {
-            case XR_SESSION_STATE_FOCUSED:
-                TransitionState(XR_SESSION_STATE_VISIBLE);
-                break;
-
-            case XR_SESSION_STATE_VISIBLE:
-                TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
-                break;
-
-            case XR_SESSION_STATE_READY:
-                DelayFrameTransitionForTest();
-                TransitionState(XR_SESSION_STATE_SYNCHRONIZED);
-                break;
-
-            case XR_SESSION_STATE_SYNCHRONIZED:
-                TransitionState(XR_SESSION_STATE_STOPPING);
-                break;
-
-            default:
-                break;
-        }
         return;
     }
 

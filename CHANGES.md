@@ -172,6 +172,10 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   example Arizona Sunshine under Wine) waited out its timeout and re-initialised. Such a session now
   moves to `STOPPING` immediately. Frame-driven and exit-driven state transitions are serialized so
   an exit request racing the first `xrEndFrame` can no longer be overwritten back to `SYNCHRONIZED`.
+- Fixed restarting a Blender VR session crashing Blender. Blender stops rendering as soon as it
+  requests exit, so a session that had reached `FOCUSED` stayed there, and Blender's next
+  `xrCreateSession` failed with `XR_ERROR_LIMIT_REACHED`. `xrRequestExitSession` now moves any
+  running session to `STOPPING` immediately.
 - Fixed a headset that connects after another client, such as the desktop simulator, losing every
   tracking packet as "reordered" and being disconnected by the liveness watchdog. Clients do not
   share a clock, and the reorder guard compared the new client's timestamps against the previous
