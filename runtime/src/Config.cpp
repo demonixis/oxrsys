@@ -625,6 +625,12 @@ ConfigValues ParseConfigToml(std::istream& input, const ConfigValues& defaults)
 
 bool Config::ResolveConfigFilePath(std::string& resolvedPath, bool& fileExists) const
 {
+    if (const char* configFile = std::getenv("OXRSYS_CONFIG_FILE"); configFile != nullptr && configFile[0] != '\0')
+    {
+        resolvedPath = configFile;
+        fileExists = std::filesystem::exists(resolvedPath);
+        return true;
+    }
     const std::string preferredConfigPath = appSupportDir + "/oxrsys-runtime.toml";
     const std::string legacyConfigPath = dylibDir + "/oxrsys-runtime.toml";
     if (std::filesystem::exists(preferredConfigPath))

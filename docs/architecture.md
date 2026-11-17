@@ -118,6 +118,9 @@ The runtime reads:
 ~/Library/Application Support/OXRSys/oxrsys-runtime.toml
 ```
 
+An application that ships its own settings sets `OXRSYS_CONFIG_FILE` to that file before loading the
+runtime, and the runtime reads it instead.
+
 It publishes current activity under the same Application Support directory in
 `runtime_status.json`. OXRSys Home edits the configuration, launches applications with the selected
 `XR_RUNTIME_JSON`, and manages the user loader registration at
