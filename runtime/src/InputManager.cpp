@@ -19,6 +19,7 @@ namespace
 
 constexpr const char* kOculusTouchProfile = "/interaction_profiles/oculus/touch_controller";
 constexpr const char* kTouchPlusPromotedProfile = "/interaction_profiles/meta/touch_plus_controller";
+constexpr const char* kTouchPlusExtensionProfile = "/interaction_profiles/meta/touch_controller_plus";
 constexpr const char* kSimpleControllerProfile = "/interaction_profiles/khr/simple_controller";
 constexpr const char* kHandInteractionProfile = "/interaction_profiles/ext/hand_interaction_ext";
 constexpr const char* kValveFrameProfile = "/interaction_profiles/valve/frame_controller_valve";
@@ -826,6 +827,12 @@ std::vector<std::string> InputManager::GetActiveInteractionProfiles(Hand hand) c
 
     if (IsControllerTrackingActive(hand))
     {
+        // XR_META_touch_controller_plus names the profile OpenXR 1.1 promoted as meta/touch_plus_controller.
+        // Apps that bind only the extension's name, as Unity's OpenXR plug-in does, would otherwise get Touch.
+        if (currentProfile == kTouchPlusPromotedProfile)
+        {
+            AddProfileIfMissing(profiles, kTouchPlusExtensionProfile);
+        }
         if (currentProfile.find("/interaction_profiles/meta/") == 0 ||
             currentProfile == kOculusTouchProfile || currentProfile == kValveFrameProfile)
         {
