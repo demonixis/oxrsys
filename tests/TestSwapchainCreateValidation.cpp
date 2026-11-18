@@ -38,7 +38,10 @@ TEST_CASE("Swapchain usage and creation flags are validated per graphics API",
                             XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
                             XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Metal, createInfo) == XR_SUCCESS);
+    // OpenComposite copies each submitted OpenVR texture into a Vulkan swapchain image.
     createInfo.format = 37;
+    CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Vulkan, createInfo) == XR_SUCCESS);
+    createInfo.usageFlags |= XR_SWAPCHAIN_USAGE_UNORDERED_ACCESS_BIT;
     CHECK(oxrsys::swapchain::ValidateCreateInfo(GraphicsApi::Vulkan, createInfo) ==
           XR_ERROR_FEATURE_UNSUPPORTED);
     createInfo.format = 80;

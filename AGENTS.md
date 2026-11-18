@@ -89,6 +89,8 @@ As of November 3, 2026, the pinned non-interactive OpenXR-CTS baseline is green 
   their rendered view into the runtime-owned texture before releasing it.
 - Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those images with
   `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`; Godot renders through an sRGB view of UNORM images.
+- Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT` and create those images with
+  `VK_IMAGE_USAGE_TRANSFER_DST_BIT`; OpenComposite copies each texture an OpenVR game submits into them.
 - Metal swapchains accept `XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT` and create those textures with
   `MTLTextureUsagePixelFormatView`; Godot's Metal driver renders through an sRGB/UNORM view of
   the swapchain texture.
