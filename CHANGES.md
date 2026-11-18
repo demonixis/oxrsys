@@ -123,6 +123,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Fixed
 
+- Fixed streaming not starting for a session that begins after the application started a child
+  process. The runtime runs inside the application, and every process the application started
+  (under Wine, any child of the game, such as Steam's error reporter) inherited the runtime's
+  sockets and kept the control port bound after the runtime closed it: the next session logged
+  `Failed to bind control socket on port 9946` and never streamed. Subnautica through OpenComposite
+  hit this when OpenComposite restarted its session to register controls. The runtime's sockets and
+  the encoder helper's parent-side descriptors are now close-on-exec.
 - Fixed the current interaction profile before a client connects. With nothing tracked, the runtime reported
   `khr/simple_controller` until a client connected, and apps that bind the first profile they see at session start
   (Pistol Whip, on Unity's OpenXR plugin) kept it and ignored the later switch to Touch; Pistol Whip never drew

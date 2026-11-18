@@ -47,7 +47,28 @@ std::string LastErrorText()
 
 SocketHandle Create(int domain, int type, int protocol)
 {
-    return socket(domain, type, protocol);
+    const SocketHandle created = socket(domain, type, protocol);
+    if (IsValid(created))
+    {
+        SetCloseOnExec(created);
+    }
+    return created;
+}
+
+SocketHandle Accept(SocketHandle listenSocket)
+{
+    const SocketHandle accepted = accept(listenSocket, nullptr, nullptr);
+    if (IsValid(accepted))
+    {
+        SetCloseOnExec(accepted);
+    }
+    return accepted;
+}
+
+bool SetCloseOnExec(int descriptor)
+{
+    const int flags = fcntl(descriptor, F_GETFD);
+    return flags != -1 && fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0;
 }
 
 void Close(SocketHandle& socket)

@@ -6,13 +6,18 @@
 #include "RuntimeSockets.h"
 
 #include <cerrno>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include <fcntl.h>
 #include <pthread/qos.h>
+#include <spawn.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 TEST_CASE("RuntimePlatform resolves macOS config and state roots", "[runtime-platform]")
 {
@@ -56,6 +61,71 @@ TEST_CASE("RuntimeSockets retires a socket but keeps its descriptor", "[runtime-
 
     oxrsys::runtime_socket::Close(socket);
     CHECK(!oxrsys::runtime_socket::IsValid(socket));
+}
+
+namespace
+{
+
+// True when a child started with posix_spawn, as Wine starts a game's child processes, still has
+// this descriptor open.
+bool ChildInheritsDescriptor(int descriptor)
+{
+    const std::string script = "test -e /dev/fd/" + std::to_string(descriptor);
+    char shell[] = "/bin/sh";
+    char flag[] = "-c";
+    std::string scriptCopy = script;
+    char* argv[] = {shell, flag, scriptCopy.data(), nullptr};
+    pid_t pid = -1;
+    if (posix_spawn(&pid, shell, nullptr, nullptr, argv, environ) != 0)
+    {
+        return false;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+} // namespace
+
+TEST_CASE("RuntimeSockets sockets are not inherited by child processes", "[runtime-sockets]")
+{
+    auto socket = oxrsys::runtime_socket::Create(AF_INET, SOCK_DGRAM, 0);
+    REQUIRE(oxrsys::runtime_socket::IsValid(socket));
+    // dup() clears close-on-exec: the copy shows the check sees an inherited descriptor.
+    const int inheritable = dup(socket);
+    REQUIRE(inheritable >= 0);
+
+    CHECK(ChildInheritsDescriptor(inheritable));
+    CHECK(!ChildInheritsDescriptor(socket));
+
+    close(inheritable);
+    oxrsys::runtime_socket::Close(socket);
+}
+
+TEST_CASE("RuntimeSockets accepted connections are not inherited by child processes",
+          "[runtime-sockets]")
+{
+    auto listenSocket = oxrsys::runtime_socket::Create(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(oxrsys::runtime_socket::IsValid(listenSocket));
+    sockaddr_in address = {};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(bind(listenSocket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    REQUIRE(listen(listenSocket, 1) == 0);
+    socklen_t addressLength = sizeof(address);
+    REQUIRE(getsockname(listenSocket, reinterpret_cast<sockaddr*>(&address), &addressLength) == 0);
+
+    auto client = oxrsys::runtime_socket::Create(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(oxrsys::runtime_socket::IsValid(client));
+    REQUIRE(connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    auto accepted = oxrsys::runtime_socket::Accept(listenSocket);
+    REQUIRE(oxrsys::runtime_socket::IsValid(accepted));
+
+    CHECK(!ChildInheritsDescriptor(accepted));
+
+    oxrsys::runtime_socket::Close(accepted);
+    oxrsys::runtime_socket::Close(client);
+    oxrsys::runtime_socket::Close(listenSocket);
 }
 
 TEST_CASE("RuntimeSockets keeps the descriptor when /dev/null cannot be opened",

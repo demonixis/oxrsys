@@ -468,7 +468,7 @@ SocketHandle AcceptWithTimeout(SocketHandle listenSocket)
         return oxrsys::runtime_socket::InvalidSocket;
     }
 
-    SocketHandle clientSocket = accept(listenSocket, nullptr, nullptr);
+    SocketHandle clientSocket = oxrsys::runtime_socket::Accept(listenSocket);
     if (oxrsys::runtime_socket::IsValid(clientSocket))
     {
         ConfigureTcpSocket(clientSocket);

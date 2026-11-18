@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <random>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -183,6 +184,10 @@ bool EncoderHelperClient::Start(const Config& config, void* const* iosurfaces, s
     // Parent no longer needs the child ends.
     ::close(sv[1]);
     ::close(errpipe[1]);
+    // The parent ends stay open for the helper's lifetime; another process the host starts must
+    // not inherit them.
+    fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+    fcntl(errpipe[0], F_SETFD, FD_CLOEXEC);
 
     if (spawnRc != 0)
     {
