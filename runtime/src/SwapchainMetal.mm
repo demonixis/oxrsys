@@ -10,6 +10,48 @@
 
 #include "OpenXRPlatform.h"
 
+#include <cstdlib>
+#include <mutex>
+#include <vector>
+
+namespace
+{
+// WORKAROUND (experimental): OXRSYS_METAL_DEFER_SNAPSHOT_COMMIT=1.
+// Some apps (Blender) encode the write into the swapchain image on a command
+// buffer they commit only after xrEndFrame. A snapshot committed at
+// xrReleaseSwapchainImage then runs before that write and copies stale content.
+// In this mode the snapshot is encoded at release as usual but committed at the
+// start of the next xrWaitFrame, after the app has flushed its frame.
+bool DeferSnapshotCommit()
+{
+    static const bool enabled = []
+    {
+        const char* value = std::getenv("OXRSYS_METAL_DEFER_SNAPSHOT_COMMIT");
+        const bool on = value != nullptr && value[0] == '1';
+        spdlog::info("OXRSys: WORKAROUND defer Metal snapshot commit to next xrWaitFrame = {}", on);
+        return on;
+    }();
+    return enabled;
+}
+
+std::mutex gDeferredSnapshotMutex;
+std::vector<id<MTLCommandBuffer>> gDeferredSnapshotCommits; // retained
+} // namespace
+
+void Swapchain::CommitDeferredMetalSnapshots()
+{
+    std::vector<id<MTLCommandBuffer>> pending;
+    {
+        std::scoped_lock lock(gDeferredSnapshotMutex);
+        pending.swap(gDeferredSnapshotCommits);
+    }
+    for (id<MTLCommandBuffer> commandBuffer : pending)
+    {
+        [commandBuffer commit];
+        [commandBuffer release];
+    }
+}
+
 namespace
 {
 
@@ -264,6 +306,8 @@ void Swapchain::InitMetalStaging(void* metalDevice)
 
 void Swapchain::DestroyMetalResources()
 {
+    // Never leave a deferred snapshot uncommitted (the command buffer retains its textures).
+    CommitDeferredMetalSnapshots();
     lastSnapshotLease_.reset();
 
     for (const auto& slot : stagingSlots_)
@@ -354,7 +398,15 @@ void Swapchain::SnapshotMetalReleasedImage(bool requested)
                 [blit copyFromTexture:src toTexture:dst];
                 [blit endEncoding];
                 [commandBuffer encodeSignalEvent:event value:signalValue];
-                [commandBuffer commit];
+                if (DeferSnapshotCommit())
+                {
+                    std::scoped_lock deferLock(gDeferredSnapshotMutex);
+                    gDeferredSnapshotCommits.push_back([commandBuffer retain]);
+                }
+                else
+                {
+                    [commandBuffer commit];
+                }
 
                 lastSnapshotIndex_ = stagingIndex;
                 lastSnapshotValue_ = signalValue;

@@ -518,6 +518,10 @@ XrResult Session::WaitFrame(const XrFrameWaitInfo* frameWaitInfo, XrFrameState* 
     {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+#ifdef XR_USE_GRAPHICS_API_METAL
+    // The app has flushed its previous frame by now; release deferred snapshot copies.
+    Swapchain::CommitDeferredMetalSnapshots();
+#endif
 
     {
         std::scoped_lock lock(frameStateMutex_);
