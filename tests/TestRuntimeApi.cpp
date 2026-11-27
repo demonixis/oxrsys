@@ -1665,6 +1665,42 @@ TEST_CASE("RequestExitSession reaches STOPPING without a frame loop", "[runtime]
     CHECK(states.back() == XR_SESSION_STATE_EXITING);
 }
 
+// Blender's VR session stops rendering as soon as it requests exit and then only pumps events while
+// it waits for STOPPING. A session that already ran its frame loop must still reach STOPPING, or the
+// app keeps the old session alive and its next xrCreateSession fails with XR_ERROR_LIMIT_REACHED.
+TEST_CASE("RequestExitSession reaches STOPPING after the frame loop stops", "[runtime][loader]")
+{
+    RuntimeSessionContext context({XR_KHR_METAL_ENABLE_EXTENSION_NAME});
+
+    XrSessionState lastState = XR_SESSION_STATE_UNKNOWN;
+    auto drainStates = [&]() {
+        XrEventDataBuffer event = {XR_TYPE_EVENT_DATA_BUFFER};
+        while (xrPollEvent(context.instance, &event) == XR_SUCCESS)
+        {
+            if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED)
+            {
+                lastState = reinterpret_cast<XrEventDataSessionStateChanged*>(&event)->state;
+            }
+            event = {XR_TYPE_EVENT_DATA_BUFFER};
+        }
+    };
+
+    for (int frame = 0; frame < 8 && lastState != XR_SESSION_STATE_FOCUSED; ++frame)
+    {
+        PumpTrackingFrame(context.session);
+        drainStates();
+    }
+    REQUIRE(lastState == XR_SESSION_STATE_FOCUSED);
+
+    XR_CHECK(xrRequestExitSession(context.session));
+    drainStates();
+    REQUIRE(lastState == XR_SESSION_STATE_STOPPING);
+
+    XR_CHECK(xrEndSession(context.session));
+    drainStates();
+    CHECK(lastState == XR_SESSION_STATE_EXITING);
+}
+
 // The session runs until xrEndSession, STOPPING included. An exit request before the first frame
 // queues SYNCHRONIZED and STOPPING at once, so an app that handles one event per frame, as the CTS
 // does, submits a frame for SYNCHRONIZED after the session has reached STOPPING.
