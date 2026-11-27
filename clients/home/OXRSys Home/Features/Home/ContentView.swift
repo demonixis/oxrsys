@@ -284,6 +284,22 @@ struct ContentView: View {
         networkAddresses = getAllInterfaceAddresses()
     }
 
+    private func transportPillColor(readiness: HomeTransportReadiness) -> Color {
+        guard model.mainTransportSelection == .avpUsb else {
+            return readiness.isReady ? .green : .red
+        }
+        switch model.avpUsbConnectionPhase {
+        case .sessionActive:
+            return .green
+        case .linkReachable:
+            return .blue
+        case .testing:
+            return .orange
+        case .linkUnreachable:
+            return .red
+        }
+    }
+
     private var transportHealthControl: some View {
         let readiness = model.mainTransportReadiness
         return HStack(spacing: 8) {
@@ -309,16 +325,10 @@ struct ContentView: View {
 
             StatusPill(
                 title: model.mainTransportSelection == .avpUsb
-                    ? model.isAvpUsbTestInProgress
-                        ? "Testing"
-                        : readiness.isReady ? "Connected" : "Not connected"
+                    ? model.avpUsbConnectionPhase.pillTitle
                     : readiness.isReady ? "Ready" : "Action needed",
-                color: readiness.isReady
-                    ? .green
-                    : model.mainTransportSelection == .avpUsb && model.isAvpUsbTestInProgress
-                        ? .orange
-                        : .red
-            ).frame(width: 70)
+                color: transportPillColor(readiness: readiness)
+            ).frame(width: model.mainTransportSelection == .avpUsb ? 130 : 70)
 
             Text(readiness.message)
                 .font(.caption)
@@ -329,20 +339,12 @@ struct ContentView: View {
 
             if model.mainTransportSelection == .avpUsb {
                 TextField("Vision Pro IP", text: Binding(
-                    get: { model.avpUsbHostAddress },
+                    get: { model.avpUsbLink.hostAddress },
                     set: { model.setAvpUsbHostAddress($0) }
                 ))
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 140)
                 .help("IPv4 address of the Vision Pro on USB Ethernet")
-
-                Button {
-                    model.testAvpUsbConnection()
-                } label: {
-                    Label("Test", systemImage: "cable.connector")
-                }
-                .disabled(model.isAvpUsbTestInProgress)
-                .frame(width: 75)
             }
 
             if readiness.canConfigureUsb {
