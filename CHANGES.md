@@ -4,6 +4,13 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ## 1.3.1 - TBD
 
+### Added
+
+- Vulkan swapchains accept `XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT` and create those images with
+  `VK_IMAGE_USAGE_TRANSFER_DST_BIT`, as Metal swapchains already did. OpenComposite copies each texture
+  an OpenVR game submits into its swapchain image, and asks for this usage; before, its swapchains
+  failed with `XR_ERROR_FEATURE_UNSUPPORTED` and the game got no frames to the headset.
+
 ### Fixed
 
 - Fixed streaming not starting for a session that begins after the application started a child

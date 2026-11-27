@@ -33,6 +33,9 @@ constexpr XrSwapchainUsageFlags SupportedUsageFlags(GraphicsApi api)
         // Godot creates UNORM swapchain images and renders through an sRGB view of them.
         // SwapchainVulkan maps this to VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT.
         flags |= XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
+        // OpenComposite copies the texture an OpenVR game submits into the swapchain image.
+        // SwapchainVulkan maps this to VK_IMAGE_USAGE_TRANSFER_DST_BIT.
+        flags |= XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     }
     return flags;
 }
