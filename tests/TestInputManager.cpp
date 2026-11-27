@@ -602,6 +602,30 @@ TEST_CASE("InputManager — streaming client names map to controller profiles an
     }
 }
 
+TEST_CASE("InputManager — Quest 3 controllers offer the Touch Plus extension profile before Touch", "[input]")
+{
+    InputManager im;
+    TrackingReceiver receiver;
+    im.SetTrackingReceiver(&receiver);
+    im.SetStreamingClientName("Meta Quest 3");
+
+    oxr::protocol::TrackingPacket packet = {};
+    packet.timestampNs = 1'000'000'000;
+    packet.headOrientation[3] = 1.0f;
+    packet.trackingFlags = oxr::protocol::TRACKING_FLAG_LEFT_CONTROLLER_ACTIVE;
+    packet.leftControllerRot[3] = 1.0f;
+    receiver.InjectPacket(reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+    im.Update(0.0f);
+
+    const std::vector<std::string> expected = {
+        "/interaction_profiles/meta/touch_plus_controller",
+        "/interaction_profiles/meta/touch_controller_plus",
+        "/interaction_profiles/oculus/touch_controller",
+        "/interaction_profiles/khr/simple_controller",
+    };
+    CHECK(im.GetActiveInteractionProfiles(InputManager::Hand::Left) == expected);
+}
+
 TEST_CASE("InputManager — streaming hands and controllers stay profile separated", "[input]")
 {
     InputManager im;
