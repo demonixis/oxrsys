@@ -47,20 +47,24 @@ std::string LastErrorText()
 
 SocketHandle Create(int domain, int type, int protocol)
 {
-    const SocketHandle created = socket(domain, type, protocol);
-    if (IsValid(created))
+    SocketHandle created = socket(domain, type, protocol);
+    if (IsValid(created) && !SetCloseOnExec(created))
     {
-        SetCloseOnExec(created);
+        const int error = errno;
+        Close(created);
+        errno = error;
     }
     return created;
 }
 
 SocketHandle Accept(SocketHandle listenSocket)
 {
-    const SocketHandle accepted = accept(listenSocket, nullptr, nullptr);
-    if (IsValid(accepted))
+    SocketHandle accepted = accept(listenSocket, nullptr, nullptr);
+    if (IsValid(accepted) && !SetCloseOnExec(accepted))
     {
-        SetCloseOnExec(accepted);
+        const int error = errno;
+        Close(accepted);
+        errno = error;
     }
     return accepted;
 }

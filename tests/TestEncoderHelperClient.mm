@@ -26,6 +26,7 @@
 #import <IOSurface/IOSurface.h>
 #import <VideoToolbox/VideoToolbox.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -33,10 +34,15 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
+
+extern char** environ;
 
 namespace
 {
@@ -193,6 +199,39 @@ bool StartOrSkip(EncoderHelperClient& client, Surfaces& surfaces,
              "one for the codec on Apple Silicon");
     }
     return started;
+}
+
+// Open socket and pipe descriptors of this process: the kinds Start creates for the helper.
+std::vector<int> OpenSocketsAndPipes()
+{
+    std::vector<int> descriptors;
+    for (int fd = 0; fd < 1024; ++fd)
+    {
+        struct stat info = {};
+        if (fstat(fd, &info) == 0 && (S_ISSOCK(info.st_mode) || S_ISFIFO(info.st_mode)))
+        {
+            descriptors.push_back(fd);
+        }
+    }
+    return descriptors;
+}
+
+// True when a child started with posix_spawn, as Wine starts a game's child processes, still has
+// this descriptor open.
+bool ChildInheritsDescriptor(int descriptor)
+{
+    std::string script = "test -e /dev/fd/" + std::to_string(descriptor);
+    char shell[] = "/bin/sh";
+    char flag[] = "-c";
+    char* argv[] = {shell, flag, script.data(), nullptr};
+    pid_t pid = -1;
+    if (posix_spawn(&pid, shell, nullptr, nullptr, argv, environ) != 0)
+    {
+        return false;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 } // namespace
@@ -368,4 +407,47 @@ TEST_CASE("Encoder helper bitstream carries the BT.709 colour description",
         RequireBt709FromHelper(EncoderHelperClient::Codec::H265,
                                EncoderHelperClient::Profile::Main10);
     }
+}
+
+TEST_CASE("Processes the host starts do not inherit the encoder helper's descriptors",
+          "[video][encoder][helper][lifecycle]")
+{
+    if (HelperPath().empty())
+    {
+        SKIP("OXRSYS_ENCODER_HELPER_PATH is not set");
+    }
+
+    Surfaces surfaces;
+    Collected collected;
+    const std::vector<int> before = OpenSocketsAndPipes();
+
+    EncoderHelperClient client;
+    if (!StartOrSkip(client, surfaces,
+                     MakeConfig(EncoderHelperClient::Codec::H264,
+                                EncoderHelperClient::Profile::Main),
+                     collected))
+    {
+        SKIP("encoder helper did not come up on a hardware encoder here");
+    }
+
+    // The parent ends of the control socket and the stderr pipe.
+    std::vector<int> opened;
+    for (int fd : OpenSocketsAndPipes())
+    {
+        if (std::find(before.begin(), before.end(), fd) == before.end())
+        {
+            opened.push_back(fd);
+        }
+    }
+    CHECK(opened.size() >= 2);
+    for (int fd : opened)
+    {
+        INFO("descriptor " << fd);
+        CHECK_FALSE(ChildInheritsDescriptor(fd));
+    }
+
+    // The helper still received its own ends: it encodes a frame.
+    client.SubmitFrame(1, 0, 1'000'000, true);
+    CHECK(collected.WaitFor([&] { return collected.framesDone > 0; }, std::chrono::seconds(5)));
+    client.Stop();
 }

@@ -120,9 +120,9 @@ As of November 3, 2026, the pinned non-interactive OpenXR-CTS baseline is green 
   mid-stream, falls back to the in-process session and reclaims every in-flight frame's slot and
   drain lease. Helper sockets use `SO_NOSIGPIPE` and `MSG_NOSIGNAL`; the runtime must not install a
   process-wide `SIGPIPE` handler in the host application.
-- The runtime's sockets and the parent ends of the encoder helper's control socket and stderr pipe
-  are close-on-exec: the runtime runs inside the host application, and a process the host starts
-  must not inherit them.
+- The runtime's sockets and both ends of the encoder helper's control socket and stderr pipe are
+  close-on-exec from creation: the runtime runs inside the host application, and a process the host
+  starts must not inherit them. The helper receives its ends only through its spawn file actions.
 - The helper is always `arm64`. Every package, universal and `x86_64` included, ships it at
   `runtime/oxrsys-encoder-helper` beside the runtime dylib, and packaging rejects any other slice
   set.

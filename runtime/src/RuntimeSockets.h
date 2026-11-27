@@ -25,7 +25,8 @@ std::string LastErrorText();
 
 // Create and Accept mark the descriptor close-on-exec. The runtime runs inside the host
 // application, so a process it starts (under Wine, any child of the game) would otherwise inherit
-// the streaming sockets and keep their ports bound after the runtime closes them.
+// the streaming sockets and keep their ports bound after the runtime closes them. If the flag
+// cannot be set, they close the descriptor and return InvalidSocket with errno preserved.
 SocketHandle Create(int domain, int type, int protocol);
 SocketHandle Accept(SocketHandle listenSocket);
 bool SetCloseOnExec(int descriptor);
