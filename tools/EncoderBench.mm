@@ -24,10 +24,15 @@
 // (e.g. 15) measures per-frame latency without adding a second full-rate
 // stream to the media engine.
 //
+// With encoder_helper = "true" and no encoder_helper_path, the runtime looks
+// for the helper beside its dylib. This binary is not there, so it falls back
+// to the helper this build produced (OXRSYS_ENCODER_HELPER_PATH still wins).
+//
 // The media engine is shared by every process on the Mac: a run beside a live
 // stream measures both, and slows the live one (a 3456x1536 run at 90 Hz beside
 // a live 2560x1120 stream made the live one drop frames).
 
+#include "Config.h"
 #include "VideoEncoder.h"
 #include "VulkanDispatch.h"
 #include <Foveation.h>
@@ -38,6 +43,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -183,6 +189,14 @@ int main(int argc, char** argv)
         d.storageMode = MTLStorageModePrivate;
         for (auto& pair : eyes) { pair[0] = [device newTextureWithDescriptor:d]; pair[1] = [device newTextureWithDescriptor:d]; }
 
+        // The runtime resolves the helper as config path, then environment, then
+        // a sibling of its dylib. The bench is not beside the dylib, so it points
+        // the environment at this build's helper unless either is already set.
+        if (std::getenv("OXRSYS_ENCODER_HELPER_PATH") == nullptr && Config::Get().GetValues().encoderHelperPath.empty())
+        {
+            setenv("OXRSYS_ENCODER_HELPER_PATH", OXRSYS_BENCH_HELPER_PATH, 0);
+        }
+
         VideoEncoder encoder;
         VideoEncoder::FoveationSettings fs = {};
         fs.enabled = fp != oxr::protocol::FoveationPreset::Off;
@@ -209,7 +223,7 @@ int main(int argc, char** argv)
         std::vector<double> cb, total, submit, gpu;
         std::map<int64_t, size_t> bytesByTs;
         std::vector<size_t> frameBytes;
-        uint32_t dropped = 0, done = 0;
+        uint32_t dropped = 0, encoded = 0;
         const uint32_t warmup = std::min<uint32_t>(30, frames / 10);
 
         const auto period = std::chrono::nanoseconds(1'000'000'000LL / fps);
@@ -257,8 +271,8 @@ int main(int argc, char** argv)
                 },
                 [&, measured](const VideoEncoder::FrameMetrics& mt) {
                     std::lock_guard<std::mutex> lock(m);
-                    ++done;
                     if (mt.frameDropped) { ++dropped; return; }
+                    ++encoded;
                     if (!measured) return;
                     cb.push_back(mt.callbackLatencyMs);
                     total.push_back(mt.totalLatencyMs);
@@ -275,7 +289,7 @@ int main(int argc, char** argv)
         for (size_t b : frameBytes) kb.push_back(b / 1024.0);
         std::printf("RESULT %ux%u %s fps=%u hz=%u mbps=%u n=%zu cb min=%.2f p10=%.2f p50=%.2f p95=%.2f max=%.2f | total p50=%.2f p95=%.2f | submit p50=%.2f | gpu p50=%.2f | fps_out=%.1f drops=%u inflight_end=%u | KB/frame p50=%.1f (%.1f Mbps) | hw=%s helper=%s\n",
                     encW, encH, codecName.c_str(), fps, submitHz ? submitHz : fps, mbps, cb.size(), Pct(cb, 0.0), Pct(cb, 0.1), Pct(cb, 0.5), Pct(cb, 0.95), Pct(cb, 1.0),
-                    Pct(total, 0.5), Pct(total, 0.95), Pct(submit, 0.5), Pct(gpu, 0.5), done / wall, dropped,
+                    Pct(total, 0.5), Pct(total, 0.95), Pct(submit, 0.5), Pct(gpu, 0.5), encoded / wall, dropped,
                     encoder.GetInFlightFrameCount(), Pct(kb, 0.5), Pct(kb, 0.5) * 1024 * 8 * fps / 1e6,
                     encoder.InProcessSessionUsesHardware() ? "yes" : "no", encoder.EncoderHelperPid() > 0 ? "yes" : "no");
         encoder.Shutdown();

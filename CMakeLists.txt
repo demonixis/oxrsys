@@ -428,7 +428,11 @@ target_compile_definitions(oxrsys_encoder_bench PRIVATE
     OXRSYS_VERSION_MAJOR=${OXRSYS_VERSION_MAJOR}
     OXRSYS_VERSION_MINOR=${OXRSYS_VERSION_MINOR}
     OXRSYS_VERSION_PATCH=${OXRSYS_VERSION_PATCH}
+    # The runtime looks for the helper beside its dylib, which this binary is
+    # not; the bench falls back to the one this build produced.
+    "OXRSYS_BENCH_HELPER_PATH=\"$<TARGET_FILE:oxrsys-encoder-helper>\""
 )
+add_dependencies(oxrsys_encoder_bench oxrsys-encoder-helper)
 
 add_dependencies(oxrsys_runtime_sync_compile_commands
     ${OXRSYS_RUNTIME_TEST_TARGETS}
