@@ -5,7 +5,11 @@
 #include "Config.h"
 
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
+#include <thread>
 
 TEST_CASE("Config parser accepts quoted presets and keeps defaults for invalid values", "[config]")
 {
@@ -376,6 +380,32 @@ quest_logcat = true
     const ConfigValues values = ParseConfigToml(input);
 
     CHECK(values.questLogcat == true);
+}
+
+TEST_CASE("Config reads the file named by OXRSYS_CONFIG_FILE", "[config]")
+{
+    const std::filesystem::path configFile =
+        std::filesystem::temp_directory_path() / "oxrsys-config-file-env-test.toml";
+    {
+        std::ofstream file(configFile);
+        file << "[streaming]\nbitrate_mbps = 37\n";
+    }
+
+    auto refresh = []() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        Config::Get().RefreshIfNeeded();
+    };
+
+    Config::Get().GetValues();
+    setenv("OXRSYS_CONFIG_FILE", configFile.c_str(), 1);
+    refresh();
+    CHECK(Config::Get().configFilePath == configFile.string());
+    CHECK(Config::Get().GetValues().bitrateMbps == 37);
+
+    unsetenv("OXRSYS_CONFIG_FILE");
+    refresh();
+    CHECK(Config::Get().configFilePath != configFile.string());
+    std::filesystem::remove(configFile);
 }
 
 TEST_CASE("Config singleton initializes with bounded Quest logcat clear", "[config][logcat]")

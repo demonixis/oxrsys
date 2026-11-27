@@ -25,6 +25,8 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
 
 ### Added
 
+- Added `OXRSYS_CONFIG_FILE`. An application that ships its own settings with the runtime sets it to
+  that TOML file, and the runtime reads it instead of the user's Application Support file.
 - Added `render_device = "quest3_native"` (2064x2208 per eye), the Quest 3 panel resolution,
   also selectable in Home.
 - Added the USB network transport (`transport = "usb_ncm"`, USB Net in Home). Home switches the
