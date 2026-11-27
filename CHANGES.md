@@ -2,6 +2,18 @@
 
 This file tracks user-facing, integration-facing, and runtime-relevant changes for OXRSys.
 
+## 1.3.1 - TBD
+
+### Fixed
+
+- Fixed streaming not starting for a session that begins after the application started a child
+  process. The runtime runs inside the application, and every process the application started
+  (under Wine, any child of the game, such as Steam's error reporter) inherited the runtime's
+  sockets and kept the control port bound after the runtime closed it: the next session logged
+  `Failed to bind control socket on port 9946` and never streamed. Subnautica through OpenComposite
+  hit this when OpenComposite restarted its session to register controls. The runtime's sockets and
+  the encoder helper's control socket and stderr pipe are now close-on-exec from creation.
+
 ## 1.3.0 - TBD
 
 ### Added

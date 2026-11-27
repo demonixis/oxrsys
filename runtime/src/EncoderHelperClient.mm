@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <random>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -35,6 +36,22 @@ static_assert((uint32_t)EncoderHelperClient::Codec::H265 == (uint32_t)CodecCode:
 static_assert((uint32_t)EncoderHelperClient::Codec::H264 == (uint32_t)CodecCode::H264, "");
 static_assert((uint32_t)EncoderHelperClient::Profile::Main == (uint32_t)ProfileCode::Main, "");
 static_assert((uint32_t)EncoderHelperClient::Profile::Main10 == (uint32_t)ProfileCode::Main10, "");
+
+bool SetCloseOnExec(int fd)
+{
+    const int flags = fcntl(fd, F_GETFD);
+    return flags != -1 && fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0;
+}
+
+// Installs the parent's close-on-exec descriptor at childFd in the helper. A dup2 onto the same
+// number keeps close-on-exec on macOS, so that case inherits the descriptor instead.
+void AddChildDescriptor(posix_spawn_file_actions_t& fa, int parentFd, int childFd)
+{
+    if (parentFd == childFd)
+        posix_spawn_file_actions_addinherit_np(&fa, parentFd);
+    else
+        posix_spawn_file_actions_adddup2(&fa, parentFd, childFd);
+}
 
 bool RecvFramed(int fd, MsgType& type, std::vector<uint8_t>& payload)
 {
@@ -112,6 +129,14 @@ bool EncoderHelperClient::Start(const Config& config, void* const* iosurfaces, s
         spdlog::error("EncoderHelper: socketpair failed: {}", strerror(errno));
         return false;
     }
+    // Close-on-exec from creation: a process another host thread starts before the helper is
+    // spawned must not inherit either end. The helper still gets its end through the spawn actions.
+    if (!SetCloseOnExec(sv[0]) || !SetCloseOnExec(sv[1]))
+    {
+        spdlog::error("EncoderHelper: FD_CLOEXEC on socketpair failed: {}", strerror(errno));
+        ::close(sv[0]); ::close(sv[1]);
+        return false;
+    }
     // Before anything can write to it: a write to a peer that has died must
     // fail with EPIPE, not raise SIGPIPE in the host (the game, under Wine).
     // Set on both ends; the helper's end is the same socket it inherits as fd 3.
@@ -127,6 +152,12 @@ bool EncoderHelperClient::Start(const Config& config, void* const* iosurfaces, s
     {
         spdlog::error("EncoderHelper: pipe failed: {}", strerror(errno));
         ::close(sv[0]); ::close(sv[1]);
+        return false;
+    }
+    if (!SetCloseOnExec(errpipe[0]) || !SetCloseOnExec(errpipe[1]))
+    {
+        spdlog::error("EncoderHelper: FD_CLOEXEC on stderr pipe failed: {}", strerror(errno));
+        ::close(sv[0]); ::close(sv[1]); ::close(errpipe[0]); ::close(errpipe[1]);
         return false;
     }
 
@@ -151,20 +182,8 @@ bool EncoderHelperClient::Start(const Config& config, void* const* iosurfaces, s
     // --- Spawn the helper ---
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, sv[1], kChildSocketFd);
-    posix_spawn_file_actions_adddup2(&fa, errpipe[1], STDERR_FILENO);
-    // Close every inherited fd we don't want the child to keep, but NEVER an fd
-    // number that is also a dup2 target: dup2 already closed the target's old
-    // occupant, and an explicit close of that number would kill the descriptor
-    // we just installed (socketpair/pipe can hand back fd 3 or 2 themselves).
-    auto closeIfNotTarget = [&](int fd) {
-        if (fd != kChildSocketFd && fd != STDERR_FILENO)
-            posix_spawn_file_actions_addclose(&fa, fd);
-    };
-    closeIfNotTarget(sv[0]);
-    closeIfNotTarget(errpipe[0]);
-    closeIfNotTarget(sv[1]);
-    closeIfNotTarget(errpipe[1]);
+    AddChildDescriptor(fa, sv[1], kChildSocketFd);
+    AddChildDescriptor(fa, errpipe[1], STDERR_FILENO);
 
     char fdArg[16];
     snprintf(fdArg, sizeof(fdArg), "%d", kChildSocketFd);
