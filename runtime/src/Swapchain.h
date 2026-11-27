@@ -185,6 +185,10 @@ private:
                                   XrSwapchainImageBaseHeader* images) const;
     void DestroyMetalResources();
     void SnapshotMetalReleasedImage(bool requested);
+public:
+    // Commits Metal snapshot copies deferred by OXRSYS_METAL_DEFER_SNAPSHOT_COMMIT=1.
+    static void CommitDeferredMetalSnapshots();
+private:
     void* GetLastReleasedMetalTextureSlice(uint32_t arrayIndex) const;
     FrameImageSource SnapshotMetalFrameImageSource(uint32_t arrayIndex) const;
     static void ReleaseMetalTextureSlice(void* textureSlice);

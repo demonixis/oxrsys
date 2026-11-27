@@ -246,6 +246,11 @@ This file tracks user-facing, integration-facing, and runtime-relevant changes f
   apart, sharp in one eye where the other was compressed. The runtime also averages each encoded
   pixel's whole source span (up to six taps per axis) instead of taking one bilinear sample, which
   removes the aliasing and skipped rows in the compressed bands.
+- Added an opt-in workaround for Blender's Metal VR path streaming old frames to the headset
+  (about 300 ms behind, differing per eye): with `OXRSYS_METAL_DEFER_SNAPSHOT_COMMIT=1`, the
+  streaming snapshot of a released Metal swapchain image is committed at the next `xrWaitFrame`
+  instead of at `xrReleaseSwapchainImage`, so it runs after the application's own blit. Blender
+  encodes that blit on a command buffer it commits only after `xrEndFrame`.
 
 ### Removed
 
