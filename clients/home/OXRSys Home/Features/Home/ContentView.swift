@@ -285,12 +285,11 @@ struct ContentView: View {
     }
 
     private func transportPillColor(readiness: HomeTransportReadiness) -> Color {
-        guard model.mainTransportSelection == .avpUsb else {
-            return readiness.isReady ? .green : .red
-        }
-        switch model.avpUsbConnectionPhase {
-        case .sessionActive:
-            return .green
+        readiness.isReady ? .green : .red
+    }
+
+    private func avpUsbLinkPillColor(_ phase: AVPUSBConnectionPhase) -> Color {
+        switch phase {
         case .linkReachable:
             return .blue
         case .testing:
@@ -323,12 +322,14 @@ struct ContentView: View {
             .pickerStyle(.segmented)
             .frame(width: 240)
 
-            StatusPill(
-                title: model.mainTransportSelection == .avpUsb
-                    ? model.avpUsbConnectionPhase.pillTitle
-                    : readiness.isReady ? "Ready" : "Action needed",
-                color: transportPillColor(readiness: readiness)
-            ).frame(width: model.mainTransportSelection == .avpUsb ? 130 : 70)
+            if model.mainTransportSelection == .avpUsb {
+                avpUsbStatusPills
+            } else {
+                StatusPill(
+                    title: readiness.isReady ? "Ready" : "Action needed",
+                    color: transportPillColor(readiness: readiness)
+                ).frame(width: 70)
+            }
 
             Text(readiness.message)
                 .font(.caption)
@@ -361,6 +362,17 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 360, alignment: .leading)
+    }
+
+    /// Vision Pro streaming status, shown separately from USB link health.
+    private var avpUsbStatusPills: some View {
+        let status = model.avpUsbStatus
+        return HStack(spacing: 8) {
+            if let streamingTitle = status.streamingPillTitle {
+                StatusPill(title: streamingTitle, color: .green)
+            }
+            StatusPill(title: status.linkPhase.pillTitle, color: avpUsbLinkPillColor(status.linkPhase))
+        }
     }
 
     private var appsTab: some View {
