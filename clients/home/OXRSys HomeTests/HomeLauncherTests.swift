@@ -606,6 +606,109 @@ final class HomeLauncherTests: XCTestCase {
         try expect(activity?.stateDisplayName == "Streaming (USB Network)", "Expected USB network display state")
     }
 
+    func testAvpUsbConnectionPhase() throws {
+        let reachable = AVPUSBLinkStatus(
+            isReachable: true,
+            hostAddress: "169.254.34.86",
+            interfaceName: "en17",
+            message: "reachable"
+        )
+        let unreachable = AVPUSBLinkStatus.disconnected("169.254.34.86", message: "unreachable")
+        let streaming = HomeRuntimeActivity(state: .streaming, deviceType: .visionPro)
+
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: .idle)
+                == .linkReachable,
+            "Expected a successful ping to be only 'USB link reachable'"
+        )
+        try expect(
+            AVPUSBConnectionPhase.linkReachable.pillTitle == "USB link reachable"
+                && !AVPUSBConnectionPhase.linkReachable.isSessionActive,
+            "Expected a reachable link not to count as connected"
+        )
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: .idle)
+                == .linkUnreachable,
+            "Expected a failed ping to be 'USB link unreachable'"
+        )
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: true, linkStatus: unreachable, runtimeActivity: .idle)
+                == .testing,
+            "Expected an active test to show Testing"
+        )
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: streaming)
+                == .sessionActive,
+            "Expected a streaming runtime session to be Connected"
+        )
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: streaming)
+                == .sessionActive,
+            "Expected the runtime session to win over a failed ping"
+        )
+        try expect(
+            AVPUSBConnectionPhase.sessionActive.pillTitle == "Connected",
+            "Expected Connected title for an active session"
+        )
+        let questStreaming = HomeRuntimeActivity(state: .streaming, deviceType: .quest)
+        try expect(
+            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: questStreaming)
+                == .linkReachable,
+            "Expected a Quest session not to count as an AVP USB connection"
+        )
+    }
+
+    func testAvpUsbNetworkStatusParsing() throws {
+        let route = """
+        route to: 169.254.34.86
+        destination: 169.254.0.0
+        interface: en17
+        """
+        try expect(
+            AVPUSBEthernetLink.interfaceName(fromRoute: route) == "en17",
+            "Expected route interface parsing"
+        )
+
+        let hardwarePorts = """
+        Hardware Port: Wi-Fi
+        Device: en0
+        Ethernet Address: aa:bb:cc:dd:ee:ff
+
+        Hardware Port: Vision Pro
+        Device: en17
+        Ethernet Address: 12:f9:c3:45:1c:9d
+        """
+        let hardwarePort = AVPUSBEthernetLink.hardwarePortName(for: "en17", in: hardwarePorts)
+        try expect(hardwarePort == "Vision Pro", "Expected Vision Pro USB Ethernet interface lookup")
+        try expect(
+            AVPUSBEthernetLink.isUsbEthernetPort(hardwarePort ?? ""),
+            "Expected Vision Pro interface to be identified as USB Ethernet"
+        )
+        try expect(
+            !AVPUSBEthernetLink.isUsbEthernetPort("Wi-Fi"),
+            "Expected Wi-Fi not to be identified as USB Ethernet"
+        )
+
+        try expect(
+            AVPUSBEthernetLink.hardwarePortName(for: "en99", in: hardwarePorts) == nil,
+            "Expected unknown device to have no hardware port"
+        )
+        try expect(
+            AVPUSBEthernetLink.hardwarePortName(for: "lo0", in: hardwarePorts) == nil,
+            "Expected loopback to be missing from the hardware port inventory"
+        )
+        try expect(
+            AVPUSBEthernetLink.interfaceName(
+                fromRoute: "route to: 169.254.34.86\ndestination: 169.254.0.0"
+            ) == nil,
+            "Expected missing interface line to yield nil"
+        )
+        try expect(
+            AVPUSBEthernetLink.isUsbEthernetPort("USB 10/100/1000 LAN"),
+            "Expected generic USB LAN adapter to be identified as USB Ethernet"
+        )
+    }
+
     func testUsbNetworkMacConfigurationParsing() throws {
         let serviceOrder = """
         An asterisk (*) denotes that a network service is disabled.

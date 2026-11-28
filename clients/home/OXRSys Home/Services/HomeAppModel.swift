@@ -76,6 +76,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     private let runtimeManifestPathKey = "runtimeManifestPath"
     private let adbModeKey = "adbMode"
     private let customAdbPathKey = "customAdbPath"
+    let avpUsbLink = AVPUSBEthernetLinkModel()
+    private var avpUsbLinkObserver: AnyCancellable?
     private let launcherScanner = LauncherAppScanner()
     private let maxLogCharacters = 30_000
     private var launcherStore = LauncherAppsStore()
@@ -99,6 +101,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     init() {
         runtimeManifestPath = defaults.string(forKey: runtimeManifestPathKey) ?? SourceDefaults.defaultRuntimeManifestPath()
         customAdbPath = defaults.string(forKey: customAdbPathKey) ?? ""
+        avpUsbLinkObserver = avpUsbLink.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        if avpUsbLink.isSelected {
+            mainTransportOverride = .avpUsb
+        }
         if let rawMode = defaults.string(forKey: adbModeKey),
            let storedMode = HomeAdbMode(rawValue: rawMode) {
             adbMode = storedMode
@@ -106,6 +114,9 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             adbMode = .custom
         }
         loadAll()
+        if mainTransportSelection == .avpUsb {
+            testAvpUsbConnection()
+        }
         configureUsbOnStartupIfNeeded()
         startPolling()
     }
@@ -189,6 +200,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 return .usbAdb
             case .usbNcm:
                 return .usbNetwork
+            case .avpUsb:
+                return .avpUsb
             case nil:
                 break
             }
@@ -263,7 +276,21 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
                 message: usbNetworkStatus.message,
                 canConfigureUsb: !usbNetworkStatus.isReady
             )
+        case .avpUsb:
+            return HomeTransportReadiness(
+                isReady: avpUsbConnectionPhase.isSessionActive,
+                message: avpUsbLink.status.message
+            )
         }
+    }
+
+    /// "Connected" comes from the runtime's session status; a ping only proves the USB link is reachable.
+    var avpUsbConnectionPhase: AVPUSBConnectionPhase {
+        AVPUSBConnectionPhase.resolve(
+            isTesting: avpUsbLink.isTesting,
+            linkStatus: avpUsbLink.status,
+            runtimeActivity: runtimeActivity
+        )
     }
 
     var latestRuntimeStats: HomeRuntimeStreamingStats? {
@@ -456,6 +483,12 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         if mainTransportSelection == .usbNetwork && !isUsbNetworkSetupInProgress {
             startUsbNetworkRefresh()
         }
+        // AVP USB is not polled. While the link is reachable it is re-checked silently so a
+        // dropped cable is noticed; otherwise tests run on address entry, tab selection,
+        // the Test button and when a runtime session ends.
+        if mainTransportSelection == .avpUsb && avpUsbLink.status.isReachable && !avpUsbLink.isTesting {
+            avpUsbLink.test(silently: true)
+        }
     }
 
     func refreshQuestUsbDevices() {
@@ -504,6 +537,8 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
     }
 
     func setMainTransportSelection(_ selection: HomePrimaryTransport) {
+        avpUsbLink.cancelPendingTest()
+        avpUsbLink.setSelected(selection == .avpUsb)
         if selection == .usbAdb {
             mainTransportOverride = .usbAdb
             startUsbTransportSetup(requireSelectedDevice: false, persistTransportOnSuccess: true)
@@ -516,9 +551,27 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
         }
 
         mainTransportOverride = selection
+        // AVP USB selects nothing in the runtime: the config falls back to auto.
         serverConfig.transport = selection.configTransport
         saveStructuredConfig()
         refreshTransportHealth(force: true)
+        if selection == .avpUsb {
+            testAvpUsbConnection()
+        }
+    }
+
+    func setAvpUsbHostAddress(_ hostAddress: String) {
+        avpUsbLink.setHostAddress(hostAddress)
+        if mainTransportSelection == .avpUsb {
+            avpUsbLink.scheduleTestAfterAddressEntry()
+        }
+    }
+
+    func testAvpUsbConnection() {
+        guard mainTransportSelection == .avpUsb else {
+            return
+        }
+        avpUsbLink.test()
     }
 
     func setAdbMode(_ mode: HomeAdbMode) {
@@ -1029,8 +1082,13 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     func refreshRuntimeActivity() {
         let activity = HomeRuntimeActivity.read()
+        let hadAvpSession = avpUsbConnectionPhase.isSessionActive
         updateRuntimeStatsHistory(with: activity)
         runtimeActivity = activity
+        if hadAvpSession, !avpUsbConnectionPhase.isSessionActive {
+            // The session ended: check whether the USB link itself is still up.
+            testAvpUsbConnection()
+        }
     }
 
     private func updateRuntimeStatsHistory(with activity: HomeRuntimeActivity) {

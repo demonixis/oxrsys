@@ -213,6 +213,7 @@ enum RuntimeActivityTransport: String {
     case wifi
     case usbAdb = "usb_adb"
     case usbNcm = "usb_ncm"
+    case avpUsb = "avp_usb"
 }
 
 enum RuntimeDeviceType: String {
@@ -457,6 +458,8 @@ struct HomeRuntimeActivity: Equatable {
             return "Streaming (USB)"
         case (.streaming, .usbNcm):
             return "Streaming (USB Network)"
+        case (.streaming, .avpUsb):
+            return "Streaming (AVP USB)"
         case (.streaming, _):
             return "Streaming"
         case (.idle, _):
@@ -558,6 +561,7 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
     case wifi
     case usbAdb
     case usbNetwork
+    case avpUsb
 
     var id: String { rawValue }
 
@@ -569,6 +573,8 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return "USB"
         case .usbNetwork:
             return "USB Net"
+        case .avpUsb:
+            return "AVP USB"
         }
     }
 
@@ -580,6 +586,9 @@ enum HomePrimaryTransport: String, CaseIterable, Identifiable {
             return .usbAdb
         case .usbNetwork:
             return .usbNcm
+        case .avpUsb:
+            // AVP USB is Home-only; the runtime keeps choosing the transport itself.
+            return .auto
         }
     }
 }

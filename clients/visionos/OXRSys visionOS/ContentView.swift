@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 import SwiftUI
+import Darwin
 
 struct ContentView: View {
     @Environment(AppModel.self) private var appModel
@@ -8,7 +9,8 @@ struct ContentView: View {
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.openWindow) private var openWindow
-
+    @State private var networkAddresses: [InterfaceAddress] = []
+    
     var body: some View {
         @Bindable var appModel = appModel
 
@@ -29,6 +31,38 @@ struct ContentView: View {
 
             Divider()
 
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("AVP USB-Ethernet Address")
+                        .font(.headline)
+
+                    Spacer()
+
+                    Button {
+                        refreshNetworkAddresses()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Refresh network addresses")
+                }
+
+                if networkAddresses.isEmpty {
+                    Text("No network addresses found")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(networkAddresses) { item in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.address)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+
+            Divider()
             Toggle("Auto-enter immersive", isOn: $appModel.autoEnterImmersiveOnConnect)
                 .disabled(appModel.connectionState == .streaming)
 
@@ -248,6 +282,73 @@ struct ContentView: View {
                 try? await Task.sleep(for: .milliseconds(150))
             }
         }
+    }
+    
+    /// Returns the numeric IPv4 and IPv6 addresses assigned to local interfaces.
+    private struct InterfaceAddress: Identifiable {
+        let id: String
+        let interface: String
+        let address: String
+    }
+
+    private func getAllInterfaceAddresses() -> [InterfaceAddress] {
+        var addresses: [InterfaceAddress] = []
+        var interfaceList: UnsafeMutablePointer<ifaddrs>?
+
+        guard getifaddrs(&interfaceList) == 0, let firstInterface = interfaceList else {
+            return []
+        }
+        defer {
+            freeifaddrs(interfaceList)
+        }
+
+        for pointer in sequence(first: firstInterface, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            guard let socketAddress = interface.ifa_addr else { continue }
+
+            let family = socketAddress.pointee.sa_family
+            guard family == UInt8(AF_INET) else {
+                continue
+            }
+
+            let interfaceName = String(cString: interface.ifa_name)
+
+            // Loopback und WLAN ausschließen
+            if interfaceName == "lo0" || interfaceName == "en0" {
+                continue
+            }
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                socketAddress,
+                socklen_t(socketAddress.pointee.sa_len),
+                &hostname,
+                socklen_t(hostname.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            )
+
+            guard result == 0 else { continue }
+            let address = String(cString: hostname)
+            addresses.append(
+                InterfaceAddress(
+                    id: "\(interfaceName)-\(address)",
+                    interface: interfaceName,
+                    address: address
+                )
+            )
+        }
+
+        return addresses.sorted {
+            if $0.interface == $1.interface {
+                return $0.address < $1.address
+            }
+            return $0.interface < $1.interface
+        }
+    }
+    
+    private func refreshNetworkAddresses() {
+        networkAddresses = getAllInterfaceAddresses()
     }
 }
 
