@@ -278,15 +278,16 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
             )
         case .avpUsb:
             return HomeTransportReadiness(
-                isReady: avpUsbConnectionPhase.isSessionActive,
+                isReady: avpUsbStatus.isVisionProStreaming,
                 message: avpUsbLink.status.message
             )
         }
     }
 
-    /// "Connected" comes from the runtime's session status; a ping only proves the USB link is reachable.
-    var avpUsbConnectionPhase: AVPUSBConnectionPhase {
-        AVPUSBConnectionPhase.resolve(
+    /// Vision Pro streaming comes from the runtime's session status; a ping only proves the USB link is reachable.
+    /// Streaming and USB link health are reported separately.
+    var avpUsbStatus: AVPUSBStatus {
+        AVPUSBStatus.resolve(
             isTesting: avpUsbLink.isTesting,
             linkStatus: avpUsbLink.status,
             runtimeActivity: runtimeActivity
@@ -1082,10 +1083,10 @@ final class HomeAppModel: ObservableObject, @unchecked Sendable {
 
     func refreshRuntimeActivity() {
         let activity = HomeRuntimeActivity.read()
-        let hadAvpSession = avpUsbConnectionPhase.isSessionActive
+        let hadAvpSession = avpUsbStatus.isVisionProStreaming
         updateRuntimeStatsHistory(with: activity)
         runtimeActivity = activity
-        if hadAvpSession, !avpUsbConnectionPhase.isSessionActive {
+        if hadAvpSession, !avpUsbStatus.isVisionProStreaming {
             // The session ended: check whether the USB link itself is still up.
             testAvpUsbConnection()
         }

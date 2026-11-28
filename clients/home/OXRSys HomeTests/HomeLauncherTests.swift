@@ -617,45 +617,70 @@ final class HomeLauncherTests: XCTestCase {
         let streaming = HomeRuntimeActivity(state: .streaming, deviceType: .visionPro)
 
         try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: .idle)
+            AVPUSBStatus.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: .idle).linkPhase
                 == .linkReachable,
             "Expected a successful ping to be only 'USB link reachable'"
         )
         try expect(
             AVPUSBConnectionPhase.linkReachable.pillTitle == "USB link reachable"
-                && !AVPUSBConnectionPhase.linkReachable.isSessionActive,
-            "Expected a reachable link not to count as connected"
+                && AVPUSBStatus.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: .idle)
+                    .isVisionProStreaming == false,
+            "Expected a reachable link alone not to count as Vision Pro streaming"
         )
         try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: .idle)
+            AVPUSBStatus.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: .idle).linkPhase
                 == .linkUnreachable,
             "Expected a failed ping to be 'USB link unreachable'"
         )
         try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: true, linkStatus: unreachable, runtimeActivity: .idle)
+            AVPUSBConnectionPhase.linkUnreachable.pillTitle == "USB link unreachable",
+            "Expected 'USB link unreachable' title"
+        )
+        try expect(
+            AVPUSBStatus.resolve(isTesting: true, linkStatus: unreachable, runtimeActivity: .idle).linkPhase
                 == .testing,
             "Expected an active test to show Testing"
         )
+
+        // Vision Pro streaming is shown separately from USB link health.
+        let streamingWithCable = AVPUSBStatus.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: streaming)
         try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: streaming)
-                == .sessionActive,
-            "Expected a streaming runtime session to be Connected"
+            streamingWithCable.isVisionProStreaming && streamingWithCable.linkPhase == .linkReachable,
+            "Expected Vision Pro streaming shown alongside USB link reachable"
         )
+
+        // Streaming over Wi-Fi with the cable unplugged shows both 'Vision Pro streaming' and 'USB link unreachable'.
+        let wifiStreaming = HomeRuntimeActivity(state: .streaming, transport: .wifi, deviceType: .visionPro)
+        let unplugged = AVPUSBStatus.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: wifiStreaming)
+        try expect(unplugged.isVisionProStreaming, "Expected Vision Pro streaming over Wi-Fi to be reported")
+        try expect(unplugged.streamingPillTitle == "Vision Pro streaming", "Expected 'Vision Pro streaming' title")
+        try expect(unplugged.linkPhase == .linkUnreachable, "Expected 'USB link unreachable' to be reported separately")
+        try expect(unplugged.linkPhase.pillTitle == "USB link unreachable", "Expected 'USB link unreachable' title")
         try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: streaming)
-                == .sessionActive,
-            "Expected the runtime session to win over a failed ping"
+            AVPUSBStatus.visionProStreamingPillTitle == "Vision Pro streaming",
+            "Expected 'Vision Pro streaming' title"
         )
-        try expect(
-            AVPUSBConnectionPhase.sessionActive.pillTitle == "Connected",
-            "Expected Connected title for an active session"
-        )
+
+        // Only show 'Vision Pro streaming' when the runtime identifies the device as a Vision Pro.
         let questStreaming = HomeRuntimeActivity(state: .streaming, deviceType: .quest)
-        try expect(
-            AVPUSBConnectionPhase.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: questStreaming)
-                == .linkReachable,
-            "Expected a Quest session not to count as an AVP USB connection"
+        let quest = AVPUSBStatus.resolve(isTesting: false, linkStatus: reachable, runtimeActivity: questStreaming)
+        try expect(!quest.isVisionProStreaming, "Expected a Quest session not to count as Vision Pro streaming")
+        try expect(quest.streamingPillTitle == nil, "Expected no streaming pill for a Quest session")
+        try expect(quest.linkPhase == .linkReachable, "Expected Quest streaming not to affect USB link health")
+        let unknownDevice = AVPUSBStatus.resolve(
+            isTesting: false,
+            linkStatus: reachable,
+            runtimeActivity: HomeRuntimeActivity(state: .streaming, deviceType: .unknown)
         )
+        try expect(!unknownDevice.isVisionProStreaming, "Expected an unknown device not to count as Vision Pro streaming")
+        let noDeviceType = AVPUSBStatus.resolve(
+            isTesting: false,
+            linkStatus: reachable,
+            runtimeActivity: HomeRuntimeActivity(state: .streaming)
+        )
+        try expect(!noDeviceType.isVisionProStreaming, "Expected a missing device type not to count as Vision Pro streaming")
+        let idleStatus = AVPUSBStatus.resolve(isTesting: false, linkStatus: unreachable, runtimeActivity: .idle)
+        try expect(!idleStatus.isVisionProStreaming && idleStatus.streamingPillTitle == nil, "Expected no streaming pill when idle")
     }
 
     func testAvpUsbNetworkStatusParsing() throws {

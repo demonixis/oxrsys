@@ -34,7 +34,7 @@ enum AVPUSBEthernetLink {
     /// Shown while no direct address is entered. Automatic discovery stays the default;
     /// a direct IP connection is only used when the user enters an address explicitly.
     nonisolated static let emptyAddressMessage =
-        "No Vision Pro IP entered. Automatic discovery is used; enter an IPv4 address to connect directly."
+        "Enter the Vision Pro’s IPv4 address to test the USB link. Automatic discovery is used."
     nonisolated static let idleMessage = "Test the Vision Pro USB Ethernet connection."
 
     nonisolated static func idleMessage(for hostAddress: String) -> String {
@@ -233,13 +233,11 @@ enum AVPUSBEthernetLink {
     }
 }
 
-/// Phase shown in the AVP USB status pill.
+/// Phase shown in the AVP USB link status pill.
 enum AVPUSBConnectionPhase: Equatable {
     case testing
     case linkUnreachable
     case linkReachable
-    /// The runtime reports an active session with a Vision Pro.
-    case sessionActive
 
     var pillTitle: String {
         switch self {
@@ -249,30 +247,48 @@ enum AVPUSBConnectionPhase: Equatable {
             return "USB link unreachable"
         case .linkReachable:
             return "USB link reachable"
-        case .sessionActive:
-            return "Connected"
         }
     }
 
-    /// Only the runtime session counts as ready; a successful ping alone does not.
-    var isSessionActive: Bool {
-        self == .sessionActive
-    }
-
-    /// Decides the phase from the ping result and the runtime's session status.
+    /// Decides the USB link phase from the ping result.
+    /// A runtime session does not affect USB link health; streaming is tracked separately.
     static func resolve(
         isTesting: Bool,
-        linkStatus: AVPUSBLinkStatus,
-        runtimeActivity: HomeRuntimeActivity
+        linkStatus: AVPUSBLinkStatus
     ) -> AVPUSBConnectionPhase {
-        if runtimeActivity.state == .streaming,
-           runtimeActivity.deviceType == nil || runtimeActivity.deviceType == .visionPro {
-            return .sessionActive
-        }
         if isTesting {
             return .testing
         }
         return linkStatus.isReachable ? .linkReachable : .linkUnreachable
+    }
+}
+
+/// AVP USB status. Vision Pro streaming and USB link health are independent:
+/// a Vision Pro can stream over Wi-Fi while the USB cable is unplugged, and both are shown.
+struct AVPUSBStatus: Equatable {
+    /// The runtime reports an active session with a Vision Pro, on any transport.
+    var isVisionProStreaming: Bool
+    var linkPhase: AVPUSBConnectionPhase
+
+    static let visionProStreamingPillTitle = "Vision Pro streaming"
+
+    /// Title for the streaming pill; `nil` when no Vision Pro session is active.
+    var streamingPillTitle: String? {
+        isVisionProStreaming ? Self.visionProStreamingPillTitle : nil
+    }
+
+    /// Only a runtime session with a Vision Pro counts as streaming; a successful ping alone does not,
+    /// and streaming over Wi-Fi does not imply the USB link is up.
+    static func resolve(
+        isTesting: Bool,
+        linkStatus: AVPUSBLinkStatus,
+        runtimeActivity: HomeRuntimeActivity
+    ) -> AVPUSBStatus {
+        AVPUSBStatus(
+            isVisionProStreaming: runtimeActivity.state == .streaming
+                && runtimeActivity.deviceType == .visionPro,
+            linkPhase: AVPUSBConnectionPhase.resolve(isTesting: isTesting, linkStatus: linkStatus)
+        )
     }
 }
 
